@@ -1,0 +1,66 @@
+services:
+  redis:
+    # Imagen fijada por versión y por digest: la versión es legible para humanos
+    # y el digest garantiza que el contenido es exactamente el que revisamos,
+    # aunque alguien republique la etiqueta (defensa ante cadena de suministro).
+    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    # Usuario sin privilegios: si el proceso se compromete, no es root dentro
+    # del contenedor.
+    user: redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      # Persistencia desactivada (save "" y appendonly no): Redis solo guarda
+      # contadores efímeros del limitador. Nada sensible debe llegar a disco.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      # Tope de memoria: evita que un abuso agote la RAM del host.
+      - --maxmemory
+      - 64mb
+      # noeviction: los contadores del limitador nunca se expulsan en silencio.
+      # Si la memoria se llena, Redis devuelve error y la API falla cerrada
+      # (rechaza la petición) en vez de dejar pasar tráfico sin límite.
+      - --maxmemory-policy
+      - noeviction
+      # Solo avisos y errores, para no llenar los logs de ruido.
+      - --loglevel
+      - warning
+    # Sistema de ficheros raíz de solo lectura. Incluye /data, porque la imagen
+    # no declara ningún volumen. Así ni SAVE ni BGSAVE pueden escribir a disco,
+    # y un atacante no puede dejar ficheros dentro del contenedor.
+    read_only: true
+    # Sin ninguna capability de Linux: Redis no necesita ninguna.
+    cap_drop:
+      - ALL
+    # Impide ganar privilegios nuevos (por ejemplo con binarios setuid).
+    security_opt:
+      - no-new-privileges:true
+    # Límites de recursos: contienen el daño de un fallo o de un abuso.
+    mem_limit: 128m
+    pids_limit: 64
+    # Sin puertos publicados (no hay clave "ports"): Redis solo es accesible
+    # desde otros contenedores conectados a la red cache.
+    # Sin autenticación todavía: se añadirá un ACL con contraseña hasheada en
+    # el paso de secretos. Hasta entonces, el aislamiento lo da la red interna.
+    networks:
+      - cache
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    # Rotación de logs: evita que crezcan sin límite y llenen el disco.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  cache:
+    # Red interna: los contenedores no tienen salida a internet ni son
+    # accesibles desde fuera del host.
+    internal: true
