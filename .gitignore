@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Environment and secrets (order matters because of the negations)
+.env
+.env.*
+!.env.example
+secrets/*
+!secrets/.gitkeep
+!secrets/README.md
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local data
+/data/
+/uploads/
+/attachments/
+*.log
+docker-compose.override.yml
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
