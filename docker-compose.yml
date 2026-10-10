@@ -136,6 +136,11 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/contrasena_postgres_superusuario
     secrets:
       - contrasena_postgres_superusuario
+      # Contraseñas de los roles de login: solo las lee el script de
+      # inicialización db/init/01_roles.sh.
+      - contrasena_migrador
+      - contrasena_aplicacion
+      - contrasena_plataforma
     # Sistema de ficheros raíz de solo lectura: lo único escribible son los
     # volúmenes y los tmpfs de abajo.
     read_only: true
@@ -150,6 +155,9 @@ services:
       - pgdata:/var/lib/postgresql
       # Reglas de acceso propias, en solo lectura.
       - ./db/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      # Scripts de inicialización de la imagen: solo se ejecutan con el volumen
+      # vacío, y se montan en solo lectura.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
     # Sin ninguna capability de Linux.
     cap_drop:
       - ALL
@@ -165,11 +173,19 @@ services:
       - data
     healthcheck:
       # pg_isready da OK aunque pg_hba rechace la conexión. Aquí solo es sano
-      # si el servidor responde por el socket y escucha ya por TCP, lo que
-      # descarta el servidor temporal de la inicialización de la imagen. No se
-      # suprime stderr para que el fallo quede visible en el historial del
-      # healthcheck.
-      test: ["CMD-SHELL", "x=$$(psql -U postgres -d canario -Atc 'show listen_addresses'); case $$x in '*') exit 0;; *) exit 1;; esac"]
+      # si el servidor responde por el socket, escucha ya por TCP (lo que
+      # descarta el servidor temporal de la inicialización de la imagen) y
+      # existen los cuatro roles. Así, si el script de inicialización falla y
+      # el contenedor se reinicia, la imagen se salta los scripts sin aviso
+      # (el volumen ya no está vacío) y este healthcheck deja el estado visible
+      # como unhealthy. La lista de roles está también en db/init/01_roles.sh
+      # y deben mantenerse iguales. No se suprime stderr para que el fallo
+      # quede visible en el historial del healthcheck.
+      test:
+        - CMD-SHELL
+        - |
+          x=$$(psql -U postgres -d canario -Atc "select current_setting('listen_addresses') || '|' || count(*) from pg_roles where rolname in ('migrador','aplicacion','plataforma','propietario_funciones')")
+          case $$x in '*|4') exit 0;; *) exit 1;; esac
       interval: 10s
       timeout: 5s
       retries: 5
@@ -198,6 +214,12 @@ secrets:
     file: ./secrets/redis_acl.conf
   contrasena_postgres_superusuario:
     file: ./secrets/contrasena_postgres_superusuario.txt
+  contrasena_migrador:
+    file: ./secrets/contrasena_migrador.txt
+  contrasena_aplicacion:
+    file: ./secrets/contrasena_aplicacion.txt
+  contrasena_plataforma:
+    file: ./secrets/contrasena_plataforma.txt
 
 volumes:
   # Persiste entre reinicios, a diferencia de redis. Los scripts de
