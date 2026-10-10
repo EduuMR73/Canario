@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Batería de pruebas de seguridad del esquema "canal" (db/init/02_esquema.sql).
+"""Batería de pruebas de seguridad del esquema "canal" (db/init/02_esquema.sql y
+db/init/03_funciones.sql).
 
-Qué prueba: que el esquema se aplica entero al arrancar, que la estructura, las
-políticas RLS y los permisos coinciden con unos oráculos escritos aquí como
-literales (no derivados del SQL), que una empresa no puede ver ni tocar los
-datos de otra, que los permisos por columna se cumplen, que la auditoría es
-encadenada e inmutable (con recálculo independiente del hash en Python) y que
-el bloqueo por empresa y el healthcheck se comportan como se espera. Cada
-prueba negativa lleva su control positivo: si el control falla, el resultado es
-SIN CONCLUSION, nunca PASA.
+Qué prueba: que el esquema y las funciones de definidor se aplican enteros al
+arrancar, que la estructura, las políticas RLS y los permisos coinciden con
+unos oráculos escritos aquí como literales (no derivados del SQL), que una
+empresa no puede ver ni tocar los datos de otra, que los permisos por columna
+se cumplen, que la auditoría es encadenada e inmutable (con recálculo
+independiente del hash en Python), que el bloqueo por empresa y el healthcheck
+se comportan como se espera, y que las funciones de definidor hacen solo lo que
+deben (también frente a un search_path hostil). Cada prueba negativa lleva su
+control positivo: si el control falla, el resultado es SIN CONCLUSION, nunca
+PASA.
 
 Cómo se ejecuta (desde la raíz del repositorio, con Docker en marcha):
 
@@ -17,8 +20,14 @@ Cómo se ejecuta (desde la raíz del repositorio, con Docker en marcha):
 Usa un proyecto de Docker propio (canario_esquema), con su red y su volumen, y
 solo levanta el servicio postgres. Nunca toca el proyecto canario. Al terminar
 lo borra todo (down -v). Necesita que existan secrets/contrasena_*.txt (solo
-comprueba que son ficheros; el único que llega a un contenedor es el de la
-aplicación, montado en solo lectura, y nunca se lee ni se imprime).
+comprueba que son ficheros; los de aplicacion y plataforma llegan a un
+contenedor temporal montados en solo lectura, y nunca se leen ni se imprimen).
+
+Requisitos: Docker en marcha, Python 3, y que existan
+secrets/contrasena_aplicacion.txt y secrets/contrasena_plataforma.txt (se
+generan con scripts/generar_secretos.py). La batería no modifica el repo y se
+puede ejecutar con el árbol de Git limpio o sucio: la comprobación s) compara
+el estado de Git al terminar con el que había al arrancar.
 
 La salida completa se guarda en verificacion_esquema.txt dentro del directorio
 temporal del sistema (nunca dentro del repositorio). El código de salida es 0
@@ -61,6 +70,14 @@ DEN_A3 = "a0000000-0000-4000-8000-0000000000d3"  # solo para la prueba de mensaj
 DEN_B1 = "b0000000-0000-4000-8000-0000000000d1"
 DEN_B2 = "b0000000-0000-4000-8000-0000000000d2"
 BYTES_FALSOS = r"'\xdeadbeef'"
+IDENT_A = "a" * 32  # identificador publico de la empresa A en directorio_empresas
+IDENT_B = "b" * 32
+IDENT_FALSO = "f" * 32  # solo existe en la tabla temporal de la prueba w
+IDENT_DESCONOCIDO = "0123456789abcdef0123456789abcdef"
+HMAC1 = "ab" * 32  # HMAC de prueba de 32 bytes (hexadecimal)
+HMAC2 = "cd" * 32
+HMAC3 = "ef" * 32
+HMAC31 = "ab" * 31  # 31 bytes: demasiado corto
 
 # ---------------------------------------------------------------------------
 # Oráculos literales
@@ -69,6 +86,17 @@ TABLAS = ["busqueda_seguimiento", "clave_empresa", "denuncia", "directorio_empre
           "empresa", "mensaje", "registro_auditoria", "usuario_personal"]
 TABLAS_RLS = ["clave_empresa", "denuncia", "empresa", "mensaje", "registro_auditoria", "usuario_personal"]
 TABLAS_SIN_RLS = ["busqueda_seguimiento", "directorio_empresas"]
+COLUMNAS = {
+    "empresa": ["id", "nombre", "activa", "fecha_alta"],
+    "directorio_empresas": ["identificador_publico", "empresa_id"],
+    "clave_empresa": ["empresa_id", "version", "clave_envuelta"],
+    "usuario_personal": ["empresa_id", "id", "email", "hash_contrasena", "rol", "secreto_totp_cifrado",
+                         "totp_activo", "intentos_fallidos", "bloqueado_hasta", "activo"],
+    "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "categoria", "contenido_cifrado", "version_clave"],
+    "mensaje": ["empresa_id", "denuncia_id", "secuencia", "autor", "autor_id", "contenido_cifrado", "version_clave"],
+    "busqueda_seguimiento": ["codigo_hmac", "empresa_id", "denuncia_id"],
+    "registro_auditoria": ["empresa_id", "secuencia", "fecha", "actor", "accion", "objeto_id", "hash_anterior", "hash"],
+}
 
 CLAVES_PRIMARIAS = [
     "busqueda_seguimiento|PRIMARY KEY (codigo_hmac)",
@@ -94,8 +122,8 @@ CLAVES_FORANEAS = [
     "registro_auditoria|empresa_id|empresa|id|a",
     "usuario_personal|empresa_id|empresa|id|a",
 ]
-# tabla|politica|comando
-POLITICAS = [
+# tabla|politica|comando (13 de aplicacion + 2 de propietario_funciones)
+POLITICAS_APLICACION = [
     "empresa|empresa_select|SELECT",
     "clave_empresa|clave_empresa_select|SELECT",
     "clave_empresa|clave_empresa_insert|INSERT",
@@ -110,27 +138,83 @@ POLITICAS = [
     "registro_auditoria|registro_auditoria_select|SELECT",
     "registro_auditoria|registro_auditoria_insert|INSERT",
 ]
-# Privilegios de tabla de aplicacion (UPDATE solo por columna, nunca a nivel de tabla)
-PRIVILEGIOS_TABLA_APLICACION = {
-    "empresa": {"SELECT"},
-    "clave_empresa": {"SELECT", "INSERT"},
-    "usuario_personal": {"SELECT", "INSERT"},
-    "denuncia": {"SELECT", "INSERT"},
-    "mensaje": {"SELECT", "INSERT"},
-    "registro_auditoria": {"SELECT", "INSERT"},
-    "directorio_empresas": set(),
-    "busqueda_seguimiento": set(),
+POLITICAS_DEFINIDOR = [
+    "empresa|empresa_select_definidor|SELECT",
+    "empresa|empresa_insert_definidor|INSERT",
+]
+POLITICAS = POLITICAS_APLICACION + POLITICAS_DEFINIDOR
+NOMBRES_POLITICAS_DEFINIDOR = {"empresa_select_definidor", "empresa_insert_definidor"}
+
+# Privilegios de tabla por rol (UPDATE solo por columna, nunca a nivel de tabla)
+PRIVILEGIOS_TABLA = {
+    "aplicacion": {
+        "empresa": {"SELECT"},
+        "clave_empresa": {"SELECT", "INSERT"},
+        "usuario_personal": {"SELECT", "INSERT"},
+        "denuncia": {"SELECT", "INSERT"},
+        "mensaje": {"SELECT", "INSERT"},
+        "registro_auditoria": {"SELECT", "INSERT"},
+        "directorio_empresas": set(),
+        "busqueda_seguimiento": set(),
+    },
+    "plataforma": {t: set() for t in TABLAS},
+    "propietario_funciones": {
+        "empresa": set(), "clave_empresa": set(), "usuario_personal": set(), "denuncia": set(),
+        "mensaje": set(), "registro_auditoria": set(),
+        "directorio_empresas": {"SELECT"},
+        "busqueda_seguimiento": {"SELECT", "INSERT"},
+    },
 }
-TABLAS_CON_UPDATE_POR_COLUMNA = {"usuario_personal", "denuncia"}
+# Privilegios concedidos solo en algunas columnas: rol -> (tabla, privilegio) -> columnas
+PRIVILEGIOS_COLUMNA = {
+    "aplicacion": {
+        ("usuario_personal", "UPDATE"): {"hash_contrasena", "secreto_totp_cifrado", "totp_activo",
+                                         "intentos_fallidos", "bloqueado_hasta", "activo"},
+        ("denuncia", "UPDATE"): {"estado", "asignada_a"},
+    },
+    "plataforma": {},
+    "propietario_funciones": {
+        ("empresa", "SELECT"): {"id", "activa"},
+        ("empresa", "INSERT"): {"nombre"},
+        ("directorio_empresas", "INSERT"): {"empresa_id"},
+    },
+}
 COLUMNAS_UPDATE = {
     "usuario_personal": {"hash_contrasena", "secreto_totp_cifrado", "totp_activo",
                          "intentos_fallidos", "bloqueado_hasta", "activo"},
     "denuncia": {"estado", "asignada_a"},
 }
 PRIVILEGIOS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
-FUNCIONES = ["asignar_secuencia_mensaje", "empresa_actual", "encadenar_auditoria",
-             "rechazar_modificacion_auditoria", "verificar_cadena_auditoria"]
-FUNCIONES_EXECUTE_APLICACION = {"empresa_actual", "verificar_cadena_auditoria"}
+PRIVILEGIOS_COLUMNA_COMPROBADOS = ["SELECT", "INSERT", "UPDATE", "REFERENCES"]
+ROLES = ["aplicacion", "plataforma", "propietario_funciones"]
+
+# funcion -> (dueno, SECURITY DEFINER, volatilidad, firma)
+FUNCIONES_CATALOGO = {
+    "asignar_secuencia_mensaje": ("migrador", "f", "v", "canal.asignar_secuencia_mensaje()"),
+    "empresa_actual": ("migrador", "f", "s", "canal.empresa_actual()"),
+    "encadenar_auditoria": ("migrador", "f", "v", "canal.encadenar_auditoria()"),
+    "rechazar_modificacion_auditoria": ("migrador", "f", "v", "canal.rechazar_modificacion_auditoria()"),
+    "verificar_cadena_auditoria": ("migrador", "f", "s", "canal.verificar_cadena_auditoria()"),
+    "resolver_empresa": ("propietario_funciones", "t", "s", "canal.resolver_empresa(text)"),
+    "buscar_codigo": ("propietario_funciones", "t", "s", "canal.buscar_codigo(bytea)"),
+    "registrar_codigo": ("propietario_funciones", "t", "v", "canal.registrar_codigo(bytea,uuid)"),
+    "alta_empresa": ("propietario_funciones", "t", "v", "canal.alta_empresa(text)"),
+}
+FUNCIONES_DEFINIDOR = ["resolver_empresa", "buscar_codigo", "registrar_codigo", "alta_empresa"]
+CONFIG_DEFINIDOR = "search_path=pg_catalog, canal, pg_temp"
+# funcion -> roles con EXECUTE. propietario_funciones tiene EXECUTE sobre las suyas por ser su dueno
+# (es el privilegio implicito del dueno; no se le revoca).
+EXECUTE_ESPERADO = {
+    "asignar_secuencia_mensaje": set(),
+    "empresa_actual": {"aplicacion", "propietario_funciones"},
+    "encadenar_auditoria": set(),
+    "rechazar_modificacion_auditoria": set(),
+    "verificar_cadena_auditoria": {"aplicacion"},
+    "resolver_empresa": {"aplicacion", "propietario_funciones"},
+    "buscar_codigo": {"aplicacion", "propietario_funciones"},
+    "registrar_codigo": {"aplicacion", "propietario_funciones"},
+    "alta_empresa": {"plataforma", "propietario_funciones"},
+}
 TRIGGERS = [
     "mensaje|mensaje_secuencia|O",
     "registro_auditoria|auditoria_encadenar|O",
@@ -247,11 +331,19 @@ def valor(r):
     return ls[0] if ls else ""
 
 
+def bytea_hex(hexa):
+    return f"'\\x{hexa}'::bytea"
+
+
 # ---------------------------------------------------------------------------
 # Comprobaciones
 # ---------------------------------------------------------------------------
 IMAGEN = ""
 CID = ""
+# Conteos por contexto tomados al comienzo de v), antes de alta_empresa; los usa x)
+FOTO_PREVIA = None
+# Salida de "git status --short -uall" al arrancar (None si git no está disponible); la usa s)
+ESTADO_GIT_ARRANQUE = None
 
 
 def seccion_a():
@@ -264,12 +356,18 @@ def seccion_a():
         p("--- log completo de postgres ---")
         p(registro)
         raise Parada("el SQL no se aplico o el servicio no llego a healthy")
-    pasa("running /docker-entrypoint-initdb.d/02_esquema.sql" in registro,
-         "a) el log contiene 'running /docker-entrypoint-initdb.d/02_esquema.sql'")
+    for fichero in ("02_esquema.sql", "03_funciones.sql"):
+        pasa(f"running /docker-entrypoint-initdb.d/{fichero}" in registro,
+             f"a) el log contiene 'running /docker-entrypoint-initdb.d/{fichero}'")
     malas = [l for l in registro.splitlines() if "ERROR" in l or "FATAL" in l]
     pasa(not malas, f"a) el log del arranque no tiene lineas con ERROR ni FATAL ({len(malas)})")
     for l in malas:
         p(f"   {l}")
+
+
+def lineas_de_codigo(datos):
+    return [l.strip() for l in datos.decode("utf-8").split("\n")
+            if l.strip() and not l.strip().startswith("--")]
 
 
 def seccion_b():
@@ -277,14 +375,25 @@ def seccion_b():
     datos = (RAIZ / "db" / "init" / "02_esquema.sql").read_bytes()
     pasa(not datos.startswith(b"\xef\xbb\xbf"), "b) sin BOM")
     pasa(b"\r" not in datos, "b) sin CR")
-    codigo = [l.strip() for l in datos.decode("utf-8").split("\n")
-              if l.strip() and not l.strip().startswith("--")]
+    codigo = lineas_de_codigo(datos)
     pasa(codigo[:3] == ["\\set ON_ERROR_STOP on", "BEGIN;", "SET ROLE migrador;"],
          f"b) empieza por \\set ON_ERROR_STOP on, BEGIN; y SET ROLE migrador; ({codigo[:3]})")
     pasa(codigo[-1] == "COMMIT;", f"b) termina en COMMIT; ({codigo[-1]!r})")
     unido = "\n".join(codigo).upper()
     for prohibido in ("TO PUBLIC", "BYPASSRLS", "SECURITY DEFINER", "PASSWORD"):
         pasa(prohibido not in unido, f"b) no contiene {prohibido!r}")
+    p("=== b) estaticas de db/init/03_funciones.sql")
+    datos = (RAIZ / "db" / "init" / "03_funciones.sql").read_bytes()
+    pasa(not datos.startswith(b"\xef\xbb\xbf"), "b) 03: sin BOM")
+    pasa(b"\r" not in datos, "b) 03: sin CR")
+    codigo = lineas_de_codigo(datos)
+    pasa(codigo[:2] == ["\\set ON_ERROR_STOP on", "BEGIN;"], f"b) 03: empieza por \\set ON_ERROR_STOP on y BEGIN; ({codigo[:2]})")
+    pasa(codigo[-1] == "COMMIT;", f"b) 03: termina en COMMIT; ({codigo[-1]!r})")
+    unido = "\n".join(codigo)
+    for prohibido in ("TO PUBLIC", "BYPASSRLS", "PASSWORD", "SET ROLE"):
+        pasa(prohibido not in unido.upper(), f"b) 03: no contiene {prohibido!r}")
+    for texto in ("SECURITY DEFINER", "SET search_path = pg_catalog, canal, pg_temp", "REVOKE EXECUTE ON FUNCTION"):
+        pasa(unido.count(texto) == 4, f"b) 03: contiene exactamente 4 veces {texto!r} ({unido.count(texto)})")
 
 
 def seccion_c():
@@ -329,48 +438,71 @@ def seccion_d():
     r = sup("select tablename, policyname, cmd, roles, coalesce(qual, ''), coalesce(with_check, '') "
             "from pg_policies where schemaname = 'canal' order by 1, 2;")
     filas = [l.split("|") for l in r.lineas()]
-    comparar("d) conjunto exacto de politicas (tabla, nombre, comando)",
+    comparar("d) conjunto exacto de las 15 politicas (tabla, nombre, comando)",
              ["|".join(f[:3]) for f in filas], POLITICAS)
-    pasa(all(f[3] == "{aplicacion}" for f in filas), "d) todas son TO aplicacion y nadie mas")
+    pasa(all(f[3] == ("{propietario_funciones}" if f[1] in NOMBRES_POLITICAS_DEFINIDOR else "{aplicacion}") for f in filas),
+         "d) las 13 de siempre son TO aplicacion y las 2 del definidor solo TO propietario_funciones")
     pasa(all(f[2] not in ("DELETE", "ALL") for f in filas), "d) ninguna con comando DELETE ni ALL")
     ok = True
     for f in filas:
         tabla, nombre, cmd, _roles, qual, check = f
         esperado_qual = cmd in ("SELECT", "UPDATE")
         esperado_check = cmd in ("INSERT", "UPDATE")
+        if nombre in NOMBRES_POLITICAS_DEFINIDOR:
+            # las del definidor no dependen del contexto: llevan true
+            if qual != ("true" if esperado_qual else "") or check != ("true" if esperado_check else ""):
+                ok = False
+                p(f"   {nombre}: qual={qual!r} with_check={check!r} (se esperaba true donde corresponde)")
+            continue
         if esperado_qual != ("empresa_actual" in qual) or (not esperado_qual and qual):
             ok = False
             p(f"   {nombre}: qual inesperado {qual!r}")
         if esperado_check != ("empresa_actual" in check) or (not esperado_check and check):
             ok = False
             p(f"   {nombre}: with_check inesperado {check!r}")
-    pasa(ok, "d) todas usan empresa_actual y SELECT solo qual, INSERT solo with_check, UPDATE ambos")
+    pasa(ok, "d) las 13 de aplicacion usan empresa_actual (SELECT solo qual, INSERT solo with_check, UPDATE ambos) y las 2 del definidor llevan true")
 
 
 def seccion_e():
     p("=== e) privilegios")
-    roles = ["aplicacion", "plataforma", "propietario_funciones"]
     consultas = []
-    for rol in roles:
+    for rol in ROLES:
         for t in TABLAS:
             for pr in PRIVILEGIOS:
                 consultas.append(f"select '{rol}|{t}|{pr}|' || has_table_privilege('{rol}', 'canal.{t}', '{pr}')::text;")
-            consultas.append(f"select '{rol}|{t}|COLUMNA_UPDATE|' || has_any_column_privilege('{rol}', 'canal.{t}', 'UPDATE')::text;")
     r = sup("\n".join(consultas))
     real = set(r.lineas())
     esperado = set()
-    for rol in roles:
+    for rol in ROLES:
         for t in TABLAS:
             for pr in PRIVILEGIOS:
-                da = rol == "aplicacion" and pr in PRIVILEGIOS_TABLA_APLICACION[t]
+                da = pr in PRIVILEGIOS_TABLA[rol][t]
                 esperado.add(f"{rol}|{t}|{pr}|{'true' if da else 'false'}")
-            col = rol == "aplicacion" and t in TABLAS_CON_UPDATE_POR_COLUMNA
-            esperado.add(f"{rol}|{t}|COLUMNA_UPDATE|{'true' if col else 'false'}")
     pasa(real == esperado, "e) matriz de privilegios de tabla de los 3 roles (UPDATE solo por columna)")
     if real != esperado:
         p(f"   sobran: {sorted(real - esperado)[:10]}")
         p(f"   faltan: {sorted(esperado - real)[:10]}")
-    # UPDATE por columna
+    # privilegios de columna (SELECT, INSERT, UPDATE, REFERENCES) de cada columna de cada tabla
+    for rol in ROLES:
+        r = sup(
+            f"select '{rol}|' || c.relname || '|' || a.attname || '|' || q.priv || '|' || "
+            f"has_column_privilege('{rol}', c.oid, a.attnum, q.priv)::text "
+            "from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped "
+            "cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) q(priv) "
+            "where n.nspname = 'canal' and c.relkind = 'r';")
+        real = set(r.lineas())
+        esperado = set()
+        for t, columnas in COLUMNAS.items():
+            for col in columnas:
+                for pr in PRIVILEGIOS_COLUMNA_COMPROBADOS:
+                    da = pr in PRIVILEGIOS_TABLA[rol][t] or col in PRIVILEGIOS_COLUMNA[rol].get((t, pr), set())
+                    esperado.add(f"{rol}|{t}|{col}|{pr}|{'true' if da else 'false'}")
+        pasa(real == esperado, f"e) {rol}: privilegios SELECT, INSERT, UPDATE y REFERENCES en cada una de las {sum(len(c) for c in COLUMNAS.values())} columnas")
+        if real != esperado:
+            p(f"   sobran: {sorted(real - esperado)[:10]}")
+            p(f"   faltan: {sorted(esperado - real)[:10]}")
+    # UPDATE por columna de aplicacion
     for t, permitidas in COLUMNAS_UPDATE.items():
         r = sup(f"select a.attname || '|' || has_column_privilege('aplicacion', 'canal.{t}', a.attname, 'UPDATE')::text "
                 f"from pg_attribute a where a.attrelid = 'canal.{t}'::regclass and a.attnum > 0 and not a.attisdropped;")
@@ -393,28 +525,32 @@ def seccion_e():
             "join lateral aclexplode(c.relacl) a on true join pg_roles ro on ro.oid = a.grantee "
             "where n.nspname = 'canal' and ro.rolname = 'aplicacion';")
     pasa(valor(r).isdigit() and int(valor(r)) > 0, "e) control: la consulta de ACL si ve las entradas de aplicacion")
-    for rol in roles:
+    for rol in ROLES:
         r = sup(f"select has_schema_privilege('{rol}', 'canal', 'USAGE')::text || '|' || has_schema_privilege('{rol}', 'canal', 'CREATE')::text;")
         pasa(valor(r) == "true|false", f"e) {rol}: USAGE sobre canal true y CREATE false ({valor(r)})")
 
 
 def seccion_f():
     p("=== f) funciones y triggers")
-    r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef from pg_proc p "
-            "join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
-    comparar("f) las 5 funciones, de migrador y sin SECURITY DEFINER", r.lineas(), [f"{f}|migrador|f" for f in FUNCIONES])
+    r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef, p.provolatile, p.oid::regprocedure::text "
+            "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
+    esperado = [f"{f}|{d}|{s}|{v}|{firma}" for f, (d, s, v, firma) in FUNCIONES_CATALOGO.items()]
+    comparar("f) exactamente las 9 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
+    r = sup("select p.proname, c from pg_proc p join pg_namespace n on n.oid = p.pronamespace, unnest(p.proconfig) c "
+            "where n.nspname = 'canal' and p.prosecdef;")
+    comparar("f) las 4 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
+             r.lineas(), [f"{f}|{CONFIG_DEFINIDOR}" for f in FUNCIONES_DEFINIDOR])
     consultas = []
-    for rol in ["aplicacion", "plataforma", "propietario_funciones"]:
+    for rol in ROLES:
         consultas.append(
             f"select '{rol}|' || p.proname || '|' || has_function_privilege('{rol}', p.oid, 'EXECUTE')::text "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
     r = sup("\n".join(consultas))
     esperado = []
-    for rol in ["aplicacion", "plataforma", "propietario_funciones"]:
-        for f in FUNCIONES:
-            da = rol == "aplicacion" and f in FUNCIONES_EXECUTE_APLICACION
-            esperado.append(f"{rol}|{f}|{'true' if da else 'false'}")
-    comparar("f) EXECUTE solo para aplicacion y solo en empresa_actual y verificar_cadena_auditoria", r.lineas(), esperado)
+    for rol in ROLES:
+        for f in FUNCIONES_CATALOGO:
+            esperado.append(f"{rol}|{f}|{'true' if rol in EXECUTE_ESPERADO[f] else 'false'}")
+    comparar("f) matriz de EXECUTE de los 3 roles sobre las 9 funciones", r.lineas(), esperado)
     r = sup("select c.relname, t.tgname, t.tgenabled from pg_trigger t join pg_class c on c.oid = t.tgrelid "
             "join pg_namespace n on n.oid = c.relnamespace where not t.tgisinternal and n.nspname = 'canal';")
     comparar("f) los 4 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
@@ -434,6 +570,8 @@ def seccion_g():
     p("=== g) fixture y control de datos")
     sql = f"""
 INSERT INTO canal.empresa (id, nombre) VALUES ('{EMPRESA_A}', 'Empresa A'), ('{EMPRESA_B}', 'Empresa B');
+INSERT INTO canal.directorio_empresas (identificador_publico, empresa_id) VALUES
+    ('{IDENT_A}', '{EMPRESA_A}'), ('{IDENT_B}', '{EMPRESA_B}');
 INSERT INTO canal.clave_empresa (empresa_id, version, clave_envuelta) VALUES
     ('{EMPRESA_A}', 1, '\\x01'), ('{EMPRESA_B}', 1, '\\x02');
 INSERT INTO canal.usuario_personal (empresa_id, id, email, hash_contrasena, rol) VALUES
@@ -635,15 +773,26 @@ def seccion_l():
              actualizar("alter table canal.denuncia disable row level security;"), "must be owner", sin_error(ctl_dueno))
 
 
-def cliente_red(sql):
-    """psql como aplicacion por la red data, con el secreto real montado sin leerlo."""
-    ruta = (RAIZ / "secrets" / "contrasena_aplicacion.txt").resolve()
+def cliente_red(sql, rol="aplicacion"):
+    """psql como un rol de login por la red data, con su secreto real montado sin leerlo."""
+    ruta = (RAIZ / "secrets" / f"contrasena_{rol}.txt").resolve()
     return ejecutar([
         "docker", "run", "--rm", "-i", "--network", f"{PROYECTO}_data",
         "-e", "PGCONNECT_TIMEOUT=5",
         "--mount", f"type=bind,source={ruta},target=/s,readonly",
         "--entrypoint", "sh", IMAGEN,
-        "-c", 'PGPASSWORD=$(cat /s) exec psql -h postgres -U aplicacion -d canario -X -q -A -t -v ON_ERROR_STOP=0 -f -',
+        "-c", 'PGPASSWORD=$(cat /s) exec psql -h postgres -U "$1" -d canario -X -q -A -t -v ON_ERROR_STOP=0 -f -',
+        "sh", rol,
+    ], entrada=sql.encode("utf-8"))
+
+
+def cliente_literal(usuario, sql, contrasena="x"):
+    """psql por la red data con una contraseña literal ficticia (para roles sin secreto)."""
+    return ejecutar([
+        "docker", "run", "--rm", "-i", "--network", f"{PROYECTO}_data",
+        "-e", f"PGPASSWORD={contrasena}", "-e", "PGCONNECT_TIMEOUT=5",
+        "--entrypoint", "psql", IMAGEN,
+        "-h", "postgres", "-U", usuario, "-d", "canario", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=0", "-f", "-",
     ], entrada=sql.encode("utf-8"))
 
 
@@ -850,6 +999,212 @@ def seccion_q():
     pasa(r.rc == 1, f"q) con -U nadie el Test da {r.rc} (esperado 1)")
 
 
+def seccion_t():
+    p("=== t) resolver_empresa")
+    def resolver(texto):
+        literal = "NULL" if texto is None else "'" + texto.replace("'", "''") + "'"
+        return app(f"select coalesce(canal.resolver_empresa({literal})::text, 'NULL');")
+    a, b = resolver(IDENT_A), resolver(IDENT_B)
+    controles = sin_error(a) and sin_error(b) and valor(a) == EMPRESA_A and valor(b) == EMPRESA_B
+    pasa(controles, f"t) controles: el identificador de A devuelve el uuid de A y el de B el de B ({valor(a)}, {valor(b)})")
+    desconocido = resolver(IDENT_DESCONOCIDO)
+    malformados = [("vacio", ""), ("x", "x"), ("64 caracteres", "a" * 64),
+                   ("inyeccion SQL", "'; drop table canal.empresa; --"), ("mayusculas", "A" * 32), ("NULL", None)]
+    if not controles:
+        sinc("t) los controles fallaron: no se puede afirmar nada sobre los negativos")
+        return
+    pasa(valor(desconocido) == "NULL" and sin_error(desconocido), f"t) identificador valido desconocido -> NULL ({valor(desconocido)})")
+    resultados = {}
+    for nombre, texto in malformados:
+        r = resolver(texto)
+        resultados[nombre] = r
+        pasa(valor(r) == "NULL" and sin_error(r) and not r.err.strip(), f"t) entrada mal formada ({nombre}) -> NULL sin error")
+    # empresa A desactivada por el superusuario; se reactiva siempre
+    try:
+        sup(f"update canal.empresa set activa = false where id = '{EMPRESA_A}';")
+        inactiva = resolver(IDENT_A)
+    finally:
+        sup(f"update canal.empresa set activa = true where id = '{EMPRESA_A}';")
+    reactivada = resolver(IDENT_A)
+    pasa(valor(inactiva) == "NULL" and sin_error(inactiva), f"t) empresa A desactivada -> NULL ({valor(inactiva)})")
+    pasa(valor(reactivada) == EMPRESA_A, f"t) empresa A reactivada -> uuid de A otra vez ({valor(reactivada)})")
+    huellas = {"desconocido": (desconocido.out, desconocido.err), "mal formado": (resultados["x"].out, resultados["x"].err),
+               "inactiva": (inactiva.out, inactiva.err)}
+    pasa(len(set(huellas.values())) == 1, f"t) salida y stderr identicos para desconocido, mal formado e inactiva ({huellas})")
+
+
+def seccion_u():
+    p("=== u) registrar_codigo y buscar_codigo")
+    def registrar(hmac, den, ctx, final="COMMIT"):
+        return app(f"select canal.registrar_codigo({bytea_hex(hmac)}, '{den}');", ctx=ctx, final=final)
+    def contar():
+        return valor(sup("select count(*) from canal.busqueda_seguimiento;"))
+    ctl = registrar(HMAC1, DEN_A1, EMPRESA_A)
+    pasa(sin_error(ctl), f"u) control: registrar_codigo(hmac1, A1) con contexto A funciona {ctl.err.strip()[:200]}")
+    r = app(f"select * from canal.buscar_codigo({bytea_hex(HMAC1)});")
+    pasa(r.lineas() == [f"{EMPRESA_A}|{DEN_A1}"], f"u) buscar_codigo(hmac1) sin contexto devuelve (A, A1) ({r.lineas()})")
+    ctl_propia = registrar(HMAC2, DEN_A2, EMPRESA_A, final="ROLLBACK")
+    ctl_ok = sin_error(ctl) and sin_error(ctl_propia)
+    pasa(sin_error(ctl_propia), "u) control: una denuncia propia sin codigo (A2) se puede registrar (ROLLBACK)")
+    ajena = registrar(HMAC3, DEN_B1, EMPRESA_A)
+    inexistente = registrar(HMAC3, str(uuid.uuid4()), EMPRESA_A)
+    if not ctl_ok:
+        sinc("u) el control fallo: no se puede comparar el error de denuncia ajena e inexistente")
+    else:
+        a, b = normalizar_uuid(ajena.err), normalizar_uuid(inexistente.err)
+        pasa("violates foreign key constraint" in a and a == b, "u) denuncia de B y uuid aleatorio: mismo error de clave foranea")
+        if a != b:
+            p(f"   ajena:       {a.strip()!r}\n   inexistente: {b.strip()!r}")
+    antes = contar()
+    sin_ctx = registrar(HMAC3, DEN_A2, SIN)
+    vacio = registrar(HMAC3, DEN_A2, "")
+    despues = contar()
+    negativo("u) registrar_codigo sin contexto", sin_ctx, "registrar_codigo requiere contexto de empresa", ctl_ok)
+    negativo("u) registrar_codigo con contexto vacio", vacio, "registrar_codigo requiere contexto de empresa", ctl_ok)
+    pasa(antes == despues, f"u) sin contexto no se crean filas en busqueda_seguimiento ({antes} antes, {despues} despues)")
+    negativo("u) HMAC de 31 bytes", registrar(HMAC31, DEN_A2, EMPRESA_A), "violates check constraint", ctl_ok)
+    negativo("u) HMAC repetido (hmac1 con A2)", registrar(HMAC1, DEN_A2, EMPRESA_A), "duplicate key", ctl_ok)
+    negativo("u) segundo codigo para la misma denuncia (A1)", registrar(HMAC3, DEN_A1, EMPRESA_A), "duplicate key", ctl_ok)
+    inexistente_hmac = app(f"select count(*) from canal.buscar_codigo({bytea_hex(HMAC2)});")
+    corto = app(f"select count(*) from canal.buscar_codigo({bytea_hex(HMAC31)});")
+    control_buscar = app(f"select count(*) from canal.buscar_codigo({bytea_hex(HMAC1)});")
+    if valor(control_buscar) != "1":
+        sinc(f"u) el control de buscar_codigo (hmac1 devuelve 1 fila) dio {valor(control_buscar)!r}")
+    else:
+        pasa(valor(inexistente_hmac) == "0" and sin_error(inexistente_hmac), "u) buscar_codigo con HMAC inexistente -> 0 filas sin error")
+        pasa(valor(corto) == "0" and sin_error(corto), "u) buscar_codigo con HMAC de 31 bytes -> 0 filas sin error")
+    r = app(f"select * from canal.buscar_codigo({bytea_hex(HMAC1)});\n"
+            f"select count(*) from canal.denuncia where id = '{DEN_A1}';", ctx=EMPRESA_B)
+    pasa(r.lineas() == [f"{EMPRESA_A}|{DEN_A1}", "0"],
+         f"u) con contexto B, buscar_codigo(hmac1) devuelve (A, A1) (ignora el contexto) y leer A1 devuelve 0 filas ({r.lineas()})")
+    # suposicion 5: dentro de una funcion de definidor, empresa_actual() exige EXECUTE al dueno
+    r = sup("BEGIN;\nREVOKE EXECUTE ON FUNCTION canal.empresa_actual() FROM propietario_funciones;\nSET ROLE aplicacion;\n"
+            f"SELECT set_config('app.empresa_id', '{EMPRESA_A}', true) \\gset\n"
+            f"select canal.registrar_codigo({bytea_hex(HMAC2)}, '{DEN_A2}');\nRESET ROLE;\nROLLBACK;\n")
+    negativo("u) suposicion 5: sin EXECUTE sobre empresa_actual() para el dueno, registrar_codigo falla",
+             r, "permission denied for function empresa_actual", ctl_ok)
+    # suposicion 3: una funcion de definidor no se expande en linea
+    r = sup(f"explain (verbose, costs off) select canal.resolver_empresa('{IDENT_A}');")
+    p(f"   plan: {r.lineas()}")
+    pasa("resolver_empresa" in r.out and "directorio_empresas" not in r.out,
+         "u) suposicion 3: el plan llama a resolver_empresa y no la expande en linea")
+
+
+def seccion_v():
+    global FOTO_PREVIA
+    p("=== v) alta_empresa y roles plataforma y propietario_funciones")
+    # foto previa de los conteos, antes de dar de alta ninguna empresa
+    foto = {"A": conteos_contexto(EMPRESA_A), "B": conteos_contexto(EMPRESA_B)}
+    FOTO_PREVIA = foto if all(len(v) == len(TABLAS_RLS) for v in foto.values()) else None
+    p(f"   foto previa de conteos: {FOTO_PREVIA}")
+    alta = cliente_red("select * from canal.alta_empresa('Empresa Nueva');", "plataforma")
+    p(f"alta_empresa por login real de plataforma: {len(alta.lineas())} fila(s); stderr={alta.err.strip()[:200]!r}")
+    fila = alta.lineas()[0] if alta.lineas() else ""
+    encaje = re.fullmatch(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\|([0-9a-f]{32})", fila)
+    pasa(len(alta.lineas()) == 1 and encaje is not None and sin_error(alta), "v) alta_empresa devuelve (uuid, 32 hexadecimales)")
+    if encaje:
+        r = app(f"select coalesce(canal.resolver_empresa('{encaje.group(2)}')::text, 'NULL');")
+        pasa(valor(r) == encaje.group(1), "v) control: resolver_empresa(identificador) como aplicacion devuelve ese uuid")
+    control_alta = encaje is not None and sin_error(alta)
+    negativo("v) nombre vacio", cliente_red("select * from canal.alta_empresa('');", "plataforma"),
+             "violates check constraint", control_alta)
+    negativo("v) nombre de 201 caracteres", cliente_red(f"select * from canal.alta_empresa('{'x' * 201}');", "plataforma"),
+             "violates check constraint", control_alta)
+    # plataforma no puede leer ninguna tabla ni ejecutar las funciones de la aplicacion
+    r = cliente_red("\n".join(f"select count(*) from canal.{t};" for t in TABLAS), "plataforma")
+    for t in TABLAS:
+        negativo(f"v) plataforma: select de {t}", r, f"permission denied for table {t}", control_alta)
+    r = cliente_red("select canal.resolver_empresa('x');\nselect * from canal.buscar_codigo('\\x00'::bytea);\n"
+                    "select canal.registrar_codigo('\\x00'::bytea, gen_random_uuid());\n"
+                    "select canal.verificar_cadena_auditoria();\nselect canal.empresa_actual();\n", "plataforma")
+    for f in ("resolver_empresa", "buscar_codigo", "registrar_codigo", "verificar_cadena_auditoria", "empresa_actual"):
+        negativo(f"v) plataforma: ejecutar {f}", r, f"permission denied for function {f}", control_alta)
+    negativo("v) aplicacion: ejecutar alta_empresa", app("select * from canal.alta_empresa('Intrusa');"),
+             "permission denied for function alta_empresa", control_alta)
+    negativo("v) login de red como propietario_funciones", cliente_literal("propietario_funciones", "select 1;"),
+             "rejects connection", control_alta)
+    # propietario_funciones (SET ROLE desde el superusuario): sin acceso a las demas tablas
+    def como_propietario(sentencia):
+        return sup(f"SET ROLE propietario_funciones;\n{sentencia}\n")
+    ctl = como_propietario("select count(id) from canal.empresa;")
+    ctl_ok = sin_error(ctl) and valor(ctl).isdigit() and int(valor(ctl)) >= 3
+    pasa(ctl_ok, f"v) control: propietario_funciones si puede leer empresa(id) ({valor(ctl)} empresas)")
+    for t in ("denuncia", "mensaje", "usuario_personal", "clave_empresa", "registro_auditoria"):
+        negativo(f"v) propietario_funciones: select de {t}", como_propietario(f"select count(*) from canal.{t};"),
+                 "permission denied", ctl_ok)
+    # suposicion 2: INSERT ... RETURNING bajo RLS exige privilegio y politica de SELECT.
+    # Cada prueba va en su propia transaccion terminada en ROLLBACK.
+    insercion = "insert into canal.empresa (nombre) values ('prueba_s2') returning id;"
+    def prueba_s2(preparacion):
+        return sup(f"BEGIN;\n{preparacion}SET ROLE propietario_funciones;\n{insercion}\nROLLBACK;\n")
+    control = prueba_s2("")
+    control_s2 = sin_error(control) and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", valor(control)) is not None
+    pasa(control_s2, f"v) suposicion 2, control: propietario_funciones inserta en empresa y recibe el id ({valor(control)!r}) {control.err.strip()[:200]}")
+    negativo("v) suposicion 2: sin la politica empresa_select_definidor el INSERT ... RETURNING falla",
+             prueba_s2("DROP POLICY empresa_select_definidor ON canal.empresa;\n"), "row-level security", control_s2)
+    negativo("v) suposicion 2: sin SELECT sobre empresa(id) el INSERT ... RETURNING falla",
+             prueba_s2("REVOKE SELECT (id) ON canal.empresa FROM propietario_funciones;\n"), "permission denied", control_s2)
+    r = sup("select count(*) from pg_policies where schemaname = 'canal' and policyname = 'empresa_select_definidor';")
+    pasa(valor(r) == "1", f"v) tras las pruebas la politica empresa_select_definidor sigue existiendo ({valor(r)} fila)")
+    r = sup("select has_column_privilege('propietario_funciones', 'canal.empresa', 'id', 'SELECT')::text;")
+    pasa(valor(r) == "true", f"v) tras las pruebas propietario_funciones sigue teniendo SELECT en empresa(id) ({valor(r)})")
+
+
+def seccion_w():
+    p("=== w) search_path hostil")
+    sql = f"""BEGIN;
+CREATE TEMP TABLE directorio_empresas (identificador_publico text, empresa_id uuid);
+INSERT INTO pg_temp.directorio_empresas VALUES ('{IDENT_FALSO}', '{str(uuid.uuid4())}');
+GRANT ALL ON pg_temp.directorio_empresas TO PUBLIC;
+CREATE FUNCTION canal.control_inseguro(p text) RETURNS uuid LANGUAGE sql SECURITY DEFINER
+AS $$ select empresa_id from directorio_empresas where identificador_publico = p $$;
+GRANT EXECUTE ON FUNCTION canal.control_inseguro(text) TO aplicacion;
+SET ROLE aplicacion;
+SET search_path = pg_temp, canal;
+select 'control|' || coalesce(canal.control_inseguro('{IDENT_FALSO}')::text, 'NULL');
+select 'falso|' || coalesce(canal.resolver_empresa('{IDENT_FALSO}')::text, 'NULL');
+select 'real|' || coalesce(canal.resolver_empresa('{IDENT_A}')::text, 'NULL');
+RESET ROLE;
+ROLLBACK;
+"""
+    r = sup(sql)
+    p(f"   salida: {r.lineas()}; stderr: {r.err.strip()[:200]!r}")
+    datos = dict(l.split("|", 1) for l in r.lineas() if "|" in l)
+    control = datos.get("control", "NULL")
+    if control == "NULL" or not sin_error(r):
+        sinc("w) el control no devuelve el uuid FALSO: la tecnica de suplantacion no funciona en este entorno")
+    else:
+        pasa(datos.get("falso") == "NULL", f"w) con search_path = pg_temp, canal, resolver_empresa('{IDENT_FALSO}') -> NULL ({datos.get('falso')})")
+        pasa(datos.get("real") == EMPRESA_A, f"w) y resolver_empresa del identificador real de A -> uuid real de A ({datos.get('real')})")
+    r = sup("select count(*) from pg_proc where proname = 'control_inseguro';\n"
+            "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "where c.relname = 'directorio_empresas' and n.nspname like 'pg_temp%';\n"
+            "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "where c.relname = 'directorio_empresas' and n.nspname = 'canal';")
+    pasa(r.lineas() == ["0", "0", "1"], f"w) tras el ROLLBACK no quedan ni la funcion de control ni la tabla temporal ({r.lineas()})")
+
+
+def seccion_x():
+    p("=== x) aislamiento tras las funciones (regresion)")
+    if FOTO_PREVIA is None:
+        sinc("x) no se pudo tomar la foto previa de conteos al comienzo de v)")
+        return
+    for nombre, ctx, idx in (("A", EMPRESA_A, 0), ("B", EMPRESA_B, 1)):
+        real = conteos_contexto(ctx)
+        pasa(real == FOTO_PREVIA[nombre],
+             f"x) contexto {nombre}: las 6 tablas (incluida registro_auditoria) iguales a la foto previa: real={real} foto={FOTO_PREVIA[nombre]}")
+        fijas = sorted(l for l in real if not l.startswith("registro_auditoria|"))
+        esperado = sorted(f"{t}|{CONTEOS[t][idx]}" for t in TABLAS_RLS if t != "registro_auditoria")
+        pasa(fijas == esperado, f"x) contexto {nombre}: las 5 tablas sin registro_auditoria coinciden con los literales de h): real={fijas} esperado={esperado}")
+        cadena = verificar_cadena(ctx)
+        pasa(cadena == "NULL", f"x) contexto {nombre}: verificar_cadena_auditoria() = {cadena} (esperado NULL)")
+    esperado_cero = sorted(f"{t}|0" for t in TABLAS_RLS)
+    consultas = "\n".join(f"select '{t}|' || count(*) from canal.{t};" for t in TABLAS_RLS)
+    pasa(sorted(app(consultas).lineas()) == esperado_cero, "x) sin contexto todas las tablas siguen devolviendo 0")
+    r = sup("select count(*) from canal.empresa;")
+    pasa(valor(r) == "3", f"x) el superusuario ve 3 empresas (A, B y la creada por alta_empresa): {valor(r)}")
+
+
 def esperar_healthy(cid, maximo=60):
     estado_salud = ""
     for _ in range(maximo):
@@ -873,9 +1228,11 @@ def seccion_r():
                                          "where n.nspname = 'canal' and c.relkind = 'r';").lineas(), TABLAS)
     politicas = sup("select tablename, policyname, cmd from pg_policies where schemaname = 'canal';").lineas()
     tablas_con_politicas = {l.split("|")[0] for l in politicas}
-    comparar("r) siguen las 13 politicas definidas en d)", politicas, POLITICAS)
-    pasa(len(politicas) == 13 and len(tablas_con_politicas) == 6,
-         f"r) exactamente 13 politicas repartidas en exactamente 6 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
+    comparar("r) siguen las 15 politicas definidas en d)", politicas, POLITICAS)
+    pasa(len(politicas) == 15 and len(tablas_con_politicas) == 6,
+         f"r) exactamente 15 politicas repartidas en exactamente 6 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
+    funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
+    comparar("r) siguen las 9 funciones", funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
 
 
@@ -893,9 +1250,15 @@ def seccion_s():
     for nombre in ("contrasena_postgres_superusuario", "contrasena_migrador", "contrasena_aplicacion", "contrasena_plataforma"):
         ruta = RAIZ / "secrets" / f"{nombre}.txt"
         pasa(ruta.is_file() and not ruta.is_dir(), f"s) secrets/{nombre}.txt sigue siendo un fichero")
-    r = ejecutar(["git", "status", "--short", "-uall"])
-    esperado = [" M docker-compose.yml", "?? db/init/02_esquema.sql", "?? tests/security/verificar_esquema.py"]
-    comparar("s) git status solo muestra los tres cambios esperados", [l.rstrip() for l in r.out.splitlines() if l.strip()], esperado)
+    final = estado_git()
+    if ESTADO_GIT_ARRANQUE is None or final is None:
+        sinc("s) no se pudo comparar el estado de Git (git no disponible, fallo o el directorio no es un repositorio)")
+    else:
+        iguales = final == ESTADO_GIT_ARRANQUE
+        pasa(iguales, "s) la bateria no ha modificado el repo (git status igual al del arranque)")
+        if not iguales:
+            p(f"   al arrancar: {ESTADO_GIT_ARRANQUE}")
+            p(f"   al terminar: {final}")
 
 
 def terminar():
@@ -908,6 +1271,17 @@ def terminar():
     sys.exit(0 if resultado == "OK" else 1)
 
 
+def estado_git():
+    """Líneas de "git status --short -uall", o None si git no está disponible o falla."""
+    try:
+        r = ejecutar(["git", "status", "--short", "-uall"], timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.rc != 0:
+        return None
+    return [l.rstrip() for l in r.out.splitlines() if l.strip()]
+
+
 def recursos_previos():
     previos = []
     for orden in (["docker", "ps", "-a", "--format", "{{.Names}}"],
@@ -918,7 +1292,9 @@ def recursos_previos():
 
 
 def main():
-    global IMAGEN, CID
+    global IMAGEN, CID, ESTADO_GIT_ARRANQUE
+    # Estado de Git al arrancar, antes de levantar Docker: s) lo compara con el final.
+    ESTADO_GIT_ARRANQUE = estado_git()
     # Precondiciones: si fallan, no se limpia nada (podrian ser recursos ajenos).
     if ejecutar(["docker", "info", "--format", "{{.ServerVersion}}"]).rc != 0:
         p("PARADA: docker info falla")
@@ -927,7 +1303,7 @@ def main():
     if previos:
         p(f"PARADA: ya existen recursos con prefijo {PROYECTO}: {previos}")
         terminar_con_parada()
-    for nombre in ("contrasena_aplicacion",):
+    for nombre in ("contrasena_aplicacion", "contrasena_plataforma"):
         if not (RAIZ / "secrets" / f"{nombre}.txt").is_file():
             p(f"PARADA: secrets/{nombre}.txt no existe como fichero")
             terminar_con_parada()
@@ -942,7 +1318,7 @@ def main():
         CID = dc("ps", "-q", "postgres").out.strip()
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
                         seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p, seccion_q,
-                        seccion_r):
+                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)
