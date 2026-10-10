@@ -1,3 +1,5 @@
+name: canario
+
 services:
   redis:
     # Imagen fijada por versión y por digest: la versión es legible para humanos
@@ -27,6 +29,11 @@ services:
       # Solo avisos y errores, para no llenar los logs de ruido.
       - --loglevel
       - warning
+      # La ACL (generada por scripts/generar_secretos.py) define el usuario
+      # aplicacion, con su contraseña hasheada y sus permisos, y desactiva el
+      # usuario default.
+      - --aclfile
+      - /run/secrets/redis_acl
     # Sistema de ficheros raíz de solo lectura. Incluye /data, porque la imagen
     # no declara ningún volumen. Así ni SAVE ni BGSAVE pueden escribir a disco,
     # y un atacante no puede dejar ficheros dentro del contenedor.
@@ -42,12 +49,22 @@ services:
     pids_limit: 64
     # Sin puertos publicados (no hay clave "ports"): Redis solo es accesible
     # desde otros contenedores conectados a la red cache.
-    # Sin autenticación todavía: se añadirá un ACL con contraseña hasheada en
-    # el paso de secretos. Hasta entonces, el aislamiento lo da la red interna.
+    # Autenticación por ACL: el usuario default está desactivado y solo existe
+    # el usuario aplicacion, con una lista explícita de comandos y acceso
+    # únicamente a las claves limite:*. Los módulos de la imagen (RedisJSON,
+    # RediSearch, RedisBloom, RedisTimeSeries) siguen cargados, pero sus
+    # comandos quedan denegados por la ACL.
+    secrets:
+      - contrasena_redis
+      - redis_acl
     networks:
       - cache
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # redis-cli sale con 0 aunque falle la autenticación (NOAUTH, WRONGPASS,
+      # NOPERM), así que solo es sano si la respuesta es exactamente PONG. La
+      # contraseña se lee del fichero y se pasa por entorno, no como argumento,
+      # para que no aparezca en la línea de comandos del proceso.
+      test: ["CMD-SHELL", "x=$$(REDISCLI_AUTH=$$(cat /run/secrets/contrasena_redis) redis-cli --user aplicacion ping); case $$x in PONG) exit 0;; *) exit 1;; esac"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -64,3 +81,9 @@ networks:
     # Red interna: los contenedores no tienen salida a internet ni son
     # accesibles desde fuera del host.
     internal: true
+
+secrets:
+  contrasena_redis:
+    file: ./secrets/contrasena_redis.txt
+  redis_acl:
+    file: ./secrets/redis_acl.conf
