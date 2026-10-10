@@ -76,10 +76,119 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  postgres:
+    # Imagen fijada por versión y por digest, por el mismo motivo que redis
+    # (defensa ante cadena de suministro).
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    # Usuario sin privilegios desde el primer proceso (70 es postgres en la
+    # imagen alpine): el contenedor nunca arranca como root.
+    user: "70:70"
+    restart: unless-stopped
+    # Con datos persistentes el apagado necesita margen para el checkpoint;
+    # los 10 s por defecto son pocos.
+    stop_grace_period: 30s
+    command:
+      - postgres
+      # pg_hba propio: sustituye al de la imagen, que trae reglas trust. El
+      # que la imagen deja en PGDATA queda inerte mientras se use hba_file.
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      # Escucha en todas las interfaces del contenedor; el acceso lo limitan
+      # la red interna data y las reglas de pg_hba.conf.
+      - -c
+      - listen_addresses=*
+      # El entrypoint de la imagen cambia el modo del directorio del socket
+      # (comprobado: queda drwxrwsr-t), así que "mode" en el tmpfs no sirve.
+      # La protección real es el permiso del propio fichero del socket, al que
+      # solo puede conectarse el usuario postgres.
+      - -c
+      - unix_socket_permissions=0700
+      # Las contraseñas nuevas se guardan con SCRAM-SHA-256, no con MD5.
+      - -c
+      - password_encryption=scram-sha-256
+      # ssl=off es un límite asumido: la red data es interna y el contenido
+      # sensible ya llega cifrado desde la aplicación.
+      - -c
+      - ssl=off
+      # Cada conexión es un proceso, así que max_connections=20 y pids_limit 64
+      # son coherentes: el contenedor no puede agotar los procesos antes de
+      # llegar al tope de conexiones.
+      - -c
+      - max_connections=20
+      # Sin trazas de conexiones ni de nombres de host: el log no debe
+      # acumular quién se conecta ni desde dónde.
+      - -c
+      - log_connections=off
+      - -c
+      - log_disconnections=off
+      - -c
+      - log_hostname=off
+      - -c
+      - log_statement=none
+      # panic evita que un error vuelque al log el texto de la consulta, que
+      # podría contener datos sensibles.
+      - -c
+      - log_min_error_statement=panic
+    environment:
+      POSTGRES_DB: canario
+      # La contraseña del superusuario se lee de un secreto de fichero, no de
+      # una variable de entorno visible con docker inspect.
+      POSTGRES_PASSWORD_FILE: /run/secrets/contrasena_postgres_superusuario
+    secrets:
+      - contrasena_postgres_superusuario
+    # Sistema de ficheros raíz de solo lectura: lo único escribible son los
+    # volúmenes y los tmpfs de abajo.
+    read_only: true
+    tmpfs:
+      # Temporales en memoria, sin ejecución ni setuid.
+      - /tmp:rw,noexec,nosuid,size=64m
+      # Socket Unix en memoria. El modo del directorio lo fija el entrypoint de
+      # la imagen y el acceso al socket lo restringe unix_socket_permissions.
+      - /var/run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m
+    volumes:
+      # A diferencia de redis, los datos de PostgreSQL sí persisten.
+      - pgdata:/var/lib/postgresql
+      # Reglas de acceso propias, en solo lectura.
+      - ./db/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    # Sin ninguna capability de Linux.
+    cap_drop:
+      - ALL
+    # Impide ganar privilegios nuevos (por ejemplo con binarios setuid).
+    security_opt:
+      - no-new-privileges:true
+    # Límites de recursos: contienen el daño de un fallo o de un abuso.
+    mem_limit: 512m
+    pids_limit: 64
+    # Sin puertos publicados (no hay clave "ports"): PostgreSQL solo es
+    # accesible desde otros contenedores conectados a la red data.
+    networks:
+      - data
+    healthcheck:
+      # pg_isready da OK aunque pg_hba rechace la conexión. Aquí solo es sano
+      # si el servidor responde por el socket y escucha ya por TCP, lo que
+      # descarta el servidor temporal de la inicialización de la imagen. No se
+      # suprime stderr para que el fallo quede visible en el historial del
+      # healthcheck.
+      test: ["CMD-SHELL", "x=$$(psql -U postgres -d canario -Atc 'show listen_addresses'); case $$x in '*') exit 0;; *) exit 1;; esac"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Rotación de logs: evita que crezcan sin límite y llenen el disco.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   cache:
     # Red interna: los contenedores no tienen salida a internet ni son
     # accesibles desde fuera del host.
+    internal: true
+  data:
+    # Red interna de la base de datos: sin salida a internet ni acceso desde
+    # fuera del host. Solo los servicios que la necesitan se conectan a ella.
     internal: true
 
 secrets:
@@ -87,3 +196,10 @@ secrets:
     file: ./secrets/contrasena_redis.txt
   redis_acl:
     file: ./secrets/redis_acl.conf
+  contrasena_postgres_superusuario:
+    file: ./secrets/contrasena_postgres_superusuario.txt
+
+volumes:
+  # Persiste entre reinicios, a diferencia de redis. Los scripts de
+  # inicialización de la imagen solo se ejecutan cuando el volumen está vacío.
+  pgdata:
