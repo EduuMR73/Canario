@@ -40,9 +40,21 @@ ES_POSIX = os.name == "posix"
 # encaja nunca (a diferencia de "$", que lo tolera).
 PATRON_URLSAFE = re.compile(rb"[A-Za-z0-9_-]{64}")
 PATRON_HEXADECIMAL = re.compile(rb"[0-9a-f]{64}")
+
+# Permisos del usuario "aplicacion" de Redis (la línea de la ACL sin el hash).
+# Es la única fuente de verdad: tanto el patrón de comprobación como el
+# contenido que se genera se construyen a partir de ella, así no pueden
+# divergir. Resumen: solo las claves "limite:*" y solo los comandos mínimos.
+PERMISOS_ACL_APLICACION = (
+    "resetkeys ~limite:* resetchannels -@all "
+    "+ping +multi +exec +incr +expire +ttl +client|setinfo"
+)
+# Las partes fijas se escapan con re.escape para no escapar a mano
+# caracteres como + | * ~.
 PATRON_ACL = re.compile(
-    rb"user default off\n"
-    rb"user aplicacion on #([0-9a-f]{64}) ~\* \+@all -@admin -@dangerous\n"
+    re.escape(b"user default off\nuser aplicacion on #")
+    + rb"([0-9a-f]{64})"
+    + re.escape(b" " + PERMISOS_ACL_APLICACION.encode("ascii") + b"\n")
 )
 
 # nombre de fichero -> (generador, patrón que debe cumplir)
@@ -157,11 +169,14 @@ def crear_fichero(ruta, contenido):
 
 
 def contenido_acl(contrasena_en_disco):
-    """Construye redis_acl.conf a partir de los bytes de contrasena_redis.txt."""
+    """Construye redis_acl.conf a partir de los bytes de contrasena_redis.txt.
+
+    Son exactamente dos líneas terminadas en LF (196 bytes en total).
+    """
     hash_contrasena = hashlib.sha256(contrasena_en_disco).hexdigest()
     return (
         "user default off\n"
-        f"user aplicacion on #{hash_contrasena} ~* +@all -@admin -@dangerous\n"
+        f"user aplicacion on #{hash_contrasena} {PERMISOS_ACL_APLICACION}\n"
     ).encode("utf-8")
 
 
@@ -242,7 +257,12 @@ def comprobar(directorio, estado_git):
         datos_acl = ruta_acl.read_bytes()
         encaje = PATRON_ACL.fullmatch(datos_acl)
         if not encaje:
-            problemas.append(f"{FICHERO_ACL}: formato incorrecto")
+            # El script nunca sobrescribe ni borra: si es la ACL antigua, la
+            # decisión de borrarla es de la persona que lo ejecuta.
+            problemas.append(
+                f"{FICHERO_ACL}: el formato no coincide con el esperado; "
+                "si es la ACL antigua, borre el fichero y vuelva a ejecutar el script"
+            )
         elif FICHERO_REDIS not in valores:
             problemas.append(f"{FICHERO_ACL}: no se puede verificar el hash sin {FICHERO_REDIS}")
         else:
