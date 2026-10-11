@@ -47,13 +47,14 @@
 --   eso habría que anclar el último hash fuera de la base de datos (por
 --   ejemplo en un registro externo o en una copia firmada), diseño que queda
 --   como diseñado, no implementado.
--- * El bloqueo consultivo de encadenar_auditoria y de asignar_secuencia_mensaje
---   se toma en un trigger BEFORE INSERT, es decir, antes de que la RLS
---   compruebe la fila (WITH CHECK). Una sesión con contexto de la empresa A
---   que intente insertar con empresa_id de B toma el bloqueo de B hasta cerrar
---   su transacción, aunque su INSERT falle, y puede retrasar los inserts de B.
---   Requiere código de la API comprometido. Posible mejora: rechazar en el
---   trigger lo que no sea de la empresa del contexto antes de bloquear.
+-- * El bloqueo consultivo de encadenar_auditoria se toma en un trigger BEFORE
+--   INSERT, es decir, antes de que la RLS compruebe la fila (WITH CHECK). Una
+--   sesión con contexto de la empresa A que intente insertar con empresa_id
+--   de B toma el bloqueo de B hasta cerrar su transacción, aunque su INSERT
+--   falle, y puede retrasar los inserts de auditoría de B. Requiere código de
+--   la API comprometido. Los mensajes no tienen este problema: preparar_mensaje
+--   no usa bloqueo consultivo, sino el de la fila de su denuncia, que bajo RLS
+--   solo se puede tomar sobre denuncias de la empresa del contexto.
 --
 -- Este paso no crea funciones de definidor, ni políticas para
 -- propietario_funciones, ni permisos para plataforma: eso llega en el paso
@@ -179,10 +180,14 @@ CREATE TABLE canal.denuncia (
 -- dentro del AAD, un mensaje se podría duplicar en otra fila o intercambiar con
 -- otro de la misma denuncia sin que el descifrado lo notara. UNIQUE con
 -- empresa_id, como el resto: un duplicado nunca revela datos de otra empresa.
+-- secuencia y fecha las fija siempre el trigger mensaje_preparar, sin valor
+-- por defecto: si no pudiera calcularlas, NOT NULL lo rechazaría. El trigger
+-- también impone que la denuncia esté abierta y el tope de mensajes.
 CREATE TABLE canal.mensaje (
     empresa_id uuid NOT NULL,
     denuncia_id uuid NOT NULL,
     secuencia integer NOT NULL,
+    fecha date NOT NULL,
     id uuid NOT NULL DEFAULT gen_random_uuid(),
     autor text NOT NULL CHECK (autor IN ('denunciante', 'personal')),
     autor_id uuid,
@@ -353,9 +358,9 @@ BEGIN
 
     NEW.secuencia := coalesce(v_ultima_secuencia, 0) + 1;
     NEW.hash_anterior := v_ultimo_hash;
-    -- Mismo cálculo que fijar_fecha_denuncia (si se cambia uno, hay que
-    -- cambiar el otro): el día en la zona de la empresa, sin depender de la
-    -- zona de la sesión.
+    -- Mismo cálculo que fijar_fecha_denuncia y preparar_mensaje (si se cambia
+    -- uno, hay que cambiar los otros): el día en la zona de la empresa, sin
+    -- depender de la zona de la sesión.
     NEW.fecha := (SELECT (now() AT TIME ZONE e.zona_horaria)::date
                     FROM canal.empresa e
                    WHERE e.id = NEW.empresa_id);
@@ -389,23 +394,82 @@ BEGIN
 END
 $$;
 
--- Numera los mensajes de cada denuncia (1, 2, 3...) sin huecos, ignorando la
--- secuencia que traiga el INSERT. El bloqueo consultivo evita que dos mensajes
--- simultáneos de la misma denuncia reciban el mismo número. Así no hace falta
--- una hora para ordenar la conversación.
-CREATE FUNCTION canal.asignar_secuencia_mensaje() RETURNS trigger
+-- Prepara cada mensaje nuevo. Es un solo trigger, y no uno por regla, porque
+-- el orden de los pasos importa y PostgreSQL ejecuta los triggers BEFORE de
+-- una tabla por orden alfabético de nombre: que la corrección dependiera de
+-- cómo se llaman sería frágil.
+--
+-- 1. Bloquea la fila de la denuncia (FOR NO KEY UPDATE) y lee su estado. Es
+--    el único bloqueo, y hace tres cosas:
+--    * Serializa los mensajes de una misma denuncia, para que dos simultáneos
+--      no reciban el mismo número (paso 3).
+--    * Choca con el UPDATE que cambia el estado. Si el personal está cerrando
+--      la denuncia, el mensaje espera a que confirme y entonces ve el estado
+--      nuevo: no hay ventana entre comprobar el estado e insertar.
+--    * Al ser el único, no hay orden de bloqueos que pueda cruzarse. Con dos
+--      (la fila y uno consultivo para la secuencia) habría interbloqueo entre
+--      un mensaje del denunciante y el personal que, en una transacción,
+--      escribe su mensaje y cierra la denuncia.
+--    La lectura va con los permisos de quien inserta y bajo RLS: una denuncia
+--    de otra empresa es invisible, igual que una inexistente, y las dos dan el
+--    mismo error sin bloquear nada. FOR NO KEY UPDATE y no FOR UPDATE: no
+--    choca con el FOR KEY SHARE que toman las claves foráneas.
+-- 2. Una denuncia resuelta o archivada no admite mensajes (SQLSTATE CN001): el
+--    expediente está cerrado y nadie leería lo que llegue, que sería un fallo
+--    silencioso. El personal que cierre con un mensaje final lo inserta antes
+--    de cambiar el estado, en la misma transacción.
+-- 3. Numera los mensajes de cada denuncia (1, 2, 3...) sin huecos, ignorando
+--    la secuencia que traiga el INSERT. Así no hace falta una hora para
+--    ordenar la conversación. Requiere READ COMMITTED (el nivel por defecto,
+--    el de la API al escribir): cada consulta del trigger ve lo confirmado
+--    por el mensaje que esperaba delante. Con un nivel superior, el número
+--    repetido lo rechazaría la clave primaria, nunca en silencio.
+-- 4. Tope de 200 mensajes por denuncia (SQLSTATE CN002): acota lo que guarda
+--    la base de datos y lo que devuelve el seguimiento, que los lee todos. La
+--    velocidad de envío la limita la API (límite de peticiones).
+-- 5. Fecha: el día en la zona de la empresa, con el mismo cálculo que
+--    fijar_fecha_denuncia y encadenar_auditoria (si se cambia uno, hay que
+--    cambiar los otros; las baterías comprueban los tres por zona).
+--
+-- Los SQLSTATE propios (clase CN, que no usa PostgreSQL) permiten a la API
+-- distinguir cada caso sin leer el texto del error.
+CREATE FUNCTION canal.preparar_mensaje() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, canal
 AS $$
+DECLARE
+    v_estado text;
 BEGIN
-    PERFORM pg_advisory_xact_lock(hashtextextended(
-        'mensaje:' || NEW.empresa_id::text || ':' || NEW.denuncia_id::text, 0));
+    SELECT d.estado
+      INTO v_estado
+      FROM canal.denuncia d
+     WHERE d.empresa_id = NEW.empresa_id
+       AND d.id = NEW.denuncia_id
+       FOR NO KEY UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'el mensaje no corresponde a ninguna denuncia visible'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+
+    IF v_estado IN ('resuelta', 'archivada') THEN
+        RAISE EXCEPTION 'la denuncia esta cerrada y no admite mensajes'
+            USING ERRCODE = 'CN001';
+    END IF;
 
     SELECT coalesce(max(m.secuencia), 0) + 1
       INTO NEW.secuencia
       FROM canal.mensaje m
      WHERE m.empresa_id = NEW.empresa_id
        AND m.denuncia_id = NEW.denuncia_id;
+
+    IF NEW.secuencia > 200 THEN
+        RAISE EXCEPTION 'la denuncia ha alcanzado el maximo de 200 mensajes'
+            USING ERRCODE = 'CN002';
+    END IF;
+
+    NEW.fecha := (SELECT (now() AT TIME ZONE e.zona_horaria)::date
+                    FROM canal.empresa e
+                   WHERE e.id = NEW.empresa_id);
     RETURN NEW;
 END
 $$;
@@ -490,7 +554,7 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION canal.encadenar_auditoria() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.rechazar_modificacion_auditoria() FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION canal.asignar_secuencia_mensaje() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION canal.preparar_mensaje() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.fijar_fecha_denuncia() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() TO aplicacion;
@@ -504,9 +568,9 @@ CREATE TRIGGER auditoria_inmutable_fila
 CREATE TRIGGER auditoria_inmutable_truncate
     BEFORE TRUNCATE ON canal.registro_auditoria
     FOR EACH STATEMENT EXECUTE FUNCTION canal.rechazar_modificacion_auditoria();
-CREATE TRIGGER mensaje_secuencia
+CREATE TRIGGER mensaje_preparar
     BEFORE INSERT ON canal.mensaje
-    FOR EACH ROW EXECUTE FUNCTION canal.asignar_secuencia_mensaje();
+    FOR EACH ROW EXECUTE FUNCTION canal.preparar_mensaje();
 CREATE TRIGGER denuncia_fecha
     BEFORE INSERT ON canal.denuncia
     FOR EACH ROW EXECUTE FUNCTION canal.fijar_fecha_denuncia();

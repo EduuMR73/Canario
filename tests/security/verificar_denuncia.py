@@ -41,6 +41,24 @@ app/rutas_denuncias.py, app/frontera_http.py y proxy/Caddyfile):
 * El uso normal no deja ninguna línea en el log de la API; ningún texto,
   código ni HMAC aparece en los logs; PostgreSQL no registra DETAIL.
 
+Paso (c), mensajes del denunciante (POST /v1/seguimiento/mensajes y los
+mensajes del seguimiento):
+* 201 solo con la secuencia y la fecha del día en la zona de la empresa
+  (Madrid y Canarias); el seguimiento devuelve los textos exactos en orden,
+  con autor genérico y sin id ni autor_id, también los del personal.
+* El mismo 404 que el seguimiento para cualquier código que no es de una
+  denuncia, y el mismo 422 sin eco para cualquier petición inválida, sin
+  guardar nada.
+* Una denuncia resuelta o archivada responde 409 y no guarda el mensaje; en
+  instrucción lo acepta. El mensaje número 201 de una denuncia responde 409.
+* Si el personal archiva la denuncia mientras llega un mensaje, el mensaje
+  espera y recibe 409; si el personal deshace, se guarda. Si la denuncia
+  sigue bloqueada más que lock_timeout, 503 con Retry-After y un evento sin
+  datos en el log.
+* Tras rotar la clave de la empresa, los mensajes nuevos usan la nueva y los
+  antiguos se siguen leyendo con la suya. Un mensaje cambiado de fila (de la
+  misma denuncia o de otra empresa) da 500 y un evento de integridad.
+
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
 
@@ -68,6 +86,7 @@ directorio temporal del sistema. El código de salida es 0 solo si el
 resultado global es OK. Solo usa la biblioteca estándar.
 """
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -140,9 +159,9 @@ PATRON_CLAVE = re.compile(r"clave creada: empresa_id=([0-9a-f-]{36}) version=(\d
 TEXTO_NO_DESENVUELVE = "no desenvuelve la version"
 TEXTO_EMPRESA_NO_EXISTE = "la empresa no existe"
 TEXTO_SIN_CLAVE = "NO tiene clave"
-# Claves de empresa al llegar a e): A v1 a v3, B v1 y v2, C v1 (d) y la de la
-# empresa inactiva de f), v1.
-CLAVES_EMPRESA_ESPERADAS = 7
+# Claves de empresa al llegar a e): A v1 a v3 (d) y v4 (m), B v1 y v2, C v1
+# (d) y la de la empresa inactiva de f), v1.
+CLAVES_EMPRESA_ESPERADAS = 8
 # Cualquier secuencia de 64 hexadecimales: el formato de las claves.
 PATRON_CLAVE_HEX = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -273,8 +292,19 @@ CUERPO_413 = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode("ut
 CUERPO_422 = '{"detalle": "petición no válida"}'.encode("utf-8")
 CUERPO_500 = '{"detalle": "error interno"}'.encode("utf-8")
 CUERPO_503 = '{"detalle": "el canal de esta empresa no está disponible; inténtelo más tarde"}'.encode("utf-8")
+CUERPO_409_CERRADA = '{"detalle": "la denuncia está cerrada y no admite mensajes"}'.encode("utf-8")
+CUERPO_409_LIMITE = '{"detalle": "la denuncia ha alcanzado el máximo de mensajes"}'.encode("utf-8")
+CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode("utf-8")
+REINTENTAR_TRAS = "5"
+TEXTO_SATURACION = "SATURACION: LockNotAvailable 55P03"
 CLAVES_RESPUESTA_CREAR = ["codigo_seguimiento", "fecha"]
 CLAVES_RESPUESTA_SEGUIMIENTO = ["categoria", "estado", "fecha", "mensajes", "texto"]
+CLAVES_RESPUESTA_MENSAJE = ["fecha", "secuencia"]
+CLAVES_MENSAJE = ["autor", "fecha", "secuencia", "texto"]
+MAXIMO_MENSAJES = 200
+# Versión de la clave de A tras d) (v1, v2 y v3) y tras la rotación de m).
+VERSION_CLAVE_A = 3
+VERSION_CLAVE_A_ROTADA = 4
 LIMITE_CUERPO = 131072  # 128 KiB, en la API y en Caddy
 LONGITUD_MAXIMA_TEXTO = 10000
 TEXTO_EVENTO_SIN_CLAVE = "EVENTO empresa_sin_clave"
@@ -393,6 +423,34 @@ for texto in sys.argv[1:]:
     res[texto] = salida
 pool.close()
 print(json.dumps({"longitudes": res, "claves": claves_hex}, sort_keys=True))
+"""
+
+# Se ejecuta dentro del contenedor de la API: inserta, como haría el personal
+# (bloque 4), un mensaje cifrado con autor "personal" y su autor_id. El
+# contenido se escribe aquí con el formato del modelo de amenazas ({"texto",
+# "v": 1}, JSON compacto con claves ordenadas), no con el código de la API:
+# si la API leyera otro formato, el seguimiento fallaría.
+MENSAJE_PERSONAL = """
+import json, sys, uuid
+from app import bd, claves, cripto
+maestra = claves.cargar_maestra()
+empresa, denuncia, autor = (uuid.UUID(x) for x in sys.argv[1:4])
+texto = sys.argv[4]
+pool = bd.crear_pool(tamano_maximo=1)
+pool.open(wait=True, timeout=15)
+mensaje = uuid.uuid4()
+with bd.transaccion_empresa(pool, empresa) as c:
+    version, envuelta = c.execute(
+        "select version, clave_envuelta from canal.clave_empresa order by version desc limit 1").fetchone()
+    clave = cripto.desenvolver_clave(maestra, bytes(envuelta), empresa, version)
+    contenido = json.dumps({"texto": texto, "v": 1}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    cifrado = cripto.cifrar_contenido(clave, contenido.encode("utf-8"),
+                                      cripto.aad_mensaje(empresa, denuncia, mensaje, "personal", autor))
+    c.execute("insert into canal.mensaje (empresa_id, denuncia_id, id, autor, autor_id, contenido_cifrado, "
+              "version_clave) values (%s, %s, %s, 'personal', %s, %s, %s)",
+              [empresa, denuncia, mensaje, autor, cifrado, version])
+pool.close()
+print("insertado")
 """
 
 
@@ -932,6 +990,48 @@ def denuncia_de(codigo):
     return r.out.strip()
 
 
+def nuevo_mensaje(codigo, texto):
+    return pt("POST", "/v1/seguimiento/mensajes", {"codigo": codigo, "texto": texto})
+
+
+def mensajes_en_bd(denuncia_id):
+    return sup(f"select count(*) from canal.mensaje where denuncia_id = '{denuncia_id}';").out.strip()
+
+
+def retener_y_enviar(sentencia, final, codigo, texto, pausa_tras_ver=0):
+    """Retiene la fila de una denuncia en una transacción del superusuario y,
+    mientras tanto, envía un mensaje por la API.
+
+    La transacción ejecuta `sentencia` (que bloquea la fila), espera a que la
+    API quede esperando un bloqueo, opcionalmente duerme `pausa_tras_ver`
+    segundos y termina con `final` (COMMIT o ROLLBACK). Devuelve la respuesta
+    de la API y si se vio a la API esperando (el control de que hubo
+    contención de verdad). pg_stat_clear_snapshot(): dentro de una
+    transacción, pg_stat_activity se lee una vez y se cachea.
+    """
+    api_esperando = ("EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'canario-api' "
+                     "AND wait_event_type = 'Lock')")
+    sql = ("SET application_name = 'prueba_retencion';\nBEGIN;\n"
+           f"{sentencia}\n"
+           "DO $$ BEGIN FOR i IN 1..300 LOOP PERFORM pg_stat_clear_snapshot(); "
+           f"EXIT WHEN {api_esperando}; PERFORM pg_sleep(0.1); END LOOP; END $$;\n"
+           "SELECT pg_stat_clear_snapshot();\n"
+           f"SELECT 'visto|' || ({api_esperando})::text;\n"
+           + (f"SELECT pg_sleep({pausa_tras_ver});\n" if pausa_tras_ver else "")
+           + f"{final};\n")
+
+    def en_pausa():
+        return sup("select count(*) from pg_stat_activity where application_name = 'prueba_retencion' "
+                   "and wait_event = 'PgSleep';").out.strip() == "1"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        futuro = pool.submit(sup, sql)
+        respuesta = http([nuevo_mensaje(codigo, texto)])[0] if esperar(en_pausa, 30) else None
+        retencion = futuro.result()
+    if respuesta is None or retencion.rc != 0:
+        raise Parada(f"no se pudo retener la denuncia: {retencion.err.strip()[:300]!r}")
+    return respuesta, "visto|true" in retencion.out.split()
+
+
 # ---------------------------------------------------------------------------
 # Secciones HTTP
 # ---------------------------------------------------------------------------
@@ -1119,6 +1219,271 @@ def seccion_g():
          "g) el 405 conserva la cabecera Allow con POST")
 
 
+def seccion_m():
+    p("=== m) mensajes del denunciante")
+    empresa_a, ident_a, zona_a = EMPRESAS["A"]
+    _, ident_b, zona_b = EMPRESAS["B"]
+    dia_a, dia_b = dia_en(zona_a), dia_en(zona_b)
+    # Una denuncia por caso, para que ninguno dependa del estado de otro. Sus
+    # códigos pasan a CODIGOS: h) y l) los buscan en el volcado y los logs.
+    casos = ("M", "MB", "instruccion", "resuelta", "archivada", "tope", "carrera", "carrera_ctl", "espera",
+             "personal")
+    respuestas = http([pt("POST", ruta_denuncias(ident_b if c == "MB" else ident_a),
+                          {"categoria": "otros", "texto": f"denuncia {c}"}) for c in casos])
+    codigos = {}
+    for caso, respuesta in zip(casos, respuestas):
+        cuerpo = json_de(respuesta)
+        if respuesta.get("estado") == 201 and isinstance(cuerpo, dict):
+            codigos[caso] = cuerpo["codigo_seguimiento"]
+    if len(codigos) != len(casos):
+        sinc(f"m) no se pudieron crear las denuncias de prueba ({sorted(codigos)})")
+        return
+    CODIGOS.update({f"m_{c}": v for c, v in codigos.items()})
+    ids = {c: denuncia_de(v) for c, v in codigos.items()}
+
+    for nombre in ("m1", "m2", "m3", "mb", "m4", "personal", "422"):
+        MARCADORES[f"mensaje_{nombre}"] = f"marcador-mensaje-{nombre}-{secrets.token_hex(8)}"
+    # Mismos caracteres especiales que la denuncia de f), y el texto más largo
+    # admitido.
+    MARCADORES["mensaje_m1"] = ("ñandú, acción y " + chr(0x1F600) + " con un control bidi " + chr(0x202E)
+                                + " al final " + MARCADORES["mensaje_m1"])
+    MARCADORES["mensaje_m2"] += "x" * (LONGITUD_MAXIMA_TEXTO - len(MARCADORES["mensaje_m2"]))
+    m = {k: MARCADORES[f"mensaje_{k}"] for k in ("m1", "m2", "m3", "mb", "m4", "personal", "422")}
+
+    # Envío: secuencia y fecha del día en la zona de cada empresa. El tercero
+    # usa una forma equivalente del código (minúsculas, sin guiones).
+    codigo_m = codigos["M"]
+    envios = {
+        "m1": (nuevo_mensaje(codigo_m, m["m1"]), 1, dia_a),
+        "m2": (nuevo_mensaje(codigo_m, m["m2"]), 2, dia_a),
+        "m3": (nuevo_mensaje(codigo_m.replace("-", "").lower(), m["m3"]), 3, dia_a),
+        "mb": (nuevo_mensaje(codigos["MB"], m["mb"]), 1, dia_b),
+    }
+    respuestas = dict(zip(envios, http([peticion for peticion, _, _ in envios.values()])))
+    for nombre, (_, secuencia, dia) in envios.items():
+        respuesta = respuestas[nombre]
+        pasa(respuesta.get("estado") == 201 and json_de(respuesta) == {"secuencia": secuencia, "fecha": dia},
+             f"m) mensaje {nombre}: 201 solo con secuencia {secuencia} y fecha {dia} "
+             f"({respuesta.get('estado')}, {json_de(respuesta)})")
+    control = all(respuestas[n].get("estado") == 201 for n in envios)
+    pasa(control and sorted(json_de(respuestas["m1"]) or {}) == CLAVES_RESPUESTA_MENSAJE,
+         "m) la respuesta del envio no lleva ningun campo mas (ni ids)")
+    pasa(control, f"m) un mensaje de exactamente {LONGITUD_MAXIMA_TEXTO} caracteres se acepta")
+
+    # Seguimiento: los textos exactos, en orden, con autor genérico.
+    esperado_m = {"estado": "nueva", "fecha": dia_a, "categoria": "otros", "texto": "denuncia M", "mensajes": [
+        {"secuencia": 1, "fecha": dia_a, "autor": "denunciante", "texto": m["m1"]},
+        {"secuencia": 2, "fecha": dia_a, "autor": "denunciante", "texto": m["m2"]},
+        {"secuencia": 3, "fecha": dia_a, "autor": "denunciante", "texto": m["m3"]},
+    ]}
+    esperado_mb = {"estado": "nueva", "fecha": dia_b, "categoria": "otros", "texto": "denuncia MB", "mensajes": [
+        {"secuencia": 1, "fecha": dia_b, "autor": "denunciante", "texto": m["mb"]},
+    ]}
+    seg_m, seg_mb = http([seguimiento(codigo_m), seguimiento(codigos["MB"])])
+    pasa(seg_m.get("estado") == 200 and json_de(seg_m) == esperado_m,
+         "m) seguimiento de M: los 3 mensajes con su secuencia, fecha, autor y texto exacto")
+    pasa(seg_mb.get("estado") == 200 and json_de(seg_mb) == esperado_mb,
+         f"m) seguimiento de MB: su mensaje con la fecha de {zona_b}")
+    pasa(all(sorted(x) == CLAVES_MENSAJE for x in (json_de(seg_m) or {}).get("mensajes", [{}])),
+         "m) cada mensaje del seguimiento lleva solo secuencia, fecha, autor y texto")
+    r = sup(f"select version_clave from canal.mensaje where denuncia_id = '{ids['M']}' order by secuencia;")
+    pasa(r.out.split() == [str(VERSION_CLAVE_A)] * 3,
+         f"m) los mensajes se cifran con la version mas alta de la clave de A ({r.out.split()})")
+
+    # Mismo 404 que el seguimiento para todo lo que no es un código, sin
+    # guardar nada. Control: los envíos de arriba.
+    aleatorio = base64.b32encode(secrets.token_bytes(20)).decode("ascii")
+    otro = "B" if codigo_m[0] != "B" else "C"
+    invalidos = {
+        "con un caracter cambiado": otro + codigo_m[1:],
+        "aleatorio con formato valido": "-".join(aleatorio[i:i + 4] for i in range(0, 32, 4)),
+        "vacio": "",
+        "de 200 caracteres": "A" * 200,
+    }
+    antes = sup("select count(*) from canal.mensaje;").out.strip()
+    respuestas = http([nuevo_mensaje(c, "hola") for c in invalidos.values()])
+    despues = sup("select count(*) from canal.mensaje;").out.strip()
+    for nombre, respuesta in zip(invalidos, respuestas):
+        negativo(f"m) mensaje con codigo {nombre}: 404 con el cuerpo exacto del seguimiento",
+                 respuesta.get("estado") == 404 and respuesta.get("cuerpo") == CUERPO_404_CODIGO, control,
+                 f"respuesta: {respuesta}")
+    negativo(f"m) ninguno de esos envios guarda un mensaje ({antes} -> {despues})", antes == despues, control)
+
+    # 422 uniforme y sin eco: el marcador va en el campo que falla.
+    marca = m["422"]
+    valido = json.dumps({"codigo": codigo_m, "texto": marca}).encode("utf-8")
+    ruta = "/v1/seguimiento/mensajes"
+    invalidas = {
+        "texto vacio": nuevo_mensaje(codigo_m, ""),
+        "texto solo de espacios": nuevo_mensaje(codigo_m, "   "),
+        f"texto de {LONGITUD_MAXIMA_TEXTO + 1} caracteres":
+            nuevo_mensaje(codigo_m, marca + "x" * (LONGITUD_MAXIMA_TEXTO + 1 - len(marca))),
+        "texto numerico": pt("POST", ruta, {"codigo": codigo_m, "texto": 12345}),
+        "sin texto": pt("POST", ruta, {"codigo": codigo_m}),
+        "codigo numerico": pt("POST", ruta, {"codigo": 12345, "texto": marca}),
+        "campo extra": pt("POST", ruta, {"codigo": codigo_m, "texto": "hola", "extra": marca}),
+        "JSON invalido": pt("POST", ruta, crudo=b'{"codigo": "x", "texto": "' + marca.encode()),
+        "Content-Type text/plain": pt("POST", ruta, crudo=valido, tipo="text/plain"),
+    }
+    antes = sup("select count(*) from canal.mensaje;").out.strip()
+    respuestas = http(list(invalidas.values()))
+    despues = sup("select count(*) from canal.mensaje;").out.strip()
+    for nombre, respuesta in zip(invalidas, respuestas):
+        negativo(f"m) mensaje con {nombre}: 422 con el cuerpo exacto, sin devolver lo enviado",
+                 respuesta.get("estado") == 422 and respuesta.get("cuerpo") == CUERPO_422, control,
+                 f"respuesta: {respuesta}")
+    negativo(f"m) ningun envio invalido guarda un mensaje ({antes} -> {despues})", antes == despues, control)
+
+    # Estado: en instrucción acepta (control); resuelta y archivada, 409 sin
+    # guardar nada. El seguimiento de una archivada sigue funcionando.
+    for caso, estado_denuncia in (("instruccion", "en_instruccion"), ("resuelta", "resuelta"),
+                                  ("archivada", "archivada")):
+        sup(f"update canal.denuncia set estado = '{estado_denuncia}' where id = '{ids[caso]}';")
+    r_instr, r_resuelta, r_archivada, seg_archivada = http([
+        nuevo_mensaje(codigos["instruccion"], "hola"), nuevo_mensaje(codigos["resuelta"], "hola"),
+        nuevo_mensaje(codigos["archivada"], "hola"), seguimiento(codigos["archivada"])])
+    control_estado = r_instr.get("estado") == 201
+    pasa(control_estado, "m) control: una denuncia en instruccion acepta mensajes")
+    for nombre, respuesta in (("resuelta", r_resuelta), ("archivada", r_archivada)):
+        negativo(f"m) denuncia {nombre}: 409 con el cuerpo exacto y sin guardar el mensaje",
+                 respuesta.get("estado") == 409 and respuesta.get("cuerpo") == CUERPO_409_CERRADA
+                 and mensajes_en_bd(ids[nombre]) == "0", control_estado, f"respuesta: {respuesta}")
+    negativo("m) el seguimiento de una denuncia archivada sigue dando 200 con su estado",
+             seg_archivada.get("estado") == 200 and (json_de(seg_archivada) or {}).get("estado") == "archivada",
+             control_estado, f"respuesta: {seg_archivada}")
+
+    # Tope: se rellenan 199 mensajes como superusuario (contenido falso: esta
+    # denuncia no se consulta después). El 200 se acepta (control) y el 201 no.
+    r = sup(f"do $$ begin for i in 1..{MAXIMO_MENSAJES - 1} loop insert into canal.mensaje "
+            "(empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) "
+            f"values ('{empresa_a}', '{ids['tope']}', 'denunciante', '\\xdeadbeef', 1); end loop; end $$;")
+    if r.rc != 0:
+        raise Parada(f"no se pudo rellenar la denuncia del tope: {r.err.strip()[:300]}")
+    ultimo, sobra = http([nuevo_mensaje(codigos["tope"], "el ultimo"), nuevo_mensaje(codigos["tope"], "sobra")])
+    control_tope = ultimo.get("estado") == 201 and (json_de(ultimo) or {}).get("secuencia") == MAXIMO_MENSAJES
+    pasa(control_tope, f"m) control: el mensaje numero {MAXIMO_MENSAJES} de una denuncia se acepta")
+    negativo(f"m) el mensaje numero {MAXIMO_MENSAJES + 1}: 409 con el cuerpo exacto y la denuncia sigue con "
+             f"{MAXIMO_MENSAJES}",
+             sobra.get("estado") == 409 and sobra.get("cuerpo") == CUERPO_409_LIMITE
+             and mensajes_en_bd(ids["tope"]) == str(MAXIMO_MENSAJES), control_tope, f"respuesta: {sobra}")
+
+    # Carrera: el personal archiva la denuncia mientras llega un mensaje. El
+    # mensaje espera a que termine y ve el estado final: con COMMIT, 409; con
+    # ROLLBACK (control), 201.
+    archivar = "update canal.denuncia set estado = 'archivada' where id = '{}';"
+    ctl_carrera, visto_ctl = retener_y_enviar(archivar.format(ids["carrera_ctl"]), "ROLLBACK",
+                                              codigos["carrera_ctl"], "llega durante un cierre que se deshace")
+    control_carrera = visto_ctl and ctl_carrera.get("estado") == 201
+    pasa(control_carrera, f"m) control: la API espera al cierre y, si se deshace, guarda el mensaje "
+                          f"(esperando {visto_ctl}, {ctl_carrera.get('estado')})")
+    carrera, visto = retener_y_enviar(archivar.format(ids["carrera"]), "COMMIT",
+                                      codigos["carrera"], "llega durante el cierre")
+    negativo("m) un mensaje que llega mientras se archiva la denuncia espera y recibe 409 sin guardarse",
+             visto and carrera.get("estado") == 409 and carrera.get("cuerpo") == CUERPO_409_CERRADA
+             and mensajes_en_bd(ids["carrera"]) == "0", control_carrera, f"respuesta: {carrera}, esperando {visto}")
+
+    # Saturación: la fila sigue bloqueada más que lock_timeout (2 s). 503 con
+    # Retry-After y un evento sin datos. Control: se vio a la API esperando.
+    lineas_antes = len(lineas_log("api"))
+    espera, visto = retener_y_enviar(f"select 1 from canal.denuncia where id = '{ids['espera']}' "
+                                     "for no key update;", "ROLLBACK", codigos["espera"], "llega bloqueado",
+                                     pausa_tras_ver=4)
+    nuevas = lineas_log("api")[lineas_antes:]
+    negativo("m) con la denuncia bloqueada mas que lock_timeout: 503 con el cuerpo exacto y Retry-After",
+             espera.get("estado") == 503 and espera.get("cuerpo") == CUERPO_503_OCUPADO
+             and (espera.get("cabeceras") or {}).get("retry-after") == REINTENTAR_TRAS
+             and mensajes_en_bd(ids["espera"]) == "0", visto, f"respuesta: {espera}")
+    negativo(f"m) el 503 registra solo {TEXTO_SATURACION!r}, sin ids ni codigo",
+             any(TEXTO_SATURACION in l for l in nuevas)
+             and not any(v in l for l in nuevas for v in (ids["espera"], codigos["espera"], empresa_a.hex,
+                                                          str(empresa_a))),
+             visto, f"lineas nuevas: {nuevas}")
+
+    # Integridad: un mensaje cambiado de fila no se descifra (el AAD lleva su
+    # id, su denuncia y su empresa). Control: antes y después, 200.
+    def cifrado_de(denuncia_id, secuencia):
+        return sup(f"select encode(contenido_cifrado, 'hex') from canal.mensaje "
+                   f"where denuncia_id = '{denuncia_id}' and secuencia = {secuencia};").out.strip()
+
+    def poner(denuncia_id, secuencia, hexadecimal):
+        sup(f"update canal.mensaje set contenido_cifrado = '\\x{hexadecimal}' "
+            f"where denuncia_id = '{denuncia_id}' and secuencia = {secuencia};")
+    originales = {1: cifrado_de(ids["M"], 1), 2: cifrado_de(ids["M"], 2), 3: cifrado_de(ids["M"], 3)}
+    del_b = cifrado_de(ids["MB"], 1)
+    control_integridad = all(originales.values()) and bool(del_b) and http([seguimiento(codigo_m)])[0].get("estado") == 200
+    lineas_antes = len(lineas_log("api"))
+    poner(ids["M"], 1, originales[2])
+    poner(ids["M"], 2, originales[1])
+    try:
+        intercambiados = http([seguimiento(codigo_m)])[0]
+    finally:
+        poner(ids["M"], 1, originales[1])
+        poner(ids["M"], 2, originales[2])
+    poner(ids["M"], 3, del_b)
+    try:
+        de_otra_empresa = http([seguimiento(codigo_m)])[0]
+    finally:
+        poner(ids["M"], 3, originales[3])
+    nuevas = lineas_log("api")[lineas_antes:]
+    for nombre, respuesta in (("intercambiado con otro de la misma denuncia", intercambiados),
+                              ("de una denuncia de otra empresa", de_otra_empresa)):
+        negativo(f"m) con el cifrado de un mensaje {nombre}: 500 generico",
+                 respuesta.get("estado") == 500 and respuesta.get("cuerpo") == CUERPO_500, control_integridad,
+                 f"respuesta: {respuesta}")
+    negativo(f"m) queda un evento {TEXTO_INTEGRIDAD!r} sin ids, codigo ni texto",
+             any(TEXTO_INTEGRIDAD in l for l in nuevas)
+             and not any(v in l for l in nuevas for v in (ids["M"], codigo_m, m["m1"], m["m3"])),
+             control_integridad, f"lineas nuevas: {nuevas}")
+    restaurado = http([seguimiento(codigo_m)])[0]
+    pasa(restaurado.get("estado") == 200 and json_de(restaurado) == esperado_m,
+         "m) al restaurar los cifrados, M vuelve a dar 200 con sus mensajes")
+
+    # Rotación: tras nueva-clave, el mensaje nuevo usa la versión nueva y el
+    # seguimiento lee los antiguos con la suya.
+    r = gestion("nueva-clave", "--empresa-id", str(empresa_a))
+    if r.rc != 0 or f"version={VERSION_CLAVE_A_ROTADA}" not in r.out:
+        raise Parada(f"no se pudo rotar la clave de A: {r.err.strip()[-300:]!r}")
+    enviado, seg_rotado = http([nuevo_mensaje(codigo_m, m["m4"]), seguimiento(codigo_m)])
+    versiones = sup(f"select version_clave from canal.mensaje where denuncia_id = '{ids['M']}' "
+                    "order by secuencia;").out.split()
+    pasa(enviado.get("estado") == 201 and versiones == [str(VERSION_CLAVE_A)] * 3 + [str(VERSION_CLAVE_A_ROTADA)],
+         f"m) tras rotar, el mensaje nuevo usa la version {VERSION_CLAVE_A_ROTADA} y los antiguos "
+         f"conservan la {VERSION_CLAVE_A} ({versiones})")
+    esperado_rotado = {**esperado_m, "mensajes": esperado_m["mensajes"] + [
+        {"secuencia": 4, "fecha": dia_a, "autor": "denunciante", "texto": m["m4"]}]}
+    pasa(seg_rotado.get("estado") == 200 and json_de(seg_rotado) == esperado_rotado,
+         "m) el seguimiento descifra los mensajes de las dos versiones de la clave")
+
+    # Mensajes del personal: autor "personal" y nunca quién. Se inserta uno
+    # como lo haría el personal, con un usuario de A, y luego el denunciante
+    # responde.
+    r = sup(f"insert into canal.usuario_personal (empresa_id, email, hash_contrasena, rol) "
+            f"values ('{empresa_a}', 'instructora@ejemplo.test', 'x', 'instructor') returning id;")
+    autor_id = r.out.strip()
+    if r.rc != 0 or not autor_id:
+        raise Parada(f"no se pudo crear el usuario del personal: {r.err.strip()[:300]}")
+    r = dc("exec", "-T", "api", "python", "-c", MENSAJE_PERSONAL, str(empresa_a), ids["personal"], autor_id,
+           m["personal"])
+    if r.rc != 0 or "insertado" not in r.out:
+        raise Parada(f"no se pudo insertar el mensaje del personal: {r.err.strip()[-300:]!r}")
+    respuesta, seg_personal = http([nuevo_mensaje(codigos["personal"], "respuesta del denunciante"),
+                                    seguimiento(codigos["personal"])])
+    esperado_personal = [
+        {"secuencia": 1, "fecha": dia_a, "autor": "personal", "texto": m["personal"]},
+        {"secuencia": 2, "fecha": dia_a, "autor": "denunciante", "texto": "respuesta del denunciante"},
+    ]
+    control_personal = (respuesta.get("estado") == 201 and seg_personal.get("estado") == 200
+                        and (json_de(seg_personal) or {}).get("mensajes") == esperado_personal)
+    pasa(control_personal, "m) el seguimiento muestra el mensaje del personal y la respuesta, en orden y con su autor")
+    ids_mensajes = sup(f"select id from canal.mensaje where denuncia_id = '{ids['personal']}';").out.split()
+    cuerpo = (seg_personal.get("cuerpo") or b"").decode("utf-8", "replace")
+    filtrados = [n for n, v in [("autor_id", autor_id), ("autor_id sin guiones", autor_id.replace("-", "")),
+                                ("id de la denuncia", ids["personal"])] + [("id de un mensaje", i) for i in ids_mensajes]
+                 if v in cuerpo]
+    negativo(f"m) la respuesta no contiene autor_id ni ningun id interno {filtrados if filtrados else ''}".strip(),
+             not filtrados and len(ids_mensajes) == 2, control_personal)
+
+
 def seccion_h():
     p("=== h) volcado de la base de datos")
     r = dc("exec", "-T", "postgres", "pg_dump", "-U", "postgres", "-d", "canario", "--data-only")
@@ -1131,6 +1496,9 @@ def seccion_h():
     pasa(control, f"h) control: el volcado contiene los {len(hmacs)} HMAC, y cada uno es "
                   "HMAC-SHA256(clave, etiqueta || codigo)")
     buscadas = {f"texto de {n}": MARCADORES[n] for n in ("A", "A2", "B", "inactiva", "utf", "limite")}
+    # Los mensajes guardados en m) (el de 422 nunca se guardó).
+    buscadas.update({f"texto del {n}": v for n, v in MARCADORES.items()
+                     if n.startswith("mensaje_") and n != "mensaje_422"})
     buscadas.update({f"codigo de {n}": c for n, c in CODIGOS.items()})
     buscadas.update({f"codigo de {n} sin guiones": c.replace("-", "") for n, c in CODIGOS.items()})
     buscadas.update({f"categoria {c}": c for c in ("acoso", "fraude", "corrupcion", "proteccion_datos",
@@ -1300,35 +1668,39 @@ def seccion_k():
 
 def seccion_l():
     p("=== l) logs del camino anonimo")
-    if not {"A", "B"} <= set(CODIGOS):
-        sinc("l) faltan codigos de f)")
+    if not {"A", "B", "m_archivada"} <= set(CODIGOS):
+        sinc("l) faltan codigos de f) o de m)")
         return
     _, ident_a, _ = EMPRESAS["A"]
-    # Crear, consultar, un 404 y un 422 son el uso normal: no deben dejar
-    # ninguna línea, porque cada línea lleva la hora. Control: un caso que sí
-    # se registra (empresa sin clave) añade una línea en el mismo log.
+    # Crear, consultar, enviar un mensaje, un 404, un 409 y un 422 son el uso
+    # normal: no deben dejar ninguna línea, porque cada línea lleva la hora.
+    # Control: un caso que sí se registra (empresa sin clave) añade una línea
+    # en el mismo log.
     antes = len(lineas_log("api"))
     respuestas = http([
         pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso", "texto": "uso normal"}),
         seguimiento(CODIGOS["A"]),
         seguimiento(CODIGOS["B"]),
+        nuevo_mensaje(CODIGOS["A"], "mensaje de uso normal"),
         pt("POST", ruta_denuncias(secrets.token_hex(16)), {"categoria": "acoso", "texto": "hola"}),
         seguimiento("x"),
+        nuevo_mensaje(CODIGOS["m_archivada"], "a una denuncia archivada"),
         pt("POST", ruta_denuncias(ident_a), {"categoria": "no", "texto": "hola"}),
     ])
     nuevas = lineas_log("api")[antes:]
     previas = len(lineas_log("api"))
     http([pt("POST", ruta_denuncias(EMPRESAS["sin_clave"][1]), {"categoria": "acoso", "texto": "hola"})])
     control = (len(lineas_log("api")) > previas
-               and [x.get("estado") for x in respuestas] == [201, 200, 200, 404, 404, 422])
-    negativo(f"l) crear, consultar, 404 y 422 no dejan ninguna linea en el log de la API ({len(nuevas)} nuevas)",
-             nuevas == [], control, f"lineas nuevas: {nuevas}")
+               and [x.get("estado") for x in respuestas] == [201, 200, 200, 201, 404, 404, 409, 422])
+    negativo(f"l) crear, consultar, enviar un mensaje, 404, 409 y 422 no dejan ninguna linea en el log de la API "
+             f"({len(nuevas)} nuevas)", nuevas == [], control, f"lineas nuevas: {nuevas}")
 
     # Textos y códigos en los logs de la API, PostgreSQL y Caddy. Control: un
     # marcador escrito a propósito en el log de la API se encuentra.
     def textos():
         return {s: dc("logs", "--no-color", "--no-log-prefix", s).todo for s in ("api", "postgres", "caddy")}
     buscadas = {f"texto de {n}": MARCADORES[n] for n in ("A", "A2", "B", "inactiva", "utf", "422")}
+    buscadas.update({f"texto del {n}": v for n, v in MARCADORES.items() if n.startswith("mensaje_")})
     buscadas.update({f"codigo de {n}": c for n, c in CODIGOS.items()})
     buscadas.update({f"codigo de {n} sin guiones": c.replace("-", "") for n, c in CODIGOS.items()})
     buscadas.update({f"HMAC del codigo de {n}": hmac_de(c) for n, c in CODIGOS.items()})
@@ -1502,7 +1874,7 @@ def main():
     try:
         # e) va al final: busca las claves en los logs después de todo lo
         # demás, incluidas las peticiones HTTP.
-        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_f, seccion_g, seccion_h,
+        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_f, seccion_g, seccion_m, seccion_h,
                         seccion_i, seccion_j, seccion_k, seccion_l, seccion_e):
             seccion()
     except Parada as e:

@@ -18,12 +18,19 @@ Tres piezas que no dependen de ninguna ruta concreta:
   starlette/middleware/errors.py de la versión fijada).
 * Respuestas de error uniformes y en castellano. El 422 nunca devuelve lo que
   envió el cliente: el de FastAPI incluye el campo "input" con su valor.
+* Saturación: si una consulta agota lock_timeout (55P03) o statement_timeout
+  (57014) de app/bd.py, la respuesta es 503 con Retry-After, no 500. No es un
+  error del servidor sino contención pasajera (por ejemplo, un mensaje que
+  espera a que el personal termine de cambiar el estado de su denuncia), y el
+  cliente debe saber que puede reintentar. Se registra solo la clase y el
+  SQLSTATE, como el resto de errores.
 """
 import json
 import logging
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
+from psycopg import errors as errores_bd
 from starlette.exceptions import HTTPException
 
 registro = logging.getLogger("canario.api")
@@ -40,7 +47,12 @@ MENSAJES = {
     413: "cuerpo de la petición demasiado grande",
     422: "petición no válida",
     500: "error interno",
+    503: "servicio ocupado; inténtelo de nuevo en unos segundos",
 }
+
+# Segundos que se sugieren al cliente antes de reintentar tras una saturación.
+# Del orden de lock_timeout (2 s, app/bd.py) con margen.
+REINTENTAR_TRAS = "5"
 
 
 def cuerpo_error(codigo, mensaje=None):
@@ -146,11 +158,21 @@ async def _validacion(_peticion, _error):
     return Response(cuerpo_error(422), status_code=422, media_type="application/json")
 
 
+async def _saturacion(_peticion, error):
+    registro.warning("SATURACION: %s", describir_error(error))
+    return Response(cuerpo_error(503), status_code=503, media_type="application/json",
+                    headers={"Retry-After": REINTENTAR_TRAS})
+
+
 def instalar(aplicacion):
     """Middlewares y manejadores. ErroresInternos se añade el último para
     quedar por fuera de LimiteCuerpo: Starlette pone el último añadido en la
     posición más externa."""
     aplicacion.add_exception_handler(HTTPException, _http_exception)
     aplicacion.add_exception_handler(RequestValidationError, _validacion)
+    # Solo estas dos clases: cualquier otro error de la base de datos sigue
+    # siendo un 500 de ErroresInternos.
+    aplicacion.add_exception_handler(errores_bd.LockNotAvailable, _saturacion)
+    aplicacion.add_exception_handler(errores_bd.QueryCanceled, _saturacion)
     aplicacion.add_middleware(LimiteCuerpo)
     aplicacion.add_middleware(ErroresInternos)

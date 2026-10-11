@@ -1,20 +1,26 @@
-"""Rutas del denunciante anónimo (docs/threat-model.md, 6.1 y 6.11).
+"""Rutas del denunciante anónimo (docs/threat-model.md, 6.1, 6.5 y 6.11).
 
 * POST /v1/empresas/{identificador}/denuncias: crea una denuncia y devuelve,
   una sola vez, su código de seguimiento y su fecha.
-* POST /v1/seguimiento: estado y contenido de la denuncia de un código. El
-  código va en el cuerpo y nunca en la URL: así no queda en historiales, en
-  la cabecera Referer ni en ningún registro de rutas.
+* POST /v1/seguimiento: estado, contenido y mensajes de la denuncia de un
+  código.
+* POST /v1/seguimiento/mensajes: añade un mensaje del denunciante a la
+  denuncia de un código.
+
+El código va siempre en el cuerpo y nunca en la URL: así no queda en
+historiales, en la cabecera Referer ni en ningún registro de rutas.
 
 Respuestas uniformes: una empresa desconocida, mal formada o inactiva da
 exactamente el mismo 404 que cualquier ruta inexistente, así que no se puede
 distinguir "esa empresa no existe" de "esa URL no existe" (un identificador
 con "%2F" ni siquiera llega a esta ruta). Un código mal formado o inexistente
-da siempre el mismo 404 del seguimiento. El id interno de la denuncia nunca
-sale de la API.
+da siempre el mismo 404 del seguimiento, también al enviar un mensaje. Ni el
+id interno de la denuncia ni el de un mensaje salen de la API, y de un
+mensaje del personal solo se dice que es del personal, nunca de quién.
 
 Registro: solo fallos, con el tipo de evento y sin empresa, denuncia ni
-código (app/denuncias.py explica por qué).
+código (app/denuncias.py explica por qué). Una denuncia cerrada o llena
+(409) es una respuesta normal del flujo y no se registra.
 
 Las funciones son síncronas (def): FastAPI las ejecuta en su pool de hilos y
 el acceso a la base de datos es síncrono (docs/threat-model.md, 6.10).
@@ -33,10 +39,22 @@ registro = logging.getLogger("canario.denuncias")
 
 router = APIRouter(prefix="/v1")
 
+# Para la denuncia y para cada mensaje. Con el peor escapado JSON cabe en el
+# límite de cuerpo (app/frontera_http.py, LIMITE_CUERPO).
 LONGITUD_MAXIMA_TEXTO = 10_000
 
 MENSAJE_CODIGO = "código de seguimiento no válido"
 MENSAJE_SIN_CLAVE = "el canal de esta empresa no está disponible; inténtelo más tarde"
+MENSAJE_CERRADA = "la denuncia está cerrada y no admite mensajes"
+MENSAJE_LIMITE = "la denuncia ha alcanzado el máximo de mensajes"
+
+
+def _texto_no_vacio(texto):
+    # Se guarda tal cual llega (es una prueba y no se modifica), pero un texto
+    # solo de espacios no es una denuncia ni un mensaje.
+    if not texto.strip():
+        raise ValueError("texto vacio")
+    return texto
 
 
 # extra="forbid": un campo desconocido es un error, no se ignora.
@@ -50,11 +68,7 @@ class NuevaDenuncia(BaseModel):
     @field_validator("texto")
     @classmethod
     def no_vacio(cls, texto):
-        # Se guarda tal cual llega (es una prueba y no se modifica), pero un
-        # texto solo de espacios no es una denuncia.
-        if not texto.strip():
-            raise ValueError("texto vacio")
-        return texto
+        return _texto_no_vacio(texto)
 
 
 class ConsultaSeguimiento(BaseModel):
@@ -65,6 +79,19 @@ class ConsultaSeguimiento(BaseModel):
     # cuerpo ya está acotado por LimiteCuerpo y cripto.leer_codigo descarta
     # lo que pase de su longitud máxima antes de procesarlo.
     codigo: str
+
+
+class NuevoMensaje(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    # Como en ConsultaSeguimiento: sin límite propio.
+    codigo: str
+    texto: str = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+
+    @field_validator("texto")
+    @classmethod
+    def no_vacio(cls, texto):
+        return _texto_no_vacio(texto)
 
 
 def _error(codigo, mensaje):
@@ -107,6 +134,34 @@ def consultar_seguimiento(datos: ConsultaSeguimiento, peticion: Request):
         "fecha": denuncia.fecha.isoformat(),
         "categoria": denuncia.categoria,
         "texto": denuncia.texto,
-        # Los mensajes llegan con el paso siguiente del bloque.
-        "mensajes": [],
+        # Lista explícita de campos: lo que no está aquí no sale.
+        "mensajes": [{
+            "secuencia": mensaje.secuencia,
+            "fecha": mensaje.fecha.isoformat(),
+            "autor": mensaje.autor,
+            "texto": mensaje.texto,
+        } for mensaje in denuncia.mensajes],
+    })
+
+
+@router.post("/seguimiento/mensajes", status_code=201)
+def enviar_mensaje(datos: NuevoMensaje, peticion: Request):
+    estado = peticion.app.state
+    try:
+        enviado = denuncias.enviar_mensaje(estado.pool, estado.claves, datos.codigo, datos.texto)
+    except denuncias.CodigoNoEncontrado:
+        return _error(404, MENSAJE_CODIGO)
+    except denuncias.DenunciaCerrada:
+        return _error(409, MENSAJE_CERRADA)
+    except denuncias.LimiteMensajes:
+        return _error(409, MENSAJE_LIMITE)
+    except denuncias.EmpresaSinClave:
+        registro.error("EVENTO empresa_sin_clave: una empresa activa no tiene clave de cifrado")
+        return _error(503, MENSAJE_SIN_CLAVE)
+    except cripto.ErrorIntegridad:
+        registro.error("INTEGRIDAD: una clave de empresa no se puede desenvolver")
+        return _error(500, None)
+    return JSONResponse(status_code=201, content={
+        "secuencia": enviado.secuencia,
+        "fecha": enviado.fecha.isoformat(),
     })

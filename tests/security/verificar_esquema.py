@@ -7,11 +7,15 @@ arrancar, que la estructura, las políticas RLS y los permisos coinciden con
 unos oráculos escritos aquí como literales (no derivados del SQL), que una
 empresa no puede ver ni tocar los datos de otra, que los permisos por columna
 se cumplen, que la auditoría es encadenada e inmutable (con recálculo
-independiente del hash en Python), que la fecha de una denuncia y de una fila
-de auditoría es el día en la zona horaria de su empresa (sin depender de la
-fecha del INSERT ni de la zona de la sesión), que el bloqueo por empresa y el
-healthcheck se comportan como se espera, y que las funciones de definidor hacen
-solo lo que deben (también frente a un search_path hostil). Cada prueba negativa lleva su
+independiente del hash en Python), que la fecha de una denuncia, de un mensaje
+y de una fila de auditoría es el día en la zona horaria de su empresa (sin
+depender de la fecha del INSERT ni de la zona de la sesión), que una denuncia
+cerrada no admite mensajes y que hay un tope de mensajes por denuncia, que el
+cierre de una denuncia y un mensaje simultáneos no se interbloquean y que un
+mensaje rechazado entre empresas no bloquea a la otra, que el bloqueo por
+empresa y el healthcheck se comportan como se espera, y que las funciones de
+definidor hacen solo lo que deben (también frente a un search_path hostil).
+Cada prueba negativa lleva su
 control positivo: si el control falla, el resultado es SIN CONCLUSION, nunca
 PASA.
 
@@ -96,7 +100,8 @@ COLUMNAS = {
                          "totp_activo", "intentos_fallidos", "bloqueado_hasta", "activo"],
     # Sin categoria: va dentro de contenido_cifrado.
     "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "contenido_cifrado", "version_clave"],
-    "mensaje": ["empresa_id", "denuncia_id", "secuencia", "id", "autor", "autor_id", "contenido_cifrado", "version_clave"],
+    "mensaje": ["empresa_id", "denuncia_id", "secuencia", "fecha", "id", "autor", "autor_id", "contenido_cifrado",
+                "version_clave"],
     "busqueda_seguimiento": ["codigo_hmac", "empresa_id", "denuncia_id"],
     "registro_auditoria": ["empresa_id", "secuencia", "fecha", "actor", "accion", "objeto_id", "hash_anterior", "hash"],
 }
@@ -193,7 +198,7 @@ ROLES = ["aplicacion", "plataforma", "propietario_funciones"]
 
 # funcion -> (dueno, SECURITY DEFINER, volatilidad, firma)
 FUNCIONES_CATALOGO = {
-    "asignar_secuencia_mensaje": ("migrador", "f", "v", "canal.asignar_secuencia_mensaje()"),
+    "preparar_mensaje": ("migrador", "f", "v", "canal.preparar_mensaje()"),
     "empresa_actual": ("migrador", "f", "s", "canal.empresa_actual()"),
     "encadenar_auditoria": ("migrador", "f", "v", "canal.encadenar_auditoria()"),
     "fijar_fecha_denuncia": ("migrador", "f", "v", "canal.fijar_fecha_denuncia()"),
@@ -209,7 +214,7 @@ CONFIG_DEFINIDOR = "search_path=pg_catalog, canal, pg_temp"
 # funcion -> roles con EXECUTE. propietario_funciones tiene EXECUTE sobre las suyas por ser su dueno
 # (es el privilegio implicito del dueno; no se le revoca).
 EXECUTE_ESPERADO = {
-    "asignar_secuencia_mensaje": set(),
+    "preparar_mensaje": set(),
     "empresa_actual": {"aplicacion", "propietario_funciones"},
     "encadenar_auditoria": set(),
     "fijar_fecha_denuncia": set(),
@@ -222,11 +227,18 @@ EXECUTE_ESPERADO = {
 }
 TRIGGERS = [
     "denuncia|denuncia_fecha|O",
-    "mensaje|mensaje_secuencia|O",
+    "mensaje|mensaje_preparar|O",
     "registro_auditoria|auditoria_encadenar|O",
     "registro_auditoria|auditoria_inmutable_fila|O",
     "registro_auditoria|auditoria_inmutable_truncate|O",
 ]
+# Errores de canal.preparar_mensaje(). Los de estado y tope con su SQLSTATE
+# propio, tal como los muestra psql con VERBOSITY verbose.
+TEXTO_MENSAJE_SIN_DENUNCIA = "el mensaje no corresponde a ninguna denuncia visible"
+TEXTO_DENUNCIA_CERRADA = "CN001: la denuncia esta cerrada y no admite mensajes"
+TEXTO_LIMITE_MENSAJES = "CN002: la denuncia ha alcanzado el maximo de 200 mensajes"
+MAXIMO_MENSAJES = 200
+TEXTO_PLAZO_BLOQUEO = "canceling statement due to lock timeout"
 # Conteos esperados con contexto A y B
 CONTEOS = {
     "empresa": (1, 1), "clave_empresa": (1, 1), "usuario_personal": (2, 2),
@@ -660,10 +672,15 @@ def seccion_i():
         "clave_empresa": lambda e, d: f"insert into canal.clave_empresa (empresa_id, version, clave_envuelta) values ('{e}', 2, {BYTES_FALSOS});",
         "registro_auditoria": lambda e, d: f"insert into canal.registro_auditoria (empresa_id, actor, accion) values ('{e}', 'prueba', 'accion');",
     }
+    # mensaje: canal.preparar_mensaje() busca su denuncia bajo RLS antes de que
+    # se compruebe la política de INSERT. Con contexto A la de B es invisible
+    # y el rechazo llega antes, con su propio error y sin bloquear nada (y).
+    esperados = {"mensaje": TEXTO_MENSAJE_SIN_DENUNCIA}
     for tabla, f in inserciones.items():
         neg = app(f(EMPRESA_B, DEN_B1), ctx=EMPRESA_A)
         ctl = app(f(EMPRESA_A, DEN_A1), ctx=EMPRESA_A, final="ROLLBACK")
-        negativo(f"i) INSERT en {tabla} con empresa_id = B", neg, "row-level security", sin_error(ctl))
+        negativo(f"i) INSERT en {tabla} con empresa_id = B", neg, esperados.get(tabla, "row-level security"),
+                 sin_error(ctl))
     neg = app(f"update canal.denuncia set empresa_id = '{EMPRESA_B}' where id = '{DEN_A1}';", ctx=EMPRESA_A)
     ctl = app(f"update canal.denuncia set estado = 'resuelta' where id = '{DEN_A1}';", ctx=EMPRESA_A, final="ROLLBACK")
     negativo("i) cambiar empresa_id de una denuncia propia a B", neg, "permission denied", sin_error(ctl))
@@ -724,7 +741,9 @@ def seccion_k():
              "k1) INSERT con empresa_id = B: el email existente en B y uno nuevo dan el mismo error 'row-level security'")
         if a != b or "row-level security" not in a:
             p(f"   existente: {a.strip()!r}\n   nuevo:     {b.strip()!r}")
-    # k2: mensajes con denuncia ajena frente a inexistente
+    # k2: mensajes con denuncia ajena frente a inexistente. El error lo da
+    # canal.preparar_mensaje(), antes que la clave foránea, y tiene que ser el
+    # mismo en los dos casos.
     def mensaje(den):
         return f"insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) values ('{EMPRESA_A}', '{den}', 'denunciante', {BYTES_FALSOS}, 1);"
     ajena = app(mensaje(DEN_B1), ctx=EMPRESA_A)
@@ -734,8 +753,8 @@ def seccion_k():
         sinc("k2) el control (mensaje en una denuncia propia) fallo")
     else:
         a, b = normalizar_uuid(ajena.err), normalizar_uuid(inexistente.err)
-        pasa("violates foreign key constraint" in a and a == b,
-             "k2) mensaje con denuncia de B y con uuid aleatorio: mismo error de clave foranea")
+        pasa(TEXTO_MENSAJE_SIN_DENUNCIA in a and a == b,
+             f"k2) mensaje con denuncia de B y con uuid aleatorio: mismo error {TEXTO_MENSAJE_SIN_DENUNCIA!r}")
         if a != b:
             p(f"   ajena:       {a.strip()!r}\n   inexistente: {b.strip()!r}")
     # k2 bis: denuncia.asignada_a
@@ -847,6 +866,41 @@ insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, ve
              "violates check constraint", sin_error(ctl_personal) and sin_error(ctl_denunciante))
     negativo("n) autor 'denunciante' con autor_id", app(mensaje("denunciante", INSTR_A), ctx=EMPRESA_A),
              "violates check constraint", sin_error(ctl_personal) and sin_error(ctl_denunciante))
+
+    # Una denuncia resuelta o archivada no admite mensajes, ni del denunciante
+    # ni del personal. Control: nueva y en_instruccion sí. Todo se deshace.
+    def con_estado(estado_denuncia, autor, autor_id):
+        return app("\\set VERBOSITY verbose\n"
+                   f"update canal.denuncia set estado = '{estado_denuncia}' where id = '{DEN_A2}';\n"
+                   + mensaje(autor, autor_id), ctx=EMPRESA_A, final="ROLLBACK")
+    autores = (("denunciante", None), ("personal", INSTR_A))
+    controles = [con_estado(e, a, i) for e in ("nueva", "en_instruccion") for a, i in autores]
+    for e in ("resuelta", "archivada"):
+        for a, i in autores:
+            negativo(f"n) mensaje del {a} en una denuncia {e}", con_estado(e, a, i), TEXTO_DENUNCIA_CERRADA,
+                     all(sin_error(c) for c in controles))
+
+    # Tope de mensajes por denuncia, en una denuncia nueva que se deshace. El
+    # último que cabe se acepta (control) y el siguiente no; el SAVEPOINT
+    # permite contar después del error.
+    den = str(uuid.uuid4())
+    insertar = (f"insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) "
+                f"values ('{EMPRESA_A}', '{den}', 'denunciante', {BYTES_FALSOS}, 1)")
+    cuerpo = ("\\set VERBOSITY verbose\n"
+              f"insert into canal.denuncia (empresa_id, id, contenido_cifrado, version_clave) "
+              f"values ('{EMPRESA_A}', '{den}', {BYTES_FALSOS}, 1);\n"
+              + f"{insertar};\n" * (MAXIMO_MENSAJES - 1)
+              + f"{insertar} returning 'ultimo|' || secuencia;\n"
+              + "savepoint antes_del_tope;\n"
+              + f"{insertar} returning 'sobra|' || secuencia;\n"
+              + "rollback to savepoint antes_del_tope;\n"
+              + f"select 'total|' || count(*) from canal.mensaje where denuncia_id = '{den}';\n")
+    r = app(cuerpo, ctx=EMPRESA_A, final="ROLLBACK")
+    control = f"ultimo|{MAXIMO_MENSAJES}" in r.lineas()
+    negativo(f"n) el mensaje numero {MAXIMO_MENSAJES + 1} de una denuncia se rechaza", r, TEXTO_LIMITE_MENSAJES, control)
+    negativo_valor(f"n) tras el rechazo la denuncia sigue con {MAXIMO_MENSAJES} mensajes",
+                   f"total|{MAXIMO_MENSAJES}" in r.lineas() and not any(l.startswith("sobra|") for l in r.lineas()),
+                   control)
 
 
 def filas_auditoria(empresa):
@@ -969,43 +1023,53 @@ def seccion_z():
     p(f"   zona de control (otro dia que Madrid ahora mismo): {zona}")
 
     # 1) Como aplicacion, con la zona de la sesion cambiada y una fecha falsa
-    #    en el INSERT: la fecha guardada es la de Madrid (zona de A). Control:
-    #    en esa sesion current_date es otro dia, asi que la prueba distingue.
+    #    en el INSERT: la fecha guardada de la denuncia y de su mensaje es la
+    #    de Madrid (zona de A). Control: en esa sesion current_date es otro
+    #    dia, asi que la prueba distingue.
     den = str(uuid.uuid4())
+    resto = "fecha::text || '|' || current_date::text || '|' || (now() at time zone 'Europe/Madrid')::date::text;"
     r = app(f"SET LOCAL TIME ZONE '{zona}';\n"
             f"insert into canal.denuncia (empresa_id, id, fecha, contenido_cifrado, version_clave) "
-            f"values ('{EMPRESA_A}', '{den}', '2001-01-01', {BYTES_FALSOS}, 1) "
-            "returning fecha::text || '|' || current_date::text || '|' "
-            "|| (now() at time zone 'Europe/Madrid')::date::text;", ctx=EMPRESA_A, final="ROLLBACK")
-    partes = valor(r).split("|")
-    if len(partes) != 3 or not sin_error(r):
-        sinc(f"z) no se pudo insertar la denuncia de prueba: {r.err.strip()[:300]!r}")
-    else:
-        fecha, dia_sesion, dia_madrid = partes
-        negativo_valor("z) la fecha de la denuncia es el dia de Madrid: ignora la fecha del INSERT y la zona "
+            f"values ('{EMPRESA_A}', '{den}', '2001-01-01', {BYTES_FALSOS}, 1) returning 'denuncia|' || {resto}\n"
+            f"insert into canal.mensaje (empresa_id, denuncia_id, fecha, autor, contenido_cifrado, version_clave) "
+            f"values ('{EMPRESA_A}', '{den}', '2001-01-01', 'denunciante', {BYTES_FALSOS}, 1) "
+            f"returning 'mensaje|' || {resto}", ctx=EMPRESA_A, final="ROLLBACK")
+    filas = {l.split("|")[0]: l.split("|")[1:] for l in r.lineas() if "|" in l}
+    for tabla in ("denuncia", "mensaje"):
+        datos = filas.get(tabla)
+        if not datos or len(datos) != 3 or not sin_error(r):
+            sinc(f"z) {tabla}: no se pudo insertar la fila de prueba: {r.err.strip()[:300]!r}")
+            continue
+        fecha, dia_sesion, dia_madrid = datos
+        negativo_valor(f"z) la fecha del {tabla} es el dia de Madrid: ignora la fecha del INSERT y la zona "
                        f"de la sesion (fecha {fecha}, Madrid {dia_madrid}, sesion {dia_sesion})",
                        fecha == dia_madrid and fecha != "2001-01-01", dia_sesion != dia_madrid)
 
     # 2) La zona que manda es la de la empresa. Como superusuario y en una
     #    transaccion que se deshace: se quita el CHECK, se pone a B la zona de
-    #    control y se inserta una denuncia y una fila de auditoria de B. Control:
-    #    en esa zona es otro dia que en Madrid.
+    #    control y se inserta una denuncia, un mensaje y una fila de auditoria
+    #    de B. Control: en esa zona es otro dia que en Madrid. Las tres tablas
+    #    calculan el dia con su propia copia de la expresion: si una se
+    #    desviara, esta prueba lo veria.
     den = str(uuid.uuid4())
+    resto = (f"fecha::text || '|' || (now() at time zone '{zona}')::date::text"
+             " || '|' || (now() at time zone 'Europe/Madrid')::date::text;")
     r = sup(f"""BEGIN;
 ALTER TABLE canal.empresa DROP CONSTRAINT empresa_zona_horaria_check;
 UPDATE canal.empresa SET zona_horaria = '{zona}' WHERE id = '{EMPRESA_B}';
 INSERT INTO canal.denuncia (empresa_id, id, contenido_cifrado, version_clave)
      VALUES ('{EMPRESA_B}', '{den}', {BYTES_FALSOS}, 1)
-  RETURNING 'denuncia|' || fecha::text || '|' || (now() at time zone '{zona}')::date::text
-            || '|' || (now() at time zone 'Europe/Madrid')::date::text;
+  RETURNING 'denuncia|' || {resto}
+INSERT INTO canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave)
+     VALUES ('{EMPRESA_B}', '{den}', 'denunciante', {BYTES_FALSOS}, 1)
+  RETURNING 'mensaje|' || {resto}
 INSERT INTO canal.registro_auditoria (empresa_id, actor, accion)
      VALUES ('{EMPRESA_B}', 'prueba', 'zona')
-  RETURNING 'auditoria|' || fecha::text || '|' || (now() at time zone '{zona}')::date::text
-            || '|' || (now() at time zone 'Europe/Madrid')::date::text;
+  RETURNING 'auditoria|' || {resto}
 ROLLBACK;
 """)
     filas = {l.split("|")[0]: l.split("|")[1:] for l in r.lineas() if "|" in l}
-    for tabla in ("denuncia", "auditoria"):
+    for tabla in ("denuncia", "mensaje", "auditoria"):
         datos = filas.get(tabla)
         if not datos or len(datos) != 3:
             sinc(f"z) {tabla}: no se pudo insertar con la zona de control: {r.err.strip()[:300]!r}")
@@ -1087,6 +1151,134 @@ def seccion_p():
     else:
         sinc(f"p2) los margenes no se cumplen (sesion 2 = {t2} s, esperado >= 1,0; sesion 3 = {t3} s, esperado < 0,5); no se ajustan umbrales")
     pasa(verificar_cadena(EMPRESA_A) == "NULL" and verificar_cadena(EMPRESA_B) == "NULL", "p2) las cadenas siguen intactas")
+
+
+def sesion_en(nombre, condicion):
+    """Cierto si la sesión con ese application_name cumple la condición SQL
+    sobre pg_stat_activity (leída como superusuario, que ve todas)."""
+    return valor(sup(f"select count(*) from pg_stat_activity where application_name = '{nombre}' "
+                     f"and {condicion};")) == "1"
+
+
+def esperar_sesion(nombre, condicion, maximo=20):
+    limite = time.monotonic() + maximo
+    while time.monotonic() < limite:
+        if sesion_en(nombre, condicion):
+            return True
+        time.sleep(0.2)
+    return sesion_en(nombre, condicion)
+
+
+def sql_esperar_bloqueo_de(nombre, maximo_decimas=150):
+    """SQL que, dentro de la transacción en curso, espera (como superusuario)
+    a que la sesión `nombre` esté esperando un bloqueo, y deja la línea
+    visto|true o visto|false. pg_stat_clear_snapshot(): dentro de una
+    transacción, pg_stat_activity se lee una vez y se cachea."""
+    hay_espera = (f"EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = '{nombre}' "
+                  "AND wait_event_type = 'Lock')")
+    return ("RESET ROLE;\n"
+            f"DO $$ BEGIN FOR i IN 1..{maximo_decimas} LOOP PERFORM pg_stat_clear_snapshot(); "
+            f"EXIT WHEN {hay_espera}; PERFORM pg_sleep(0.1); END LOOP; END $$;\n"
+            "SELECT pg_stat_clear_snapshot();\n"
+            f"SELECT 'visto|' || ({hay_espera})::text;\n"
+            "SET ROLE aplicacion;\n")
+
+
+def seccion_y():
+    # Va después de x): y1 confirma una denuncia y un mensaje de A (el cierre
+    # del personal tiene que hacer COMMIT de verdad), y x) compara los
+    # conteos de A con los literales de h).
+    p("=== y) mensajes: cierre simultaneo y rechazo entre empresas sin bloqueos")
+    # y1) El personal, en una transacción, escribe su mensaje y archiva la
+    #     denuncia; a la vez, el denunciante envía otro. Con un solo bloqueo
+    #     (la fila de la denuncia) no hay interbloqueo: el denunciante espera
+    #     a que el personal confirme y recibe CN001. Control: el denunciante
+    #     llegó a esperar de verdad (visto|true), es decir, hubo contención.
+    den = str(uuid.uuid4())
+    r = sup(f"insert into canal.denuncia (empresa_id, id, contenido_cifrado, version_clave) "
+            f"values ('{EMPRESA_A}', '{den}', {BYTES_FALSOS}, 1);")
+    if not sin_error(r):
+        sinc(f"y1) no se pudo crear la denuncia de prueba: {r.err.strip()[:200]!r}")
+        return
+    contexto = f"BEGIN;\nSELECT set_config('app.empresa_id', '{EMPRESA_A}', true) \\gset\n"
+
+    def insertar(autor, autor_id, etiqueta):
+        columnas = "empresa_id, denuncia_id, autor, contenido_cifrado, version_clave" + (", autor_id" if autor_id else "")
+        valores = f"'{EMPRESA_A}', '{den}', '{autor}', {BYTES_FALSOS}, 1" + (f", '{autor_id}'" if autor_id else "")
+        return f"insert into canal.mensaje ({columnas}) values ({valores}) returning '{etiqueta}|' || secuencia;\n"
+
+    personal = ("SET application_name = 'y_personal';\n\\set VERBOSITY verbose\nSET ROLE aplicacion;\n" + contexto
+                + insertar("personal", INSTR_A, "personal") + sql_esperar_bloqueo_de("y_denunciante")
+                + f"update canal.denuncia set estado = 'archivada' where id = '{den}';\nCOMMIT;\n")
+    denunciante = ("SET application_name = 'y_denunciante';\n\\set VERBOSITY verbose\nSET ROLE aplicacion;\n"
+                   + contexto + insertar("denunciante", None, "denunciante") + "COMMIT;\n")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futuro_personal = pool.submit(sup, personal)
+        # El personal ya tiene su mensaje (y el bloqueo) cuando está en el
+        # pg_sleep de la espera.
+        listo = esperar_sesion("y_personal", "wait_event = 'PgSleep'")
+        futuro_denunciante = pool.submit(sup, denunciante) if listo else None
+        r_personal = futuro_personal.result()
+        r_denunciante = futuro_denunciante.result() if futuro_denunciante else None
+    if r_denunciante is None:
+        sinc(f"y1) la sesion del personal no llego a su espera: {r_personal.err.strip()[:300]!r}")
+    else:
+        control = "visto|true" in r_personal.lineas() and "personal|1" in r_personal.lineas()
+        p(f"   personal: {r_personal.lineas()} {r_personal.err.strip()[:200]!r}")
+        p(f"   denunciante: {r_denunciante.lineas()} {r_denunciante.err.strip()[:200]!r}")
+        negativo_valor("y1) ninguna de las dos sesiones termina en interbloqueo",
+                       "deadlock" not in r_personal.err + r_denunciante.err, control)
+        negativo_valor("y1) el personal escribe su mensaje y archiva la denuncia sin errores",
+                       sin_error(r_personal), control)
+        negativo("y1) el mensaje del denunciante, que esperaba, se rechaza al ver la denuncia archivada",
+                 r_denunciante, TEXTO_DENUNCIA_CERRADA, control)
+        final = sup(f"select estado || '|' || (select count(*) from canal.mensaje where denuncia_id = '{den}') "
+                    f"from canal.denuncia where id = '{den}';")
+        negativo_valor(f"y1) la denuncia queda archivada con solo el mensaje del personal ({valor(final)})",
+                       valor(final) == "archivada|1", control)
+
+    # y2) Un mensaje de la empresa A que apunta a una denuncia de B se rechaza
+    #     sin tomar ningún bloqueo: con la transacción de A abierta (abortada
+    #     por el error, que retendría lo bloqueado hasta el ROLLBACK), B
+    #     escribe en su denuncia sin esperar. Control: si la denuncia de B
+    #     está bloqueada de verdad, la misma medida falla por lock_timeout.
+    def medir_b():
+        return sup(f"\\set VERBOSITY verbose\nSET ROLE aplicacion;\nBEGIN;\n"
+                   f"SELECT set_config('app.empresa_id', '{EMPRESA_B}', true) \\gset\n"
+                   "SET LOCAL lock_timeout = '1s';\n"
+                   f"insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) "
+                   f"values ('{EMPRESA_B}', '{DEN_B1}', 'denunciante', {BYTES_FALSOS}, 1) returning 'b|' || secuencia;\n"
+                   "ROLLBACK;\n")
+
+    def con_sesion_abierta(nombre, sql, estado_sesion):
+        """Ejecuta sql (que acaba en una pausa de 6 s con la transacción
+        abierta), mide a B mientras tanto y devuelve (medida, sesión)."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            futuro = pool.submit(sup, f"SET application_name = '{nombre}';\n" + sql)
+            listo = esperar_sesion(nombre, f"state = '{estado_sesion}'")
+            medida = medir_b() if listo else None
+            return medida, futuro.result()
+
+    retiene = (f"BEGIN;\nselect 1 from canal.denuncia where id = '{DEN_B1}' for no key update;\n"
+               "\\! sleep 6\nROLLBACK;\n")
+    ctl_medida, ctl_sesion = con_sesion_abierta("y_retiene", retiene, "idle in transaction")
+    control = ctl_medida is not None and TEXTO_PLAZO_BLOQUEO in ctl_medida.err
+    if not control:
+        p(f"   control: medida {ctl_medida.todo.strip()[:200] if ctl_medida else None!r}; "
+          f"sesion {ctl_sesion.err.strip()[:200]!r}")
+    ajena = (f"SET ROLE aplicacion;\nBEGIN;\nSELECT set_config('app.empresa_id', '{EMPRESA_A}', true) \\gset\n"
+             f"insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) "
+             f"values ('{EMPRESA_B}', '{DEN_B1}', 'denunciante', {BYTES_FALSOS}, 1);\n"
+             "\\! sleep 6\nROLLBACK;\n")
+    medida, sesion = con_sesion_abierta("y_ajena", ajena, "idle in transaction (aborted)")
+    if medida is None:
+        sinc(f"y2) la sesion de A no quedo abierta tras el error: {sesion.err.strip()[:300]!r}")
+        return
+    negativo_valor("y2) la sesion de A recibe el rechazo de la denuncia ajena",
+                   TEXTO_MENSAJE_SIN_DENUNCIA in sesion.err, control)
+    negativo_valor(f"y2) con esa transaccion de A abierta, B escribe en su denuncia sin esperar "
+                   f"({medida.lineas()} {medida.err.strip()[:150]!r})",
+                   sin_error(medida) and "b|" in " ".join(medida.lineas()), control)
 
 
 def seccion_q():
@@ -1444,8 +1636,9 @@ def main():
         seccion_a()
         CID = dc("ps", "-q", "postgres").out.strip()
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_z, seccion_p, seccion_q,
-                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_r):
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_z, seccion_p,
+                        seccion_q,
+                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)

@@ -57,6 +57,14 @@ PARAMETROS_CONEXION = {
 
 # true = local a la transacción. El valor siempre como parámetro enlazado.
 SQL_FIJAR_CONTEXTO = "select set_config('app.empresa_id', %s, true)"
+
+# Solo lectura y REPEATABLE READ: todas las consultas de la transacción ven
+# la misma foto de los datos. En READ COMMITTED cada consulta toma la suya, y
+# el seguimiento (denuncia y luego sus mensajes) podría mezclar un estado con
+# mensajes de otro momento. En solo lectura este nivel no produce fallos de
+# serialización, así que no hay reintentos que gestionar. Las escrituras se
+# quedan en READ COMMITTED, que es lo que espera canal.preparar_mensaje().
+SQL_SOLO_LECTURA = "set transaction isolation level repeatable read, read only"
 SQL_LEER_CONTEXTO = "select current_setting('app.empresa_id', true)"
 
 # Por debajo del CONNECTION LIMIT 10 del rol aplicacion: deja margen para que
@@ -155,7 +163,8 @@ def transaccion_empresa(pool, empresa_id, solo_lectura=False):
     """Transacción con el contexto de una empresa fijado.
 
     solo_lectura: para los caminos que solo consultan (el seguimiento del
-    denunciante). Un error del código no puede escribir nada.
+    denunciante). Un error del código no puede escribir nada, y todas las
+    consultas ven la misma foto (SQL_SOLO_LECTURA).
     """
     # Se valida antes de pedir una conexión al pool: un valor inválido no
     # llega a ocupar ninguna.
@@ -164,7 +173,7 @@ def transaccion_empresa(pool, empresa_id, solo_lectura=False):
     with pool.connection() as conexion, conexion.transaction():
         # Tiene que ser la primera sentencia de la transacción.
         if solo_lectura:
-            conexion.execute("set transaction read only")
+            conexion.execute(SQL_SOLO_LECTURA)
         fijar_contexto(conexion, empresa_id)
         yield conexion
 
@@ -179,5 +188,5 @@ def transaccion_sin_contexto(pool, solo_lectura=False):
     """
     with pool.connection() as conexion, conexion.transaction():
         if solo_lectura:
-            conexion.execute("set transaction read only")
+            conexion.execute(SQL_SOLO_LECTURA)
         yield conexion
