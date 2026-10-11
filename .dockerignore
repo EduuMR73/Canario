@@ -1,42 +1,25 @@
-# This file protects the Docker build context from leaking secrets, VCS data
-# and local artifacts into images. When a Dockerfile with context ./app
-# exists, there will be another .dockerignore inside app/ for that context.
+# Protege el contexto de construcción de la API (Dockerfile de la raíz) para
+# que no entren secretos, datos de Git ni artefactos locales en la imagen.
+# El proxy se construye con su propio contexto (proxy/), que solo contiene su
+# Dockerfile y su Caddyfile.
 
-# Version control
-.git
-.gitignore
-.gitattributes
+# Lista de permitidos: se excluye todo y solo entra lo que la imagen necesita.
+# Así secrets/, .git, tests/, docs/ o cualquier fichero nuevo nunca llegan al
+# contexto, aunque nadie se acuerde de añadirlos aquí.
+*
+!requirements.txt
+!app/
 
-# Secrets and local environment (never part of an image)
-.env
-.env.*
-secrets
-*.pem
-*.key
-*.p12
-*.pfx
+# Aun dentro de lo permitido, nunca secretos ni entorno local. En
+# .dockerignore gana la última regla que coincide, por eso van después.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
 
-# Python artifacts
+# Artefactos de Python y marcadores de carpeta vacía de Git
 **/__pycache__
 **/*.pyc
-.venv
-venv
-.pytest_cache
-.mypy_cache
-.ruff_cache
-.coverage
-htmlcov
-dist
-build
-*.egg-info
-
-# Local data and logs
-data
-uploads
-attachments
-*.log
-
-# Docs and editor files
-docs
-.vscode
-.idea
+**/.gitkeep

@@ -199,6 +199,96 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  api:
+    # Imagen propia (Dockerfile de la raíz) sobre python:3.12-slim fijada por
+    # digest. Usuario 10001 sin privilegios, declarado en la imagen.
+    build:
+      context: .
+    restart: unless-stopped
+    # Se añade al ENTRYPOINT de la imagen (que ya fija --no-access-log y
+    # --no-server-header). Solo se confía en las cabeceras de reenvío que vengan
+    # de la IP fija del proxy en la red app; nunca "*". Sin esto, todos los
+    # clientes parecerían el proxy y compartirían un único contador de rate
+    # limit; con "*", cualquiera podría falsificar su IP.
+    command:
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - 10.88.0.2
+    # Sistema de ficheros raíz de solo lectura. No hace falta tmpfs: la API no
+    # escribe en disco (PYTHONDONTWRITEBYTECODE en la imagen).
+    read_only: true
+    # Sin ninguna capability de Linux.
+    cap_drop:
+      - ALL
+    # Impide ganar privilegios nuevos (por ejemplo con binarios setuid).
+    security_opt:
+      - no-new-privileges:true
+    # Límites de recursos: contienen el daño de un fallo o de un abuso.
+    mem_limit: 256m
+    pids_limit: 64
+    # Sin puertos publicados: solo se llega a la API a través del proxy. Por
+    # ahora solo está en la red app; data y cache se añadirán cuando el núcleo
+    # las use.
+    networks:
+      - app
+    healthcheck:
+      # Sin curl: un script de la propia imagen que solo da sano con 200 y el
+      # cuerpo exacto {"estado":"ok"}. El motivo del fallo queda en stderr.
+      test: ["CMD", "python", "-m", "app.comprobar_salud"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Rotación de logs: evita que crezcan sin límite y llenen el disco.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    # Imagen propia (proxy/Dockerfile) sobre caddy:2.11.7-alpine fijada por
+    # digest: sin la file capability del binario, /data/caddy solo para el
+    # usuario 10002 y el Caddyfile dentro de la imagen.
+    build:
+      context: ./proxy
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    # Sistema de ficheros raíz de solo lectura: lo único escribible es el
+    # volumen de /data. /config no se monta: con persist_config off Caddy no
+    # escribe ahí.
+    read_only: true
+    # Sin ninguna capability: escucha en 8443, que no es un puerto privilegiado.
+    cap_drop:
+      - ALL
+    # Impide ganar privilegios nuevos (por ejemplo con binarios setuid).
+    security_opt:
+      - no-new-privileges:true
+    # Límites de recursos: contienen el daño de un fallo o de un abuso.
+    mem_limit: 128m
+    pids_limit: 64
+    # Único puerto publicado del proyecto, y solo en 127.0.0.1 del host (nunca
+    # en 0.0.0.0). Sin puerto 80.
+    ports:
+      - "127.0.0.1:8443:8443/tcp"
+    volumes:
+      # Estado que debe sobrevivir a reinicios: el CA local y los certificados.
+      # Si se perdiera, el CA se regeneraría y los clientes dejarían de confiar.
+      - caddy_datos:/data
+    networks:
+      app:
+        # IP fija: es la única en la que confía uvicorn (--forwarded-allow-ips).
+        ipv4_address: 10.88.0.2
+      edge: {}
+    # Rotación de logs: evita que crezcan sin límite y llenen el disco.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   cache:
     # Red interna: los contenedores no tienen salida a internet ni son
@@ -208,6 +298,30 @@ networks:
     # Red interna de la base de datos: sin salida a internet ni acceso desde
     # fuera del host. Solo los servicios que la necesitan se conectan a ella.
     internal: true
+  app:
+    # Red interna entre el proxy y la API: sin salida a internet.
+    # Subred fija y pequeña (/28, 14 direcciones) para que la IP del proxy sea
+    # estable. Está fuera de los rangos que Docker asigna por defecto
+    # (172.17.0.0/16 a 172.31.0.0/16 y 192.168.0.0/16), así no choca con las
+    # redes que Docker cree después.
+    # ip_range: Docker solo asigna IPs automáticas dentro de 10.88.0.8/29 (.8 a
+    # .15). Las de .2 a .7 quedan reservadas para IPs fijas; sin esto, el primer
+    # contenedor en arrancar (la API) recibe la .2 y el proxy no puede tomarla
+    # (comprobado: "Address already in use").
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.88.0.0/28
+          ip_range: 10.88.0.8/29
+  edge:
+    # Red de cara al exterior: la única que publica puertos (una red interna no
+    # puede). Solo el proxy se conecta a ella. Subred fija por el mismo motivo y
+    # para que las pruebas puedan usar un cliente de IP conocida, reservada
+    # fuera del rango automático igual que en app.
+    ipam:
+      config:
+        - subnet: 10.88.1.0/28
+          ip_range: 10.88.1.8/29
 
 secrets:
   contrasena_redis:
@@ -227,3 +341,6 @@ volumes:
   # Persiste entre reinicios, a diferencia de redis. Los scripts de
   # inicialización de la imagen solo se ejecutan cuando el volumen está vacío.
   pgdata:
+  # CA local de Caddy y sus certificados. Al crearse vacío hereda de la imagen
+  # el dueño (10002) y el modo (0700) de /data/caddy.
+  caddy_datos:
