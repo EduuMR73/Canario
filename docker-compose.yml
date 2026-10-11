@@ -217,8 +217,12 @@ services:
     # Al arrancar, la API verifica la base de datos (roles, RLS, permisos y
     # políticas) y se niega a arrancar si algo no coincide. Para eso necesita
     # PostgreSQL ya inicializado: su healthcheck comprueba roles y esquema.
+    # Después verifica Redis (autenticación y ACL, app/limitador.py): sin
+    # limitador no sirve ninguna petición.
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     # Se añade al ENTRYPOINT de la imagen (que ya fija --no-access-log y
     # --no-server-header). Solo se confía en las cabeceras de reenvío que vengan
@@ -243,19 +247,24 @@ services:
     pids_limit: 64
     # Sin puertos publicados: solo se llega a la API a través del proxy (red
     # app). En data habla con PostgreSQL; pg_hba.conf solo admite su subred
-    # (samenet). cache se añadirá cuando la API use Redis.
+    # (samenet). En cache habla con Redis, el del limitador de peticiones.
     networks:
       - app
       - data
+      - cache
     # Secretos como ficheros en /run/secrets, nunca como variables de entorno:
     # la contraseña del rol aplicacion (se lee en cada conexión nueva), la
-    # clave maestra (desenvuelve las claves de cada empresa) y la clave del
-    # HMAC de los códigos de seguimiento. Sin contrasena_plataforma: la API no
-    # puede dar de alta empresas.
+    # clave maestra (desenvuelve las claves de cada empresa), la clave del
+    # HMAC de los códigos de seguimiento y la contraseña del usuario
+    # aplicacion de Redis (también se lee en cada conexión nueva). Sin
+    # contrasena_plataforma: la API no puede dar de alta empresas.
+    # Sin variable CANARIO_LIMITES: la API usa los límites de producción de
+    # app/limitador.py y los registra al arrancar.
     secrets:
       - contrasena_aplicacion
       - clave_maestra
       - clave_hmac_codigos
+      - contrasena_redis
     healthcheck:
       # Sin curl: un script de la propia imagen que solo da sano con 200 y el
       # cuerpo exacto {"estado":"ok"}. El motivo del fallo queda en stderr.

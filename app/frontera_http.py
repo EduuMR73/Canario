@@ -24,6 +24,9 @@ Tres piezas que no dependen de ninguna ruta concreta:
   espera a que el personal termine de cambiar el estado de su denuncia), y el
   cliente debe saber que puede reintentar. Se registra solo la clase y el
   SQLSTATE, como el resto de errores.
+* Limitador de peticiones (app/limitador.py): se instala aquí, entre
+  ErroresInternos y LimiteCuerpo, para rechazar antes de leer el cuerpo.
+  Responde 429 o, si Redis no responde, 503, con el mismo formato.
 """
 import json
 import logging
@@ -46,12 +49,14 @@ MENSAJES = {
     405: "método no permitido",
     413: "cuerpo de la petición demasiado grande",
     422: "petición no válida",
+    429: "demasiadas peticiones; inténtelo de nuevo más tarde",
     500: "error interno",
     503: "servicio ocupado; inténtelo de nuevo en unos segundos",
 }
 
-# Segundos que se sugieren al cliente antes de reintentar tras una saturación.
-# Del orden de lock_timeout (2 s, app/bd.py) con margen.
+# Segundos que se sugieren al cliente antes de reintentar tras una saturación
+# o con Redis sin responder. Del orden de lock_timeout (2 s, app/bd.py) con
+# margen.
 REINTENTAR_TRAS = "5"
 
 
@@ -60,7 +65,8 @@ def cuerpo_error(codigo, mensaje=None):
                       ensure_ascii=False).encode("utf-8")
 
 
-async def _responder(send, codigo, cabeceras=(), mensaje=None):
+async def responder(send, codigo, cabeceras=(), mensaje=None):
+    """Respuesta de error completa desde un middleware ASGI."""
     cuerpo = cuerpo_error(codigo, mensaje)
     await send({"type": "http.response.start", "status": codigo,
                 "headers": [(b"content-type", b"application/json"),
@@ -87,11 +93,11 @@ class LimiteCuerpo:
         declarada = dict(scope["headers"]).get(b"content-length")
         if declarada is not None:
             if not declarada.isdigit():
-                await _responder(send, 400)
+                await responder(send, 400)
                 return
             # Se rechaza antes de leer nada.
             if int(declarada) > self.maximo:
-                await _responder(send, 413, [(b"connection", b"close")])
+                await responder(send, 413, [(b"connection", b"close")])
                 return
         partes = []
         recibidos = 0
@@ -104,7 +110,7 @@ class LimiteCuerpo:
             # Cuenta lo que llega de verdad: cubre un Content-Length falso y
             # el envío por trozos sin Content-Length.
             if recibidos > self.maximo:
-                await _responder(send, 413, [(b"connection", b"close")])
+                await responder(send, 413, [(b"connection", b"close")])
                 return
             partes.append(trozo)
             if not mensaje.get("more_body", False):
@@ -145,7 +151,7 @@ class ErroresInternos:
             # Si la respuesta ya había empezado no se puede enviar otra: la
             # conexión se cierra incompleta y el cliente lo ve.
             if not iniciada:
-                await _responder(send, 500)
+                await responder(send, 500)
 
 
 async def _http_exception(_peticion, error):
@@ -164,10 +170,12 @@ async def _saturacion(_peticion, error):
                     headers={"Retry-After": REINTENTAR_TRAS})
 
 
-def instalar(aplicacion):
-    """Middlewares y manejadores. ErroresInternos se añade el último para
-    quedar por fuera de LimiteCuerpo: Starlette pone el último añadido en la
-    posición más externa."""
+def instalar(aplicacion, limitador):
+    """Middlewares y manejadores. Starlette pone el último añadido en la
+    posición más externa, así que el orden, de fuera adentro, queda
+    ErroresInternos, limitador (el middleware de app/limitador.py, que se
+    recibe como parámetro para no crear un ciclo de importaciones) y
+    LimiteCuerpo."""
     aplicacion.add_exception_handler(HTTPException, _http_exception)
     aplicacion.add_exception_handler(RequestValidationError, _validacion)
     # Solo estas dos clases: cualquier otro error de la base de datos sigue
@@ -175,4 +183,5 @@ def instalar(aplicacion):
     aplicacion.add_exception_handler(errores_bd.LockNotAvailable, _saturacion)
     aplicacion.add_exception_handler(errores_bd.QueryCanceled, _saturacion)
     aplicacion.add_middleware(LimiteCuerpo)
+    aplicacion.add_middleware(limitador)
     aplicacion.add_middleware(ErroresInternos)

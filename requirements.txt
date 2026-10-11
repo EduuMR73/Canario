@@ -6,8 +6,13 @@
 # Resuelto para Linux y CPython 3.12 dentro de un contenedor desechable de
 # python:3.12-slim (no en Windows: los marcadores de plataforma darían otro
 # resultado). Peticiones directas: fastapi, uvicorn (sin [standard], para no
-# arrastrar uvloop ni httptools), psycopg[binary], psycopg-pool y cryptography.
-# El resto son dependencias transitivas.
+# arrastrar uvloop ni httptools), psycopg[binary], psycopg-pool, cryptography
+# y redis. El resto son dependencias transitivas.
+#
+# redis (redis-py, cliente del limitador) es Python puro y en CPython 3.12 no
+# tiene dependencias: async-timeout solo se exige por debajo de 3.11.3. Su
+# telemetría (OpenTelemetry) solo se activa con una llamada explícita que la
+# API no hace (comprobado en redis/observability de la versión fijada).
 #
 # cryptography aporta AES-256-GCM (la biblioteca estándar no trae cifrado
 # autenticado). Su wheel trae OpenSSL dentro, igual que psycopg-binary: lo
@@ -424,6 +429,9 @@ pydantic_core==2.50.0 \
     --hash=sha256:f517a417cd02aa8fb05b603a0ac6d87b7b004c3ba4fcd279cad25cab7229043b \
     --hash=sha256:f8cc61ad94215ab98e5cbcdea2cfde45e11bb0136ee980e1240b721635e55790 \
     --hash=sha256:f8df36f964c21168e345f914855e3b428e2cb6e1f739c8ef5963b77d86dd84ae
+redis==8.1.0 \
+    --hash=sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25 \
+    --hash=sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb
 starlette==1.7.0 \
     --hash=sha256:67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e \
     --hash=sha256:c79f74ea63cff761804fbbfb182f1e0b440c2d07b164d24700c5a1bab5d6ff5d

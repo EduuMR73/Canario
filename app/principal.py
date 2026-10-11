@@ -2,10 +2,12 @@
 
 Expone GET /salud (vivacidad) y las rutas del denunciante anónimo
 (app/rutas_denuncias.py), detrás de la frontera HTTP (app/frontera_http.py):
-límite de cuerpo, errores internos sin detalles y respuestas de error
-uniformes. Al arrancar comprueba los secretos (contraseña y claves de
-cifrado), abre el pool de conexiones a PostgreSQL y verifica la base de datos;
-si algo no es lo esperado, la API no arranca (docs/threat-model.md, 6.10).
+límite de cuerpo, limitador de peticiones con Redis (app/limitador.py),
+errores internos sin detalles y respuestas de error uniformes. Al arrancar
+comprueba los secretos (contraseña, claves de cifrado y contraseña de Redis)
+y los límites, abre el pool de conexiones a PostgreSQL, verifica la base de
+datos y después Redis; si algo no es lo esperado, la API no arranca
+(docs/threat-model.md, 6.10).
 """
 import logging
 from contextlib import asynccontextmanager
@@ -13,7 +15,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from psycopg_pool import PoolTimeout
 
-from app import bd, claves, frontera_http, rutas_denuncias, verificacion_arranque
+from app import (
+    bd,
+    claves,
+    frontera_http,
+    limitador,
+    rutas_denuncias,
+    verificacion_arranque,
+)
 
 # Logs propios y del pool de conexiones por la salida de error. Nunca llevan
 # IPs de clientes ni la contraseña: solo nombres de comprobaciones, clases de
@@ -47,7 +56,23 @@ async def ciclo_de_vida(app):
     except claves.ErrorClaves as error:
         registro.error("ARRANQUE BLOQUEADO: claves: %s", error)
         raise verificacion_arranque.ArranqueBloqueado("claves") from None
+    # Los límites y el secreto de Redis también antes de conectar: un límite
+    # mal configurado o un secreto que falta son errores de despliegue y deben
+    # verse al arrancar, no como un 503 en cada petición.
+    try:
+        limites, origen = limitador.cargar_limites()
+    except limitador.ErrorConfiguracion as error:
+        registro.error("ARRANQUE BLOQUEADO: limites: %s", error)
+        raise verificacion_arranque.ArranqueBloqueado("limites") from None
+    try:
+        limitador.leer_contrasena()
+    except limitador.ErrorConfiguracion as error:
+        registro.error("ARRANQUE BLOQUEADO: secreto_redis: %s", error)
+        raise verificacion_arranque.ArranqueBloqueado("secreto_redis") from None
+    # Visible en cada arranque: un límite relajado no pasa desapercibido.
+    registro.info("LIMITES (%s): %s", origen, limitador.describir_limites(limites))
     pool = bd.crear_pool()
+    limitador_api = None
     try:
         try:
             pool.open(wait=True, timeout=ESPERA_CONEXION_SEGUNDOS)
@@ -60,10 +85,20 @@ async def ciclo_de_vida(app):
             )
             raise verificacion_arranque.ArranqueBloqueado("conexion") from None
         verificacion_arranque.verificar(pool)
+        limitador_api = limitador.Limitador(limites)
+        fallos = await limitador_api.verificar()
+        for detalle in fallos:
+            registro.error("ARRANQUE BLOQUEADO: limitador: %s", detalle)
+        if fallos:
+            raise verificacion_arranque.ArranqueBloqueado("limitador")
+        registro.info("LIMITADOR VERIFICADO")
         app.state.pool = pool
         app.state.claves = claves_servidor
+        app.state.limitador = limitador_api
         yield
     finally:
+        if limitador_api is not None:
+            await limitador_api.cerrar()
         pool.close()
 
 
@@ -78,7 +113,7 @@ aplicacion = FastAPI(
     redirect_slashes=False,
     lifespan=ciclo_de_vida,
 )
-frontera_http.instalar(aplicacion)
+frontera_http.instalar(aplicacion, limitador.FronteraLimitador)
 aplicacion.include_router(rutas_denuncias.router)
 
 
