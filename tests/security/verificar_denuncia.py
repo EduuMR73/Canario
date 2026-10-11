@@ -64,7 +64,9 @@ suprimir-caducadas y la frontera HTTP):
 * Un mensaje que llega mientras se suprime su denuncia espera y recibe el
   mismo 404 que un código inexistente, no un 500; si la supresión se deshace,
   se guarda. Tras suprimir, el código responde el mismo 404 byte a byte en el
-  seguimiento y en los mensajes.
+  seguimiento y en los mensajes. Dentro del contenedor de la API, leer o
+  escribir tras resolver el código de una denuncia ya suprimida da
+  CodigoNoEncontrado, no un error interno.
 * gestion suprime por lotes, informa solo de recuentos por empresa y
   artículo, salta una denuncia en uso y lo avisa con código de salida 1, y la
   suprime en la ejecución siguiente; no imprime códigos ni textos.
@@ -461,6 +463,36 @@ with bd.transaccion_empresa(pool, empresa) as c:
               [empresa, denuncia, mensaje, autor, cifrado, version])
 pool.close()
 print("insertado")
+"""
+
+# Se ejecuta dentro del contenedor de la API, con el código y la base de datos
+# reales. Ejercita la carrera "el código resolvió una denuncia que después se
+# suprimió", que por HTTP no tiene ningún punto de pausa en consultar() (no
+# toma bloqueos): sustituye _resolver_codigo SOLO en este proceso para que
+# devuelva la empresa y el id de una denuncia ya suprimida. El código de
+# producción no se toca. Control: con una denuncia que existe, las dos
+# funciones responden con normalidad. Solo imprime nombres de clase.
+RAMAS_SUPRESION = """
+import json, sys, uuid
+from app import bd, claves, denuncias
+empresa, existente, suprimida = (uuid.UUID(x) for x in sys.argv[1:4])
+claves_api = claves.cargar()
+pool = bd.crear_pool(tamano_maximo=1)
+pool.open(wait=True, timeout=15)
+
+def clase(funcion):
+    try:
+        return type(funcion()).__name__
+    except Exception as error:
+        return type(error).__name__
+
+res = {}
+for nombre, denuncia in (("existente", existente), ("suprimida", suprimida)):
+    denuncias._resolver_codigo = lambda p, c, codigo, d=denuncia: (empresa, d)
+    res["consultar_" + nombre] = clase(lambda: denuncias.consultar(pool, claves_api, "x"))
+    res["mensaje_" + nombre] = clase(lambda: denuncias.enviar_mensaje(pool, claves_api, "x", "rama"))
+pool.close()
+print(json.dumps(res, sort_keys=True))
 """
 
 
@@ -1745,7 +1777,8 @@ def seccion_n():
     # gestion de esta sección.
     p("=== n) supresion legal (arts. 32.4 y 26.2)")
     empresa_a, ident_a, zona_a = EMPRESAS["A"]
-    casos = ("carrera", "art32", "art26", "en_uso")
+    # "ramas" no se caduca: es el control de n4.
+    casos = ("carrera", "art32", "art26", "en_uso", "ramas")
     marcas = {c: f"marcador-supresion-{c}-{secrets.token_hex(8)}" for c in casos}
     respuestas = http([pt("POST", ruta_denuncias(ident_a), {"categoria": "otros", "texto": marcas[c]})
                        for c in casos])
@@ -1855,6 +1888,25 @@ def seccion_n():
     buscadas = list(marcas.values()) + list(codigos.values()) + [hmac_de(c) for c in codigos.values()]
     negativo("n3) las salidas de gestion no contienen codigos, textos ni HMAC de las denuncias suprimidas",
              not any(b in salidas for b in buscadas), "total suprimidas" in salidas)
+
+    # n4) Las dos ramas de la carrera, de forma determinista y con el código
+    #     real (RAMAS_SUPRESION): un código que resolvió la denuncia "carrera",
+    #     suprimida en n1, da CodigoNoEncontrado (el 404 uniforme) al leerla y
+    #     al escribir un mensaje. Control: con la denuncia "ramas", que existe,
+    #     la lectura y el mensaje funcionan.
+    r = dc("exec", "-T", "api", "python", "-c", RAMAS_SUPRESION, str(empresa_a), ids["ramas"], ids["carrera"])
+    try:
+        ramas = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        sinc(f"n4) el script de las ramas no devolvio resultado: {r.err.strip()[-300:]!r}")
+        return
+    p(f"   ramas: {ramas}")
+    control = ramas.get("consultar_existente") == "EstadoDenuncia" and ramas.get("mensaje_existente") == "MensajeEnviado"
+    pasa(control, "n4) control: con una denuncia que existe, la lectura y el mensaje funcionan")
+    negativo("n4) leer una denuncia suprimida tras resolver su codigo da CodigoNoEncontrado (404), no un error interno",
+             ramas.get("consultar_suprimida") == "CodigoNoEncontrado", control, f"ramas: {ramas}")
+    negativo("n4) escribir en una denuncia suprimida tras resolver su codigo da CodigoNoEncontrado (404)",
+             ramas.get("mensaje_suprimida") == "CodigoNoEncontrado", control, f"ramas: {ramas}")
 
 
 def formas(clave_hex):
