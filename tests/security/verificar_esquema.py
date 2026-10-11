@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Batería de pruebas de seguridad del esquema "canal" (db/init/02_esquema.sql y
-db/init/03_funciones.sql).
+"""Batería de pruebas de seguridad del esquema "canal" (db/init/02_esquema.sql,
+db/init/03_funciones.sql y db/init/04_supresion.sql).
 
 Qué prueba: que el esquema y las funciones de definidor se aplican enteros al
 arrancar, que la estructura, las políticas RLS y los permisos coinciden con
@@ -13,8 +13,12 @@ depender de la fecha del INSERT ni de la zona de la sesión), que una denuncia
 cerrada no admite mensajes y que hay un tope de mensajes por denuncia, que el
 cierre de una denuncia y un mensaje simultáneos no se interbloquean y que un
 mensaje rechazado entre empresas no bloquea a la otra, que el bloqueo por
-empresa y el healthcheck se comportan como se espera, y que las funciones de
-definidor hacen solo lo que deben (también frente a un search_path hostil).
+empresa y el healthcheck se comportan como se espera, que las funciones de
+definidor hacen solo lo que deben (también frente a un search_path hostil), y
+que la supresión legal (arts. 32.4 y 26.2 de la Ley 2/2023) borra solo lo
+caducado, con sus bordes, salta lo que está en uso sin esperar, respeta una
+denuncia que pasa a instrucción en carrera y deja su evidencia en la
+auditoría.
 Cada prueba negativa lleva su
 control positivo: si el control falla, el resultado es SIN CONCLUSION, nunca
 PASA.
@@ -84,6 +88,25 @@ HMAC1 = "ab" * 32  # HMAC de prueba de 32 bytes (hexadecimal)
 HMAC2 = "cd" * 32
 HMAC3 = "ef" * 32
 HMAC31 = "ab" * 31  # 31 bytes: demasiado corto
+# Supresion (seccion su): una empresa propia, para no tocar los conteos de A y B
+EMPRESA_C = "c0000000-0000-4000-8000-000000000003"
+# caso -> (id, antiguedad respecto a hoy en la zona de C como expresion SQL, estado).
+# Los bordes: un dia menos que el plazo (hoy - 3 meses + 1 dia) se conserva.
+SU = {
+    "art32": ("c0000000-0000-4000-8000-0000000000e1", "interval '3 months'", "nueva"),
+    "art32_borde": ("c0000000-0000-4000-8000-0000000000e2", "(interval '3 months' - interval '1 day')", "nueva"),
+    "instruccion": ("c0000000-0000-4000-8000-0000000000e3", "interval '4 months'", "en_instruccion"),
+    "art26": ("c0000000-0000-4000-8000-0000000000e4", "interval '10 years'", "archivada"),
+    "art26_borde": ("c0000000-0000-4000-8000-0000000000e5", "(interval '10 years' - interval '1 day')", "resuelta"),
+    "en_uso": ("c0000000-0000-4000-8000-0000000000e6", "interval '5 months'", "nueva"),
+    "carrera": ("c0000000-0000-4000-8000-0000000000e7", "interval '5 months'", "nueva"),
+    "carrera_ctl": ("c0000000-0000-4000-8000-0000000000e8", "interval '5 months'", "nueva"),
+}
+HMAC_SU_ART32 = "a1" * 32
+HMAC_SU_ART26 = "a2" * 32
+HMAC_SU_BORDE = "a3" * 32
+TEXTO_LOTE = "el lote debe estar entre 1 y 500"
+TEXTO_AISLAMIENTO = "la supresion exige el nivel de aislamiento READ COMMITTED"
 
 # ---------------------------------------------------------------------------
 # Oráculos literales
@@ -130,7 +153,7 @@ CLAVES_FORANEAS = [
     "registro_auditoria|empresa_id|empresa|id|a",
     "usuario_personal|empresa_id|empresa|id|a",
 ]
-# tabla|politica|comando (13 de aplicacion + 2 de propietario_funciones)
+# tabla|politica|comando (13 de aplicacion + 2 de propietario_funciones + 8 de propietario_supresion)
 POLITICAS_APLICACION = [
     "empresa|empresa_select|SELECT",
     "clave_empresa|clave_empresa_select|SELECT",
@@ -150,8 +173,23 @@ POLITICAS_DEFINIDOR = [
     "empresa|empresa_select_definidor|SELECT",
     "empresa|empresa_insert_definidor|INSERT",
 ]
-POLITICAS = POLITICAS_APLICACION + POLITICAS_DEFINIDOR
+# Las unicas con DELETE del esquema: las del dueno de la supresion. La de UPDATE
+# solo sirve para bloquear (USING true, WITH CHECK false).
+# tabla|politica|comando|USING|WITH CHECK
+POLITICAS_SUPRESION_COMPLETAS = [
+    "empresa|empresa_select_supresion|SELECT|true|",
+    "denuncia|denuncia_select_supresion|SELECT|true|",
+    "denuncia|denuncia_bloqueo_supresion|UPDATE|true|false",
+    "denuncia|denuncia_delete_supresion|DELETE|true|",
+    "mensaje|mensaje_select_supresion|SELECT|true|",
+    "mensaje|mensaje_delete_supresion|DELETE|true|",
+    "registro_auditoria|registro_auditoria_select_supresion|SELECT|true|",
+    "registro_auditoria|registro_auditoria_insert_supresion|INSERT||true",
+]
+POLITICAS_SUPRESION = ["|".join(l.split("|")[:3]) for l in POLITICAS_SUPRESION_COMPLETAS]
+POLITICAS = POLITICAS_APLICACION + POLITICAS_DEFINIDOR + POLITICAS_SUPRESION
 NOMBRES_POLITICAS_DEFINIDOR = {"empresa_select_definidor", "empresa_insert_definidor"}
+NOMBRES_POLITICAS_SUPRESION = {l.split("|")[1] for l in POLITICAS_SUPRESION_COMPLETAS}
 
 # Privilegios de tabla por rol (UPDATE solo por columna, nunca a nivel de tabla)
 PRIVILEGIOS_TABLA = {
@@ -172,6 +210,13 @@ PRIVILEGIOS_TABLA = {
         "directorio_empresas": {"SELECT"},
         "busqueda_seguimiento": {"SELECT", "INSERT"},
     },
+    # El unico rol con DELETE, y solo en lo que suprime. SELECT, UPDATE e
+    # INSERT solo por columna.
+    "propietario_supresion": {
+        "empresa": set(), "clave_empresa": set(), "usuario_personal": set(),
+        "denuncia": {"DELETE"}, "mensaje": {"DELETE"}, "busqueda_seguimiento": {"DELETE"},
+        "registro_auditoria": set(), "directorio_empresas": set(),
+    },
 }
 # Privilegios concedidos solo en algunas columnas: rol -> (tabla, privilegio) -> columnas
 PRIVILEGIOS_COLUMNA = {
@@ -186,6 +231,16 @@ PRIVILEGIOS_COLUMNA = {
         ("empresa", "INSERT"): {"nombre", "zona_horaria"},
         ("directorio_empresas", "INSERT"): {"empresa_id"},
     },
+    "propietario_supresion": {
+        ("empresa", "SELECT"): {"id", "zona_horaria"},
+        ("denuncia", "SELECT"): {"empresa_id", "id", "fecha", "estado"},
+        # Solo para poder bloquear con FOR UPDATE (la politica lo deja en eso).
+        ("denuncia", "UPDATE"): {"estado"},
+        ("mensaje", "SELECT"): {"empresa_id", "denuncia_id"},
+        ("busqueda_seguimiento", "SELECT"): {"empresa_id", "denuncia_id"},
+        ("registro_auditoria", "SELECT"): {"empresa_id", "secuencia", "hash"},
+        ("registro_auditoria", "INSERT"): {"empresa_id", "actor", "accion", "objeto_id"},
+    },
 }
 COLUMNAS_UPDATE = {
     "usuario_personal": {"hash_contrasena", "secreto_totp_cifrado", "totp_activo",
@@ -194,7 +249,7 @@ COLUMNAS_UPDATE = {
 }
 PRIVILEGIOS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
 PRIVILEGIOS_COLUMNA_COMPROBADOS = ["SELECT", "INSERT", "UPDATE", "REFERENCES"]
-ROLES = ["aplicacion", "plataforma", "propietario_funciones"]
+ROLES = ["aplicacion", "plataforma", "propietario_funciones", "propietario_supresion"]
 
 # funcion -> (dueno, SECURITY DEFINER, volatilidad, firma)
 FUNCIONES_CATALOGO = {
@@ -208,8 +263,12 @@ FUNCIONES_CATALOGO = {
     "buscar_codigo": ("propietario_funciones", "t", "s", "canal.buscar_codigo(bytea)"),
     "registrar_codigo": ("propietario_funciones", "t", "v", "canal.registrar_codigo(bytea,uuid)"),
     "alta_empresa": ("propietario_funciones", "t", "v", "canal.alta_empresa(text,text)"),
+    "articulo_supresion": ("propietario_supresion", "f", "s", "canal.articulo_supresion(text,date,text)"),
+    "suprimir_denuncias_caducadas": ("propietario_supresion", "t", "v", "canal.suprimir_denuncias_caducadas(integer)"),
+    "contar_denuncias_caducadas": ("propietario_supresion", "t", "s", "canal.contar_denuncias_caducadas()"),
 }
-FUNCIONES_DEFINIDOR = ["resolver_empresa", "buscar_codigo", "registrar_codigo", "alta_empresa"]
+FUNCIONES_DEFINIDOR = ["resolver_empresa", "buscar_codigo", "registrar_codigo", "alta_empresa",
+                       "suprimir_denuncias_caducadas", "contar_denuncias_caducadas"]
 CONFIG_DEFINIDOR = "search_path=pg_catalog, canal, pg_temp"
 # funcion -> roles con EXECUTE. propietario_funciones tiene EXECUTE sobre las suyas por ser su dueno
 # (es el privilegio implicito del dueno; no se le revoca).
@@ -224,6 +283,10 @@ EXECUTE_ESPERADO = {
     "buscar_codigo": {"aplicacion", "propietario_funciones"},
     "registrar_codigo": {"aplicacion", "propietario_funciones"},
     "alta_empresa": {"plataforma", "propietario_funciones"},
+    # articulo_supresion solo la ejecuta su dueno (desde las otras dos).
+    "articulo_supresion": {"propietario_supresion"},
+    "suprimir_denuncias_caducadas": {"plataforma", "propietario_supresion"},
+    "contar_denuncias_caducadas": {"plataforma", "propietario_supresion"},
 }
 TRIGGERS = [
     "denuncia|denuncia_fecha|O",
@@ -374,7 +437,7 @@ def seccion_a():
         p("--- log completo de postgres ---")
         p(registro)
         raise Parada("el SQL no se aplico o el servicio no llego a healthy")
-    for fichero in ("02_esquema.sql", "03_funciones.sql"):
+    for fichero in ("02_esquema.sql", "03_funciones.sql", "04_supresion.sql"):
         pasa(f"running /docker-entrypoint-initdb.d/{fichero}" in registro,
              f"a) el log contiene 'running /docker-entrypoint-initdb.d/{fichero}'")
     malas = [l for l in registro.splitlines() if "ERROR" in l or "FATAL" in l]
@@ -412,6 +475,19 @@ def seccion_b():
         pasa(prohibido not in unido.upper(), f"b) 03: no contiene {prohibido!r}")
     for texto in ("SECURITY DEFINER", "SET search_path = pg_catalog, canal, pg_temp", "REVOKE EXECUTE ON FUNCTION"):
         pasa(unido.count(texto) == 4, f"b) 03: contiene exactamente 4 veces {texto!r} ({unido.count(texto)})")
+    p("=== b) estaticas de db/init/04_supresion.sql")
+    datos = (RAIZ / "db" / "init" / "04_supresion.sql").read_bytes()
+    pasa(not datos.startswith(b"\xef\xbb\xbf"), "b) 04: sin BOM")
+    pasa(b"\r" not in datos, "b) 04: sin CR")
+    codigo = lineas_de_codigo(datos)
+    pasa(codigo[:2] == ["\\set ON_ERROR_STOP on", "BEGIN;"], f"b) 04: empieza por \\set ON_ERROR_STOP on y BEGIN; ({codigo[:2]})")
+    pasa(codigo[-1] == "COMMIT;", f"b) 04: termina en COMMIT; ({codigo[-1]!r})")
+    unido = "\n".join(codigo)
+    for prohibido in ("TO PUBLIC", "BYPASSRLS", "PASSWORD", "SET ROLE", "TO APLICACION"):
+        pasa(prohibido not in unido.upper(), f"b) 04: no contiene {prohibido!r}")
+    for texto, veces in (("SECURITY DEFINER", 2), ("SET search_path = pg_catalog, canal, pg_temp", 2),
+                         ("REVOKE EXECUTE ON FUNCTION", 3), ("OWNER TO propietario_supresion", 3)):
+        pasa(unido.count(texto) == veces, f"b) 04: contiene exactamente {veces} veces {texto!r} ({unido.count(texto)})")
 
 
 def seccion_c():
@@ -462,14 +538,30 @@ def seccion_d():
     r = sup("select tablename, policyname, cmd, roles, coalesce(qual, ''), coalesce(with_check, '') "
             "from pg_policies where schemaname = 'canal' order by 1, 2;")
     filas = [l.split("|") for l in r.lineas()]
-    comparar("d) conjunto exacto de las 15 politicas (tabla, nombre, comando)",
+    comparar("d) conjunto exacto de las 23 politicas (tabla, nombre, comando)",
              ["|".join(f[:3]) for f in filas], POLITICAS)
-    pasa(all(f[3] == ("{propietario_funciones}" if f[1] in NOMBRES_POLITICAS_DEFINIDOR else "{aplicacion}") for f in filas),
-         "d) las 13 de siempre son TO aplicacion y las 2 del definidor solo TO propietario_funciones")
-    pasa(all(f[2] not in ("DELETE", "ALL") for f in filas), "d) ninguna con comando DELETE ni ALL")
+
+    def rol_esperado(nombre):
+        if nombre in NOMBRES_POLITICAS_DEFINIDOR:
+            return "{propietario_funciones}"
+        if nombre in NOMBRES_POLITICAS_SUPRESION:
+            return "{propietario_supresion}"
+        return "{aplicacion}"
+    pasa(all(f[3] == rol_esperado(f[1]) for f in filas),
+         "d) las 13 de siempre son TO aplicacion, las 2 del definidor solo TO propietario_funciones "
+         "y las 8 de supresion solo TO propietario_supresion")
+    pasa(all(f[2] != "ALL" for f in filas), "d) ninguna con comando ALL")
+    con_delete = sorted(f[1] for f in filas if f[2] == "DELETE")
+    comparar("d) las unicas politicas de DELETE son las 2 de supresion (denuncia y mensaje)", con_delete,
+             ["denuncia_delete_supresion", "mensaje_delete_supresion"])
+    comparar("d) las 8 de supresion: comando, USING y WITH CHECK exactos (la de UPDATE con WITH CHECK false)",
+             ["|".join(f[:3] + f[4:]) for f in filas if f[1] in NOMBRES_POLITICAS_SUPRESION],
+             POLITICAS_SUPRESION_COMPLETAS)
     ok = True
     for f in filas:
         tabla, nombre, cmd, _roles, qual, check = f
+        if nombre in NOMBRES_POLITICAS_SUPRESION:
+            continue
         esperado_qual = cmd in ("SELECT", "UPDATE")
         esperado_check = cmd in ("INSERT", "UPDATE")
         if nombre in NOMBRES_POLITICAS_DEFINIDOR:
@@ -502,7 +594,7 @@ def seccion_e():
             for pr in PRIVILEGIOS:
                 da = pr in PRIVILEGIOS_TABLA[rol][t]
                 esperado.add(f"{rol}|{t}|{pr}|{'true' if da else 'false'}")
-    pasa(real == esperado, "e) matriz de privilegios de tabla de los 3 roles (UPDATE solo por columna)")
+    pasa(real == esperado, f"e) matriz de privilegios de tabla de los {len(ROLES)} roles (UPDATE solo por columna)")
     if real != esperado:
         p(f"   sobran: {sorted(real - esperado)[:10]}")
         p(f"   faltan: {sorted(esperado - real)[:10]}")
@@ -559,11 +651,14 @@ def seccion_f():
     r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef, p.provolatile, p.oid::regprocedure::text "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
     esperado = [f"{f}|{d}|{s}|{v}|{firma}" for f, (d, s, v, firma) in FUNCIONES_CATALOGO.items()]
-    comparar("f) exactamente las 10 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
+    comparar("f) exactamente las 13 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
     r = sup("select p.proname, c from pg_proc p join pg_namespace n on n.oid = p.pronamespace, unnest(p.proconfig) c "
             "where n.nspname = 'canal' and p.prosecdef;")
-    comparar("f) las 4 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
+    comparar("f) las 6 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
              r.lineas(), [f"{f}|{CONFIG_DEFINIDOR}" for f in FUNCIONES_DEFINIDOR])
+    r = sup("select array_to_string(proconfig, ',') from pg_proc "
+            "where proname = 'articulo_supresion' and pronamespace = 'canal'::regnamespace;")
+    comparar("f) articulo_supresion fija search_path=pg_catalog", r.lineas(), ["search_path=pg_catalog"])
     consultas = []
     for rol in ROLES:
         consultas.append(
@@ -574,7 +669,7 @@ def seccion_f():
     for rol in ROLES:
         for f in FUNCIONES_CATALOGO:
             esperado.append(f"{rol}|{f}|{'true' if rol in EXECUTE_ESPERADO[f] else 'false'}")
-    comparar("f) matriz de EXECUTE de los 3 roles sobre las 10 funciones", r.lineas(), esperado)
+    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 13 funciones", r.lineas(), esperado)
     r = sup("select c.relname, t.tgname, t.tgenabled from pg_trigger t join pg_class c on c.oid = t.tgrelid "
             "join pg_namespace n on n.oid = c.relnamespace where not t.tgisinternal and n.nspname = 'canal';")
     comparar("f) los 5 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
@@ -1287,21 +1382,32 @@ def seccion_q():
     p(f"Test: {json.dumps(test)}")
     texto = " ".join(test)
     pasa("$$" not in texto, "q) el Test no contiene '$$'")
-    pasa("*|4|true" in texto and not re.search(r"\*\|4(?!\|true)", texto), "q) el Test acepta solo '*|4|true'")
+    pasa("*|5|true" in texto and not re.search(r"\*\|5(?!\|true)", texto), "q) el Test acepta solo '*|5|true'")
     orden = test[-1]
     control = dc("exec", "-T", "postgres", "sh", "-c", orden)
     if control.rc != 0:
         sinc(f"q) el control del Test no da 0 (codigo {control.rc})")
         return
     pasa(True, "q) control: el Test da 0")
+    # El centinela es la funcion del ultimo script (04_supresion.sql): si no
+    # existe, la inicializacion no llego al final.
     try:
-        sup("ALTER TABLE canal.registro_auditoria RENAME TO registro_auditoria_x;")
+        sup("ALTER FUNCTION canal.suprimir_denuncias_caducadas(integer) RENAME TO suprimir_centinela_x;")
         r = dc("exec", "-T", "postgres", "sh", "-c", orden)
-        pasa(r.rc == 1, f"q) con la tabla centinela renombrada el Test da {r.rc} (esperado 1)")
+        pasa(r.rc == 1, f"q) con la funcion centinela renombrada el Test da {r.rc} (esperado 1)")
     finally:
-        sup("ALTER TABLE canal.registro_auditoria_x RENAME TO registro_auditoria;")
+        sup("ALTER FUNCTION canal.suprimir_centinela_x(integer) RENAME TO suprimir_denuncias_caducadas;")
     r = dc("exec", "-T", "postgres", "sh", "-c", orden)
     pasa(r.rc == 0, f"q) tras renombrar de vuelta el Test da {r.rc} (esperado 0)")
+    # Sin el rol de supresion (renombrado), tampoco es sano.
+    try:
+        sup("ALTER ROLE propietario_supresion RENAME TO propietario_supresion_x;")
+        r = dc("exec", "-T", "postgres", "sh", "-c", orden)
+        pasa(r.rc == 1, f"q) con propietario_supresion renombrado el Test da {r.rc} (esperado 1)")
+    finally:
+        sup("ALTER ROLE propietario_supresion_x RENAME TO propietario_supresion;")
+    r = dc("exec", "-T", "postgres", "sh", "-c", orden)
+    pasa(r.rc == 0, f"q) tras devolver el nombre al rol el Test da {r.rc} (esperado 0)")
     r = dc("exec", "-T", "postgres", "sh", "-c", orden.replace("-U postgres", "-U nadie"))
     pasa(r.rc == 1, f"q) con -U nadie el Test da {r.rc} (esperado 1)")
 
@@ -1524,6 +1630,174 @@ def seccion_x():
     pasa(valor(r) == "3", f"x) el superusuario ve 3 empresas (A, B y la creada por alta_empresa): {valor(r)}")
 
 
+def seccion_su():
+    # Va despues de y) y antes de r): borra filas, asi que usa su propia
+    # empresa C y comprueba al final que A y B no han cambiado.
+    p("=== su) supresion legal (arts. 32.4 y 26.2)")
+    ids = {caso: datos[0] for caso, datos in SU.items()}
+    hoy = "(now() AT TIME ZONE 'Europe/Madrid')::date"
+    filas = ",\n    ".join(f"('{EMPRESA_C}', '{i}', ({hoy} - {intervalo})::date, '{e}', {BYTES_FALSOS}, 1)"
+                           for i, intervalo, e in SU.values())
+    mensajes = ",\n    ".join(f"('{EMPRESA_C}', '{ids[c]}', {s}, current_date, 'denunciante', {BYTES_FALSOS}, 1)"
+                               for c, s in (("art32", 1), ("art32", 2), ("art26", 1), ("instruccion", 1)))
+    codigos = ",\n    ".join(f"({bytea_hex(h)}, '{EMPRESA_C}', '{ids[c]}')"
+                              for c, h in (("art32", HMAC_SU_ART32), ("art26", HMAC_SU_ART26),
+                                           ("art32_borde", HMAC_SU_BORDE)))
+    # Fechas forzadas como superusuario con los triggers de fecha y de
+    # mensajes desactivados solo dentro de esta transaccion.
+    sql = f"""BEGIN;
+INSERT INTO canal.empresa (id, nombre, zona_horaria) VALUES ('{EMPRESA_C}', 'Empresa C', 'Europe/Madrid');
+INSERT INTO canal.clave_empresa (empresa_id, version, clave_envuelta) VALUES ('{EMPRESA_C}', 1, '\\x03');
+ALTER TABLE canal.denuncia DISABLE TRIGGER denuncia_fecha;
+ALTER TABLE canal.mensaje DISABLE TRIGGER mensaje_preparar;
+INSERT INTO canal.denuncia (empresa_id, id, fecha, estado, contenido_cifrado, version_clave) VALUES
+    {filas};
+INSERT INTO canal.mensaje (empresa_id, denuncia_id, secuencia, fecha, autor, contenido_cifrado, version_clave) VALUES
+    {mensajes};
+INSERT INTO canal.busqueda_seguimiento (codigo_hmac, empresa_id, denuncia_id) VALUES
+    {codigos};
+ALTER TABLE canal.denuncia ENABLE TRIGGER denuncia_fecha;
+ALTER TABLE canal.mensaje ENABLE TRIGGER mensaje_preparar;
+COMMIT;
+"""
+    r = dc(*PSQL[:-4], "-v", "ON_ERROR_STOP=1", "-f", "-", entrada=sql.encode())
+    if not sin_error(r):
+        sinc(f"su) no se pudieron preparar los datos de prueba: {r.err.strip()[:300]!r}")
+        return
+    r = sup("select count(*) from pg_trigger where not tgisinternal and tgenabled <> 'O' "
+            "and tgrelid in ('canal.denuncia'::regclass, 'canal.mensaje'::regclass);")
+    pasa(valor(r) == "0", f"su) los triggers de fecha y de mensajes vuelven a estar activos ({valor(r)} desactivados)")
+    foto = {"A": conteos_contexto(EMPRESA_A), "B": conteos_contexto(EMPRESA_B)}
+
+    def plataforma(sql_plataforma):
+        return cliente_red(sql_plataforma, "plataforma")
+
+    def suprimir(lote):
+        return plataforma(f"select empresa_id || '|' || articulo || '|' || suprimidas "
+                          f"from canal.suprimir_denuncias_caducadas({lote});")
+    contar = "select canal.contar_denuncias_caducadas();"
+
+    # su1) Antes de borrar nada: plataforma ve las 5 caducadas (art32, art26,
+    #      en_uso, carrera y carrera_ctl), y no las 3 de los bordes ni la de
+    #      instruccion. Es tambien el control de los negativos: sin una
+    #      politica de bloqueo, FOR UPDATE devolveria cero filas en silencio.
+    r = plataforma(contar)
+    control = sin_error(r) and valor(r) == "5"
+    pasa(control, f"su1) contar_denuncias_caducadas como plataforma = {valor(r)!r} (esperado 5) {r.err.strip()[:200]}")
+    negativo("su1) aplicacion no puede ejecutar suprimir_denuncias_caducadas",
+             app("select * from canal.suprimir_denuncias_caducadas(1);"),
+             "permission denied for function suprimir_denuncias_caducadas", control)
+    negativo("su1) aplicacion no puede ejecutar contar_denuncias_caducadas",
+             app("select canal.contar_denuncias_caducadas();"),
+             "permission denied for function contar_denuncias_caducadas", control)
+    negativo("su1) plataforma no puede ejecutar articulo_supresion directamente",
+             plataforma("select canal.articulo_supresion('nueva', current_date, 'Europe/Madrid');"),
+             "permission denied for function articulo_supresion", control)
+    for lote in ("0", "501", "NULL"):
+        negativo(f"su1) lote {lote} rechazado", suprimir(lote), TEXTO_LOTE, control)
+    negativo("su1) en REPEATABLE READ se rechaza",
+             plataforma("BEGIN ISOLATION LEVEL REPEATABLE READ;\n"
+                        "select * from canal.suprimir_denuncias_caducadas(1);\nROLLBACK;"),
+             TEXTO_AISLAMIENTO, control)
+    r = plataforma(contar)
+    negativo_valor(f"su1) tras los rechazos no se ha borrado nada (contar = {valor(r)})", valor(r) == "5", control)
+    negativo("su1) login de red como propietario_supresion", cliente_literal("propietario_supresion", "select 1;"),
+             "rejects connection", control)
+
+    # su2) propietario_supresion puede bloquear pero no modificar; no lee el
+    #      contenido ni toca otras tablas. Control: bloquea la fila.
+    def como_supresion(sentencia):
+        return sup(f"SET ROLE propietario_supresion;\n{sentencia}\n")
+    ctl = como_supresion(f"BEGIN;\nselect count(*) from (select id from canal.denuncia "
+                         f"where id = '{ids['art32_borde']}' for update) s;\nROLLBACK;")
+    ctl_ok = sin_error(ctl) and valor(ctl) == "1"
+    pasa(ctl_ok, f"su2) control: propietario_supresion bloquea una denuncia con FOR UPDATE ({valor(ctl)!r})")
+    negativo("su2) propietario_supresion no puede cambiar el estado (WITH CHECK false)",
+             como_supresion(f"update canal.denuncia set estado = 'archivada' where id = '{ids['art32_borde']}';"),
+             "new row violates row-level security policy", ctl_ok)
+    negativo("su2) propietario_supresion no lee el contenido cifrado",
+             como_supresion("select contenido_cifrado from canal.denuncia limit 1;"),
+             "permission denied for table denuncia", ctl_ok)
+    for t in ("clave_empresa", "usuario_personal", "empresa", "registro_auditoria", "directorio_empresas"):
+        negativo(f"su2) propietario_supresion no borra en {t}", como_supresion(f"delete from canal.{t};"),
+                 "permission denied", ctl_ok)
+    # Suposicion comprobada: sin la politica de bloqueo, FOR UPDATE no da
+    # error sino cero filas (por eso existe denuncia_bloqueo_supresion).
+    r = sup(f"BEGIN;\nDROP POLICY denuncia_bloqueo_supresion ON canal.denuncia;\nSET ROLE propietario_supresion;\n"
+            f"select count(*) from (select id from canal.denuncia where id = '{ids['art32_borde']}' for update) s;\n"
+            "RESET ROLE;\nROLLBACK;")
+    negativo_valor(f"su2) suposicion: sin la politica de bloqueo, FOR UPDATE devuelve 0 filas sin error ({valor(r)!r})",
+                   sin_error(r) and valor(r) == "0", ctl_ok)
+    r = sup("select count(*) from pg_policies where schemaname = 'canal' and policyname = 'denuncia_bloqueo_supresion';")
+    pasa(valor(r) == "1", f"su2) tras la prueba la politica de bloqueo sigue existiendo ({valor(r)})")
+
+    # su3) Con dos sesiones del personal abiertas: una pasa "carrera" a
+    #      en_instruccion y retiene "en_uso" (confirmara); otra pasa
+    #      "carrera_ctl" a en_instruccion (deshara). La supresion las salta sin
+    #      esperar y borra el resto, por lotes y la mas antigua primero.
+    contexto = f"SET ROLE aplicacion;\nBEGIN;\nSELECT set_config('app.empresa_id', '{EMPRESA_C}', true) \\gset\n"
+    confirma = ("SET application_name = 'su_confirma';\n" + contexto
+                + f"update canal.denuncia set estado = 'en_instruccion' where id = '{ids['carrera']}';\n"
+                + f"select 1 from canal.denuncia where id = '{ids['en_uso']}' for no key update;\n"
+                + "\\! sleep 20\nCOMMIT;\n")
+    deshace = ("SET application_name = 'su_deshace';\n" + contexto
+               + f"update canal.denuncia set estado = 'en_instruccion' where id = '{ids['carrera_ctl']}';\n"
+               + "\\! sleep 20\nROLLBACK;\n")
+    abiertas = "state = 'idle in transaction'"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        f_confirma, f_deshace = pool.submit(sup, confirma), pool.submit(sup, deshace)
+        listas = esperar_sesion("su_confirma", abiertas) and esperar_sesion("su_deshace", abiertas)
+        if listas:
+            nowait = sup(f"BEGIN;\nselect 1 from canal.denuncia where id in ('{ids['en_uso']}', '{ids['carrera']}', "
+                         f"'{ids['carrera_ctl']}') for update nowait;\nROLLBACK;")
+            lote1, lote2, durante = suprimir(1), suprimir(100), plataforma(contar)
+            siguen = sesion_en("su_confirma", abiertas) and sesion_en("su_deshace", abiertas)
+        r_confirma, r_deshace = f_confirma.result(), f_deshace.result()
+    if not listas:
+        sinc(f"su3) las sesiones del personal no quedaron abiertas: {r_confirma.err.strip()[:200]!r} "
+             f"{r_deshace.err.strip()[:200]!r}")
+        return
+    control = "could not obtain lock" in nowait.err and siguen and sin_error(r_confirma) and sin_error(r_deshace)
+    pasa(control, f"su3) control: las tres filas estaban bloqueadas de verdad y las dos sesiones seguian abiertas "
+                  f"al terminar la supresion ({siguen})")
+    negativo_valor(f"su3) lote de 1: solo la mas antigua, la de 10 anos ({lote1.lineas()})",
+                   lote1.lineas() == [f"{EMPRESA_C}|art26|1"] and sin_error(lote1), control)
+    negativo_valor(f"su3) lote de 100: solo la de 3 meses justos; las tres en uso se saltan sin esperar "
+                   f"({lote2.lineas()})", lote2.lineas() == [f"{EMPRESA_C}|art32|1"] and sin_error(lote2), control)
+    negativo_valor(f"su3) mientras tanto, contar ve las 3 en uso ({valor(durante)})", valor(durante) == "3", control)
+
+    # su4) Ya sin sesiones: "carrera" se confirmo en instruccion y se conserva;
+    #      "carrera_ctl" se deshizo y se suprime con "en_uso".
+    lote3, lote4, despues = suprimir(100), suprimir(100), plataforma(contar)
+    negativo_valor(f"su4) la siguiente ejecucion suprime en_uso y carrera_ctl ({lote3.lineas()})",
+                   lote3.lineas() == [f"{EMPRESA_C}|art32|2"], control)
+    negativo_valor(f"su4) despues no queda nada que suprimir ({lote4.lineas()}, contar = {valor(despues)})",
+                   lote4.lineas() == [] and sin_error(lote4) and valor(despues) == "0", control)
+
+    # su5) Lo que queda y la evidencia.
+    r = sup(f"select id || '|' || estado from canal.denuncia where empresa_id = '{EMPRESA_C}';")
+    comparar("su5) quedan exactamente los dos bordes, la de instruccion y la que paso a instruccion en carrera",
+             r.lineas(), [f"{ids['art32_borde']}|nueva", f"{ids['instruccion']}|en_instruccion",
+                          f"{ids['art26_borde']}|resuelta", f"{ids['carrera']}|en_instruccion"])
+    r = sup(f"select denuncia_id || '|' || secuencia from canal.mensaje where empresa_id = '{EMPRESA_C}';")
+    comparar("su5) de los mensajes solo queda el de la denuncia en instruccion", r.lineas(), [f"{ids['instruccion']}|1"])
+    r = sup(f"select denuncia_id from canal.busqueda_seguimiento where empresa_id = '{EMPRESA_C}';")
+    comparar("su5) de los codigos solo queda el de la denuncia del borde", r.lineas(), [ids["art32_borde"]])
+    r = sup(f"select secuencia || '|' || actor || '|' || accion || '|' || objeto_id from canal.registro_auditoria "
+            f"where empresa_id = '{EMPRESA_C}' order by secuencia;")
+    comparar("su5) auditoria: una fila de sistema por denuncia suprimida, con su articulo y su id", r.lineas(), [
+        f"1|sistema|supresion_art26|{ids['art26']}",
+        f"2|sistema|supresion_art32|{ids['art32']}",
+        f"3|sistema|supresion_art32|{ids['en_uso']}",
+        f"4|sistema|supresion_art32|{ids['carrera_ctl']}",
+    ])
+    pasa(verificar_cadena(EMPRESA_C) == "NULL", "su5) la cadena de auditoria de C sigue intacta")
+    comprobar_python(EMPRESA_C, "empresa C tras la supresion")
+    for nombre, ctx in (("A", EMPRESA_A), ("B", EMPRESA_B)):
+        real = conteos_contexto(ctx)
+        pasa(real == foto[nombre], f"su5) las 6 tablas de la empresa {nombre} no han cambiado: {real}")
+
+
 def esperar_healthy(cid, maximo=60):
     estado_salud = ""
     for _ in range(maximo):
@@ -1547,11 +1821,11 @@ def seccion_r():
                                          "where n.nspname = 'canal' and c.relkind = 'r';").lineas(), TABLAS)
     politicas = sup("select tablename, policyname, cmd from pg_policies where schemaname = 'canal';").lineas()
     tablas_con_politicas = {l.split("|")[0] for l in politicas}
-    comparar("r) siguen las 15 politicas definidas en d)", politicas, POLITICAS)
-    pasa(len(politicas) == 15 and len(tablas_con_politicas) == 6,
-         f"r) exactamente 15 politicas repartidas en exactamente 6 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
+    comparar("r) siguen las 23 politicas definidas en d)", politicas, POLITICAS)
+    pasa(len(politicas) == 23 and len(tablas_con_politicas) == 6,
+         f"r) exactamente 23 politicas repartidas en exactamente 6 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
     funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
-    comparar("r) siguen las 10 funciones", funciones, list(FUNCIONES_CATALOGO))
+    comparar("r) siguen las 13 funciones", funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
 
 
@@ -1638,7 +1912,7 @@ def main():
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
                         seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_z, seccion_p,
                         seccion_q,
-                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_r):
+                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)

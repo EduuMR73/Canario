@@ -60,6 +60,11 @@ PATRON_IDENTIFICADOR = re.compile(r"[0-9a-f]{32}")
 # SQLSTATE propios de canal.preparar_mensaje() (db/init/02_esquema.sql).
 SQLSTATE_DENUNCIA_CERRADA = "CN001"
 SQLSTATE_LIMITE_MENSAJES = "CN002"
+# foreign_key_violation: preparar_mensaje lo lanza cuando la denuncia no es
+# visible. Con un código resuelto, solo pasa si la denuncia se ha suprimido
+# entre resolver el código e insertar (db/init/04_supresion.sql): la clave de
+# cifrado se acaba de leer en la misma transacción y nunca se borra.
+SQLSTATE_DENUNCIA_NO_VISIBLE = "23503"
 
 SQL_RESOLVER = "select canal.resolver_empresa(%s)"
 SQL_CLAVE_ACTUAL = (
@@ -207,7 +212,12 @@ def consultar(pool, claves, codigo):
     empresa_id, denuncia_id = _resolver_codigo(pool, claves, codigo)
 
     with bd.transaccion_empresa(pool, empresa_id, solo_lectura=True) as conexion:
-        fecha, estado, cifrado, version = conexion.execute(SQL_DENUNCIA, [denuncia_id]).fetchone()
+        denuncia = conexion.execute(SQL_DENUNCIA, [denuncia_id]).fetchone()
+        # Suprimida entre resolver el código y leerla
+        # (db/init/04_supresion.sql): el código ya no existe, mismo 404.
+        if denuncia is None:
+            raise CodigoNoEncontrado
+        fecha, estado, cifrado, version = denuncia
         filas = conexion.execute(SQL_MENSAJES, [denuncia_id]).fetchall()
         versiones = sorted({version} | {fila[6] for fila in filas})
         envueltas = dict(conexion.execute(SQL_CLAVES, [versiones]).fetchall())
@@ -245,10 +255,13 @@ def enviar_mensaje(pool, claves, codigo, texto):
             secuencia, fecha = conexion.execute(
                 SQL_INSERTAR_MENSAJE, [empresa_id, denuncia_id, mensaje_id, cifrado, version]).fetchone()
     except psycopg.Error as error:
-        # Solo los dos casos previstos; cualquier otro error sigue su camino.
+        # Solo los casos previstos; cualquier otro error sigue su camino.
         if error.sqlstate == SQLSTATE_DENUNCIA_CERRADA:
             raise DenunciaCerrada from None
         if error.sqlstate == SQLSTATE_LIMITE_MENSAJES:
             raise LimiteMensajes from None
+        # Denuncia suprimida en carrera: el código ya no existe, mismo 404.
+        if error.sqlstate == SQLSTATE_DENUNCIA_NO_VISIBLE:
+            raise CodigoNoEncontrado from None
         raise
     return MensajeEnviado(secuencia=secuencia, fecha=fecha)

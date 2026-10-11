@@ -1,14 +1,26 @@
-"""Gestión de empresas de Canario: alta y claves de cifrado.
+"""Gestión de Canario: alta de empresas, claves de cifrado y supresión legal.
 
 Operación de administración, fuera de la API pública: corre en el servicio
 gestion de docker-compose.yml (perfil propio, solo en la red data), nunca en
 el contenedor de la API, que no tiene ni el secreto de plataforma ni forma de
-dar de alta empresas.
+dar de alta empresas ni de borrar nada.
 
 Uso (PowerShell, desde la raíz del repositorio, con postgres en marcha):
 
     docker compose run --rm gestion alta-empresa --nombre "Empresa S.L." --zona Europe/Madrid
     docker compose run --rm gestion nueva-clave --empresa-id <uuid>
+    docker compose run --rm gestion suprimir-caducadas
+
+suprimir-caducadas aplica los arts. 32.4 y 26.2 de la Ley 2/2023 con
+canal.suprimir_denuncias_caducadas() (db/init/04_supresion.sql), el único
+camino de borrado. Hay que ejecutarla periódicamente (por ejemplo, cada día).
+Repite lotes, cada uno en su transacción, hasta que uno vuelve vacío. Las
+denuncias que estaban en uso se saltan: al terminar se cuentan las que siguen
+cumpliendo el criterio y, si queda alguna, la orden lo dice y sale con código
+1, para que una ejecución programada no lo pase por alto. No verifica la base
+de datos como el arranque de la API: esas comprobaciones son las del rol
+aplicacion, y plataforma solo puede ejecutar la función, cuyo criterio está
+fijo en la base de datos.
 
 La zona horaria es obligatoria: fija el calendario con el que se fechan las
 denuncias de la empresa (docs/threat-model.md, 6.5).
@@ -59,6 +71,11 @@ SQL_CLAVES = "select version, clave_envuelta from canal.clave_empresa order by v
 SQL_INSERTAR_CLAVE = (
     "insert into canal.clave_empresa (empresa_id, version, clave_envuelta) values (%s, %s, %s)"
 )
+SQL_SUPRIMIR = "select empresa_id, articulo, suprimidas from canal.suprimir_denuncias_caducadas(%s)"
+SQL_CONTAR_CADUCADAS = "select canal.contar_denuncias_caducadas()"
+# Mismo intervalo que acepta la función (1 a 500). Un lote pequeño retiene
+# pocos bloqueos y cabe de sobra en el statement_timeout de la sesión.
+LOTE_POR_DEFECTO = 100
 
 
 class ErrorGestion(Exception):
@@ -118,6 +135,31 @@ def alta_empresa(nombre, zona_horaria, maestra):
     print(f"clave creada: empresa_id={empresa_id} version={version}")
 
 
+def suprimir_caducadas(lote):
+    """Suprime las denuncias caducadas por lotes. Devuelve (totales, pendientes).
+
+    totales: {(empresa_id, articulo): suprimidas}. pendientes: las que siguen
+    cumpliendo el criterio al terminar (estaban en uso y se saltaron).
+    """
+    totales = {}
+    with bd.conectar("plataforma", bd.FICHERO_CONTRASENA_PLATAFORMA) as conexion:
+        while True:
+            # Una transacción por lote, en READ COMMITTED (el nivel por defecto,
+            # que la función exige): los bloqueos de un lote se liberan antes
+            # del siguiente.
+            with conexion.transaction():
+                filas = conexion.execute(SQL_SUPRIMIR, [lote]).fetchall()
+            if not filas:
+                break
+            for empresa_id, articulo, suprimidas in filas:
+                totales[(empresa_id, articulo)] = totales.get((empresa_id, articulo), 0) + suprimidas
+        with conexion.transaction():
+            # El recuento solo lee: en solo lectura no puede escribir nada.
+            conexion.execute(bd.SQL_SOLO_LECTURA)
+            pendientes = conexion.execute(SQL_CONTAR_CADUCADAS).fetchone()[0]
+    return totales, pendientes
+
+
 def _motivo(error):
     # Los errores de psycopg se resumen en su clase y su SQLSTATE: su texto
     # puede incluir valores de la fila (por ejemplo en DETAIL).
@@ -142,12 +184,42 @@ def construir_parser():
                       help="zona horaria de la empresa: fija el calendario de sus fechas")
     clave = ordenes.add_parser("nueva-clave", help="crea la version siguiente de la clave de una empresa")
     clave.add_argument("--empresa-id", required=True, type=_uuid)
+    supresion = ordenes.add_parser(
+        "suprimir-caducadas",
+        help="suprime las denuncias caducadas (arts. 32.4 y 26.2 de la Ley 2/2023)")
+    supresion.add_argument("--lote", type=_lote, default=LOTE_POR_DEFECTO,
+                           help="denuncias por transaccion, de 1 a 500")
     return parser
+
+
+def _lote(texto):
+    try:
+        valor = int(texto)
+    except ValueError:
+        raise argparse.ArgumentTypeError("no es un entero") from None
+    if not 1 <= valor <= 500:
+        raise argparse.ArgumentTypeError("debe estar entre 1 y 500")
+    return valor
+
+
+def _informar_supresion(totales, pendientes):
+    """Imprime solo recuentos por empresa y artículo. Devuelve el código de salida."""
+    for (empresa_id, articulo), suprimidas in sorted(totales.items(), key=lambda e: (str(e[0][0]), e[0][1])):
+        print(f"suprimidas: empresa_id={empresa_id} articulo={articulo} denuncias={suprimidas}")
+    print(f"total suprimidas: {sum(totales.values())}")
+    if pendientes:
+        print(f"AVISO: quedan {pendientes} denuncias caducadas que estaban en uso; "
+              "vuelva a ejecutar suprimir-caducadas", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv=None):
     args = construir_parser().parse_args(argv)
     try:
+        # La supresión no toca claves: no necesita cargar la clave maestra.
+        if args.orden == "suprimir-caducadas":
+            return _informar_supresion(*suprimir_caducadas(args.lote))
         maestra = claves.cargar_maestra()
         if args.orden == "alta-empresa":
             alta_empresa(args.nombre, args.zona, maestra)

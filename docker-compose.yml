@@ -181,19 +181,22 @@ services:
       # pg_isready da OK aunque pg_hba rechace la conexión. Aquí solo es sano
       # si el servidor responde por el socket, escucha ya por TCP (lo que
       # descarta el servidor temporal de la inicialización de la imagen) y
-      # existen los cuatro roles y el esquema (se usa la tabla centinela
-      # registro_auditoria). Así, si el script de inicialización falla y el
-      # contenedor se reinicia, la imagen se salta los scripts sin aviso (el
-      # volumen ya no está vacío) y este healthcheck deja el estado visible como
-      # unhealthy. Como el esquema se aplica en una sola transacción, existe
-      # entero o no existe. La lista de roles y el centinela están también en
-      # db/init y deben mantenerse iguales. No se suprime stderr para que el
-      # fallo quede visible en el historial del healthcheck.
+      # existen los cinco roles y lo último que crea la inicialización (se usa
+      # como centinela la función suprimir_denuncias_caducadas, del último
+      # script, 04_supresion.sql). Así, si un script de inicialización falla y
+      # el contenedor se reinicia, la imagen se salta los scripts sin aviso (el
+      # volumen ya no está vacío) y este healthcheck deja el estado visible
+      # como unhealthy. Cada script se aplica en una sola transacción y en
+      # orden, y la inicialización se detiene en el primero que falla: si
+      # existe el centinela del último, se aplicaron todos. La lista de roles y
+      # el centinela están también en db/init y deben mantenerse iguales. No se
+      # suprime stderr para que el fallo quede visible en el historial del
+      # healthcheck.
       test:
         - CMD-SHELL
         - |
-          x=$$(psql -U postgres -d canario -Atc "select current_setting('listen_addresses') || '|' || (select count(*) from pg_roles where rolname in ('migrador','aplicacion','plataforma','propietario_funciones')) || '|' || (to_regclass('canal.registro_auditoria') is not null)::text")
-          case $$x in '*|4|true') exit 0;; *) exit 1;; esac
+          x=$$(psql -U postgres -d canario -Atc "select current_setting('listen_addresses') || '|' || (select count(*) from pg_roles where rolname in ('migrador','aplicacion','plataforma','propietario_funciones','propietario_supresion')) || '|' || (to_regprocedure('canal.suprimir_denuncias_caducadas(integer)') is not null)::text")
+          case $$x in '*|5|true') exit 0;; *) exit 1;; esac
       interval: 10s
       timeout: 5s
       retries: 5

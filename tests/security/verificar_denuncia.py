@@ -59,6 +59,16 @@ mensajes del seguimiento):
   antiguos se siguen leyendo con la suya. Un mensaje cambiado de fila (de la
   misma denuncia o de otra empresa) da 500 y un evento de integridad.
 
+Supresión legal (arts. 32.4 y 26.2 de la Ley 2/2023, gestion
+suprimir-caducadas y la frontera HTTP):
+* Un mensaje que llega mientras se suprime su denuncia espera y recibe el
+  mismo 404 que un código inexistente, no un 500; si la supresión se deshace,
+  se guarda. Tras suprimir, el código responde el mismo 404 byte a byte en el
+  seguimiento y en los mensajes.
+* gestion suprime por lotes, informa solo de recuentos por empresa y
+  artículo, salta una denuncia en uso y lo avisa con código de salida 1, y la
+  suprime en la ejecución siguiente; no imprime códigos ni textos.
+
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
 
@@ -1728,6 +1738,125 @@ def seccion_l():
              "DETAIL" not in registro and hmac_repetido not in registro, control)
 
 
+def seccion_n():
+    # Va después de l): h) busca en el volcado el HMAC de cada código de
+    # CODIGOS, así que estas denuncias, que se suprimen, usan los suyos
+    # propios. Y antes de e), que busca claves también en las salidas de
+    # gestion de esta sección.
+    p("=== n) supresion legal (arts. 32.4 y 26.2)")
+    empresa_a, ident_a, zona_a = EMPRESAS["A"]
+    casos = ("carrera", "art32", "art26", "en_uso")
+    marcas = {c: f"marcador-supresion-{c}-{secrets.token_hex(8)}" for c in casos}
+    respuestas = http([pt("POST", ruta_denuncias(ident_a), {"categoria": "otros", "texto": marcas[c]})
+                       for c in casos])
+    codigos = {c: (json_de(r) or {}).get("codigo_seguimiento") for c, r in zip(casos, respuestas)}
+    if not all(r.get("estado") == 201 for r in respuestas) or not all(codigos.values()):
+        sinc(f"n) no se pudieron crear las denuncias de prueba ({[r.get('estado') for r in respuestas]})")
+        return
+    ids = {c: denuncia_de(v) for c, v in codigos.items()}
+    hoy = f"(now() at time zone '{zona_a}')::date"
+
+    def caducar(caso, intervalo, estado_denuncia="nueva"):
+        # Como superusuario: el trigger de fecha solo actúa al insertar.
+        return sup(f"update canal.denuncia set fecha = ({hoy} - interval '{intervalo}')::date, "
+                   f"estado = '{estado_denuncia}' where id = '{ids[caso]}';").rc == 0
+
+    # n1) Un mensaje llega mientras se suprime su denuncia. La supresión (como
+    #     plataforma, en una transacción abierta) ya la ha borrado y la tiene
+    #     bloqueada: el mensaje espera y, al confirmarse, no la encuentra.
+    #     Debe ser el 404 de un código inexistente, no un 500. Control: si la
+    #     supresión se deshace, el mensaje se guarda (201), y en los dos casos
+    #     se vio a la API esperando.
+    if not caducar("carrera", "4 months"):
+        sinc("n1) no se pudo caducar la denuncia de prueba")
+        return
+    seg_antes = http([seguimiento(codigos["carrera"])])[0]
+    supresion = ("SET ROLE plataforma;\nselect * from canal.suprimir_denuncias_caducadas(100);\nRESET ROLE;")
+    ctl_resp, ctl_visto = retener_y_enviar(supresion, "ROLLBACK", codigos["carrera"], "llega durante la supresion")
+    control = seg_antes.get("estado") == 200 and ctl_resp.get("estado") == 201 and ctl_visto
+    pasa(control, f"n1) control: con la supresion deshecha, el mensaje que esperaba se guarda "
+                  f"({ctl_resp.get('estado')}, se vio a la API esperando: {ctl_visto})")
+    resp, visto = retener_y_enviar(supresion, "COMMIT", codigos["carrera"], "llega durante la supresion")
+    negativo("n1) con la supresion confirmada, el mensaje que esperaba recibe el 404 del codigo inexistente",
+             resp.get("estado") == 404 and resp.get("cuerpo") == CUERPO_404_CODIGO and visto, control,
+             f"respuesta: {resp}; visto: {visto}")
+    restos = sup(f"select (select count(*) from canal.denuncia where id = '{ids['carrera']}') || '|' || "
+                 f"(select count(*) from canal.mensaje where denuncia_id = '{ids['carrera']}') || '|' || "
+                 f"(select count(*) from canal.busqueda_seguimiento where denuncia_id = '{ids['carrera']}') || '|' || "
+                 f"(select string_agg(actor || ':' || accion, ',') from canal.registro_auditoria "
+                 f"where objeto_id = '{ids['carrera']}');").out.strip()
+    negativo(f"n1) no queda nada de la denuncia (ni su mensaje anterior ni su codigo) y la auditoria guarda "
+             f"solo sistema:supresion_art32 ({restos})", restos == "0|0|0|sistema:supresion_art32", control)
+
+    # n2) El código suprimido responde exactamente como uno que nunca existió.
+    aleatorio = base64.b32encode(secrets.token_bytes(20)).decode("ascii")
+    inexistente = "-".join(aleatorio[i:i + 4] for i in range(0, 32, 4))
+    seg_sup, seg_inex, men_sup, men_inex = http([
+        seguimiento(codigos["carrera"]), seguimiento(inexistente),
+        nuevo_mensaje(codigos["carrera"], "hola"), nuevo_mensaje(inexistente, "hola")])
+    control_n2 = seg_antes.get("estado") == 200
+    negativo("n2) seguimiento de un codigo suprimido: el mismo 404, byte a byte, que uno inexistente",
+             seg_sup.get("estado") == 404 and seg_sup.get("cuerpo") == seg_inex.get("cuerpo") == CUERPO_404_CODIGO,
+             control_n2, f"suprimido: {seg_sup}; inexistente: {seg_inex}")
+    negativo("n2) mensaje a un codigo suprimido: el mismo 404, byte a byte, que a uno inexistente",
+             men_sup.get("estado") == 404 and men_sup.get("cuerpo") == men_inex.get("cuerpo") == CUERPO_404_CODIGO,
+             control_n2, f"suprimido: {men_sup}; inexistente: {men_inex}")
+
+    # n3) gestion suprimir-caducadas: art. 32.4 (nueva con 3 meses justos) y
+    #     art. 26.2 (archivada con 10 años); la denuncia "en_uso" la retiene
+    #     otra sesión y se salta. Control: la sesión seguía reteniéndola
+    #     cuando gestion terminó.
+    if not (caducar("art32", "3 months") and caducar("art26", "10 years", "archivada")
+            and caducar("en_uso", "4 months")):
+        sinc("n3) no se pudieron caducar las denuncias de prueba")
+        return
+    retiene = (f"SET application_name = 'n_retiene';\nBEGIN;\n"
+               f"select 1 from canal.denuncia where id = '{ids['en_uso']}' for no key update;\n"
+               "select pg_sleep(60);\nROLLBACK;\n")
+
+    def retenida():
+        return sup("select count(*) from pg_stat_activity where application_name = 'n_retiene' "
+                   "and wait_event = 'PgSleep';").out.strip() == "1"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        futuro = pool.submit(sup, retiene)
+        lista = esperar(retenida, 30)
+        primera = gestion("suprimir-caducadas") if lista else None
+        seguia = retenida()
+        sup("select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'n_retiene';")
+        futuro.result()
+    if primera is None:
+        sinc("n3) la sesion que retiene la denuncia no llego a su pausa")
+        return
+    esperado = [f"suprimidas: empresa_id={empresa_a} articulo=art26 denuncias=1",
+                f"suprimidas: empresa_id={empresa_a} articulo=art32 denuncias=1",
+                "total suprimidas: 2"]
+    aviso = "AVISO: quedan 1 denuncias caducadas que estaban en uso; vuelva a ejecutar suprimir-caducadas"
+    p(f"   gestion (1): codigo {primera.rc}; salida {primera.out.strip().splitlines()}")
+    negativo("n3) gestion suprime art32 y art26, solo con recuentos, salta la denuncia en uso, lo avisa y sale con 1",
+             primera.rc == 1 and primera.out.strip().splitlines() == esperado and aviso in primera.err,
+             seguia, f"stderr: {primera.err.strip()[-300:]!r}")
+    quedan = sup(f"select count(*) from canal.denuncia where id in ('{ids['art32']}', '{ids['art26']}', "
+                 f"'{ids['en_uso']}');").out.strip()
+    negativo(f"n3) de las tres caducadas solo queda la que estaba en uso ({quedan})", quedan == "1", seguia)
+    segunda = gestion("suprimir-caducadas")
+    pasa(segunda.rc == 0 and segunda.out.strip().splitlines() == [
+        f"suprimidas: empresa_id={empresa_a} articulo=art32 denuncias=1", "total suprimidas: 1"],
+         f"n3) liberada, la ejecucion siguiente la suprime y sale con 0 ({segunda.rc}, {segunda.out.strip().splitlines()})")
+    tercera = gestion("suprimir-caducadas")
+    pasa(tercera.rc == 0 and tercera.out.strip().splitlines() == ["total suprimidas: 0"],
+         f"n3) sin nada que suprimir: total 0 y codigo 0 ({tercera.rc}, {tercera.out.strip().splitlines()})")
+    lote_malo = gestion("suprimir-caducadas", "--lote", "0")
+    negativo("n3) un lote fuera de 1..500 se rechaza antes de conectar",
+             lote_malo.rc == 2 and "debe estar entre 1 y 500" in lote_malo.err, tercera.rc == 0,
+             f"codigo {lote_malo.rc}: {lote_malo.err.strip()[-200:]!r}")
+    # Ni códigos, ni textos, ni HMAC en lo que imprime gestion. Control: la
+    # búsqueda sí encuentra lo que gestion imprime de verdad.
+    salidas = "\n".join(r.out + r.err for r in (primera, segunda, tercera))
+    buscadas = list(marcas.values()) + list(codigos.values()) + [hmac_de(c) for c in codigos.values()]
+    negativo("n3) las salidas de gestion no contienen codigos, textos ni HMAC de las denuncias suprimidas",
+             not any(b in salidas for b in buscadas), "total suprimidas" in salidas)
+
+
 def formas(clave_hex):
     """Cómo podría aparecer una clave en un log: hex, hex en mayúsculas, base64
     y la representación de bytes de Python (sin el b'' que la rodea)."""
@@ -1875,7 +2004,7 @@ def main():
         # e) va al final: busca las claves en los logs después de todo lo
         # demás, incluidas las peticiones HTTP.
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_f, seccion_g, seccion_m, seccion_h,
-                        seccion_i, seccion_j, seccion_k, seccion_l, seccion_e):
+                        seccion_i, seccion_j, seccion_k, seccion_l, seccion_n, seccion_e):
             seccion()
     except Parada as e:
         parada = str(e)

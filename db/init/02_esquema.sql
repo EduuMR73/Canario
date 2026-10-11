@@ -29,8 +29,11 @@
 --   hash de la anterior, de modo que cualquier alteración posterior rompe la
 --   cadena y verificar_cadena_auditoria() señala dónde. Los triggers rechazan
 --   UPDATE, DELETE y TRUNCATE.
--- * Ningún DELETE en el sistema: no hay política ni permiso de borrado, y las
---   claves foráneas son ON DELETE NO ACTION.
+-- * Un único camino de borrado: aquí no hay política ni permiso de DELETE
+--   para nadie, y las claves foráneas son ON DELETE NO ACTION. La única
+--   excepción es la supresión que exige la Ley 2/2023 (arts. 32.4 y 26.2),
+--   en 04_supresion.sql: una función con un dueño propio y un criterio fijo,
+--   que solo ejecuta plataforma y que deja evidencia en la auditoría.
 --
 -- Límites asumidos:
 -- * La RLS por variable de sesión no protege frente a una inyección SQL

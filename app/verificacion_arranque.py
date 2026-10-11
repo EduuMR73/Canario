@@ -70,17 +70,20 @@ FUNCIONES_EJECUTABLES = {
     "canal.registrar_codigo(bytea,uuid)",
 }
 
-# Funciones SECURITY DEFINER del esquema canal y su dueño.
+# Funciones SECURITY DEFINER del esquema canal y su dueño. Las de supresión
+# tienen un dueño propio, el único rol con permiso de borrar (04_supresion.sql).
 FUNCIONES_DEFINIDOR = {
     "alta_empresa|propietario_funciones",
     "buscar_codigo|propietario_funciones",
     "registrar_codigo|propietario_funciones",
     "resolver_empresa|propietario_funciones",
+    "suprimir_denuncias_caducadas|propietario_supresion",
+    "contar_denuncias_caducadas|propietario_supresion",
 }
 
 # Todas las políticas del esquema canal:
 # tabla|política|comando|permisiva|roles|USING|WITH CHECK
-# Comandos: r = SELECT, a = INSERT, w = UPDATE.
+# Comandos: r = SELECT, a = INSERT, w = UPDATE, d = DELETE.
 # La condición de todas las políticas de aplicacion salvo la de empresa (que
 # compara id), tal como la devuelve PostgreSQL con search_path = pg_catalog.
 _MISMA_EMPRESA = "(empresa_id = canal.empresa_actual())"
@@ -101,6 +104,15 @@ POLITICAS = {
     f"registro_auditoria|registro_auditoria_insert|a|t|aplicacion||{_MISMA_EMPRESA}",
     "empresa|empresa_select_definidor|r|t|propietario_funciones|true|",
     "empresa|empresa_insert_definidor|a|t|propietario_funciones||true",
+    # Supresión: la de UPDATE solo permite bloquear (WITH CHECK false).
+    "empresa|empresa_select_supresion|r|t|propietario_supresion|true|",
+    "denuncia|denuncia_select_supresion|r|t|propietario_supresion|true|",
+    "denuncia|denuncia_bloqueo_supresion|w|t|propietario_supresion|true|false",
+    "denuncia|denuncia_delete_supresion|d|t|propietario_supresion|true|",
+    "mensaje|mensaje_select_supresion|r|t|propietario_supresion|true|",
+    "mensaje|mensaje_delete_supresion|d|t|propietario_supresion|true|",
+    "registro_auditoria|registro_auditoria_select_supresion|r|t|propietario_supresion|true|",
+    "registro_auditoria|registro_auditoria_insert_supresion|a|t|propietario_supresion||true",
 }
 
 # Consultas. Se ejecutan con search_path = pg_catalog (SET LOCAL), para que
@@ -264,6 +276,14 @@ def comprobar(conexion):
         "where rolname = 'propietario_funciones'").fetchone()
     exigir("propietario_funciones", duenio == (False, False, False),
            f"super, bypassrls, login = {duenio}")
+    # Lo mismo para el dueño de la supresión, el único rol que puede borrar:
+    # con BYPASSRLS o login, ese permiso dejaría de estar encerrado en su
+    # función.
+    supresion = conexion.execute(
+        "select rolsuper, rolbypassrls, rolcanlogin from pg_roles "
+        "where rolname = 'propietario_supresion'").fetchone()
+    exigir("propietario_supresion", supresion == (False, False, False),
+           f"super, bypassrls, login = {supresion}")
 
     politicas = _conjunto(conexion, SQL_POLITICAS)
     exigir("politicas", politicas == POLITICAS, _diferencia(politicas, POLITICAS))

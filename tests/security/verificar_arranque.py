@@ -102,6 +102,8 @@ DESVIACIONES = [
      "ALTER FUNCTION canal.resolver_empresa(text) OWNER TO propietario_funciones;"),
     ("propietario_funciones", "ALTER ROLE propietario_funciones BYPASSRLS;",
      "ALTER ROLE propietario_funciones NOBYPASSRLS;"),
+    ("propietario_supresion", "ALTER ROLE propietario_supresion BYPASSRLS;",
+     "ALTER ROLE propietario_supresion NOBYPASSRLS;"),
     ("politicas", "CREATE POLICY prueba_permisiva ON canal.denuncia FOR SELECT TO aplicacion USING (true);",
      "DROP POLICY prueba_permisiva ON canal.denuncia;"),
     ("search_path", "ALTER ROLE aplicacion IN DATABASE canario SET search_path = canal, pg_catalog;",
