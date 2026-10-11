@@ -7,9 +7,11 @@ arrancar, que la estructura, las políticas RLS y los permisos coinciden con
 unos oráculos escritos aquí como literales (no derivados del SQL), que una
 empresa no puede ver ni tocar los datos de otra, que los permisos por columna
 se cumplen, que la auditoría es encadenada e inmutable (con recálculo
-independiente del hash en Python), que el bloqueo por empresa y el healthcheck
-se comportan como se espera, y que las funciones de definidor hacen solo lo que
-deben (también frente a un search_path hostil). Cada prueba negativa lleva su
+independiente del hash en Python), que la fecha de una denuncia y de una fila
+de auditoría es el día en la zona horaria de su empresa (sin depender de la
+fecha del INSERT ni de la zona de la sesión), que el bloqueo por empresa y el
+healthcheck se comportan como se espera, y que las funciones de definidor hacen
+solo lo que deben (también frente a un search_path hostil). Cada prueba negativa lleva su
 control positivo: si el control falla, el resultado es SIN CONCLUSION, nunca
 PASA.
 
@@ -87,13 +89,14 @@ TABLAS = ["busqueda_seguimiento", "clave_empresa", "denuncia", "directorio_empre
 TABLAS_RLS = ["clave_empresa", "denuncia", "empresa", "mensaje", "registro_auditoria", "usuario_personal"]
 TABLAS_SIN_RLS = ["busqueda_seguimiento", "directorio_empresas"]
 COLUMNAS = {
-    "empresa": ["id", "nombre", "activa", "fecha_alta"],
+    "empresa": ["id", "nombre", "activa", "fecha_alta", "zona_horaria"],
     "directorio_empresas": ["identificador_publico", "empresa_id"],
     "clave_empresa": ["empresa_id", "version", "clave_envuelta"],
     "usuario_personal": ["empresa_id", "id", "email", "hash_contrasena", "rol", "secreto_totp_cifrado",
                          "totp_activo", "intentos_fallidos", "bloqueado_hasta", "activo"],
-    "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "categoria", "contenido_cifrado", "version_clave"],
-    "mensaje": ["empresa_id", "denuncia_id", "secuencia", "autor", "autor_id", "contenido_cifrado", "version_clave"],
+    # Sin categoria: va dentro de contenido_cifrado.
+    "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "contenido_cifrado", "version_clave"],
+    "mensaje": ["empresa_id", "denuncia_id", "secuencia", "id", "autor", "autor_id", "contenido_cifrado", "version_clave"],
     "busqueda_seguimiento": ["codigo_hmac", "empresa_id", "denuncia_id"],
     "registro_auditoria": ["empresa_id", "secuencia", "fecha", "actor", "accion", "objeto_id", "hash_anterior", "hash"],
 }
@@ -175,7 +178,7 @@ PRIVILEGIOS_COLUMNA = {
     "plataforma": {},
     "propietario_funciones": {
         ("empresa", "SELECT"): {"id", "activa"},
-        ("empresa", "INSERT"): {"nombre"},
+        ("empresa", "INSERT"): {"nombre", "zona_horaria"},
         ("directorio_empresas", "INSERT"): {"empresa_id"},
     },
 }
@@ -193,12 +196,13 @@ FUNCIONES_CATALOGO = {
     "asignar_secuencia_mensaje": ("migrador", "f", "v", "canal.asignar_secuencia_mensaje()"),
     "empresa_actual": ("migrador", "f", "s", "canal.empresa_actual()"),
     "encadenar_auditoria": ("migrador", "f", "v", "canal.encadenar_auditoria()"),
+    "fijar_fecha_denuncia": ("migrador", "f", "v", "canal.fijar_fecha_denuncia()"),
     "rechazar_modificacion_auditoria": ("migrador", "f", "v", "canal.rechazar_modificacion_auditoria()"),
     "verificar_cadena_auditoria": ("migrador", "f", "s", "canal.verificar_cadena_auditoria()"),
     "resolver_empresa": ("propietario_funciones", "t", "s", "canal.resolver_empresa(text)"),
     "buscar_codigo": ("propietario_funciones", "t", "s", "canal.buscar_codigo(bytea)"),
     "registrar_codigo": ("propietario_funciones", "t", "v", "canal.registrar_codigo(bytea,uuid)"),
-    "alta_empresa": ("propietario_funciones", "t", "v", "canal.alta_empresa(text)"),
+    "alta_empresa": ("propietario_funciones", "t", "v", "canal.alta_empresa(text,text)"),
 }
 FUNCIONES_DEFINIDOR = ["resolver_empresa", "buscar_codigo", "registrar_codigo", "alta_empresa"]
 CONFIG_DEFINIDOR = "search_path=pg_catalog, canal, pg_temp"
@@ -208,6 +212,7 @@ EXECUTE_ESPERADO = {
     "asignar_secuencia_mensaje": set(),
     "empresa_actual": {"aplicacion", "propietario_funciones"},
     "encadenar_auditoria": set(),
+    "fijar_fecha_denuncia": set(),
     "rechazar_modificacion_auditoria": set(),
     "verificar_cadena_auditoria": {"aplicacion"},
     "resolver_empresa": {"aplicacion", "propietario_funciones"},
@@ -216,6 +221,7 @@ EXECUTE_ESPERADO = {
     "alta_empresa": {"plataforma", "propietario_funciones"},
 }
 TRIGGERS = [
+    "denuncia|denuncia_fecha|O",
     "mensaje|mensaje_secuencia|O",
     "registro_auditoria|auditoria_encadenar|O",
     "registro_auditoria|auditoria_inmutable_fila|O",
@@ -427,6 +433,12 @@ select c.relname,
     comparar("c) conjunto exacto de claves foraneas (todas ON DELETE NO ACTION)", r.lineas(), CLAVES_FORANEAS)
     r = sup("select pg_get_constraintdef(oid) from pg_constraint where contype = 'u' and conrelid = 'canal.usuario_personal'::regclass;")
     comparar("c) UNIQUE (empresa_id, email) en usuario_personal", r.lineas(), ["UNIQUE (empresa_id, email)"])
+    r = sup("select pg_get_constraintdef(oid) from pg_constraint where contype = 'u' and conrelid = 'canal.mensaje'::regclass;")
+    comparar("c) UNIQUE (empresa_id, denuncia_id, id) en mensaje", r.lineas(), ["UNIQUE (empresa_id, denuncia_id, id)"])
+    r = sup("select pg_get_constraintdef(oid) from pg_constraint "
+            "where conname = 'empresa_zona_horaria_check' and conrelid = 'canal.empresa'::regclass;")
+    comparar("c) CHECK de zona_horaria en empresa: solo las zonas de Espana", r.lineas(),
+             ["CHECK ((zona_horaria = ANY (ARRAY['Europe/Madrid'::text, 'Atlantic/Canary'::text, 'Africa/Ceuta'::text])))"])
     r = sup("select c.relname, c.relrowsecurity, c.relforcerowsecurity from pg_class c "
             "join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'canal' and c.relkind = 'r';")
     esperado = [f"{t}|t|t" for t in TABLAS_RLS] + [f"{t}|f|f" for t in TABLAS_SIN_RLS]
@@ -535,7 +547,7 @@ def seccion_f():
     r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef, p.provolatile, p.oid::regprocedure::text "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
     esperado = [f"{f}|{d}|{s}|{v}|{firma}" for f, (d, s, v, firma) in FUNCIONES_CATALOGO.items()]
-    comparar("f) exactamente las 9 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
+    comparar("f) exactamente las 10 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
     r = sup("select p.proname, c from pg_proc p join pg_namespace n on n.oid = p.pronamespace, unnest(p.proconfig) c "
             "where n.nspname = 'canal' and p.prosecdef;")
     comparar("f) las 4 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
@@ -550,10 +562,10 @@ def seccion_f():
     for rol in ROLES:
         for f in FUNCIONES_CATALOGO:
             esperado.append(f"{rol}|{f}|{'true' if rol in EXECUTE_ESPERADO[f] else 'false'}")
-    comparar("f) matriz de EXECUTE de los 3 roles sobre las 9 funciones", r.lineas(), esperado)
+    comparar("f) matriz de EXECUTE de los 3 roles sobre las 10 funciones", r.lineas(), esperado)
     r = sup("select c.relname, t.tgname, t.tgenabled from pg_trigger t join pg_class c on c.oid = t.tgrelid "
             "join pg_namespace n on n.oid = c.relnamespace where not t.tgisinternal and n.nspname = 'canal';")
-    comparar("f) los 4 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
+    comparar("f) los 5 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
     # control de privilegios por defecto: una funcion nueva de migrador no hereda EXECUTE de PUBLIC
     try:
         r = sup("SET ROLE migrador;\n"
@@ -579,11 +591,11 @@ INSERT INTO canal.usuario_personal (empresa_id, id, email, hash_contrasena, rol)
     ('{EMPRESA_A}', '{INSTR_A}', 'luis@ejemplo.test', 'x', 'instructor'),
     ('{EMPRESA_B}', '{ADMIN_B}', 'ana@ejemplo.test', 'x', 'admin'),
     ('{EMPRESA_B}', '{INSTR_B}', 'eva@ejemplo.test', 'x', 'instructor');
-INSERT INTO canal.denuncia (empresa_id, id, categoria, contenido_cifrado, version_clave, asignada_a) VALUES
-    ('{EMPRESA_A}', '{DEN_A1}', 'acoso', {BYTES_FALSOS}, 1, '{INSTR_A}'),
-    ('{EMPRESA_A}', '{DEN_A2}', 'fraude', {BYTES_FALSOS}, 1, NULL),
-    ('{EMPRESA_B}', '{DEN_B1}', 'acoso', {BYTES_FALSOS}, 1, NULL),
-    ('{EMPRESA_B}', '{DEN_B2}', 'fraude', {BYTES_FALSOS}, 1, NULL);
+INSERT INTO canal.denuncia (empresa_id, id, contenido_cifrado, version_clave, asignada_a) VALUES
+    ('{EMPRESA_A}', '{DEN_A1}', {BYTES_FALSOS}, 1, '{INSTR_A}'),
+    ('{EMPRESA_A}', '{DEN_A2}', {BYTES_FALSOS}, 1, NULL),
+    ('{EMPRESA_B}', '{DEN_B1}', {BYTES_FALSOS}, 1, NULL),
+    ('{EMPRESA_B}', '{DEN_B2}', {BYTES_FALSOS}, 1, NULL);
 INSERT INTO canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) VALUES
     ('{EMPRESA_A}', '{DEN_A1}', 'denunciante', {BYTES_FALSOS}, 1),
     ('{EMPRESA_A}', '{DEN_A1}', 'denunciante', {BYTES_FALSOS}, 1),
@@ -642,7 +654,7 @@ def seccion_i():
     else:
         pasa(valor(r) == "0", f"i) con contexto A, UPDATE de B1 afecta {valor(r)} filas (esperado 0)")
     inserciones = {
-        "denuncia": lambda e, d: f"insert into canal.denuncia (empresa_id, categoria, contenido_cifrado, version_clave) values ('{e}', 'c', {BYTES_FALSOS}, 1);",
+        "denuncia": lambda e, d: f"insert into canal.denuncia (empresa_id, contenido_cifrado, version_clave) values ('{e}', {BYTES_FALSOS}, 1);",
         "mensaje": lambda e, d: f"insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) values ('{e}', '{d}', 'denunciante', {BYTES_FALSOS}, 1);",
         "usuario_personal": lambda e, d: f"insert into canal.usuario_personal (empresa_id, email, hash_contrasena, rol) values ('{e}', 'nuevo@ejemplo.test', 'x', 'admin');",
         "clave_empresa": lambda e, d: f"insert into canal.clave_empresa (empresa_id, version, clave_envuelta) values ('{e}', 2, {BYTES_FALSOS});",
@@ -728,7 +740,7 @@ def seccion_k():
             p(f"   ajena:       {a.strip()!r}\n   inexistente: {b.strip()!r}")
     # k2 bis: denuncia.asignada_a
     def denuncia(asignada):
-        return f"insert into canal.denuncia (empresa_id, categoria, contenido_cifrado, version_clave, asignada_a) values ('{EMPRESA_A}', 'c', {BYTES_FALSOS}, 1, '{asignada}');"
+        return f"insert into canal.denuncia (empresa_id, contenido_cifrado, version_clave, asignada_a) values ('{EMPRESA_A}', {BYTES_FALSOS}, 1, '{asignada}');"
     ajena = app(denuncia(INSTR_B), ctx=EMPRESA_A)
     inexistente = app(denuncia(str(uuid.uuid4())), ctx=EMPRESA_A)
     ctl = app(denuncia(INSTR_A), ctx=EMPRESA_A, final="ROLLBACK")
@@ -814,7 +826,7 @@ def seccion_m():
 def seccion_n():
     p("=== n) mensajes")
     cuerpo = f"""
-insert into canal.denuncia (empresa_id, id, categoria, contenido_cifrado, version_clave) values ('{EMPRESA_A}', '{DEN_A3}', 'c', {BYTES_FALSOS}, 1);
+insert into canal.denuncia (empresa_id, id, contenido_cifrado, version_clave) values ('{EMPRESA_A}', '{DEN_A3}', {BYTES_FALSOS}, 1);
 insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) values ('{EMPRESA_A}', '{DEN_A2}', 'denunciante', {BYTES_FALSOS}, 1) returning secuencia;
 insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) values ('{EMPRESA_A}', '{DEN_A2}', 'denunciante', {BYTES_FALSOS}, 1) returning secuencia;
 insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) values ('{EMPRESA_A}', '{DEN_A2}', 'denunciante', {BYTES_FALSOS}, 1) returning secuencia;
@@ -884,8 +896,10 @@ def seccion_o():
     pasa(r.lineas() == ["3", "4", "5"], f"o) tres INSERT continuan la secuencia sin huecos ({r.lineas()}) {r.err.strip()[:200]}")
     r = app(f"insert into canal.registro_auditoria (empresa_id, secuencia, fecha, actor, accion, hash) values "
             f"('{EMPRESA_A}', 999, '2001-01-01', 'prueba', 'falsificada', '\\x00') "
-            "returning secuencia, fecha = current_date, hash <> '\\x00'::bytea;", ctx=EMPRESA_A)
-    pasa(r.lineas() == ["6|t|t"], f"o) INSERT con secuencia, fecha y hash falsos queda con secuencia 6, fecha de hoy y otro hash ({r.lineas()})")
+            "returning secuencia, fecha = (now() at time zone 'Europe/Madrid')::date, hash <> '\\x00'::bytea;", ctx=EMPRESA_A)
+    pasa(r.lineas() == ["6|t|t"],
+         f"o) INSERT con secuencia, fecha y hash falsos queda con secuencia 6, el dia de hoy en la zona de A "
+         f"(Europe/Madrid) y otro hash ({r.lineas()})")
     pasa(verificar_cadena(EMPRESA_A) == "NULL", f"o) verificar_cadena_auditoria() con contexto A = NULL ({verificar_cadena(EMPRESA_A)})")
     comprobar_python(EMPRESA_A, "empresa A")
     comprobar_python(EMPRESA_B, "empresa B")
@@ -921,6 +935,107 @@ def seccion_o():
             "where c.relname = 'registro_auditoria' and not t.tgisinternal;")
     comparar("o) los tres triggers de auditoria en tgenabled = 'O'", r.lineas(), [t for t in TRIGGERS if t.startswith("registro_auditoria")])
     comprobar_python(EMPRESA_A, "empresa A tras restaurar")
+
+
+def zona_con_otro_dia():
+    """Una zona horaria en la que ahora mismo es otro día que en Madrid.
+
+    now() no se puede fijar, así que la prueba busca un instante en que los
+    días difieran: Kiritimati (UTC+14) va por delante y Pago Pago (UTC-11) por
+    detrás. En cualquier instante, al menos una de las dos está en un día
+    distinto del de Madrid (UTC+1 o UTC+2). Devuelve (zona, None) o
+    (None, motivo) si no se pudo determinar.
+    """
+    r = sup("select (now() at time zone 'Europe/Madrid')::date || '|' || "
+            "(now() at time zone 'Pacific/Kiritimati')::date || '|' || "
+            "(now() at time zone 'Pacific/Pago_Pago')::date;")
+    partes = valor(r).split("|")
+    if len(partes) != 3:
+        return None, f"no se pudieron leer las fechas: {r.todo.strip()[:200]!r}"
+    madrid, kiritimati, pago_pago = partes
+    if kiritimati != madrid:
+        return "Pacific/Kiritimati", None
+    if pago_pago != madrid:
+        return "Pacific/Pago_Pago", None
+    return None, f"ninguna zona da otro dia ({partes})"
+
+
+def seccion_z():
+    p("=== z) fecha de recepcion: el dia en la zona horaria de la empresa")
+    zona, motivo = zona_con_otro_dia()
+    if zona is None:
+        sinc(f"z) no hay zona de control: {motivo}")
+        return
+    p(f"   zona de control (otro dia que Madrid ahora mismo): {zona}")
+
+    # 1) Como aplicacion, con la zona de la sesion cambiada y una fecha falsa
+    #    en el INSERT: la fecha guardada es la de Madrid (zona de A). Control:
+    #    en esa sesion current_date es otro dia, asi que la prueba distingue.
+    den = str(uuid.uuid4())
+    r = app(f"SET LOCAL TIME ZONE '{zona}';\n"
+            f"insert into canal.denuncia (empresa_id, id, fecha, contenido_cifrado, version_clave) "
+            f"values ('{EMPRESA_A}', '{den}', '2001-01-01', {BYTES_FALSOS}, 1) "
+            "returning fecha::text || '|' || current_date::text || '|' "
+            "|| (now() at time zone 'Europe/Madrid')::date::text;", ctx=EMPRESA_A, final="ROLLBACK")
+    partes = valor(r).split("|")
+    if len(partes) != 3 or not sin_error(r):
+        sinc(f"z) no se pudo insertar la denuncia de prueba: {r.err.strip()[:300]!r}")
+    else:
+        fecha, dia_sesion, dia_madrid = partes
+        negativo_valor("z) la fecha de la denuncia es el dia de Madrid: ignora la fecha del INSERT y la zona "
+                       f"de la sesion (fecha {fecha}, Madrid {dia_madrid}, sesion {dia_sesion})",
+                       fecha == dia_madrid and fecha != "2001-01-01", dia_sesion != dia_madrid)
+
+    # 2) La zona que manda es la de la empresa. Como superusuario y en una
+    #    transaccion que se deshace: se quita el CHECK, se pone a B la zona de
+    #    control y se inserta una denuncia y una fila de auditoria de B. Control:
+    #    en esa zona es otro dia que en Madrid.
+    den = str(uuid.uuid4())
+    r = sup(f"""BEGIN;
+ALTER TABLE canal.empresa DROP CONSTRAINT empresa_zona_horaria_check;
+UPDATE canal.empresa SET zona_horaria = '{zona}' WHERE id = '{EMPRESA_B}';
+INSERT INTO canal.denuncia (empresa_id, id, contenido_cifrado, version_clave)
+     VALUES ('{EMPRESA_B}', '{den}', {BYTES_FALSOS}, 1)
+  RETURNING 'denuncia|' || fecha::text || '|' || (now() at time zone '{zona}')::date::text
+            || '|' || (now() at time zone 'Europe/Madrid')::date::text;
+INSERT INTO canal.registro_auditoria (empresa_id, actor, accion)
+     VALUES ('{EMPRESA_B}', 'prueba', 'zona')
+  RETURNING 'auditoria|' || fecha::text || '|' || (now() at time zone '{zona}')::date::text
+            || '|' || (now() at time zone 'Europe/Madrid')::date::text;
+ROLLBACK;
+""")
+    filas = {l.split("|")[0]: l.split("|")[1:] for l in r.lineas() if "|" in l}
+    for tabla in ("denuncia", "auditoria"):
+        datos = filas.get(tabla)
+        if not datos or len(datos) != 3:
+            sinc(f"z) {tabla}: no se pudo insertar con la zona de control: {r.err.strip()[:300]!r}")
+            continue
+        fecha, dia_zona, dia_madrid = datos
+        negativo_valor(f"z) {tabla}: con la empresa en {zona}, la fecha es el dia de esa zona y no el de Madrid "
+                       f"(fecha {fecha}, zona {dia_zona}, Madrid {dia_madrid})",
+                       fecha == dia_zona, dia_zona != dia_madrid)
+
+    # 3) Tras el ROLLBACK, el CHECK y la zona de B vuelven a ser los de antes.
+    r = sup("select count(*) from pg_constraint where conname = 'empresa_zona_horaria_check';\n"
+            f"select zona_horaria from canal.empresa where id = '{EMPRESA_B}';")
+    pasa(r.lineas() == ["1", "Europe/Madrid"],
+         f"z) tras el ROLLBACK siguen el CHECK y la zona Europe/Madrid de B ({r.lineas()})")
+
+    # 4) El CHECK rechaza una zona fuera de la lista, incluso al superusuario.
+    #    Control: una zona de la lista se acepta (y se deshace).
+    ctl = sup(f"BEGIN;\nUPDATE canal.empresa SET zona_horaria = 'Atlantic/Canary' WHERE id = '{EMPRESA_B}';\nROLLBACK;\n")
+    for zona_mala in ("UTC", "Europe/London", "europe/madrid", ""):
+        negativo(f"z) zona horaria {zona_mala!r}",
+                 sup(f"UPDATE canal.empresa SET zona_horaria = '{zona_mala}' WHERE id = '{EMPRESA_B}';"),
+                 "violates check constraint", sin_error(ctl))
+
+
+def negativo_valor(nombre, cond, control_ok):
+    """Como negativo(), pero sobre una condición ya evaluada."""
+    if not control_ok:
+        sinc(f"{nombre}: el control positivo fallo")
+        return
+    pasa(cond, nombre)
 
 
 def seccion_p():
@@ -1097,7 +1212,7 @@ def seccion_v():
     foto = {"A": conteos_contexto(EMPRESA_A), "B": conteos_contexto(EMPRESA_B)}
     FOTO_PREVIA = foto if all(len(v) == len(TABLAS_RLS) for v in foto.values()) else None
     p(f"   foto previa de conteos: {FOTO_PREVIA}")
-    alta = cliente_red("select * from canal.alta_empresa('Empresa Nueva');", "plataforma")
+    alta = cliente_red("select * from canal.alta_empresa('Empresa Nueva', 'Atlantic/Canary');", "plataforma")
     p(f"alta_empresa por login real de plataforma: {len(alta.lineas())} fila(s); stderr={alta.err.strip()[:200]!r}")
     fila = alta.lineas()[0] if alta.lineas() else ""
     encaje = re.fullmatch(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\|([0-9a-f]{32})", fila)
@@ -1105,11 +1220,23 @@ def seccion_v():
     if encaje:
         r = app(f"select coalesce(canal.resolver_empresa('{encaje.group(2)}')::text, 'NULL');")
         pasa(valor(r) == encaje.group(1), "v) control: resolver_empresa(identificador) como aplicacion devuelve ese uuid")
+        r = sup(f"select zona_horaria from canal.empresa where id = '{encaje.group(1)}';")
+        pasa(valor(r) == "Atlantic/Canary", f"v) la empresa nueva guarda la zona pedida, no la de por defecto ({valor(r)})")
     control_alta = encaje is not None and sin_error(alta)
-    negativo("v) nombre vacio", cliente_red("select * from canal.alta_empresa('');", "plataforma"),
+    negativo("v) nombre vacio", cliente_red("select * from canal.alta_empresa('', 'Europe/Madrid');", "plataforma"),
              "violates check constraint", control_alta)
-    negativo("v) nombre de 201 caracteres", cliente_red(f"select * from canal.alta_empresa('{'x' * 201}');", "plataforma"),
+    negativo("v) nombre de 201 caracteres",
+             cliente_red(f"select * from canal.alta_empresa('{'x' * 201}', 'Europe/Madrid');", "plataforma"),
              "violates check constraint", control_alta)
+    negativo("v) zona horaria fuera de Espana (UTC)",
+             cliente_red("select * from canal.alta_empresa('Empresa UTC', 'UTC');", "plataforma"),
+             "violates check constraint", control_alta)
+    negativo("v) zona horaria NULL",
+             cliente_red("select * from canal.alta_empresa('Empresa sin zona', NULL);", "plataforma"),
+             "violates not-null constraint", control_alta)
+    negativo("v) la firma antigua alta_empresa(text) ya no existe",
+             cliente_red("select * from canal.alta_empresa('Empresa antigua');", "plataforma"),
+             "function canal.alta_empresa(unknown) does not exist", control_alta)
     # plataforma no puede leer ninguna tabla ni ejecutar las funciones de la aplicacion
     r = cliente_red("\n".join(f"select count(*) from canal.{t};" for t in TABLAS), "plataforma")
     for t in TABLAS:
@@ -1119,7 +1246,7 @@ def seccion_v():
                     "select canal.verificar_cadena_auditoria();\nselect canal.empresa_actual();\n", "plataforma")
     for f in ("resolver_empresa", "buscar_codigo", "registrar_codigo", "verificar_cadena_auditoria", "empresa_actual"):
         negativo(f"v) plataforma: ejecutar {f}", r, f"permission denied for function {f}", control_alta)
-    negativo("v) aplicacion: ejecutar alta_empresa", app("select * from canal.alta_empresa('Intrusa');"),
+    negativo("v) aplicacion: ejecutar alta_empresa", app("select * from canal.alta_empresa('Intrusa', 'Europe/Madrid');"),
              "permission denied for function alta_empresa", control_alta)
     negativo("v) login de red como propietario_funciones", cliente_literal("propietario_funciones", "select 1;"),
              "rejects connection", control_alta)
@@ -1232,7 +1359,7 @@ def seccion_r():
     pasa(len(politicas) == 15 and len(tablas_con_politicas) == 6,
          f"r) exactamente 15 politicas repartidas en exactamente 6 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
     funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
-    comparar("r) siguen las 9 funciones", funciones, list(FUNCIONES_CATALOGO))
+    comparar("r) siguen las 10 funciones", funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
 
 
@@ -1317,7 +1444,7 @@ def main():
         seccion_a()
         CID = dc("ps", "-q", "postgres").out.strip()
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p, seccion_q,
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_z, seccion_p, seccion_q,
                         seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_r):
             seccion()
     except Parada as e:

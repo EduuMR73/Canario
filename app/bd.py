@@ -151,13 +151,20 @@ def fijar_contexto(conexion, empresa_id):
 
 
 @contextmanager
-def transaccion_empresa(pool, empresa_id):
-    """Transacción con el contexto de una empresa fijado."""
+def transaccion_empresa(pool, empresa_id, solo_lectura=False):
+    """Transacción con el contexto de una empresa fijado.
+
+    solo_lectura: para los caminos que solo consultan (el seguimiento del
+    denunciante). Un error del código no puede escribir nada.
+    """
     # Se valida antes de pedir una conexión al pool: un valor inválido no
     # llega a ocupar ninguna.
     if not isinstance(empresa_id, uuid.UUID):
         raise TypeError("empresa_id debe ser uuid.UUID")
     with pool.connection() as conexion, conexion.transaction():
+        # Tiene que ser la primera sentencia de la transacción.
+        if solo_lectura:
+            conexion.execute("set transaction read only")
         fijar_contexto(conexion, empresa_id)
         yield conexion
 

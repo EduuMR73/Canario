@@ -56,11 +56,11 @@ BEGIN;
 -- dueño necesita EXECUTE sobre empresa_actual().
 GRANT EXECUTE ON FUNCTION canal.empresa_actual() TO propietario_funciones;
 
--- alta_empresa inserta una empresa y devuelve su id, y resolver_empresa lee si
--- está activa. Solo esas columnas, y políticas explícitas porque la tabla
--- tiene RLS con FORCE.
+-- alta_empresa inserta una empresa (nombre y zona horaria) y devuelve su id, y
+-- resolver_empresa lee si está activa. Solo esas columnas, y políticas
+-- explícitas porque la tabla tiene RLS con FORCE.
 GRANT SELECT (id, activa) ON canal.empresa TO propietario_funciones;
-GRANT INSERT (nombre) ON canal.empresa TO propietario_funciones;
+GRANT INSERT (nombre, zona_horaria) ON canal.empresa TO propietario_funciones;
 CREATE POLICY empresa_select_definidor ON canal.empresa
     FOR SELECT TO propietario_funciones
     USING (true);
@@ -142,14 +142,18 @@ GRANT EXECUTE ON FUNCTION canal.registrar_codigo(bytea, uuid) TO aplicacion;
 -- identificador público. Una sola sentencia con CTE: la clave foránea se
 -- comprueba al final, con las dos filas ya insertadas. Solo la ejecuta
 -- plataforma. No crea clave ni administrador (ver la cabecera).
-CREATE FUNCTION canal.alta_empresa(p_nombre text)
+-- La zona horaria es obligatoria y explícita, sin valor por defecto en la
+-- firma: quien da de alta decide el calendario de la empresa. El CHECK de la
+-- tabla rechaza cualquier zona que no sea de España, y NULL lo rechaza NOT
+-- NULL.
+CREATE FUNCTION canal.alta_empresa(p_nombre text, p_zona_horaria text)
 RETURNS TABLE (empresa_id uuid, identificador_publico text)
 LANGUAGE sql SECURITY DEFINER
 SET search_path = pg_catalog, canal, pg_temp
 AS $$
     with nueva as (
-        insert into canal.empresa (nombre)
-        values (p_nombre)
+        insert into canal.empresa (nombre, zona_horaria)
+        values (p_nombre, p_zona_horaria)
         returning id
     ),
     registrada as (
@@ -159,8 +163,8 @@ AS $$
     )
     select r.empresa_id, r.identificador_publico from registrada r
 $$;
-REVOKE EXECUTE ON FUNCTION canal.alta_empresa(text) FROM PUBLIC;
-ALTER FUNCTION canal.alta_empresa(text) OWNER TO propietario_funciones;
-GRANT EXECUTE ON FUNCTION canal.alta_empresa(text) TO plataforma;
+REVOKE EXECUTE ON FUNCTION canal.alta_empresa(text, text) FROM PUBLIC;
+ALTER FUNCTION canal.alta_empresa(text, text) OWNER TO propietario_funciones;
+GRANT EXECUTE ON FUNCTION canal.alta_empresa(text, text) TO plataforma;
 
 COMMIT;

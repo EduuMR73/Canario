@@ -7,8 +7,11 @@ dar de alta empresas.
 
 Uso (PowerShell, desde la raíz del repositorio, con postgres en marcha):
 
-    docker compose run --rm gestion alta-empresa --nombre "Empresa S.L."
+    docker compose run --rm gestion alta-empresa --nombre "Empresa S.L." --zona Europe/Madrid
     docker compose run --rm gestion nueva-clave --empresa-id <uuid>
+
+La zona horaria es obligatoria: fija el calendario con el que se fechan las
+denuncias de la empresa (docs/threat-model.md, 6.5).
 
 alta-empresa hace dos pasos con dos roles distintos, a propósito:
 1. Con plataforma, canal.alta_empresa(): empresa y entrada del directorio.
@@ -47,7 +50,10 @@ import psycopg
 
 from app import bd, claves, cripto, verificacion_arranque
 
-SQL_ALTA = "select empresa_id, identificador_publico from canal.alta_empresa(%s)"
+SQL_ALTA = "select empresa_id, identificador_publico from canal.alta_empresa(%s, %s)"
+# Misma lista que el CHECK de canal.empresa.zona_horaria. La autoridad es la
+# base de datos; esta copia solo da un error claro antes de conectar.
+ZONAS_HORARIAS = ("Europe/Madrid", "Atlantic/Canary", "Africa/Ceuta")
 SQL_EMPRESA_VISIBLE = "select count(*) from canal.empresa"
 SQL_CLAVES = "select version, clave_envuelta from canal.clave_empresa order by version"
 SQL_INSERTAR_CLAVE = (
@@ -97,10 +103,10 @@ def nueva_clave(empresa_id, maestra):
     return version
 
 
-def alta_empresa(nombre, maestra):
+def alta_empresa(nombre, zona_horaria, maestra):
     with (bd.conectar("plataforma", bd.FICHERO_CONTRASENA_PLATAFORMA) as conexion,
           conexion.transaction()):
-        empresa_id, identificador = conexion.execute(SQL_ALTA, [nombre]).fetchone()
+        empresa_id, identificador = conexion.execute(SQL_ALTA, [nombre, zona_horaria]).fetchone()
     print(f"empresa creada: empresa_id={empresa_id} identificador_publico={identificador}")
     try:
         version = nueva_clave(empresa_id, maestra)
@@ -132,6 +138,8 @@ def construir_parser():
     ordenes = parser.add_subparsers(dest="orden", required=True)
     alta = ordenes.add_parser("alta-empresa", help="da de alta una empresa con su clave version 1")
     alta.add_argument("--nombre", required=True)
+    alta.add_argument("--zona", required=True, choices=ZONAS_HORARIAS,
+                      help="zona horaria de la empresa: fija el calendario de sus fechas")
     clave = ordenes.add_parser("nueva-clave", help="crea la version siguiente de la clave de una empresa")
     clave.add_argument("--empresa-id", required=True, type=_uuid)
     return parser
@@ -142,7 +150,7 @@ def main(argv=None):
     try:
         maestra = claves.cargar_maestra()
         if args.orden == "alta-empresa":
-            alta_empresa(args.nombre, maestra)
+            alta_empresa(args.nombre, args.zona, maestra)
         else:
             version = nueva_clave(args.empresa_id, maestra)
             print(f"clave creada: empresa_id={args.empresa_id} version={version}")

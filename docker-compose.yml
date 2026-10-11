@@ -129,6 +129,12 @@ services:
       # podría contener datos sensibles.
       - -c
       - log_min_error_statement=panic
+      # terse: el log del servidor no lleva DETAIL, HINT, QUERY ni CONTEXT. Un
+      # DETAIL repite valores de la fila (por ejemplo "Key (codigo_hmac)=(...)"
+      # en un duplicado o la fila entera en un CHECK). Solo cambia el log del
+      # servidor: el cliente sigue recibiendo el error completo.
+      - -c
+      - log_error_verbosity=terse
     environment:
       POSTGRES_DB: canario
       # La contraseña del superusuario se lee de un secreto de fichero, no de

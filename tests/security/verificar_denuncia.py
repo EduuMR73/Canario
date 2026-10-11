@@ -16,10 +16,30 @@ app/gestion.py y el arranque de app/principal.py). Qué prueba:
   base de datos que no es la esperada, y deja visible un alta a medias con el
   comando para completarla; y que la API no tiene el secreto de plataforma.
 * Que ninguna clave (maestra, HMAC y las claves de empresa desenvueltas)
-  aparece en los logs de la API ni de PostgreSQL ni en las salidas de
+  aparece en los logs de la API, PostgreSQL y Caddy ni en las salidas de
   gestion, en hexadecimal, en mayúsculas, en base64 o como bytes de Python.
   Control: la clave maestra escrita a propósito en el log de la API sí se
   encuentra.
+
+Paso (b), crear denuncia y seguimiento (app/denuncias.py,
+app/rutas_denuncias.py, app/frontera_http.py y proxy/Caddyfile):
+* Crear: 201 solo con el código y la fecha del día en la zona de la empresa
+  (Madrid y Canarias); el mismo 404 byte a byte para una empresa desconocida,
+  mal formada o inactiva; 503 con un evento sin identificar la empresa si no
+  tiene clave; el mismo 422, sin devolver lo enviado, para cualquier
+  petición inválida (también JSON inválido y Content-Type que no es JSON).
+* Seguimiento: 200 con el texto exacto (también con caracteres especiales y
+  con el texto más largo admitido), las formas equivalentes del código
+  resuelven, y el mismo 404 para cualquier código que no es de una denuncia.
+* El volcado de la base de datos no contiene textos, códigos ni categorías
+  en claro, y cada HMAC guardado es el de la fórmula del modelo de amenazas.
+* Un cifrado cambiado a otra denuncia o empresa da 500 y un evento de
+  integridad sin datos; un error no previsto da 500 y solo su clase y
+  SQLSTATE en el log.
+* Límite de cuerpo de 128 KiB en la API (también por trozos y con
+  Content-Length declarado) y en Caddy.
+* El uso normal no deja ninguna línea en el log de la API; ningún texto,
+  código ni HMAC aparece en los logs; PostgreSQL no registra DETAIL.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -49,6 +69,7 @@ resultado global es OK. Solo usa la biblioteca estándar.
 """
 import base64
 import hashlib
+import hmac
 import json
 import pathlib
 import re
@@ -71,6 +92,12 @@ CLAVES_FALSAS = {}
 # Claves de empresa desenvueltas durante la prueba (hex), para buscarlas en los
 # logs. Nunca se imprimen.
 CLAVES_EMPRESA = set()
+# Empresas dadas de alta por gestion: etiqueta -> (uuid, identificador, zona).
+EMPRESAS = {}
+# Códigos de seguimiento y textos de las denuncias creadas en f): se buscan
+# en los logs y en el volcado. Marcadores aleatorios de esta ejecución.
+CODIGOS = {}
+MARCADORES = {}
 
 lineas_salida = []
 estado = {"falla": False, "sin_conclusion": False}
@@ -113,8 +140,9 @@ PATRON_CLAVE = re.compile(r"clave creada: empresa_id=([0-9a-f-]{36}) version=(\d
 TEXTO_NO_DESENVUELVE = "no desenvuelve la version"
 TEXTO_EMPRESA_NO_EXISTE = "la empresa no existe"
 TEXTO_SIN_CLAVE = "NO tiene clave"
-# Claves de empresa al final de d): A v1 a v3, B v1 y v2, C v1.
-CLAVES_EMPRESA_ESPERADAS = 6
+# Claves de empresa al llegar a e): A v1 a v3, B v1 y v2, C v1 (d) y la de la
+# empresa inactiva de f), v1.
+CLAVES_EMPRESA_ESPERADAS = 7
 # Cualquier secuencia de 64 hexadecimales: el formato de las claves.
 PATRON_CLAVE_HEX = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -218,6 +246,124 @@ invalidos = {{"vacio": "", "corto": t[:-1], "largo": t + "A", "con_cero": "0" + 
 res["codigos_invalidos"] = {{k: cripto.leer_codigo(v) for k, v in invalidos.items()}}
 print(json.dumps(res, sort_keys=True))
 """
+
+# Respuestas de error de la API, literales (app/frontera_http.py y
+# app/rutas_denuncias.py).
+# Una empresa que no existe responde exactamente igual que una ruta que no
+# existe: no se puede distinguir una cosa de la otra.
+CUERPO_404_RUTA = '{"detalle": "recurso no encontrado"}'.encode("utf-8")
+CUERPO_404_EMPRESA = CUERPO_404_RUTA
+CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode("utf-8")
+# Errores que genera Caddy (proxy/Caddyfile, handle_errors).
+CUERPO_413_CADDY = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode("utf-8")
+CUERPO_502_CADDY = '{"detalle": "servicio no disponible"}'.encode("utf-8")
+CUERPO_421_CADDY = '{"detalle": "host no válido"}'.encode("utf-8")
+# Cabeceras de seguridad que deben llevar todas las respuestas a través de
+# Caddy, también las de error que genera él.
+CABECERAS_SEGURIDAD = {
+    "strict-transport-security": "max-age=63072000",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+    "cache-control": "no-store",
+}
+PLAZO_CUERPO_CADDY = 30  # read_body del Caddyfile, en segundos
+CUERPO_405 = '{"detalle": "método no permitido"}'.encode("utf-8")
+CUERPO_413 = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode("utf-8")
+CUERPO_422 = '{"detalle": "petición no válida"}'.encode("utf-8")
+CUERPO_500 = '{"detalle": "error interno"}'.encode("utf-8")
+CUERPO_503 = '{"detalle": "el canal de esta empresa no está disponible; inténtelo más tarde"}'.encode("utf-8")
+CLAVES_RESPUESTA_CREAR = ["codigo_seguimiento", "fecha"]
+CLAVES_RESPUESTA_SEGUIMIENTO = ["categoria", "estado", "fecha", "mensajes", "texto"]
+LIMITE_CUERPO = 131072  # 128 KiB, en la API y en Caddy
+LONGITUD_MAXIMA_TEXTO = 10000
+TEXTO_EVENTO_SIN_CLAVE = "EVENTO empresa_sin_clave"
+TEXTO_INTEGRIDAD = "INTEGRIDAD: "
+TEXTO_ERROR_INTERNO = "ERROR INTERNO: InsufficientPrivilege 42501"
+
+# Cliente HTTP de prueba: corre con la imagen de la API en la red app (directo
+# a la API) o en la red edge (a través de Caddy, con TLS y SNI localhost, sin
+# verificar el certificado del CA local). Las peticiones llegan por la
+# entrada estándar en JSON: en Windows la línea de comandos tiene un límite de
+# 32 KB y los cuerpos de prueba llegan a 128 KiB.
+CLIENTE_HTTP = r'''
+import base64, http.client, json, socket, ssl, sys, time
+
+def lento(pt):
+    """Envía la mitad del cuerpo, espera pt["pausa"] segundos y envía el
+    resto, por un socket TLS directo. Devuelve el estado HTTP que llegue, o el
+    error si el servidor cortó la conexión."""
+    contexto = ssl.create_default_context()
+    contexto.check_hostname = False
+    contexto.verify_mode = ssl.CERT_NONE
+    s = contexto.wrap_socket(socket.create_connection((pt["host"], pt["puerto"]), timeout=pt["pausa"] + 30),
+                             server_hostname="localhost")
+    cuerpo = pt["prefijo"].encode("utf-8")
+    cabeceras = (f"POST {pt['ruta']} HTTP/1.1\r\nHost: localhost:{pt['puerto']}\r\n"
+                 f"Content-Type: application/json\r\nContent-Length: {len(cuerpo)}\r\nConnection: close\r\n\r\n")
+    mitad = len(cuerpo) // 2
+    inicio = time.monotonic()
+    try:
+        s.sendall(cabeceras.encode("ascii") + cuerpo[:mitad])
+        time.sleep(pt["pausa"])
+        s.sendall(cuerpo[mitad:])
+        datos = b""
+        while True:
+            trozo = s.recv(65536)
+            if not trozo:
+                break
+            datos += trozo
+    except OSError as error:
+        return {"error": type(error).__name__, "segundos": round(time.monotonic() - inicio, 1)}
+    finally:
+        s.close()
+    linea = datos.split(b"\r\n", 1)[0].split()
+    estado = int(linea[1]) if len(linea) > 1 and linea[1].isdigit() else None
+    return {"estado": estado, "cuerpo": base64.b64encode(datos.split(b"\r\n\r\n", 1)[-1]).decode("ascii"),
+            "segundos": round(time.monotonic() - inicio, 1)}
+
+salida = []
+for pt in json.load(sys.stdin):
+    conexion = None
+    try:
+        if pt.get("pausa") is not None:
+            salida.append(lento(pt))
+            continue
+        if pt.get("tls"):
+            contexto = ssl.create_default_context()
+            contexto.check_hostname = False
+            contexto.verify_mode = ssl.CERT_NONE
+            crudo = socket.create_connection((pt["host"], pt["puerto"]), timeout=30)
+            conexion = http.client.HTTPConnection("localhost", pt["puerto"], timeout=30)
+            conexion.sock = contexto.wrap_socket(crudo, server_hostname="localhost")
+        else:
+            conexion = http.client.HTTPConnection(pt["host"], pt["puerto"], timeout=30)
+        if "tamano" in pt:
+            # Cuerpo JSON válido de un tamaño exacto: el JSON admite espacios
+            # al final.
+            prefijo = pt["prefijo"].encode("utf-8")
+            cuerpo = prefijo + b" " * (pt["tamano"] - len(prefijo))
+        elif pt.get("cuerpo") is not None:
+            cuerpo = base64.b64decode(pt["cuerpo"])
+        else:
+            cuerpo = None
+        if pt.get("trozos"):
+            # Un iterable sin Content-Length: http.client lo envía por trozos.
+            trozos = [cuerpo[i:i + 16384] for i in range(0, len(cuerpo), 16384)]
+            conexion.request(pt["metodo"], pt["ruta"], body=iter(trozos), headers=pt.get("cabeceras", {}))
+        else:
+            conexion.request(pt["metodo"], pt["ruta"], body=cuerpo, headers=pt.get("cabeceras", {}))
+        respuesta = conexion.getresponse()
+        datos = respuesta.read()
+        salida.append({"estado": respuesta.status, "cuerpo": base64.b64encode(datos).decode("ascii"),
+                       "cabeceras": {k.lower(): v for k, v in respuesta.getheaders()}})
+    except Exception as error:
+        salida.append({"error": type(error).__name__})
+    finally:
+        if conexion is not None:
+            conexion.close()
+print(json.dumps(salida))
+'''
 
 # Se ejecuta dentro del contenedor de la API, con la clave maestra FALSA de
 # esta ejecución. Devuelve versiones y longitudes, y aparte las claves de
@@ -406,11 +552,12 @@ def claves_en_bd(empresa):
 def seccion_a():
     global IMAGEN_API
     p("=== a) arranque con las claves de esta ejecucion")
-    r = dc("up", "-d", "--build", "--wait", "postgres", "api")
-    p(f"up -d --build --wait postgres api -> codigo {r.rc}")
+    # Con Caddy: la sección k) prueba el límite de cuerpo también a través de él.
+    r = dc("up", "-d", "--build", "--wait", "postgres", "api", "caddy")
+    p(f"up -d --build --wait postgres api caddy -> codigo {r.rc}")
     if r.rc != 0:
         p(r.todo.strip()[-1500:])
-        raise Parada("no arranca la API")
+        raise Parada("no arranca la API o Caddy")
     IMAGEN_API = ejecutar(["docker", "inspect", "--format", "{{.Config.Image}}", contenedor("api")]).out.strip()
     registro = dc("logs", "--no-color", "--no-log-prefix", "api").todo
     pasa(TEXTO_VERIFICADO in registro and TEXTO_BLOQUEADO not in registro,
@@ -584,17 +731,34 @@ def seccion_d():
     if r.rc != 0:
         raise Parada(f"no se pudo construir la imagen de gestion: {r.err.strip()[-300:]}")
     altas = {}
-    for etiqueta, nombre in (("A", "Empresa A"), ("B", "Empresa B")):
-        r = gestion("alta-empresa", "--nombre", nombre)
+    # A en la península y B en Canarias: las secciones HTTP comprueban la
+    # fecha de cada una en su zona.
+    for etiqueta, nombre, zona in (("A", "Empresa A", "Europe/Madrid"), ("B", "Empresa B", "Atlantic/Canary")):
+        r = gestion("alta-empresa", "--nombre", nombre, "--zona", zona)
         alta = PATRON_ALTA.search(r.out)
         clave = PATRON_CLAVE.search(r.out)
         ok = r.rc == 0 and alta is not None and clave is not None and clave.group(2) == "1"
-        pasa(ok, f"d) alta-empresa {etiqueta}: empresa, directorio y clave version 1 (codigo {r.rc})")
+        pasa(ok, f"d) alta-empresa {etiqueta} ({zona}): empresa, directorio y clave version 1 (codigo {r.rc})")
         if not ok:
             p(f"   salida: {r.out.strip()[-300:]!r} error: {r.err.strip()[-300:]!r}")
             raise Parada("gestion no da de alta empresas")
         altas[etiqueta] = alta.group(1)
+        EMPRESAS[etiqueta] = (uuid.UUID(alta.group(1)), alta.group(2), zona)
     A, B = altas["A"], altas["B"]
+    r = sup(f"select zona_horaria from canal.empresa where id in ('{A}', '{B}') order by id = '{B}';")
+    pasa(r.out.split() == ["Europe/Madrid", "Atlantic/Canary"],
+         f"d) cada empresa guarda la zona pedida en el alta ({r.out.split()})")
+
+    # Zona horaria fuera de la lista: gestion la rechaza antes de conectar y
+    # no crea nada. Control: las altas de arriba sí crearon sus empresas.
+    antes = sup("select count(*) from canal.empresa;").out.strip()
+    r = gestion("alta-empresa", "--nombre", "Empresa UTC", "--zona", "UTC")
+    despues = sup("select count(*) from canal.empresa;").out.strip()
+    negativo(f"d) alta-empresa con --zona UTC se rechaza sin crear empresa (codigo {r.rc}, {antes} -> {despues})",
+             r.rc != 0 and "invalid choice" in r.err and antes == despues, len(EMPRESAS) == 2)
+    r = gestion("alta-empresa", "--nombre", "Empresa sin zona")
+    negativo(f"d) alta-empresa sin --zona se rechaza (codigo {r.rc})",
+             r.rc != 0 and "--zona" in r.err, len(EMPRESAS) == 2)
 
     for etiqueta, empresa in altas.items():
         filas = claves_en_bd(empresa)
@@ -662,7 +826,7 @@ def seccion_d():
     try:
         desviada = gestion("nueva-clave", "--empresa-id", A)
         sin_cambios = len(claves_en_bd(A)) == 3
-        alta = gestion("alta-empresa", "--nombre", "Empresa C")
+        alta = gestion("alta-empresa", "--nombre", "Empresa C", "--zona", "Europe/Madrid")
     finally:
         revertida = sup("REVOKE DELETE ON canal.denuncia FROM aplicacion;").rc == 0
     if not revertida:
@@ -694,6 +858,504 @@ def seccion_d():
         p(f"   coincidencia precedida de {contexto} (valor omitido)")
 
 
+# ---------------------------------------------------------------------------
+# Peticiones HTTP
+# ---------------------------------------------------------------------------
+def http(peticiones, red="app"):
+    """Ejecuta las peticiones con el cliente de prueba y devuelve sus respuestas."""
+    r = ejecutar(["docker", "run", "--rm", "-i", "--network", f"{PROYECTO}_{red}", "--read-only",
+                  "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                  "--entrypoint", "python", IMAGEN_API, "-c", CLIENTE_HTTP],
+                 entrada=json.dumps(peticiones).encode("utf-8"))
+    try:
+        respuestas = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Parada(f"el cliente HTTP no devolvio resultado: {r.err.strip()[-400:]!r}") from None
+    for respuesta in respuestas:
+        if "cuerpo" in respuesta:
+            respuesta["cuerpo"] = base64.b64decode(respuesta["cuerpo"])
+    return respuestas
+
+
+def pt(metodo, ruta, datos=None, crudo=None, tipo="application/json", cabeceras=None, **extra):
+    """Una petición para el cliente de prueba, directa a la API."""
+    todas = {} if tipo is None else {"Content-Type": tipo}
+    todas.update(cabeceras or {})
+    if crudo is None and datos is not None:
+        crudo = json.dumps(datos, ensure_ascii=False).encode("utf-8")
+    peticion = {"host": "api", "puerto": 8000, "metodo": metodo, "ruta": ruta, "cabeceras": todas, **extra}
+    if crudo is not None:
+        peticion["cuerpo"] = base64.b64encode(crudo).decode("ascii")
+    return peticion
+
+
+def por_caddy(peticion):
+    return {**peticion, "host": "caddy", "puerto": 8443, "tls": True}
+
+
+def ruta_denuncias(identificador):
+    return f"/v1/empresas/{identificador}/denuncias"
+
+
+def seguimiento(codigo):
+    return pt("POST", "/v1/seguimiento", {"codigo": codigo})
+
+
+def json_de(respuesta):
+    try:
+        return json.loads(respuesta["cuerpo"].decode("utf-8"))
+    except (KeyError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def dia_en(zona):
+    """El día de hoy en una zona, según PostgreSQL (zona escrita como literal)."""
+    return sup(f"select (now() at time zone '{zona}')::date;").out.strip()
+
+
+def lineas_log(servicio):
+    return dc("logs", "--no-color", "--no-log-prefix", servicio).todo.splitlines()
+
+
+def hmac_de(codigo):
+    """HMAC del código con la clave falsa de esta ejecución y la fórmula del
+    modelo de amenazas (6.1), escrita aquí: HMAC-SHA256(clave, etiqueta ||
+    bytes del código)."""
+    crudo = base64.b32decode(codigo.replace("-", ""))
+    return hmac.new(bytes.fromhex(CLAVES_FALSAS["clave_hmac_codigos"]),
+                    ETIQUETA_SEGUIMIENTO.encode("ascii") + crudo, hashlib.sha256).hexdigest()
+
+
+def denuncia_de(codigo):
+    """id de la denuncia de un código, buscado como superusuario por su HMAC."""
+    r = sup(f"select denuncia_id from canal.busqueda_seguimiento where codigo_hmac = '\\x{hmac_de(codigo)}';")
+    return r.out.strip()
+
+
+# ---------------------------------------------------------------------------
+# Secciones HTTP
+# ---------------------------------------------------------------------------
+def seccion_f():
+    p("=== f) crear denuncia")
+    _, ident_a, zona_a = EMPRESAS["A"]
+    _, ident_b, zona_b = EMPRESAS["B"]
+    # Empresa inactiva (con clave, por gestion) y empresa sin clave (como
+    # superusuario, como quedaría un alta a medias).
+    r = gestion("alta-empresa", "--nombre", "Empresa inactiva", "--zona", "Europe/Madrid")
+    alta = PATRON_ALTA.search(r.out)
+    if r.rc != 0 or alta is None:
+        raise Parada(f"no se pudo dar de alta la empresa inactiva: {r.err.strip()[-300:]!r}")
+    EMPRESAS["inactiva"] = (uuid.UUID(alta.group(1)), alta.group(2), "Europe/Madrid")
+    r = sup("with e as (insert into canal.empresa (nombre, zona_horaria) values ('Empresa sin clave', 'Europe/Madrid') "
+            "returning id) insert into canal.directorio_empresas (empresa_id) select id from e "
+            "returning identificador_publico;")
+    ident_sin_clave = r.out.strip()
+    if r.rc != 0 or not re.fullmatch(r"[0-9a-f]{32}", ident_sin_clave):
+        raise Parada(f"no se pudo crear la empresa sin clave: {r.err.strip()[:300]!r}")
+    EMPRESAS["sin_clave"] = (None, ident_sin_clave, "Europe/Madrid")
+
+    for nombre in ("A", "A2", "B", "inactiva", "utf", "limite", "422"):
+        MARCADORES[nombre] = f"marcador-{nombre}-{secrets.token_hex(8)}"
+    # Se guarda tal cual: tildes, eñe, un emoji y un control bidireccional
+    # (U+202E). Escaparlo al mostrarlo es tarea del cliente. El control se
+    # construye con chr() y no se escribe en el fuente: un carácter bidi
+    # literal en el código es justo lo que permite el ataque Trojan Source.
+    MARCADORES["utf"] = ("ñandú, acción y " + chr(0x1F600) + " con un control bidi " + chr(0x202E)
+                         + " al final " + MARCADORES["utf"])
+    MARCADORES["limite"] += "x" * (LONGITUD_MAXIMA_TEXTO - len(MARCADORES["limite"]))
+    validas = {
+        "A": (ident_a, "acoso", "application/json"),
+        "A2": (ident_a, "otros", "application/json"),
+        "B": (ident_b, "fraude", "application/json"),
+        "inactiva": (EMPRESAS["inactiva"][1], "corrupcion", "application/json"),
+        "utf": (ident_a, "proteccion_datos", "application/json; charset=utf-8"),
+        "limite": (ident_a, "seguridad_laboral", "application/json"),
+    }
+    peticiones = [pt("POST", ruta_denuncias(ident), {"categoria": cat, "texto": MARCADORES[nombre]}, tipo=tipo)
+                  for nombre, (ident, cat, tipo) in validas.items()]
+    respuestas = dict(zip(validas, http(peticiones)))
+    dias = {zona_a: dia_en(zona_a), zona_b: dia_en(zona_b)}
+    for nombre, respuesta in respuestas.items():
+        cuerpo = json_de(respuesta)
+        ok = (respuesta.get("estado") == 201 and isinstance(cuerpo, dict) and sorted(cuerpo) == CLAVES_RESPUESTA_CREAR
+              and re.fullmatch(PATRON_CODIGO, cuerpo.get("codigo_seguimiento", "")) is not None)
+        if ok:
+            CODIGOS[nombre] = cuerpo["codigo_seguimiento"]
+        zona = zona_b if nombre == "B" else zona_a
+        pasa(ok and cuerpo["fecha"] == dias[zona],
+             f"f) {nombre}: 201 solo con codigo_seguimiento (8 grupos de 4) y fecha, que es la de hoy en {zona} "
+             f"({respuesta.get('estado')}, {cuerpo.get('fecha') if isinstance(cuerpo, dict) else None})")
+    control = len(CODIGOS) == len(validas)
+    pasa(len(set(CODIGOS.values())) == len(CODIGOS), "f) cada denuncia recibe un codigo distinto")
+    pasa("limite" in CODIGOS, f"f) un texto de exactamente {LONGITUD_MAXIMA_TEXTO} caracteres se acepta")
+    for etiqueta in ("A", "B"):
+        empresa, _, zona = EMPRESAS[etiqueta]
+        r = sup(f"select distinct fecha::text from canal.denuncia where empresa_id = '{empresa}';")
+        pasa(r.out.split() == [dias[zona]], f"f) en la BD, las denuncias de {etiqueta} tienen la fecha de {zona} "
+                                            f"({r.out.split()})")
+    sup(f"update canal.empresa set activa = false where id = '{EMPRESAS['inactiva'][0]}';")
+
+    # Mismo 404, byte a byte, para todo lo que no es una empresa activa.
+    casos = {"desconocida": secrets.token_hex(16), "de un caracter": "x", "en mayusculas": ident_a.upper(),
+             "de 33 caracteres": ident_a + "0", "con caracteres de ruta": "..%2F..", "inactiva": EMPRESAS["inactiva"][1]}
+    antes = sup("select count(*) from canal.denuncia;").out.strip()
+    respuestas = http([pt("POST", ruta_denuncias(i), {"categoria": "acoso", "texto": "hola"}) for i in casos.values()])
+    despues = sup("select count(*) from canal.denuncia;").out.strip()
+    for nombre, respuesta in zip(casos, respuestas):
+        negativo(f"f) empresa {nombre}: 404 con el cuerpo exacto",
+                 respuesta.get("estado") == 404 and respuesta.get("cuerpo") == CUERPO_404_EMPRESA, control,
+                 f"respuesta: {respuesta}")
+    negativo(f"f) ninguna de esas peticiones crea una denuncia ({antes} -> {despues})", antes == despues, control)
+
+    # Empresa sin clave: 503 y un evento en el log sin identificar la empresa.
+    antes = len(lineas_log("api"))
+    respuesta = http([pt("POST", ruta_denuncias(ident_sin_clave), {"categoria": "acoso", "texto": "hola"})])[0]
+    nuevas = lineas_log("api")[antes:]
+    negativo("f) empresa sin clave: 503 con el cuerpo exacto",
+             respuesta.get("estado") == 503 and respuesta.get("cuerpo") == CUERPO_503, control, f"respuesta: {respuesta}")
+    negativo(f"f) el 503 registra {TEXTO_EVENTO_SIN_CLAVE!r} sin el identificador ni el uuid de la empresa",
+             any(TEXTO_EVENTO_SIN_CLAVE in l for l in nuevas)
+             and not any(ident_sin_clave in l for l in nuevas), control, f"lineas nuevas: {nuevas}")
+
+    # 422 uniforme y sin eco: el marcador va en el campo que falla.
+    m = MARCADORES["422"]
+    valido = json.dumps({"categoria": "acoso", "texto": m}).encode("utf-8")
+    invalidas = {
+        "categoria fuera de la lista": pt("POST", ruta_denuncias(ident_a), {"categoria": m, "texto": "hola"}),
+        "categoria en mayusculas": pt("POST", ruta_denuncias(ident_a), {"categoria": "ACOSO", "texto": m}),
+        "campo extra": pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso", "texto": "hola", "extra": m}),
+        "texto vacio": pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso", "texto": ""}),
+        "texto solo de espacios": pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso", "texto": "   "}),
+        f"texto de {LONGITUD_MAXIMA_TEXTO + 1} caracteres": pt(
+            "POST", ruta_denuncias(ident_a),
+            {"categoria": "acoso", "texto": m + "x" * (LONGITUD_MAXIMA_TEXTO + 1 - len(m))}),
+        "texto numerico": pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso", "texto": 12345}),
+        "sin texto": pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso"}),
+        "JSON invalido": pt("POST", ruta_denuncias(ident_a), crudo=b'{"categoria": "acoso", "texto": "' + m.encode()),
+        "Content-Type text/plain": pt("POST", ruta_denuncias(ident_a), crudo=valido, tipo="text/plain"),
+        "sin Content-Type": pt("POST", ruta_denuncias(ident_a), crudo=valido, tipo=None),
+    }
+    antes = sup("select count(*) from canal.denuncia;").out.strip()
+    respuestas = http(list(invalidas.values()))
+    despues = sup("select count(*) from canal.denuncia;").out.strip()
+    for nombre, respuesta in zip(invalidas, respuestas):
+        negativo(f"f) {nombre}: 422 con el cuerpo exacto, sin devolver lo enviado",
+                 respuesta.get("estado") == 422 and respuesta.get("cuerpo") == CUERPO_422, control,
+                 f"respuesta: {respuesta}")
+    negativo(f"f) ninguna peticion invalida crea una denuncia ({antes} -> {despues})", antes == despues, control)
+
+
+def seccion_g():
+    p("=== g) seguimiento")
+    if not {"A", "B", "utf", "limite", "inactiva"} <= set(CODIGOS):
+        sinc("g) faltan codigos de f): no se puede probar el seguimiento")
+        return
+    _, _, zona_a = EMPRESAS["A"]
+    _, _, zona_b = EMPRESAS["B"]
+    codigo_a = CODIGOS["A"]
+    peticiones = {
+        "A": seguimiento(codigo_a),
+        "A en minusculas y sin guiones": seguimiento(codigo_a.replace("-", "").lower()),
+        "A con espacios": seguimiento(codigo_a.replace("-", " ")),
+        "B": seguimiento(CODIGOS["B"]),
+        "utf": seguimiento(CODIGOS["utf"]),
+        "limite": seguimiento(CODIGOS["limite"]),
+        "inactiva": seguimiento(CODIGOS["inactiva"]),
+    }
+    respuestas = dict(zip(peticiones, http(list(peticiones.values()))))
+    esperados = {
+        "A": {"estado": "nueva", "fecha": dia_en(zona_a), "categoria": "acoso", "texto": MARCADORES["A"], "mensajes": []},
+        "B": {"estado": "nueva", "fecha": dia_en(zona_b), "categoria": "fraude", "texto": MARCADORES["B"], "mensajes": []},
+        "utf": {"estado": "nueva", "fecha": dia_en(zona_a), "categoria": "proteccion_datos", "texto": MARCADORES["utf"],
+                "mensajes": []},
+        "limite": {"estado": "nueva", "fecha": dia_en(zona_a), "categoria": "seguridad_laboral",
+                   "texto": MARCADORES["limite"], "mensajes": []},
+        "inactiva": {"estado": "nueva", "fecha": dia_en("Europe/Madrid"), "categoria": "corrupcion",
+                     "texto": MARCADORES["inactiva"], "mensajes": []},
+    }
+    for nombre, esperado in esperados.items():
+        respuesta = respuestas[nombre]
+        pasa(respuesta.get("estado") == 200 and json_de(respuesta) == esperado,
+             f"g) {nombre}: 200 con estado, fecha, categoria, texto exacto y mensajes vacios")
+    control = respuestas["A"].get("estado") == 200 and json_de(respuestas["A"]) == esperados["A"]
+    pasa(sorted(json_de(respuestas["A"]) or {}) == CLAVES_RESPUESTA_SEGUIMIENTO,
+         "g) la respuesta no lleva ningun campo mas (ni el id interno de la denuncia)")
+    for nombre in ("A en minusculas y sin guiones", "A con espacios"):
+        negativo(f"g) {nombre}: la misma respuesta que con el codigo tal como se mostro",
+                 respuestas[nombre].get("cuerpo") == respuestas["A"].get("cuerpo"), control)
+    negativo("g) una empresa desactivada no acepta denuncias (f) pero su seguimiento sigue funcionando",
+             respuestas["inactiva"].get("estado") == 200, control)
+
+    # Mismo 404 para todo lo que no es un código de una denuncia.
+    otro = "B" if codigo_a[0] != "B" else "C"
+    aleatorio = base64.b32encode(secrets.token_bytes(20)).decode("ascii")
+    casos = {
+        "con un caracter cambiado": otro + codigo_a[1:],
+        "aleatorio con formato valido": "-".join(aleatorio[i:i + 4] for i in range(0, 32, 4)),
+        "vacio": "",
+        "de un caracter": "x",
+        "con un caracter de mas": codigo_a + "A",
+        "con un cero": "0" + codigo_a[1:],
+        "con un caracter no ASCII": "Á" + codigo_a[1:],
+        "de 200 caracteres": "A" * 200,
+    }
+    respuestas = http([seguimiento(c) for c in casos.values()])
+    for nombre, respuesta in zip(casos, respuestas):
+        negativo(f"g) codigo {nombre}: 404 con el cuerpo exacto",
+                 respuesta.get("estado") == 404 and respuesta.get("cuerpo") == CUERPO_404_CODIGO, control,
+                 f"respuesta: {respuesta}")
+    otros = {
+        "codigo numerico": (pt("POST", "/v1/seguimiento", {"codigo": 12345}), 422, CUERPO_422),
+        "campo extra": (pt("POST", "/v1/seguimiento", {"codigo": codigo_a, "extra": 1}), 422, CUERPO_422),
+        "GET /v1/seguimiento": (pt("GET", "/v1/seguimiento", tipo=None), 405, CUERPO_405),
+        "ruta inexistente": (pt("POST", "/v1/no-existe", {"codigo": codigo_a}), 404, CUERPO_404_RUTA),
+    }
+    respuestas = http([peticion for peticion, _, _ in otros.values()])
+    for (nombre, (_, estado, cuerpo)), respuesta in zip(otros.items(), respuestas):
+        negativo(f"g) {nombre}: {estado} con el cuerpo exacto",
+                 respuesta.get("estado") == estado and respuesta.get("cuerpo") == cuerpo, control,
+                 f"respuesta: {respuesta}")
+    pasa("POST" in (respuestas[2].get("cabeceras") or {}).get("allow", ""),
+         "g) el 405 conserva la cabecera Allow con POST")
+
+
+def seccion_h():
+    p("=== h) volcado de la base de datos")
+    r = dc("exec", "-T", "postgres", "pg_dump", "-U", "postgres", "-d", "canario", "--data-only")
+    volcado = r.out
+    hmacs = sup("select encode(codigo_hmac, 'hex') from canal.busqueda_seguimiento;").out.split()
+    # Control: el volcado tiene los datos (los HMAC de los códigos) y el HMAC
+    # de cada código es el de la fórmula del modelo de amenazas.
+    control = (r.rc == 0 and len(hmacs) == len(CODIGOS) and all(h in volcado for h in hmacs)
+               and sorted(hmac_de(c) for c in CODIGOS.values()) == sorted(hmacs))
+    pasa(control, f"h) control: el volcado contiene los {len(hmacs)} HMAC, y cada uno es "
+                  "HMAC-SHA256(clave, etiqueta || codigo)")
+    buscadas = {f"texto de {n}": MARCADORES[n] for n in ("A", "A2", "B", "inactiva", "utf", "limite")}
+    buscadas.update({f"codigo de {n}": c for n, c in CODIGOS.items()})
+    buscadas.update({f"codigo de {n} sin guiones": c.replace("-", "") for n, c in CODIGOS.items()})
+    buscadas.update({f"categoria {c}": c for c in ("acoso", "fraude", "corrupcion", "proteccion_datos",
+                                                  "seguridad_laboral", "otros")})
+    buscadas["campo \"categoria\""] = '"categoria"'
+    encontradas = sorted(n for n, valor in buscadas.items() if valor in volcado)
+    negativo(f"h) el volcado no contiene en claro ningun texto, codigo ni categoria ({len(buscadas)} buscados) "
+             f"{encontradas if encontradas else ''}".strip(), not encontradas, control)
+
+
+def seccion_i():
+    p("=== i) integridad: cifrados cambiados de sitio")
+    if not {"A", "A2", "B"} <= set(CODIGOS):
+        sinc("i) faltan codigos de f)")
+        return
+    id_a, id_a2, id_b = denuncia_de(CODIGOS["A"]), denuncia_de(CODIGOS["A2"]), denuncia_de(CODIGOS["B"])
+    antes = http([seguimiento(CODIGOS["A"]), seguimiento(CODIGOS["A2"])])
+    control = all(x.get("estado") == 200 for x in antes) and all((id_a, id_a2, id_b))
+    pasa(control, "i) control: antes de tocar nada, A y A2 se consultan con 200")
+    intercambio = (f"with a as (select contenido_cifrado c from canal.denuncia where id = '{id_a}'), "
+                   f"b as (select contenido_cifrado c from canal.denuncia where id = '{id_a2}') "
+                   "update canal.denuncia set contenido_cifrado = case when id = "
+                   f"'{id_a}' then (select c from b) else (select c from a) end where id in ('{id_a}', '{id_a2}');")
+    lineas_antes = len(lineas_log("api"))
+    sup(intercambio)
+    try:
+        cambiada = http([seguimiento(CODIGOS["A"])])[0]
+    finally:
+        sup(intercambio)
+    nuevas = lineas_log("api")[lineas_antes:]
+    negativo("i) con el cifrado de otra denuncia de la misma empresa: 500 generico",
+             cambiada.get("estado") == 500 and cambiada.get("cuerpo") == CUERPO_500, control, f"respuesta: {cambiada}")
+    negativo(f"i) queda un evento {TEXTO_INTEGRIDAD!r} sin ids, codigo ni texto",
+             any(TEXTO_INTEGRIDAD in l for l in nuevas)
+             and not any(v in l for l in nuevas for v in (id_a, id_a2, CODIGOS["A"], MARCADORES["A"])),
+             control, f"lineas nuevas: {nuevas}")
+    original = sup(f"select encode(contenido_cifrado, 'hex') from canal.denuncia where id = '{id_a2}';").out.strip()
+    sup(f"update canal.denuncia set contenido_cifrado = (select contenido_cifrado from canal.denuncia "
+        f"where id = '{id_b}') where id = '{id_a2}';")
+    try:
+        ajena = http([seguimiento(CODIGOS["A2"])])[0]
+    finally:
+        sup(f"update canal.denuncia set contenido_cifrado = '\\x{original}' where id = '{id_a2}';")
+    negativo("i) con el cifrado de una denuncia de otra empresa: 500 generico",
+             ajena.get("estado") == 500 and ajena.get("cuerpo") == CUERPO_500, control, f"respuesta: {ajena}")
+    despues = http([seguimiento(CODIGOS["A"]), seguimiento(CODIGOS["A2"])])
+    pasa(all(x.get("estado") == 200 for x in despues), "i) al restaurar los cifrados, A y A2 vuelven a dar 200")
+
+
+def seccion_j():
+    p("=== j) errores no previstos: 500 generico y log sin detalles")
+    if "A" not in CODIGOS:
+        sinc("j) falta el codigo de A")
+        return
+    lineas_antes = len(lineas_log("api"))
+    revocado = sup("REVOKE SELECT ON canal.denuncia FROM aplicacion;").rc == 0
+    try:
+        respuesta = http([seguimiento(CODIGOS["A"])])[0]
+    finally:
+        restaurado = sup("GRANT SELECT ON canal.denuncia TO aplicacion;").rc == 0
+    nuevas = lineas_log("api")[lineas_antes:]
+    control = revocado and restaurado
+    negativo("j) sin permiso de lectura (error de la BD no previsto): 500 con el cuerpo exacto",
+             respuesta.get("estado") == 500 and respuesta.get("cuerpo") == CUERPO_500, control, f"respuesta: {respuesta}")
+    negativo(f"j) el log registra solo {TEXTO_ERROR_INTERNO!r}: sin mensaje, sin traceback y sin tabla",
+             any(TEXTO_ERROR_INTERNO in l for l in nuevas)
+             and not any(t in l for l in nuevas for t in ("permission denied", "Traceback", "canal.denuncia",
+                                                           "Exception in ASGI")),
+             control, f"lineas nuevas: {nuevas}")
+    pasa(http([seguimiento(CODIGOS["A"])])[0].get("estado") == 200, "j) con el permiso restaurado vuelve a dar 200")
+
+
+def seccion_k():
+    p("=== k) limite de cuerpo: en la API y en Caddy")
+    _, ident_a, _ = EMPRESAS["A"]
+    prefijo = json.dumps({"categoria": "otros", "texto": "prueba del limite de cuerpo"})
+    base = pt("POST", ruta_denuncias(ident_a))
+    casos = {
+        "justo en el limite": ({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO}, 201),
+        "un byte por encima": ({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO + 1}, 413),
+        "por trozos, justo en el limite": ({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO, "trozos": True}, 201),
+        "por trozos, un byte por encima (sin Content-Length)":
+            ({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO + 1, "trozos": True}, 413),
+        "Content-Length declarado por encima": (
+            pt("POST", ruta_denuncias(ident_a), crudo=b"{}", cabeceras={"Content-Length": str(LIMITE_CUERPO + 1)}), 413),
+    }
+    respuestas = dict(zip(casos, http([peticion for peticion, _ in casos.values()])))
+    control = all(respuestas[n].get("estado") == 201 for n in ("justo en el limite", "por trozos, justo en el limite"))
+    pasa(control, "k) control: directo a la API, un cuerpo de exactamente 128 KiB se acepta (entero y por trozos)")
+    for nombre, (_, estado) in casos.items():
+        if estado == 413:
+            negativo(f"k) directo a la API, {nombre}: 413 de la propia API",
+                     respuestas[nombre].get("estado") == 413 and respuestas[nombre].get("cuerpo") == CUERPO_413,
+                     control, f"respuesta: {respuestas[nombre]}")
+    # A través de Caddy: el 413 lo da Caddy, sin contactar con la API. Una
+    # respuesta que pasa por la API lleva "Via: 1.1 Caddy"; una que genera
+    # Caddy, no. Todas llevan las cabeceras de seguridad y ninguna "Server".
+    casos = {
+        "justo en el limite": por_caddy({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO}),
+        "un byte por encima": por_caddy({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO + 1}),
+        "por trozos, un byte por encima": por_caddy({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO + 1,
+                                                     "trozos": True}),
+    }
+    respuestas = dict(zip(casos, http(list(casos.values()), red="edge")))
+    aceptada = respuestas["justo en el limite"]
+    control = aceptada.get("estado") == 201 and "via" in (aceptada.get("cabeceras") or {})
+    pasa(control, f"k) control: a traves de Caddy, 128 KiB se aceptan y pasan por la API "
+                  f"({aceptada.get('estado')}, Via: {(aceptada.get('cabeceras') or {}).get('via')})")
+    for nombre in ("un byte por encima", "por trozos, un byte por encima"):
+        respuesta = respuestas[nombre]
+        cabeceras = respuesta.get("cabeceras") or {}
+        negativo(f"k) a traves de Caddy, {nombre}: 413 de Caddy (sin Via: no llega a la API) con su JSON",
+                 respuesta.get("estado") == 413 and "via" not in cabeceras
+                 and respuesta.get("cuerpo") == CUERPO_413_CADDY, control, f"respuesta: {respuesta}")
+        faltan = {k: v for k, v in CABECERAS_SEGURIDAD.items() if cabeceras.get(k) != v}
+        negativo(f"k) el 413 de Caddy ({nombre}) lleva las cabeceras de seguridad, JSON y ninguna Server "
+                 f"{faltan if faltan else ''}".strip(),
+                 not faltan and "server" not in cabeceras and cabeceras.get("content-type") == "application/json",
+                 control, f"cabeceras: {cabeceras}")
+    faltan = {k: v for k, v in CABECERAS_SEGURIDAD.items() if (aceptada.get("cabeceras") or {}).get(k) != v}
+    pasa(not faltan and "server" not in (aceptada.get("cabeceras") or {}),
+         "k) la respuesta normal a traves de Caddy lleva las mismas cabeceras y ninguna Server")
+
+    # Subida lenta (slowloris): la mitad del cuerpo, una pausa y el resto.
+    # Control: con una pausa corta se acepta; con una pausa mayor que read_body
+    # la petición no se acepta y no crea ninguna denuncia.
+    lento = {**base, "host": "caddy", "puerto": 8443, "prefijo": json.dumps({"categoria": "otros", "texto": "lento"})}
+    antes = sup("select count(*) from canal.denuncia;").out.strip()
+    corta, larga = http([{**lento, "pausa": 2}, {**lento, "pausa": PLAZO_CUERPO_CADDY + 5}], red="edge")
+    despues = sup("select count(*) from canal.denuncia;").out.strip()
+    p(f"   subida lenta: pausa 2 s -> {corta}; pausa {PLAZO_CUERPO_CADDY + 5} s -> {larga}")
+    control_lento = corta.get("estado") == 201
+    pasa(control_lento, "k) control: una subida con una pausa de 2 s se acepta")
+    negativo(f"k) una subida parada mas de read_body ({PLAZO_CUERPO_CADDY} s) se corta sin crear denuncia",
+             larga.get("estado") != 201 and int(despues) == int(antes) + 1, control_lento,
+             f"antes {antes}, despues {despues}")
+
+    # Host distinto de localhost: 421 del sitio por defecto, por las rutas, con
+    # las cabeceras de seguridad y el JSON. Control: con el Host correcto, 200.
+    respuestas = http([por_caddy(pt("GET", "/salud", tipo=None)),
+                       por_caddy(pt("GET", "/salud", tipo=None, cabeceras={"Host": "otro.ejemplo"}))], red="edge")
+    control = respuestas[0].get("estado") == 200
+    respuesta = respuestas[1]
+    cabeceras = respuesta.get("cabeceras") or {}
+    faltan = {k: v for k, v in CABECERAS_SEGURIDAD.items() if cabeceras.get(k) != v}
+    negativo(f"k) Host distinto de localhost: 421 con su JSON, las cabeceras de seguridad y ninguna Server "
+             f"{faltan if faltan else ''}".strip(),
+             respuesta.get("estado") == 421 and respuesta.get("cuerpo") == CUERPO_421_CADDY and not faltan
+             and "server" not in cabeceras, control, f"respuesta: {respuesta}")
+
+    # API caída: el 502 que genera Caddy también lleva cabeceras y JSON.
+    control = http([por_caddy(pt("GET", "/salud", tipo=None))], red="edge")[0].get("estado") == 200
+    dc("stop", "api")
+    try:
+        respuesta = http([por_caddy(pt("GET", "/salud", tipo=None))], red="edge")[0]
+    finally:
+        dc("start", "api")
+        if not esperar(lambda: salud(contenedor("api")) == "healthy", 90):
+            raise Parada("la API no vuelve a estar healthy tras pararla")
+    cabeceras = respuesta.get("cabeceras") or {}
+    faltan = {k: v for k, v in CABECERAS_SEGURIDAD.items() if cabeceras.get(k) != v}
+    negativo(f"k) con la API parada, Caddy responde 502 con su JSON, las cabeceras de seguridad y ninguna Server "
+             f"{faltan if faltan else ''}".strip(),
+             respuesta.get("estado") == 502 and respuesta.get("cuerpo") == CUERPO_502_CADDY and not faltan
+             and "server" not in cabeceras, control, f"respuesta: {respuesta}")
+
+
+def seccion_l():
+    p("=== l) logs del camino anonimo")
+    if not {"A", "B"} <= set(CODIGOS):
+        sinc("l) faltan codigos de f)")
+        return
+    _, ident_a, _ = EMPRESAS["A"]
+    # Crear, consultar, un 404 y un 422 son el uso normal: no deben dejar
+    # ninguna línea, porque cada línea lleva la hora. Control: un caso que sí
+    # se registra (empresa sin clave) añade una línea en el mismo log.
+    antes = len(lineas_log("api"))
+    respuestas = http([
+        pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso", "texto": "uso normal"}),
+        seguimiento(CODIGOS["A"]),
+        seguimiento(CODIGOS["B"]),
+        pt("POST", ruta_denuncias(secrets.token_hex(16)), {"categoria": "acoso", "texto": "hola"}),
+        seguimiento("x"),
+        pt("POST", ruta_denuncias(ident_a), {"categoria": "no", "texto": "hola"}),
+    ])
+    nuevas = lineas_log("api")[antes:]
+    previas = len(lineas_log("api"))
+    http([pt("POST", ruta_denuncias(EMPRESAS["sin_clave"][1]), {"categoria": "acoso", "texto": "hola"})])
+    control = (len(lineas_log("api")) > previas
+               and [x.get("estado") for x in respuestas] == [201, 200, 200, 404, 404, 422])
+    negativo(f"l) crear, consultar, 404 y 422 no dejan ninguna linea en el log de la API ({len(nuevas)} nuevas)",
+             nuevas == [], control, f"lineas nuevas: {nuevas}")
+
+    # Textos y códigos en los logs de la API, PostgreSQL y Caddy. Control: un
+    # marcador escrito a propósito en el log de la API se encuentra.
+    def textos():
+        return {s: dc("logs", "--no-color", "--no-log-prefix", s).todo for s in ("api", "postgres", "caddy")}
+    buscadas = {f"texto de {n}": MARCADORES[n] for n in ("A", "A2", "B", "inactiva", "utf", "422")}
+    buscadas.update({f"codigo de {n}": c for n, c in CODIGOS.items()})
+    buscadas.update({f"codigo de {n} sin guiones": c.replace("-", "") for n, c in CODIGOS.items()})
+    buscadas.update({f"HMAC del codigo de {n}": hmac_de(c) for n, c in CODIGOS.items()})
+
+    def encontradas():
+        actuales = textos()
+        return sorted({f"{n} en {s}" for n, v in buscadas.items() for s, t in actuales.items() if v in t})
+    halladas = encontradas()
+    testigo = f"testigo-{secrets.token_hex(8)}"
+    buscadas["testigo"] = testigo
+    dc("exec", "-T", "api", "sh", "-c", f"echo {testigo} > /proc/1/fd/1")
+    control = esperar(lambda: "testigo en api" in encontradas(), 10)
+    negativo(f"l) ningun texto, codigo ni HMAC aparece en los logs de la API, PostgreSQL ni Caddy "
+             f"{halladas if halladas else ''}".strip(), not halladas, control)
+
+    # log_error_verbosity=terse: el log del servidor no lleva DETAIL, que
+    # repetiría valores de la fila. Control: la línea del error sí aparece.
+    hmac_repetido = hmac_de(CODIGOS["A"])
+    sup("insert into canal.busqueda_seguimiento (codigo_hmac, empresa_id, denuncia_id) "
+        "select codigo_hmac, empresa_id, denuncia_id from canal.busqueda_seguimiento "
+        f"where codigo_hmac = '\\x{hmac_repetido}';")
+    registro = dc("logs", "--no-color", "--no-log-prefix", "postgres").todo
+    control = "duplicate key value violates unique constraint" in registro
+    negativo("l) un duplicado deja su ERROR en el log de PostgreSQL, sin DETAIL ni el valor de la clave",
+             "DETAIL" not in registro and hmac_repetido not in registro, control)
+
+
 def formas(clave_hex):
     """Cómo podría aparecer una clave en un log: hex, hex en mayúsculas, base64
     y la representación de bytes de Python (sin el b'' que la rodea)."""
@@ -717,6 +1379,7 @@ def seccion_e():
         return {
             "log de la API": dc("logs", "--no-color", "--no-log-prefix", "api").todo,
             "log de PostgreSQL": dc("logs", "--no-color", "--no-log-prefix", "postgres").todo,
+            "log de Caddy": dc("logs", "--no-color", "--no-log-prefix", "caddy").todo,
             "salidas de gestion": "\n".join(salidas_gestion),
         }
 
@@ -741,7 +1404,7 @@ def seccion_e():
     control = inyeccion.rc == 0 and esperar(encontrada, 10)
     n_empresa = len(buscadas) - len(CLAVES_FALSAS)
     negativo(f"e) ninguna de las {len(buscadas)} claves (maestra, HMAC y {n_empresa} de empresa) aparece "
-             f"en los logs de la API y de PostgreSQL ni en las salidas de gestion {antes if antes else ''}".strip(),
+             f"en los logs de la API, PostgreSQL y Caddy ni en las salidas de gestion {antes if antes else ''}".strip(),
              not antes and n_empresa == CLAVES_EMPRESA_ESPERADAS, control,
              f"inyeccion: codigo {inyeccion.rc} {inyeccion.err.strip()[-200:]!r}; tras inyectar: {despues}")
 
@@ -837,7 +1500,10 @@ def main():
     DIRECTORIO_CLAVES = preparar_claves_falsas()
     parada = None
     try:
-        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e):
+        # e) va al final: busca las claves en los logs después de todo lo
+        # demás, incluidas las peticiones HTTP.
+        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_f, seccion_g, seccion_h,
+                        seccion_i, seccion_j, seccion_k, seccion_l, seccion_e):
             seccion()
     except Parada as e:
         parada = str(e)

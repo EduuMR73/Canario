@@ -16,6 +16,15 @@
 --   secuencia, para no dejar rastro horario que ayude a correlacionar
 --   denunciantes. La única excepción es bloqueado_hasta, de las cuentas del
 --   personal, que necesita hora para el bloqueo temporal por intentos fallidos.
+-- * La fecha es la del calendario de la empresa: cada empresa tiene su zona
+--   horaria (solo las de España) y los triggers calculan el día con
+--   now() AT TIME ZONE esa zona. La Ley 2/2023 cuenta los plazos desde la
+--   recepción por la organización, y su día es el de su calendario, no el de
+--   UTC. El cálculo no depende de la zona horaria de la sesión, y lo que traiga
+--   el INSERT en la columna fecha se sobrescribe: ni la API ni una sesión
+--   manipulada pueden elegir la fecha.
+-- * Lo que describe una denuncia (categoría y texto) va cifrado. En claro solo
+--   queda lo que el flujo necesita: estado, fecha (día) y asignación.
 -- * Auditoría encadenada e inmutable: cada fila de registro_auditoria incluye el
 --   hash de la anterior, de modo que cualquier alteración posterior rompe la
 --   cadena y verificar_cadena_auditoria() señala dónde. Los triggers rechazan
@@ -94,11 +103,17 @@ GRANT EXECUTE ON FUNCTION canal.empresa_actual() TO aplicacion;
 -- Tablas
 -- ---------------------------------------------------------------------------
 
+-- zona_horaria: lista cerrada con las zonas de España (península y Baleares,
+-- Canarias, Ceuta y Melilla). Un valor que no esté aquí nunca llega a la base
+-- de datos, y los triggers de fecha pueden confiar en él.
 CREATE TABLE canal.empresa (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     nombre text NOT NULL CHECK (length(btrim(nombre)) BETWEEN 1 AND 200),
     activa boolean NOT NULL DEFAULT true,
-    fecha_alta date NOT NULL DEFAULT current_date
+    fecha_alta date NOT NULL DEFAULT current_date,
+    zona_horaria text NOT NULL DEFAULT 'Europe/Madrid'
+        CONSTRAINT empresa_zona_horaria_check
+        CHECK (zona_horaria IN ('Europe/Madrid', 'Atlantic/Canary', 'Africa/Ceuta'))
 );
 
 -- Traduce el identificador público de la URL de cada empresa a su id interno.
@@ -139,14 +154,18 @@ CREATE TABLE canal.usuario_personal (
     UNIQUE (empresa_id, email)
 );
 
+-- El id lo genera la API: lo necesita antes de cifrar, porque forma parte del
+-- AAD (app/cripto.py). fecha la fija siempre el trigger denuncia_fecha, sin
+-- valor por defecto: si el trigger no pudiera calcularla, NOT NULL lo
+-- rechazaría en vez de guardar otra fecha en silencio. La categoría va dentro
+-- de contenido_cifrado.
 CREATE TABLE canal.denuncia (
     empresa_id uuid NOT NULL REFERENCES canal.empresa (id),
     id uuid NOT NULL DEFAULT gen_random_uuid(),
-    fecha date NOT NULL DEFAULT current_date,
+    fecha date NOT NULL,
     estado text NOT NULL DEFAULT 'nueva'
         CHECK (estado IN ('nueva', 'en_instruccion', 'resuelta', 'archivada')),
     asignada_a uuid,
-    categoria text NOT NULL CHECK (length(categoria) BETWEEN 1 AND 100),
     contenido_cifrado bytea NOT NULL CHECK (octet_length(contenido_cifrado) > 0),
     version_clave integer NOT NULL,
     PRIMARY KEY (empresa_id, id),
@@ -155,15 +174,22 @@ CREATE TABLE canal.denuncia (
     FOREIGN KEY (empresa_id, version_clave) REFERENCES canal.clave_empresa (empresa_id, version)
 );
 
+-- id: identifica el mensaje en el AAD de su cifrado (app/cripto.py). La
+-- secuencia no sirve, porque la asigna el trigger después de cifrar. Sin un id
+-- dentro del AAD, un mensaje se podría duplicar en otra fila o intercambiar con
+-- otro de la misma denuncia sin que el descifrado lo notara. UNIQUE con
+-- empresa_id, como el resto: un duplicado nunca revela datos de otra empresa.
 CREATE TABLE canal.mensaje (
     empresa_id uuid NOT NULL,
     denuncia_id uuid NOT NULL,
     secuencia integer NOT NULL,
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
     autor text NOT NULL CHECK (autor IN ('denunciante', 'personal')),
     autor_id uuid,
     contenido_cifrado bytea NOT NULL CHECK (octet_length(contenido_cifrado) > 0),
     version_clave integer NOT NULL,
     PRIMARY KEY (empresa_id, denuncia_id, secuencia),
+    UNIQUE (empresa_id, denuncia_id, id),
     -- El personal siempre tiene autor_id; el denunciante, nunca (es anónimo).
     CHECK ((autor = 'personal') = (autor_id IS NOT NULL)),
     FOREIGN KEY (empresa_id, denuncia_id) REFERENCES canal.denuncia (empresa_id, id),
@@ -187,7 +213,7 @@ CREATE TABLE canal.busqueda_seguimiento (
 CREATE TABLE canal.registro_auditoria (
     empresa_id uuid NOT NULL REFERENCES canal.empresa (id),
     secuencia bigint NOT NULL,
-    fecha date NOT NULL DEFAULT current_date,
+    fecha date NOT NULL,
     actor text NOT NULL CHECK (length(actor) BETWEEN 1 AND 100),
     accion text NOT NULL CHECK (length(accion) BETWEEN 1 AND 100),
     objeto_id uuid,
@@ -327,7 +353,12 @@ BEGIN
 
     NEW.secuencia := coalesce(v_ultima_secuencia, 0) + 1;
     NEW.hash_anterior := v_ultimo_hash;
-    NEW.fecha := current_date;
+    -- Mismo cálculo que fijar_fecha_denuncia (si se cambia uno, hay que
+    -- cambiar el otro): el día en la zona de la empresa, sin depender de la
+    -- zona de la sesión.
+    NEW.fecha := (SELECT (now() AT TIME ZONE e.zona_horaria)::date
+                    FROM canal.empresa e
+                   WHERE e.id = NEW.empresa_id);
     NEW.hash := sha256(convert_to(
         jsonb_build_array(
             encode(NEW.hash_anterior, 'hex'),
@@ -375,6 +406,25 @@ BEGIN
       FROM canal.mensaje m
      WHERE m.empresa_id = NEW.empresa_id
        AND m.denuncia_id = NEW.denuncia_id;
+    RETURN NEW;
+END
+$$;
+
+-- Fecha de recepción de una denuncia: el día en la zona horaria de su empresa,
+-- ignorando la fecha que traiga el INSERT y la zona de la sesión.
+-- La empresa se lee con los permisos de quien inserta: bajo RLS, la API solo
+-- ve la de su contexto. Si inserta con el empresa_id de otra, el SELECT no
+-- devuelve fila y la fecha queda NULL; la política de INSERT, que PostgreSQL
+-- comprueba antes que NOT NULL, rechaza la fila con su error de RLS de siempre
+-- (verificar_esquema.py, i).
+CREATE FUNCTION canal.fijar_fecha_denuncia() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, canal
+AS $$
+BEGIN
+    NEW.fecha := (SELECT (now() AT TIME ZONE e.zona_horaria)::date
+                    FROM canal.empresa e
+                   WHERE e.id = NEW.empresa_id);
     RETURN NEW;
 END
 $$;
@@ -441,6 +491,7 @@ $$;
 REVOKE EXECUTE ON FUNCTION canal.encadenar_auditoria() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.rechazar_modificacion_auditoria() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.asignar_secuencia_mensaje() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION canal.fijar_fecha_denuncia() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() TO aplicacion;
 
@@ -456,6 +507,9 @@ CREATE TRIGGER auditoria_inmutable_truncate
 CREATE TRIGGER mensaje_secuencia
     BEFORE INSERT ON canal.mensaje
     FOR EACH ROW EXECUTE FUNCTION canal.asignar_secuencia_mensaje();
+CREATE TRIGGER denuncia_fecha
+    BEFORE INSERT ON canal.denuncia
+    FOR EACH ROW EXECUTE FUNCTION canal.fijar_fecha_denuncia();
 
 -- ---------------------------------------------------------------------------
 -- Ruta de búsqueda del rol de la aplicación

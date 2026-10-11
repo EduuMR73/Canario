@@ -26,13 +26,28 @@
 		# se publica ni se usa.
 		protocols h1 h2
 
-		# Si la cabecera Host no coincide con el SNI del TLS, 421. Sin esto, una
-		# petición con un Host desconocido no casaría con ninguna ruta y Caddy
-		# respondería 200 vacío.
-		strict_sni_host on
+		# Sin strict_sni_host: su 421 lo genera el servidor antes de entrar en las
+		# rutas, y salía con "Server: Caddy" y sin cabeceras de seguridad
+		# (comprobado). Lo sustituye el sitio por defecto del final del fichero,
+		# que responde 421 a cualquier Host distinto de localhost por las rutas,
+		# con las mismas cabeceras. Un SNI distinto ni siquiera completa el TLS:
+		# solo hay certificado para localhost.
 
 		# Sin trusted_proxies: Caddy no confía en ningún proxy, así que ignora el
 		# X-Forwarded-For entrante y pone la IP real de la conexión.
+
+		# Plazos explícitos. Por defecto Caddy no limita la lectura del cuerpo ni
+		# la escritura (documentación oficial: "Defaults to no timeout"): un
+		# cliente que envía un byte cada pocos segundos retendría la conexión
+		# para siempre (slowloris), y con request_buffers también su buffer.
+		# 30 s para el cuerpo dan margen a un denunciante por Tor, con poco
+		# ancho de banda, para subir el máximo de 128 KiB.
+		timeouts {
+			read_header 10s
+			read_body 30s
+			write 30s
+			idle 2m
+		}
 	}
 
 	# Logs de runtime (errores, avisos). Pueden llevar IPs de clientes.
@@ -62,14 +77,12 @@
 	}
 }
 
-# Certificado del CA interno de Caddy (tls internal): sin ACME y sin necesidad de
-# internet. Escucha en 8443 (no privilegiado), así no hace falta
-# NET_BIND_SERVICE. Docker lo publica solo en 127.0.0.1 del host.
-https://localhost:8443 {
-	tls internal
-
-	# Cabeceras de seguridad para una API sin frontend. defer las aplica al final
-	# de la respuesta, sobre lo que haya puesto la API.
+# Cabeceras de seguridad para una API sin frontend, en un único sitio: las usan
+# las respuestas normales y las de error que genera el propio Caddy. Sin esto,
+# un 413 o un 502 de Caddy saldrían con "Server: Caddy" y sin ninguna de ellas
+# (comprobado), como hace nginx sin "add_header ... always".
+(cabeceras_seguridad) {
+	# defer las aplica al final de la respuesta, sobre lo que haya puesto la API.
 	header {
 		defer
 		# Solo HTTPS en los próximos dos años. Sin includeSubDomains ni preload: el
@@ -86,6 +99,56 @@ https://localhost:8443 {
 		# No anuncia el servidor.
 		-Server
 	}
+}
 
-	reverse_proxy api:8000
+# Certificado del CA interno de Caddy (tls internal): sin ACME y sin necesidad de
+# internet. Escucha en 8443 (no privilegiado), así no hace falta
+# NET_BIND_SERVICE. Docker lo publica solo en 127.0.0.1 del host.
+https://localhost:8443 {
+	tls internal
+
+	import cabeceras_seguridad
+
+	# Tamaño máximo del cuerpo de una petición: 128 KiB, el mismo límite que
+	# aplica la API (app/frontera_http.py), que es la segunda capa. KiB y no KB:
+	# KB son 1000 bytes.
+	request_body {
+		max_size 128KiB
+	}
+
+	reverse_proxy api:8000 {
+		# max_size solo falla al leer el cuerpo, y por defecto el proxy lo
+		# reenvía mientras lo lee: una petición demasiado grande llegaba a la API
+		# (comprobado). Con un buffer algo mayor que el límite, Caddy lee el
+		# cuerpo antes de contactar con la API y corta él mismo con 413, como
+		# client_max_body_size en nginx. La documentación avisa de que es
+		# ineficiente con cuerpos grandes; aquí el máximo es 128 KiB y el tiempo
+		# que una conexión puede retener su buffer lo acota read_body.
+		request_buffers 129KiB
+	}
+
+	# Errores que genera Caddy (cuerpo demasiado grande, API caída): mismas
+	# cabeceras y mismo formato JSON que los errores de la API.
+	handle_errors {
+		import cabeceras_seguridad
+		header Content-Type "application/json"
+
+		@demasiado_grande expression {err.status_code} == 413
+		respond @demasiado_grande `{"detalle": "cuerpo de la petición demasiado grande"}` 413
+
+		@no_disponible expression {err.status_code} >= 500
+		respond @no_disponible `{"detalle": "servicio no disponible"}` {err.status_code}
+
+		respond `{"detalle": "petición no válida"}` {err.status_code}
+	}
+}
+
+# Sitio por defecto: cualquier petición cuyo Host no sea localhost. Sin él, no
+# casaría con ninguna ruta y Caddy respondería 200 vacío. Responde 421 con las
+# mismas cabeceras y el mismo formato JSON que el resto.
+https://:8443 {
+	tls internal
+	import cabeceras_seguridad
+	header Content-Type "application/json"
+	respond `{"detalle": "host no válido"}` 421
 }

@@ -1,9 +1,11 @@
 """Aplicación FastAPI de Canario.
 
-Por ahora solo expone GET /salud, una comprobación de vivacidad. Al arrancar
-comprueba los secretos (contraseña y claves de cifrado), abre el pool de
-conexiones a PostgreSQL y verifica la base de datos; si algo no es lo
-esperado, la API no arranca (docs/threat-model.md, 6.10).
+Expone GET /salud (vivacidad) y las rutas del denunciante anónimo
+(app/rutas_denuncias.py), detrás de la frontera HTTP (app/frontera_http.py):
+límite de cuerpo, errores internos sin detalles y respuestas de error
+uniformes. Al arrancar comprueba los secretos (contraseña y claves de
+cifrado), abre el pool de conexiones a PostgreSQL y verifica la base de datos;
+si algo no es lo esperado, la API no arranca (docs/threat-model.md, 6.10).
 """
 import logging
 from contextlib import asynccontextmanager
@@ -11,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from psycopg_pool import PoolTimeout
 
-from app import bd, claves, verificacion_arranque
+from app import bd, claves, frontera_http, rutas_denuncias, verificacion_arranque
 
 # Logs propios y del pool de conexiones por la salida de error. Nunca llevan
 # IPs de clientes ni la contraseña: solo nombres de comprobaciones, clases de
@@ -76,6 +78,8 @@ aplicacion = FastAPI(
     redirect_slashes=False,
     lifespan=ciclo_de_vida,
 )
+frontera_http.instalar(aplicacion)
+aplicacion.include_router(rutas_denuncias.router)
 
 
 @aplicacion.get("/salud")

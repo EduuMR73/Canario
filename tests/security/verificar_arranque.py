@@ -96,8 +96,8 @@ DESVIACIONES = [
      "REVOKE DELETE ON canal.denuncia FROM aplicacion;"),
     ("privilegios_columna", "GRANT UPDATE (contenido_cifrado) ON canal.denuncia TO aplicacion;",
      "REVOKE UPDATE (contenido_cifrado) ON canal.denuncia FROM aplicacion;"),
-    ("funciones", "GRANT EXECUTE ON FUNCTION canal.alta_empresa(text) TO aplicacion;",
-     "REVOKE EXECUTE ON FUNCTION canal.alta_empresa(text) FROM aplicacion;"),
+    ("funciones", "GRANT EXECUTE ON FUNCTION canal.alta_empresa(text, text) TO aplicacion;",
+     "REVOKE EXECUTE ON FUNCTION canal.alta_empresa(text, text) FROM aplicacion;"),
     ("funciones_definidor", "ALTER FUNCTION canal.resolver_empresa(text) OWNER TO migrador;",
      "ALTER FUNCTION canal.resolver_empresa(text) OWNER TO propietario_funciones;"),
     ("propietario_funciones", "ALTER ROLE propietario_funciones BYPASSRLS;",
@@ -112,8 +112,8 @@ DATOS_PRUEBA = f"""
 insert into canal.empresa (id, nombre) values ('{EMPRESA_A}', 'Empresa A'), ('{EMPRESA_B}', 'Empresa B');
 insert into canal.clave_empresa (empresa_id, version, clave_envuelta)
     values ('{EMPRESA_A}', 1, '\\x01'), ('{EMPRESA_B}', 1, '\\x01');
-insert into canal.denuncia (empresa_id, id, categoria, contenido_cifrado, version_clave)
-    values ('{EMPRESA_A}', '{DEN_A}', 'prueba', '\\x01', 1), ('{EMPRESA_B}', '{DEN_B}', 'prueba', '\\x01', 1);
+insert into canal.denuncia (empresa_id, id, contenido_cifrado, version_clave)
+    values ('{EMPRESA_A}', '{DEN_A}', '\\x01', 1), ('{EMPRESA_B}', '{DEN_B}', '\\x01', 1);
 """
 
 # Se ejecuta dentro del contenedor de la API con el código real de app/bd.py.
