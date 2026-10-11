@@ -71,6 +71,22 @@ suprimir-caducadas y la frontera HTTP):
   artículo, salta una denuncia en uso y lo avisa con código de salida 1, y la
   suprime en la ejecución siguiente; no imprime códigos ni textos.
 
+Limitador de peticiones (app/limitador.py, sección r, con los límites de
+producción):
+* Cada regla (denuncia, seguimiento, mensajes y otras) admite exactamente su
+  límite por cliente a través de Caddy, también con peticiones inválidas o
+  códigos inexistentes, y la siguiente es 429 con Retry-After; otro cliente
+  no comparte el contador; /salud está exenta; toda ruta sin regla propia cae
+  en otras.
+* Redis solo guarda claves con el formato literal, con TTL y sin ninguna IP;
+  la huella agrupa IPv6 por /64 y la sal cambia al reiniciar la API.
+* Con Redis en pausa o parado, 503 con Retry-After en el plazo y un evento
+  sin IP; al volver, Redis no conserva nada y la API atiende sin 503.
+* Redis sin volúmenes y con /data de solo lectura; la ACL solo permite
+  contar en limite:*; una ACL permisiva, el usuario default activo o otra
+  contraseña bloquean el arranque, y también un secreto de Redis o un
+  CANARIO_LIMITES no válidos.
+
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
 
@@ -79,8 +95,8 @@ marcha y los secretos generados con scripts/generar_secretos.py):
 
     python tests/security/verificar_denuncia.py
 
-Usa un proyecto de Docker propio (canario_denuncia) y solo levanta postgres y
-api, más ejecuciones sueltas de gestion. Necesita que el proyecto canario esté
+Usa un proyecto de Docker propio (canario_denuncia) y levanta postgres, redis,
+api y caddy, más ejecuciones sueltas de gestion. Necesita que el proyecto canario esté
 parado (las subredes de app y edge son fijas). Al terminar lo borra todo
 (down -v y las imágenes construidas).
 
@@ -91,12 +107,18 @@ buscar en los logs sin leer nunca las reales, y la sección a) comprueba
 (por su sha256, dentro del contenedor) que la API usa las falsas. De
 secrets/ solo se usan las contraseñas de los roles, sin leerlas aquí: compose
 las monta como secretos, y una ejecución suelta de gestion monta la de
-aplicacion con --mount.
+aplicacion con --mount. Redis también usa secretos FALSOS: una contraseña
+generada aquí y una ACL con los permisos literales de producción más un
+usuario inspector de solo lectura, que solo existe en la batería (la ACL
+real no permite leer qué guarda Redis). Las secciones funcionales corren con
+límites altos (CANARIO_LIMITES, en otro fichero compose adicional); r)
+vuelve a arrancar la API sin él.
 
 La salida completa se guarda en verificacion_denuncia.txt dentro del
 directorio temporal del sistema. El código de salida es 0 solo si el
 resultado global es OK. Solo usa la biblioteca estándar.
 """
+import ast
 import base64
 import concurrent.futures
 import hashlib
@@ -118,6 +140,10 @@ PROYECTO = "canario_denuncia"
 SALIDA = pathlib.Path(tempfile.gettempdir()) / "verificacion_denuncia.txt"
 # main() añade el fichero compose con las claves falsas antes de usarla.
 BASE = ["docker", "compose", "-p", PROYECTO, "-f", "docker-compose.yml"]
+# Se rellena en preparar_claves_falsas: BASE sin los límites de prueba.
+BASE_PRODUCCION = []
+# Contraseñas FALSAS de Redis de esta ejecución (aplicacion e inspector).
+CONTRASENAS_REDIS = {}
 # Claves de cifrado falsas de esta ejecución: nombre del secreto -> hex.
 CLAVES_FALSAS = {}
 # Claves de empresa desenvueltas durante la prueba (hex), para buscarlas en los
@@ -323,6 +349,59 @@ TEXTO_EVENTO_SIN_CLAVE = "EVENTO empresa_sin_clave"
 TEXTO_INTEGRIDAD = "INTEGRIDAD: "
 TEXTO_ERROR_INTERNO = "ERROR INTERNO: InsufficientPrivilege 42501"
 
+# Limitador (app/limitador.py; docs/threat-model.md, 6.8 y 6.9).
+# Permisos del usuario aplicacion de Redis: copia literal de los de
+# scripts/generar_secretos.py (r1 comprueba que siguen siendo iguales). La
+# ACL de la batería es esa línea con una contraseña falsa, más un usuario
+# inspector de solo lectura que solo existe aquí: la ACL real no permite
+# SCAN ni GET, y sin él no se podría comprobar qué guarda Redis.
+PERMISOS_ACL_APLICACION = ("resetkeys ~limite:* resetchannels -@all "
+                           "+ping +multi +exec +incr +expire +ttl +client|setinfo")
+PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +pttl +dbsize +client|setinfo"
+# Límites altos para las secciones funcionales, que mandan decenas de
+# peticiones por minuto desde pocas IPs. r) vuelve a arrancar la API sin
+# ellos y prueba los de producción.
+LIMITES_PRUEBA = "denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,otras=1000/60"
+TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): denuncia=1000/3600 mensajes=1000/3600 otras=1000/60 "
+                        "seguimiento=1000/60")
+TEXTO_LIMITES_PRODUCCION = "LIMITES (por defecto): denuncia=10/3600 mensajes=30/3600 otras=60/60 seguimiento=60/60"
+TEXTO_LIMITADOR_VERIFICADO = "LIMITADOR VERIFICADO"
+# regla -> (peticiones, ventana en segundos), los de producción.
+LIMITES_PRODUCCION = {"denuncia": (10, 3600), "seguimiento": (60, 60), "mensajes": (30, 3600), "otras": (60, 60)}
+CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode("utf-8")
+TEXTO_EVENTO_LIMITADOR = "EVENTO limitador_no_disponible: "
+# Clientes de prueba con IP fija en la red edge (fuera del rango automático):
+# llegan a la API a través de Caddy, como un cliente real.
+IP_CLIENTE_A = "10.88.1.3"
+IP_CLIENTE_B = "10.88.1.4"
+# Las únicas claves que puede haber en Redis: las de las reglas (ventana y
+# HMAC de 128 bits) y las de la comprobación de arranque.
+PATRON_CLAVE_LIMITE = re.compile(
+    r"limite:(denuncia|seguimiento|mensajes|otras):[0-9]+:[0-9a-f]{32}|limite:arranque:[0-9a-f]{16}")
+# Rutas de la API y la regla que las limita ({identificador} sustituido por
+# "x"). Una ruta nueva hace fallar r) hasta que alguien decida su regla.
+RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguimiento": "seguimiento",
+             "/v1/seguimiento/mensajes": "mensajes"}
+# Procesos de un contenedor: "<pid> <línea de comandos>" por línea, leídos de
+# /proc con sh (sin ps, que la imagen no trae). Las propias líneas de sh y tr
+# no contienen "python" ni "uvicorn".
+LISTAR_PROCESOS = 'for p in /proc/[0-9]*; do printf "%s " "${p#/proc/}"; tr "\\0" " " < "$p/cmdline"; echo; done'
+# Aplicación ASGI mínima para el control de r4: el mismo uvicorn de la imagen
+# de la API con --workers 2.
+ECO_PROCESOS = """async def aplicacion(scope, receive, send):
+    if scope["type"] == "lifespan":
+        while True:
+            mensaje = await receive()
+            if mensaje["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif mensaje["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+"""
+TEXTO_BLOQUEO_PERMISIVA ="ARRANQUE BLOQUEADO: limitador: la ACL permite GET"
+TEXTO_BLOQUEO_DEFAULT = "ARRANQUE BLOQUEADO: limitador: Redis responde sin autenticar (usuario default activo)"
+TEXTO_BLOQUEO_CONTRASENA = "ARRANQUE BLOQUEADO: limitador: sin conexion con Redis en 15 s (AuthenticationError)"
+
 # Cliente HTTP de prueba: corre con la imagen de la API en la red app (directo
 # a la API) o en la red edge (a través de Caddy, con TLS y SNI localhost, sin
 # verificar el certificado del CA local). Las peticiones llegan por la
@@ -495,6 +574,37 @@ pool.close()
 print(json.dumps(res, sort_keys=True))
 """
 
+# Se ejecuta dentro del contenedor de la API, con el código real: la regla de
+# cada ruta que la aplicación tiene registrada y de otras que no existen, y la
+# huella de cliente (app/limitador.py) con IPv4 e IPv6. No abre conexiones.
+# Las rutas salen de aplicacion.openapi(), que las genera desde el enrutador
+# real aunque la API no lo sirva (openapi_url=None). En FastAPI 0.143.0,
+# aplicacion.routes guarda los routers incluidos como objetos internos sin
+# path (comprobado). Una ruta con include_in_schema=False no saldría aquí,
+# pero igual quedaría limitada por la regla otras.
+LIMITADOR_DENTRO = """
+import json
+from app import limitador
+from app.principal import aplicacion
+rutas = sorted(r.replace("{identificador}", "x") for r in aplicacion.openapi()["paths"])
+res = {"rutas": {r: limitador.regla_de(r) for r in rutas},
+       "otras": {r: limitador.regla_de(r) for r in ("/v1/nueva", "/otra", "/salud/", "/v1/empresas/a/b/denuncias")}}
+s1, s2 = b"1" * 32, b"2" * 32
+h = limitador.huella_cliente
+res["ipv6_mismo_64"] = h(s1, "2001:db8::1") == h(s1, "2001:db8::ffff:ffff:ffff:ffff")
+res["ipv6_otro_64"] = h(s1, "2001:db8::1") != h(s1, "2001:db8:0:1::1")
+res["ipv4_en_ipv6"] = h(s1, "::ffff:10.88.1.3") == h(s1, "10.88.1.3")
+res["ipv4_distintas"] = h(s1, "10.88.1.3") != h(s1, "10.88.1.4")
+res["otra_sal"] = h(s1, "10.88.1.3") != h(s2, "10.88.1.3")
+res["longitud"] = len(h(s1, "10.88.1.3"))
+try:
+    h(s1, "no es una ip")
+    res["no_ip"] = "aceptada"
+except ValueError:
+    res["no_ip"] = "ValueError"
+print(json.dumps(res, sort_keys=True))
+"""
+
 
 # ---------------------------------------------------------------------------
 # Utilidades de ejecución y de informe
@@ -587,20 +697,54 @@ IMAGEN_API = ""
 salidas_gestion = []
 
 
+def texto_acl(aplicacion, default="user default off", contrasena=None):
+    """Una ACL de Redis con la contraseña falsa de esta ejecución.
+
+    aplicacion son los permisos de su usuario (los literales de producción, u
+    otros en las desviaciones de r). El usuario inspector solo existe en la
+    batería.
+    """
+    hash_aplicacion = hashlib.sha256((contrasena or CONTRASENAS_REDIS["aplicacion"]).encode("ascii")).hexdigest()
+    hash_inspector = hashlib.sha256(CONTRASENAS_REDIS["inspector"].encode("ascii")).hexdigest()
+    return (f"{default}\nuser aplicacion on #{hash_aplicacion} {aplicacion}\n"
+            f"user inspector on #{hash_inspector} {PERMISOS_ACL_INSPECTOR}\n")
+
+
+def fichero_secreto(nombre, ruta):
+    # Ruta con barras normales y entre comillas: la del directorio temporal de
+    # Windows puede llevar espacios.
+    return [f"  {nombre}:", f"    file: \"{ruta.as_posix()}\""]
+
+
 def preparar_claves_falsas():
-    """Genera las claves falsas y el fichero compose que las monta."""
+    """Genera las claves y los secretos de Redis falsos y los ficheros compose
+    que los montan, más el que fija los límites de prueba.
+
+    BASE_PRODUCCION queda con los secretos falsos y sin límites de prueba: la
+    API arrancada con ella usa los de producción.
+    """
     directorio = TEMPORAL / "claves_compose"
     directorio.mkdir()
     lineas = ["secrets:"]
     for nombre in ("clave_maestra", "clave_hmac_codigos"):
         CLAVES_FALSAS[nombre] = secrets.token_hex(32)
         (directorio / nombre).write_text(CLAVES_FALSAS[nombre], encoding="ascii", newline="")
-        # Ruta con barras normales y entre comillas: la del directorio
-        # temporal de Windows puede llevar espacios.
-        lineas += [f"  {nombre}:", f"    file: \"{(directorio / nombre).as_posix()}\""]
+        lineas += fichero_secreto(nombre, directorio / nombre)
+    # Mismo formato que scripts/generar_secretos.py (token_urlsafe(48)).
+    for usuario in ("aplicacion", "inspector"):
+        CONTRASENAS_REDIS[usuario] = secrets.token_urlsafe(48)
+    (directorio / "contrasena_redis").write_text(CONTRASENAS_REDIS["aplicacion"], encoding="ascii", newline="")
+    (directorio / "redis_acl").write_text(texto_acl(PERMISOS_ACL_APLICACION), encoding="ascii", newline="\n")
+    lineas += fichero_secreto("contrasena_redis", directorio / "contrasena_redis")
+    lineas += fichero_secreto("redis_acl", directorio / "redis_acl")
     adicional = TEMPORAL / "claves_falsas.yml"
     adicional.write_text("\n".join(lineas) + "\n", encoding="utf-8", newline="\n")
     BASE.extend(["-f", str(adicional)])
+    BASE_PRODUCCION.extend(BASE)
+    limites = TEMPORAL / "limites_prueba.yml"
+    limites.write_text(f"services:\n  api:\n    environment:\n      CANARIO_LIMITES: \"{LIMITES_PRUEBA}\"\n",
+                       encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(limites)])
     return directorio
 
 
@@ -662,12 +806,15 @@ def seccion_a():
     registro = dc("logs", "--no-color", "--no-log-prefix", "api").todo
     pasa(TEXTO_VERIFICADO in registro and TEXTO_BLOQUEADO not in registro,
          f"a) la API arranca con sus claves y registra {TEXTO_VERIFICADO!r}")
+    pasa(TEXTO_LIMITADOR_VERIFICADO in registro, f"a) la API verifica Redis y registra {TEXTO_LIMITADOR_VERIFICADO!r}")
+    pasa(TEXTO_LIMITES_PRUEBA in registro,
+         f"a) las secciones funcionales usan los limites de prueba y el log lo dice ({TEXTO_LIMITES_PRUEBA!r})")
     pasa(salud(contenedor("api")) == "healthy", "a) la API esta healthy")
     pasa(dc("exec", "-T", "api", "test", "-f", "/run/secrets/contrasena_aplicacion").rc == 0,
          "a) /run/secrets/contrasena_aplicacion existe en la API (sin leerlo)")
     # Las claves que ve la API son las falsas de esta ejecución: se compara su
     # sha256 dentro del contenedor, sin sacar la clave.
-    for nombre, valor in CLAVES_FALSAS.items():
+    for nombre, valor in {**CLAVES_FALSAS, "contrasena_redis": CONTRASENAS_REDIS["aplicacion"]}.items():
         r = dc("exec", "-T", "api", "sha256sum", f"/run/secrets/{nombre}")
         esperado = hashlib.sha256(valor.encode("ascii")).hexdigest()
         pasa(r.rc == 0 and r.out.split()[:1] == [esperado],
@@ -752,12 +899,14 @@ def seccion_b():
                                              "con_relleno", "excesivo", "no_texto", "bytes")}, control)
 
 
-def arrancar_api_temporal(etiqueta, montajes):
+def arrancar_api_temporal(etiqueta, montajes, entorno=None):
     """Arranca la imagen de la API con secretos falsos y devuelve su log."""
     nombre = f"{PROYECTO}_api_{etiqueta}"
     argumentos = []
     for origen, destino in montajes:
         argumentos += ["--mount", f"type=bind,src={origen},dst=/run/secrets/{destino},readonly"]
+    for variable, valor in (entorno or {}).items():
+        argumentos += ["-e", f"{variable}={valor}"]
     ejecutar(["docker", "run", "-d", "--name", nombre, "--network", f"{PROYECTO}_data",
               "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
               *argumentos, IMAGEN_API])
@@ -777,6 +926,9 @@ def seccion_c():
                "hmac": secrets.token_hex(32)}
     ficheros = {
         "contrasena": valores["contrasena"],
+        # Bien formada: la comprobación del secreto de Redis va después de la
+        # de claves y no debe interferir.
+        "redis": secrets.token_urlsafe(48),
         "maestra": valores["maestra"],
         "hmac": valores["hmac"],
         "maestra_salto": valores["maestra"] + "\n",
@@ -788,7 +940,7 @@ def seccion_c():
         (d / nombre).write_text(contenido, encoding="ascii", newline="")
 
     def montar(maestra="maestra", hmac="hmac"):
-        lista = [(d / "contrasena", "contrasena_aplicacion")]
+        lista = [(d / "contrasena", "contrasena_aplicacion"), (d / "redis", "contrasena_redis")]
         if maestra:
             lista.append((d / maestra, "clave_maestra"))
         if hmac:
@@ -961,9 +1113,14 @@ def seccion_d():
 # ---------------------------------------------------------------------------
 # Peticiones HTTP
 # ---------------------------------------------------------------------------
-def http(peticiones, red="app"):
-    """Ejecuta las peticiones con el cliente de prueba y devuelve sus respuestas."""
-    r = ejecutar(["docker", "run", "--rm", "-i", "--network", f"{PROYECTO}_{red}", "--read-only",
+def http(peticiones, red="app", ip=None):
+    """Ejecuta las peticiones con el cliente de prueba y devuelve sus respuestas.
+
+    ip fija la dirección del cliente (fuera del rango automático de la red),
+    para que el limitador vea siempre el mismo cliente.
+    """
+    fija = ["--ip", ip] if ip else []
+    r = ejecutar(["docker", "run", "--rm", "-i", "--network", f"{PROYECTO}_{red}", *fija, "--read-only",
                   "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
                   "--entrypoint", "python", IMAGEN_API, "-c", CLIENTE_HTTP],
                  entrada=json.dumps(peticiones).encode("utf-8"))
@@ -1962,6 +2119,422 @@ def seccion_e():
              f"inyeccion: codigo {inyeccion.rc} {inyeccion.err.strip()[-200:]!r}; tras inyectar: {despues}")
 
 
+# ---------------------------------------------------------------------------
+# r) Limitador de peticiones
+# ---------------------------------------------------------------------------
+def dc_produccion(*args, extra=None):
+    """compose sin los límites de prueba: la API usa los de producción."""
+    return ejecutar(BASE_PRODUCCION + (extra or []) + list(args))
+
+
+def redis_cli(usuario, *args, entrada=None):
+    """redis-cli dentro del contenedor de Redis con la contraseña FALSA del
+    usuario, por entorno y no como argumento. Con usuario None, sin
+    autenticar."""
+    autenticacion = ["-e", f"REDISCLI_AUTH={CONTRASENAS_REDIS[usuario]}", "redis", "redis-cli", "--user", usuario] \
+        if usuario else ["redis", "redis-cli"]
+    return dc("exec", "-T", *autenticacion, *args, entrada=entrada)
+
+
+def contenido_redis():
+    """Todas las claves de Redis con su valor y su PTTL (usuario inspector).
+
+    PTTL y no TTL: TTL da segundos enteros y devuelve 0 a una clave a la que
+    le queda menos de un segundo; PTTL da milisegundos, y sus únicos valores
+    especiales son -1 (sin caducidad) y -2 (no existe), como en TTL
+    (documentación oficial de Redis). Solo se piden de las claves con
+    caracteres normales: una clave con otros caracteres ya es una anomalía y
+    se informa sin leerla.
+    """
+    r = redis_cli("inspector", "--scan")
+    if r.rc != 0:
+        raise Parada(f"no se pudo recorrer Redis con el usuario inspector: {r.todo.strip()[-300:]!r}")
+    claves = sorted(set(r.out.split()))
+    legibles = [c for c in claves if re.fullmatch(r"[A-Za-z0-9:._-]+", c)]
+    res = {c: (None, None) for c in claves}
+    if legibles:
+        ordenes = "".join(f"GET {c}\nPTTL {c}\n" for c in legibles)
+        lineas = redis_cli("inspector", entrada=ordenes.encode("ascii")).out.split("\n")
+        for i, clave in enumerate(legibles):
+            valor, ttl = (lineas[2 * i:2 * i + 2] + ["", ""])[:2]
+            res[clave] = (valor.strip(), ttl.strip())
+    return res
+
+
+def esperar_ventana(ventana, margen):
+    """Si quedan menos de margen segundos para que acabe la ventana actual,
+    espera a la siguiente: una ráfaga partida entre dos ventanas no llegaría
+    al límite. Es el reloj del anfitrión; Docker Desktop sincroniza con él el
+    de su máquina virtual, y el margen cubre una deriva de segundos."""
+    resto = ventana - int(time.time()) % ventana
+    if resto < margen:
+        p(f"   espera de {resto + 3} s a la ventana siguiente ({ventana} s)")
+        time.sleep(resto + 3)
+
+
+def codigo_inexistente():
+    aleatorio = base64.b32encode(secrets.token_bytes(20)).decode("ascii")
+    return "-".join(aleatorio[i:i + 4] for i in range(0, 32, 4))
+
+
+def es_429(respuesta, ventana):
+    """429 con el cuerpo exacto, las cabeceras de seguridad de Caddy y un
+    Retry-After entre 1 y la ventana."""
+    cabeceras = respuesta.get("cabeceras", {})
+    tras = cabeceras.get("retry-after", "")
+    return (respuesta.get("estado") == 429 and respuesta.get("cuerpo") == CUERPO_429
+            and tras.isdigit() and 1 <= int(tras) <= ventana
+            and all(cabeceras.get(k) == v for k, v in CABECERAS_SEGURIDAD.items()))
+
+
+def es_503_limitador(respuesta):
+    return (respuesta.get("estado") == 503 and respuesta.get("cuerpo") == CUERPO_503_OCUPADO
+            and respuesta.get("cabeceras", {}).get("retry-after") == REINTENTAR_TRAS)
+
+
+def desviar_acl(etiqueta, acl, mensaje):
+    """Arranca Redis con otra ACL (secreto redis_acl sustituido), reinicia la
+    API y comprueba que no arranca. Después devuelve la ACL de la batería y
+    comprueba que la API vuelve a estar sana (control)."""
+    fichero = TEMPORAL / f"acl_{etiqueta}"
+    fichero.write_text(acl, encoding="ascii", newline="\n")
+    variante = TEMPORAL / f"acl_{etiqueta}.yml"
+    variante.write_text("\n".join(["secrets:"] + fichero_secreto("redis_acl", fichero)) + "\n",
+                        encoding="utf-8", newline="\n")
+    cid = contenedor("api")
+    control_antes = salud(cid) == "healthy"
+    previas = "\n".join(lineas_log("api")).count(mensaje)
+    r = dc_produccion("up", "-d", "--force-recreate", "--no-deps", "redis", extra=["-f", str(variante)])
+    # Con otra contraseña su healthcheck falla: basta con que acepte conexiones.
+    arrancado = r.rc == 0 and esperar(lambda: any(t in redis_cli(None, "PING").out for t in ("PONG", "NOAUTH")), 30)
+    dc_produccion("restart", "api")
+    bloqueado = esperar(lambda: "\n".join(lineas_log("api")).count(mensaje) > previas, 60)
+    no_sana = salud(cid) != "healthy"
+    vuelta = dc_produccion("up", "-d", "--force-recreate", "--no-deps", "--wait", "redis")
+    dc_produccion("restart", "api")
+    control_despues = vuelta.rc == 0 and esperar(lambda: salud(cid) == "healthy", 90)
+    negativo(f"r11) {etiqueta}: la API no arranca y registra {mensaje!r}", bloqueado and no_sana,
+             control_antes and arrancado and control_despues,
+             f"healthy antes {control_antes}, Redis arrancado {arrancado}, healthy tras revertir {control_despues}; "
+             f"log: {lineas_log('api')[-4:]}")
+    if not control_despues:
+        raise Parada(f"la API no vuelve a estar healthy tras revertir la ACL {etiqueta}")
+
+
+def seccion_r():
+    p("=== r) limitador de peticiones (Redis)")
+    # r1) La ACL de la batería es la de producción: los permisos literales de
+    # aquí coinciden con los de scripts/generar_secretos.py (se lee el código
+    # del script, nunca los secretos).
+    arbol = ast.parse((RAIZ / "scripts" / "generar_secretos.py").read_text(encoding="utf-8"))
+    permisos = [ast.literal_eval(n.value) for n in arbol.body if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "PERMISOS_ACL_APLICACION" for t in n.targets)]
+    pasa(permisos == [PERMISOS_ACL_APLICACION],
+         f"r1) los permisos de aplicacion en la ACL de la bateria son los de generar_secretos.py ({permisos})")
+
+    # r2) Redis no puede escribir en disco: sin volúmenes ni tmpfs, raíz de
+    # solo lectura (incluido /data). Control: la misma imagen sin read_only
+    # sí escribe en /data.
+    i = json.loads(ejecutar(["docker", "inspect", contenedor("redis")]).out)[0]
+    montajes = sorted((m["Type"], m["Destination"]) for m in i["Mounts"])
+    pasa(montajes == [("bind", "/run/secrets/contrasena_redis"), ("bind", "/run/secrets/redis_acl")]
+         and not i["HostConfig"].get("Tmpfs"), f"r2) redis: solo sus dos secretos montados ({montajes})")
+    pasa(i["HostConfig"]["ReadonlyRootfs"] is True, "r2) redis: raiz de solo lectura")
+    imagen = i["Config"]["Image"]
+    volumenes = ejecutar(["docker", "image", "inspect", "--format", "{{json .Config.Volumes}}", imagen]).out.strip()
+    pasa(volumenes == "null", f"r2) la imagen de redis no declara VOLUME ({volumenes})")
+    escritura = dc("exec", "-T", "redis", "sh", "-c", "touch /data/prueba")
+    control = ejecutar(["docker", "run", "--rm", "--user", "redis", "--entrypoint", "sh", imagen, "-c",
+                        "touch /data/prueba && echo escrito"])
+    negativo("r2) /data no es escribible en el contenedor de redis", escritura.rc != 0,
+             control.rc == 0 and "escrito" in control.out, f"control: {control.todo.strip()[-200:]!r}")
+
+    # r3) La ACL: aplicacion cuenta en limite:* (con TTL, para no dejar una
+    # clave sin caducidad) y nada más; sin autenticar no se responde.
+    r = redis_cli("aplicacion", entrada=b"MULTI\nINCR limite:arranque:0000000000000000\n"
+                                       b"EXPIRE limite:arranque:0000000000000000 60 NX\nEXEC\n")
+    control = r.out.split() == ["OK", "QUEUED", "QUEUED", "1", "1"]
+    pasa(control, f"r3) control: aplicacion hace INCR y EXPIRE NX en limite:* dentro de MULTI ({r.out.split()})")
+    for orden in (["GET", "limite:x"], ["SET", "limite:x", "1"], ["DEL", "limite:x"], ["SCAN", "0"], ["KEYS", "*"],
+                  ["CONFIG", "GET", "dir"], ["CONFIG", "SET", "dir", "/tmp"], ["BGSAVE"], ["SAVE"], ["FLUSHALL"],
+                  ["EVAL", "return 1", "0"], ["INCR", "otra:clave"], ["ACL", "LIST"]):
+        r = redis_cli("aplicacion", *orden)
+        negativo(f"r3) aplicacion: {' '.join(orden)} -> NOPERM", "NOPERM" in r.out, control,
+                 f"salida: {r.todo.strip()[:200]!r}")
+    pong = redis_cli("aplicacion", "PING").out.strip()
+    r = redis_cli(None, "PING")
+    negativo("r3) sin autenticar, Redis responde NOAUTH (usuario default desactivado)", "NOAUTH" in r.out,
+             pong == "PONG", f"salida: {r.todo.strip()[:200]!r}")
+
+    # r4) La API con los límites de producción (sin CANARIO_LIMITES).
+    r = dc_produccion("up", "-d", "--wait", "api")
+    p(f"up -d --wait api con los limites de produccion -> codigo {r.rc}")
+    if r.rc != 0:
+        p(r.todo.strip()[-1500:])
+        raise Parada("no arranca la API con los limites de produccion")
+    registro = dc("logs", "--no-color", "--no-log-prefix", "api").todo
+    pasa(TEXTO_LIMITES_PRODUCCION in registro and TEXTO_LIMITADOR_VERIFICADO in registro
+         and TEXTO_BLOQUEADO not in registro,
+         f"r4) la API arranca con los limites de produccion y lo registra ({TEXTO_LIMITES_PRODUCCION!r})")
+    entorno = json.loads(ejecutar(["docker", "inspect", "--format", "{{json .Config.Env}}",
+                                   contenedor("api")]).out)
+    pasa(not any(e.startswith("CANARIO_LIMITES=") for e in entorno), "r4) la API no tiene CANARIO_LIMITES")
+    # Un solo proceso: la sal vive en la memoria del proceso, y con varios
+    # workers cada uno tendría la suya y el límite se multiplicaría (8).
+    # Control: la misma imagen con --workers 2 muestra los procesos hijos, así
+    # que el recuento distingue.
+    def procesos(contenedor_id):
+        salida = ejecutar(["docker", "exec", contenedor_id, "sh", "-c", LISTAR_PROCESOS]).out
+        return [l.strip() for l in salida.splitlines() if "python" in l or "uvicorn" in l]
+    (TEMPORAL / "eco_procesos").mkdir()
+    (TEMPORAL / "eco_procesos" / "eco.py").write_text(ECO_PROCESOS, encoding="utf-8", newline="\n")
+    nombre = f"{PROYECTO}_api_r_workers"
+    ejecutar(["docker", "run", "-d", "--name", nombre, "--network", "none", "--read-only", "--cap-drop", "ALL",
+              "--security-opt", "no-new-privileges:true",
+              "--mount", f"type=bind,src={TEMPORAL / 'eco_procesos'},dst=/eco,readonly",
+              "--entrypoint", "uvicorn", IMAGEN_API, "eco:aplicacion", "--app-dir", "/eco", "--workers", "2"])
+    try:
+        esperar(lambda: sum("spawn_main" in l for l in procesos(nombre)) >= 2, 30)
+        control_lista = procesos(nombre)
+    finally:
+        ejecutar(["docker", "rm", "-f", nombre])
+    control = sum("spawn_main" in l for l in control_lista) >= 2
+    reales = procesos(contenedor("api"))
+    negativo(f"r4) la API corre en un solo proceso de uvicorn, el 1 ({reales})",
+             len(reales) == 1 and reales[0].startswith("1 ") and "uvicorn app.principal:aplicacion" in reales[0],
+             control, f"control con --workers 2: {control_lista}")
+
+    # r5) Ráfagas desde el cliente A, a través de Caddy. Cada regla admite
+    # exactamente su límite y la petición siguiente es 429. El cliente B, con
+    # otra IP, no comparte contador: si la API contara por la IP de Caddy, B
+    # también recibiría 429. Cuentan también las peticiones inválidas (422) y
+    # los códigos inexistentes (404).
+    _, ident_a, _ = EMPRESAS["A"]
+    inexistente = codigo_inexistente()
+    casos = [
+        ("denuncia", pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso"}), 422),
+        ("seguimiento", seguimiento(inexistente), 404),
+        ("mensajes", nuevo_mensaje(inexistente, "hola"), 404),
+        ("otras", pt("GET", "/v1/no-existe"), 404),
+    ]
+    bloqueado = {}
+    ventana_mensajes = None
+    for regla, peticion, esperado in casos:
+        maximo, ventana = LIMITES_PRODUCCION[regla]
+        esperar_ventana(ventana, 30 if ventana == 60 else 300)
+        if regla == "mensajes":
+            ventana_mensajes = int(time.time()) // ventana
+        respuestas = http([por_caddy(peticion)] * (maximo + 1), red="edge", ip=IP_CLIENTE_A)
+        estados = [x.get("estado") for x in respuestas[:-1]]
+        control = estados == [esperado] * maximo
+        pasa(control, f"r5) {regla}: las {maximo} primeras peticiones del cliente A responden {esperado} "
+                      f"({sorted(set(estados))})")
+        bloqueado[regla] = es_429(respuestas[-1], ventana)
+        negativo(f"r5) {regla}: la peticion {maximo + 1} es 429 con el cuerpo exacto, las cabeceras de seguridad "
+                 f"y Retry-After entre 1 y {ventana}", bloqueado[regla], control,
+                 f"respuesta: {respuestas[-1]}")
+        otro = http([por_caddy(peticion)], red="edge", ip=IP_CLIENTE_B)[0]
+        negativo(f"r5) {regla}: el cliente B no comparte el contador de A ({otro.get('estado')})",
+                 otro.get("estado") == esperado, bloqueado[regla])
+    # /salud está exenta: el cliente A, ya bloqueado en "otras", sigue
+    # recibiendo 200 aunque pase de 60 por minuto.
+    salud_a = http([por_caddy(pt("GET", "/salud", tipo=None))] * 70, red="edge", ip=IP_CLIENTE_A)
+    negativo(f"r5) /salud esta exenta: 70 peticiones seguidas del cliente A bloqueado responden 200 "
+             f"({sorted({x.get('estado') for x in salud_a})})",
+             all(x.get("estado") == 200 for x in salud_a), bloqueado.get("otras", False))
+
+    # r6) Qué guarda Redis: solo claves con el formato literal, con TTL que
+    # no pasa de su ventana, valores enteros, y nunca la IP de un cliente, en
+    # claro ni como hash sin clave. Control: las ráfagas han creado claves.
+    contenido = contenido_redis()
+    control = any(c.startswith("limite:denuncia:") for c in contenido) and bloqueado.get("denuncia", False)
+    raras = [c for c in contenido if not PATRON_CLAVE_LIMITE.fullmatch(c)]
+    negativo(f"r6) todas las claves de Redis tienen el formato limite:<regla>:<ventana>:<hmac> "
+             f"({len(contenido)} claves) {raras if raras else ''}".strip(), not raras, control)
+    sin_ttl = []
+    caducadas = 0
+    for clave, (valor, pttl) in contenido.items():
+        partes = clave.split(":")
+        regla = partes[1] if len(partes) > 1 else ""
+        ventana = 60 if regla == "arranque" else LIMITES_PRODUCCION.get(regla, (0, 0))[1]
+        if pttl == "-2":
+            # Caducó entre el SCAN y el PTTL (también entre GET y PTTL):
+            # tenía caducidad.
+            caducadas += 1
+            continue
+        # pttl "-1" (sin caducidad) o None (clave no leída) no cumplen.
+        if not (pttl and pttl.isdigit() and 1 <= int(pttl) <= ventana * 1000 and valor and valor.isdigit()):
+            sin_ttl.append((clave, valor, pttl))
+    negativo(f"r6) todas las claves caducan (PTTL entre 1 ms y su ventana) y tienen un valor entero "
+             f"({caducadas} caducadas durante la lectura) {sin_ttl[:3] if sin_ttl else ''}".strip(), not sin_ttl, control)
+    buscadas = {}
+    for ip in (IP_CLIENTE_A, IP_CLIENTE_B):
+        empaquetada = bytes(int(x) for x in ip.split("."))
+        buscadas[ip] = [ip, ip.replace(".", ""), empaquetada.hex(), hashlib.sha256(ip.encode("ascii")).hexdigest()[:32],
+                        hashlib.sha256(empaquetada).hexdigest()[:32]]
+    texto = "\n".join(f"{c} {v}" for c, (v, _) in contenido.items())
+    encontradas = sorted({ip for ip, formas_ip in buscadas.items() for f in formas_ip if f in texto})
+    negativo(f"r6) ninguna IP de cliente aparece en Redis, ni en claro ni como SHA-256 sin clave "
+             f"{encontradas if encontradas else ''}".strip(), not encontradas, control)
+
+    # r7) Código real dentro de la API: regla de cada ruta registrada (una
+    # ruta nueva hace fallar esta prueba hasta que se decida su regla) y de
+    # rutas inexistentes, y la huella de cliente con IPv4 e IPv6.
+    r = dc("exec", "-T", "api", "python", "-c", LIMITADOR_DENTRO)
+    try:
+        res = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        sinc(f"r7) no se pudo ejecutar la prueba del limitador dentro de la API: {r.err.strip()[-300:]!r}")
+        res = None
+    if res is not None:
+        pasa(res["rutas"] == RUTAS_API, f"r7) reglas de las rutas registradas = {res['rutas']}")
+        pasa(res["otras"] == {r_: "otras" for r_ in ("/v1/nueva", "/otra", "/salud/", "/v1/empresas/a/b/denuncias")},
+             f"r7) lo que no tiene regla propia cae en otras (cerrado por construccion): {res['otras']}")
+        control = res["ipv4_distintas"] is True and res["longitud"] == 32
+        pasa(control, "r7) control: dos IPv4 distintas tienen huellas distintas de 128 bits")
+        for clave, texto_prueba in (("ipv6_mismo_64", "dos IPv6 del mismo /64 comparten huella"),
+                                    ("ipv6_otro_64", "una IPv6 de otro /64 tiene otra huella"),
+                                    ("ipv4_en_ipv6", "una IPv4 escrita como IPv6 (::ffff:) cuenta como la IPv4"),
+                                    ("otra_sal", "con otra sal, la misma IP tiene otra huella")):
+            negativo(f"r7) {texto_prueba}", res[clave] is True, control)
+        pasa(res["no_ip"] == "ValueError", f"r7) una direccion que no es una IP se rechaza ({res['no_ip']})")
+
+    # r8) La sal solo vive en la memoria del proceso: tras reiniciar la API,
+    # el mismo cliente, en la misma ventana, tiene otra huella y su contador
+    # vuelve a empezar. Control: antes del reinicio estaba bloqueado.
+    antes = {c for c in contenido_redis() if c.startswith("limite:mensajes:")}
+    dc_produccion("restart", "api")
+    sana = esperar(lambda: salud(contenedor("api")) == "healthy", 90)
+    respuesta = http([por_caddy(nuevo_mensaje(inexistente, "hola"))], red="edge", ip=IP_CLIENTE_A)[0]
+    despues = contenido_redis()
+    nuevas = {c: v for c, (v, _) in despues.items() if c.startswith("limite:mensajes:") and c not in antes}
+    huellas_antes = {c.rsplit(":", 1)[1] for c in antes}
+    nueva = next(iter(nuevas), "")
+    otra_huella = (len(nuevas) == 1 and list(nuevas.values()) == ["1"]
+                   and nueva.split(":")[2] == str(ventana_mensajes)
+                   and nueva.rsplit(":", 1)[1] not in huellas_antes)
+    negativo("r8) tras reiniciar la API, el cliente A tiene otra huella en la misma ventana y su contador empieza "
+             f"de nuevo ({respuesta.get('estado')}, claves nuevas {nuevas})",
+             respuesta.get("estado") == 404 and otra_huella, sana and bloqueado.get("mensajes", False))
+
+    # r9) Redis en pausa (acepta la conexión pero no contesta): la petición
+    # se rechaza en el plazo, sin retener a la API. Control: la misma
+    # petición antes de la pausa.
+    peticiones = [por_caddy(pt("GET", "/salud", tipo=None)), por_caddy(seguimiento(inexistente))]
+    inicio = time.monotonic()
+    base = http(peticiones, red="edge", ip=IP_CLIENTE_B)
+    segundos_base = time.monotonic() - inicio
+    control = base[0].get("estado") == 200 and base[1].get("estado") == 404
+    previas = len(lineas_log("api"))
+    dc("pause", "redis")
+    try:
+        inicio = time.monotonic()
+        pausa = http(peticiones, red="edge", ip=IP_CLIENTE_B)
+        segundos_pausa = time.monotonic() - inicio
+    finally:
+        dc("unpause", "redis")
+    nuevas_lineas = lineas_log("api")[previas:]
+    negativo(f"r9) con Redis en pausa: 503 con el cuerpo exacto y Retry-After {REINTENTAR_TRAS}, sin esperar "
+             f"({segundos_pausa:.1f} s frente a {segundos_base:.1f} s sin pausa)",
+             es_503_limitador(pausa[1]) and segundos_pausa < segundos_base + 3, control,
+             f"respuesta: {pausa[1]}")
+    negativo(f"r9) con Redis en pausa, /salud sigue respondiendo 200 ({pausa[0].get('estado')})",
+             pausa[0].get("estado") == 200, control)
+    negativo(f"r9) el rechazo registra {TEXTO_EVENTO_LIMITADOR + 'TimeoutError'!r} sin la IP del cliente",
+             any(TEXTO_EVENTO_LIMITADOR + "TimeoutError" in l for l in nuevas_lineas)
+             and not any(IP_CLIENTE_B in l for l in nuevas_lineas), control, f"lineas nuevas: {nuevas_lineas}")
+
+    # r10) Redis parado: las cuatro reglas responden 503 y /salud 200. Al
+    # volver, Redis no conserva ningún contador y la primera petición ya se
+    # atiende (las conexiones muertas del pool se sustituyen).
+    claves_antes = redis_cli("inspector", "DBSIZE").out.strip()
+    previas = len(lineas_log("api"))
+    dc("stop", "redis")
+    try:
+        parado = http([por_caddy(x) for x in (pt("POST", ruta_denuncias(ident_a), {"categoria": "acoso"}),
+                                              seguimiento(inexistente), nuevo_mensaje(inexistente, "hola"),
+                                              pt("GET", "/v1/no-existe"), pt("GET", "/salud", tipo=None))],
+                      red="edge", ip=IP_CLIENTE_B)
+    finally:
+        dc("start", "redis")
+    nuevas_lineas = lineas_log("api")[previas:]
+    control = parado[-1].get("estado") == 200
+    pasa(control, f"r10) control: con Redis parado /salud responde 200 ({parado[-1].get('estado')})")
+    for nombre, respuesta in zip(("denuncia", "seguimiento", "mensajes", "otras"), parado):
+        negativo(f"r10) con Redis parado, {nombre}: 503 con el cuerpo exacto y Retry-After {REINTENTAR_TRAS}",
+                 es_503_limitador(respuesta), control, f"respuesta: {respuesta}")
+    negativo(f"r10) cada rechazo registra {TEXTO_EVENTO_LIMITADOR!r} sin la IP del cliente",
+             sum(TEXTO_EVENTO_LIMITADOR in l for l in nuevas_lineas) >= 4
+             and not any(IP_CLIENTE_B in l for l in nuevas_lineas), control, f"lineas nuevas: {nuevas_lineas}")
+    vuelto = esperar(lambda: salud(contenedor("redis")) == "healthy", 60)
+    claves_despues = redis_cli("inspector", "DBSIZE").out.strip()
+    negativo(f"r10) tras reiniciarse, Redis no conserva ningun contador (DBSIZE {claves_antes} -> {claves_despues})",
+             claves_despues == "0", vuelto and claves_antes.isdigit() and int(claves_antes) > 0)
+    respuesta = http([por_caddy(seguimiento(inexistente))], red="edge", ip=IP_CLIENTE_B)[0]
+    pasa(vuelto and respuesta.get("estado") == 404,
+         f"r10) con Redis de vuelta, la primera peticion se atiende sin 503 ({respuesta.get('estado')})")
+
+    # r11) Arranque verificado del limitador: cada ACL desviada bloquea el
+    # arranque; al devolver la de la batería, la API vuelve a arrancar.
+    desviar_acl("permisiva", texto_acl("resetkeys ~* &* +@all"), TEXTO_BLOQUEO_PERMISIVA)
+    desviar_acl("default_activo", texto_acl(PERMISOS_ACL_APLICACION, default="user default on nopass ~* &* +@all"),
+                TEXTO_BLOQUEO_DEFAULT)
+    desviar_acl("otra_contrasena", texto_acl(PERMISOS_ACL_APLICACION, contrasena=secrets.token_urlsafe(48)),
+                TEXTO_BLOQUEO_CONTRASENA)
+
+    # r12) Comprobaciones previas: secreto de Redis y CANARIO_LIMITES. Con
+    # todo bien formado (control), la API pasa de ellas y llega a la conexión
+    # (que falla por la contraseña falsa de la base de datos).
+    d = TEMPORAL / "previas_limitador"
+    d.mkdir()
+    redis_falsa = secrets.token_urlsafe(48)
+    for nombre, contenido_fichero in (("pg", secrets.token_urlsafe(48)), ("maestra", secrets.token_hex(32)),
+                                      ("hmac", secrets.token_hex(32)), ("redis", redis_falsa),
+                                      ("redis_salto", redis_falsa + "\n")):
+        (d / nombre).write_text(contenido_fichero, encoding="ascii", newline="")
+    base_montajes = [(d / "pg", "contrasena_aplicacion"), (d / "maestra", "clave_maestra"),
+                     (d / "hmac", "clave_hmac_codigos")]
+    validos = "denuncia=5/3600,seguimiento=6/60,mensajes=7/3600,otras=8/60"
+    control_log = arrancar_api_temporal("r_control", base_montajes + [(d / "redis", "contrasena_redis")],
+                                        {"CANARIO_LIMITES": validos})
+    control = (f"{TEXTO_BLOQUEADO}conexion" in control_log
+               and "LIMITES (configurados): denuncia=5/3600 mensajes=7/3600 otras=8/60 seguimiento=6/60" in control_log)
+    pasa(control, "r12) control: con el secreto de Redis y CANARIO_LIMITES validos la API los acepta, registra los "
+                  "limites configurados y llega a la conexion")
+    casos = [
+        ("r_sin_redis", base_montajes, None,
+         "secreto_redis: no se puede leer el secreto de Redis (FileNotFoundError)"),
+        ("r_redis_salto", base_montajes + [(d / "redis_salto", "contrasena_redis")], None,
+         "secreto_redis: el secreto de Redis tiene un formato inesperado"),
+        ("r_limites_incompletos", base_montajes + [(d / "redis", "contrasena_redis")],
+         {"CANARIO_LIMITES": "denuncia=10/3600"},
+         "limites: CANARIO_LIMITES: reglas ['denuncia'], se esperan ['denuncia', 'mensajes', 'otras', 'seguimiento']"),
+        ("r_limites_ventana", base_montajes + [(d / "redis", "contrasena_redis")],
+         {"CANARIO_LIMITES": "denuncia=10/7,seguimiento=60/60,mensajes=30/3600,otras=60/60"},
+         "limites: CANARIO_LIMITES: la ventana de denuncia no divide el dia"),
+        ("r_limites_mal_formados", base_montajes + [(d / "redis", "contrasena_redis")],
+         {"CANARIO_LIMITES": "denuncia=0/3600,seguimiento=60/60,mensajes=30/3600,otras=60/60"},
+         "limites: CANARIO_LIMITES: elemento mal formado"),
+    ]
+    for etiqueta, montajes, entorno_api, motivo in casos:
+        registro = arrancar_api_temporal(etiqueta, montajes, entorno_api)
+        esperado = f"{TEXTO_BLOQUEADO}{motivo}"
+        negativo(f"r12) {etiqueta[2:].replace('_', ' ')}: la API no arranca y registra {esperado!r}",
+                 esperado in registro and f"{TEXTO_BLOQUEADO}conexion" not in registro
+                 and redis_falsa not in registro, control, f"log: {registro.strip()[-300:]!r}")
+
+    # r13) Ni las IPs de los clientes ni las contraseñas de Redis aparecen en
+    # los logs. Control: las peticiones de A llegaron a la API (fue
+    # bloqueado).
+    textos = {s: dc("logs", "--no-color", "--no-log-prefix", s).todo for s in ("api", "redis", "caddy")}
+    fugas = sorted({f"{n} en {s}" for s, t in textos.items()
+                    for n, v in (("ip_a", IP_CLIENTE_A), ("ip_b", IP_CLIENTE_B),
+                                 ("contrasena_aplicacion", CONTRASENAS_REDIS["aplicacion"]),
+                                 ("contrasena_inspector", CONTRASENAS_REDIS["inspector"])) if v in t})
+    negativo(f"r13) ni las IPs de los clientes ni las contrasenas de Redis aparecen en los logs de api, redis y caddy "
+             f"{fugas if fugas else ''}".strip(), not fugas, bloqueado.get("denuncia", False))
+
+
 def seccion_s():
     p("=== s) limpieza")
     r = dc_con_gestion("down", "-v", "--rmi", "local")
@@ -2053,10 +2626,11 @@ def main():
     DIRECTORIO_CLAVES = preparar_claves_falsas()
     parada = None
     try:
-        # e) va al final: busca las claves en los logs después de todo lo
-        # demás, incluidas las peticiones HTTP.
+        # e) busca las claves en los logs después de todo lo demás, incluidas
+        # las peticiones HTTP. r) va detrás: vuelve a crear la API con los
+        # límites de producción, y el log del contenedor anterior se pierde.
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_f, seccion_g, seccion_m, seccion_h,
-                        seccion_i, seccion_j, seccion_k, seccion_l, seccion_n, seccion_e):
+                        seccion_i, seccion_j, seccion_k, seccion_l, seccion_n, seccion_e, seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)
@@ -2066,8 +2640,12 @@ def main():
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
         for etiqueta in ("claves_ok", "sin_maestra", "sin_hmac", "maestra_salto", "maestra_mayusculas",
-                         "maestra_corta", "hmac_igual"):
+                         "maestra_corta", "hmac_igual", "r_control", "r_sin_redis", "r_redis_salto",
+                         "r_limites_incompletos", "r_limites_ventana", "r_limites_mal_formados", "r_workers"):
             ejecutar(["docker", "rm", "-f", f"{PROYECTO}_api_{etiqueta}"])
+        # Por si r) se cortó con Redis en pausa: down no para un contenedor
+        # pausado.
+        dc("unpause", "redis")
         if parada is not None:
             dc_con_gestion("down", "-v", "--rmi", "local")
         else:

@@ -22,7 +22,8 @@ marcha):
     python tests/security/verificar_esqueleto.py
 
 Usa un proyecto de Docker propio (canario_esqueleto) y levanta los servicios
-api y caddy (y postgres, del que depende la API para su arranque verificado).
+api y caddy (y postgres y redis, de los que depende la API para su arranque
+verificado).
 Nunca toca el proyecto canario, pero necesita que esté
 parado: las subredes 10.88.0.0/28 y 10.88.1.0/28 y el puerto 127.0.0.1:8443
 son fijos y no pueden estar en uso por otro proyecto (si lo están, PARADA). Al
@@ -87,14 +88,18 @@ MEMORIA = {"api": 268435456, "caddy": 134217728}  # 256m y 128m
 PIDS = 64
 CAP_CERO = "0000000000000000"
 PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}]}
-# La API está en app (con el proxy) y en data (con PostgreSQL), nunca en edge.
-REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data"}, "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
-# Únicos montajes de la API: sus tres Docker secrets (contraseña de la base de
-# datos, clave maestra y clave del HMAC de los códigos), ordenados por destino
-# porque docker inspect no garantiza el orden. Nunca contrasena_plataforma.
+# La API está en app (con el proxy), en data (con PostgreSQL) y en cache (con
+# Redis, el del limitador), nunca en edge.
+REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache"},
+         "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
+# Únicos montajes de la API: sus cuatro Docker secrets (contraseña de la base
+# de datos, clave maestra, clave del HMAC de los códigos y contraseña de
+# Redis), ordenados por destino porque docker inspect no garantiza el orden.
+# Nunca contrasena_plataforma.
 MONTAJES_API = [("bind", "", "/run/secrets/clave_hmac_codigos"),
                 ("bind", "", "/run/secrets/clave_maestra"),
-                ("bind", "", "/run/secrets/contrasena_aplicacion")]
+                ("bind", "", "/run/secrets/contrasena_aplicacion"),
+                ("bind", "", "/run/secrets/contrasena_redis")]
 
 IMAGEN_CADDY_OFICIAL = ("caddy:2.11.7-alpine@sha256:"
                         "d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f")

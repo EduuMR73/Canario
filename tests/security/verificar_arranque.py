@@ -22,8 +22,10 @@ marcha y los secretos generados con scripts/generar_secretos.py):
 
     python tests/security/verificar_arranque.py
 
-Usa un proyecto de Docker propio (canario_arranque) y solo levanta postgres y
-api. Necesita que el proyecto canario esté parado (las subredes de app y edge
+Usa un proyecto de Docker propio (canario_arranque) y solo levanta postgres,
+redis y api (la API depende de Redis para arrancar; las comprobaciones de
+arranque del limitador se prueban en verificar_denuncia.py, r). Necesita que
+el proyecto canario esté parado (las subredes de app y edge
 son fijas). Al terminar lo borra todo (down -v y las imágenes construidas).
 No lee ningún secreto real: los cambios en la base de datos se hacen como
 superusuario por el socket del contenedor (peer), y las pruebas de
@@ -356,18 +358,20 @@ def seccion_b():
 
 
 def claves_falsas():
-    """Claves de cifrado falsas con el formato correcto, generadas aquí.
+    """Claves de cifrado y contraseña de Redis falsas con el formato correcto,
+    generadas aquí.
 
-    La API comprueba sus claves antes de conectar: sin ellas se bloquearía
-    como "claves" y nunca llegaría a la conexión que estas pruebas quieren
-    observar. Nunca se usan las reales.
+    La API comprueba sus claves y el secreto de Redis antes de conectar: sin
+    ellos se bloquearía como "claves" o "secreto_redis" y nunca llegaría a la
+    conexión que estas pruebas quieren observar. Nunca se usan los reales.
     """
     directorio = TEMPORAL / "claves_falsas"
     if not directorio.is_dir():
         directorio.mkdir()
         for nombre in ("clave_maestra", "clave_hmac_codigos"):
             (directorio / nombre).write_text(secrets.token_hex(32), encoding="ascii", newline="")
-    return [arg for nombre in ("clave_maestra", "clave_hmac_codigos")
+        (directorio / "contrasena_redis").write_text(secrets.token_urlsafe(48), encoding="ascii", newline="")
+    return [arg for nombre in ("clave_maestra", "clave_hmac_codigos", "contrasena_redis")
             for arg in ("--mount", f"type=bind,src={directorio / nombre},dst=/run/secrets/{nombre},readonly")]
 
 
@@ -568,8 +572,10 @@ def main():
     if ocupadas:
         p(f"PARADA: las subredes fijas ya estan en uso por {ocupadas} (pare el proyecto canario)")
         terminar_con_parada()
-    # Solo se comprueba que existen (is_file), nunca se leen.
-    for fichero in ("contrasena_aplicacion.txt", "clave_maestra.txt", "clave_hmac_codigos.txt"):
+    # Solo se comprueba que existen (is_file), nunca se leen. Los de Redis
+    # hacen falta porque la API depende de Redis para arrancar.
+    for fichero in ("contrasena_aplicacion.txt", "clave_maestra.txt", "clave_hmac_codigos.txt",
+                    "contrasena_redis.txt", "redis_acl.conf"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
             terminar_con_parada()
