@@ -21,8 +21,9 @@ marcha):
 
     python tests/security/verificar_esqueleto.py
 
-Usa un proyecto de Docker propio (canario_esqueleto) y solo levanta los
-servicios api y caddy. Nunca toca el proyecto canario, pero necesita que esté
+Usa un proyecto de Docker propio (canario_esqueleto) y levanta los servicios
+api y caddy (y postgres, del que depende la API para su arranque verificado).
+Nunca toca el proyecto canario, pero necesita que esté
 parado: las subredes 10.88.0.0/28 y 10.88.1.0/28 y el puerto 127.0.0.1:8443
 son fijos y no pueden estar en uso por otro proyecto (si lo están, PARADA). Al
 terminar lo borra todo (down -v y las imágenes construidas). No lee ningún
@@ -85,7 +86,10 @@ MEMORIA = {"api": 268435456, "caddy": 134217728}  # 256m y 128m
 PIDS = 64
 CAP_CERO = "0000000000000000"
 PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}]}
-REDES = {"api": {f"{PROYECTO}_app"}, "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
+# La API está en app (con el proxy) y en data (con PostgreSQL), nunca en edge.
+REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data"}, "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
+# Único montaje de la API: el secreto de la base de datos (Docker secret).
+MONTAJES_API = [("bind", "", "/run/secrets/contrasena_aplicacion")]
 
 IMAGEN_CADDY_OFICIAL = ("caddy:2.11.7-alpine@sha256:"
                         "d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f")
@@ -524,7 +528,7 @@ def seccion_g():
              lista == [("volume", f"{PROYECTO}_caddy_datos", "/data")] and not tmpfs,
              control, f"control con volumen anonimo: {lista_control}")
     lista, tmpfs, mounts = montajes(contenedor("api"))
-    pasa(lista == [] and not tmpfs and not mounts, f"g) api: sin montajes ({lista}, {tmpfs}, {mounts})")
+    pasa(lista == MONTAJES_API and not tmpfs, f"g) api: solo el secreto montado ({lista}, Tmpfs = {tmpfs})")
 
     # Logs de arranque: sin autosave ni HTTP/3. Control: Caddy sin persist_config
     # off y con protocolos por defecto los registra.

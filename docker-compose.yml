@@ -205,6 +205,12 @@ services:
     build:
       context: .
     restart: unless-stopped
+    # Al arrancar, la API verifica la base de datos (roles, RLS, permisos y
+    # políticas) y se niega a arrancar si algo no coincide. Para eso necesita
+    # PostgreSQL ya inicializado: su healthcheck comprueba roles y esquema.
+    depends_on:
+      postgres:
+        condition: service_healthy
     # Se añade al ENTRYPOINT de la imagen (que ya fija --no-access-log y
     # --no-server-header). Solo se confía en las cabeceras de reenvío que vengan
     # de la IP fija del proxy en la red app; nunca "*". Sin esto, todos los
@@ -226,11 +232,16 @@ services:
     # Límites de recursos: contienen el daño de un fallo o de un abuso.
     mem_limit: 256m
     pids_limit: 64
-    # Sin puertos publicados: solo se llega a la API a través del proxy. Por
-    # ahora solo está en la red app; data y cache se añadirán cuando el núcleo
-    # las use.
+    # Sin puertos publicados: solo se llega a la API a través del proxy (red
+    # app). En data habla con PostgreSQL; pg_hba.conf solo admite su subred
+    # (samenet). cache se añadirá cuando la API use Redis.
     networks:
       - app
+      - data
+    # Contraseña del rol aplicacion como fichero en /run/secrets, nunca como
+    # variable de entorno. La API la lee en cada conexión nueva.
+    secrets:
+      - contrasena_aplicacion
     healthcheck:
       # Sin curl: un script de la propia imagen que solo da sano con 200 y el
       # cuerpo exacto {"estado":"ok"}. El motivo del fallo queda en stderr.
