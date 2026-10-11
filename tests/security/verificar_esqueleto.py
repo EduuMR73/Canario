@@ -40,6 +40,7 @@ Solo usa la biblioteca estándar.
 import http.client
 import json
 import pathlib
+import re
 import shutil
 import socket
 import ssl
@@ -169,6 +170,29 @@ elif modo == "eco_proxy":
 elif modo == "eco_directo":
     estado, cuerpo = http_directo("/eco", {"X-Forwarded-For": "6.6.6.6", "X-Prueba": "canario"})
     res = {"codigo": estado, **json.loads(cuerpo)}
+elif modo.startswith("cabecera_lenta_"):
+    # Envía la línea de petición y una cabecera, espera N segundos y termina
+    # las cabeceras. Con N mayor que read_header, Caddy debe cortar.
+    import time
+    pausa = int(modo.rsplit("_", 1)[1])
+    s = SIN_VERIFICAR.wrap_socket(socket.create_connection((destino, 8443), timeout=pausa + 20),
+                                  server_hostname="localhost")
+    inicio = time.monotonic()
+    try:
+        s.sendall(b"GET /salud HTTP/1.1\r\nHost: localhost:8443\r\n")
+        time.sleep(pausa)
+        s.sendall(b"Connection: close\r\n\r\n")
+        datos = b""
+        while True:
+            trozo = s.recv(4096)
+            if not trozo:
+                break
+            datos += trozo
+        linea = datos.split(b"\r\n", 1)[0].split()
+        res = {"estado": int(linea[1]) if len(linea) > 1 and linea[1].isdigit() else None}
+    except OSError as error:
+        res = {"error": type(error).__name__}
+    res["segundos"] = round(time.monotonic() - inicio, 1)
 print(json.dumps(res, sort_keys=True))
 '''
 
@@ -605,6 +629,11 @@ def seccion_i():
     p(f"   rafaga: {res}")
     if not rafaga_ok:
         sinc("i) control: las 20 peticiones validas de la rafaga no llegaron")
+    # Un SNI sin certificado (3) o sin SNI (3) no completa el TLS: solo hay
+    # certificado para localhost. Control: las 20 peticiones con SNI
+    # localhost sí llegan.
+    negativo(f"i) un SNI desconocido o ausente no completa el TLS ({res.get('tls_fallido') if res else None} de 6)",
+             bool(res) and res.get("tls_fallido") == 6, rafaga_ok)
     time.sleep(3)
     log = dc("logs", "--no-color", "caddy", "api").todo
     negativo(f"i) {IP_CLIENTE} no aparece en los logs de caddy ni de api", IP_CLIENTE not in log,
@@ -667,6 +696,83 @@ def seccion_j():
 def huella_ca():
     r = exec_("caddy", "sha256sum", RAIZ_CA)
     return r.out.split()[0] if r.rc == 0 and r.out.strip() else ""
+
+
+# Caddy de control para l): API de administración y servidor de redirección
+# por defecto (este en 8080, porque el usuario 10002 no puede usar el 80).
+CADDYFILE_CONTROL_ESCUCHA = """{
+	http_port 8080
+	skip_install_trust
+}
+
+https://localhost:8443 {
+	tls internal
+	respond "ok"
+}
+"""
+# Plazos del Caddyfile en la configuración que carga Caddy (nanosegundos).
+PLAZOS_CADDY = {"read_header_timeout": 10_000_000_000, "read_timeout": 30_000_000_000,
+                "write_timeout": 30_000_000_000, "idle_timeout": 120_000_000_000}
+
+
+# Sockets del proceso 1 y tabla TCP del espacio de red. Solo se cuentan los
+# sockets del proceso de Caddy: en una red definida por el usuario, el DNS
+# embebido de Docker escucha en 127.0.0.11 con un puerto aleatorio dentro del
+# mismo espacio de red (comprobado con un contenedor que solo ejecuta cat).
+ORDEN_ESCUCHA = ["sh", "-c", "ls -l /proc/1/fd; cat /proc/net/tcp /proc/net/tcp6"]
+
+
+def puertos_escuchando(texto):
+    """Puertos TCP en LISTEN (estado 0A) cuyos sockets son del proceso 1."""
+    inodos = set(re.findall(r"socket:\[(\d+)\]", texto))
+    puertos = set()
+    for linea in texto.splitlines():
+        partes = linea.split()
+        if len(partes) > 9 and partes[3] == "0A" and ":" in partes[1] and partes[9] in inodos:
+            puertos.add(int(partes[1].rsplit(":", 1)[1], 16))
+    return puertos
+
+
+def seccion_l():
+    p("=== l) Caddy: que escucha, cabeceras lentas y plazos")
+    # Sin API de administración (2019) ni servidor de redirección: solo 8443.
+    # Control: un Caddy con los valores por defecto escucha también en 2019 y
+    # en su puerto HTTP.
+    (TEMPORAL / "control_escucha").mkdir()
+    (TEMPORAL / "control_escucha" / "Caddyfile").write_text(CADDYFILE_CONTROL_ESCUCHA, encoding="utf-8", newline="\n")
+    nombre = f"{PROYECTO}_control_escucha"
+    ejecutar(["docker", "run", "-d", "--name", nombre,
+              "--mount", f"type=bind,src={TEMPORAL / 'control_escucha' / 'Caddyfile'},dst=/etc/caddy/Caddyfile,readonly",
+              IMAGEN_PROXY])
+    try:
+        time.sleep(4)
+        control = puertos_escuchando(ejecutar(["docker", "exec", nombre, *ORDEN_ESCUCHA]).out)
+    finally:
+        ejecutar(["docker", "rm", "-f", nombre])
+    real = puertos_escuchando(exec_("caddy", *ORDEN_ESCUCHA).out)
+    negativo(f"l) Caddy solo escucha en 8443: sin API de administracion (2019) ni redireccion HTTP ({sorted(real)})",
+             real == {8443}, {2019, 8080, 8443} <= control, f"control: {sorted(control)}")
+
+    # read_header: cabeceras a medias más de 10 s se cortan. Control: con 2 s
+    # de pausa la petición llega.
+    corta = cliente_red(f"{PROYECTO}_edge", IP_CLIENTE, "cabecera_lenta_2", "caddy") or {}
+    larga = cliente_red(f"{PROYECTO}_edge", IP_CLIENTE, "cabecera_lenta_15", "caddy") or {}
+    p(f"   cabeceras lentas: 2 s -> {corta}; 15 s -> {larga}")
+    negativo("l) unas cabeceras paradas mas de read_header (10 s) no llegan a la API",
+             larga.get("estado") != 200, corta.get("estado") == 200, f"control: {corta}")
+
+    # write e idle no se prueban por comportamiento (exigirían respuestas de
+    # más de 30 s o esperas de 2 minutos): se comprueba la configuración que
+    # Caddy carga de verdad (caddy adapt del Caddyfile de la imagen).
+    r = exec_("caddy", "caddy", "adapt", "--config", "/etc/caddy/Caddyfile")
+    try:
+        servidores = json.loads(r.out)["apps"]["http"]["servers"]
+    except (ValueError, KeyError):
+        sinc(f"l) no se pudo leer la configuracion efectiva de Caddy: {r.err.strip()[-200:]!r}")
+        return
+    reales = {n: {k: s.get(k) for k in PLAZOS_CADDY} for n, s in servidores.items()}
+    pasa(bool(reales) and all(v == PLAZOS_CADDY for v in reales.values()),
+         f"l) configuracion efectiva: read_header 10s, read_body 30s, write 30s e idle 2m en todos los servidores ({reales})")
 
 
 def seccion_k():
@@ -799,7 +905,7 @@ def main():
     try:
         seccion_a()
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g,
-                        seccion_h, seccion_i, seccion_j, seccion_k):
+                        seccion_h, seccion_i, seccion_j, seccion_k, seccion_l):
             seccion()
     except Parada as e:
         parada = str(e)
