@@ -2,7 +2,7 @@
 
 Canario: canal de denuncias anónimo multi-empresa. Backend API REST (FastAPI, PostgreSQL).
 
-Estado del documento: borrador 2. Las decisiones técnicas de infraestructura y de base de datos se han contrastado con documentación (sección 11). Lo que sigue pendiente está marcado como **[VERIFICAR]**.
+Estado del documento: borrador 3. Las decisiones técnicas de infraestructura y de base de datos se han contrastado con documentación (sección 11), y la frontera con el exterior (proxy y API) además con pruebas reales (`tests/security/verificar_esqueleto.py`). Lo que sigue pendiente está marcado como **[VERIFICAR]**.
 
 ## 1. Objetivo y alcance
 
@@ -96,7 +96,7 @@ La API tiene `INSERT` y `SELECT` (este último bajo RLS) sobre el log, nunca `UP
 ### 6.8 Infraestructura sin rastro de IP
 
 - **Caddy:** no se declara la directiva `log` en ningún sitio, de modo que no hay logs de acceso. Los logs de runtime sí están activos y pueden contener IPs (por ejemplo errores de handshake TLS y errores de upstream). El campo `msg` no se puede filtrar, así que se excluye el logger `http.stdlib` en la opción global `log` y en el resto se borran los campos de IP con el filtro `delete`. No se usan `hash` ni `ip_mask` como anonimización: `hash` conserva solo 4 bytes de SHA-256 y es invertible por fuerza bruta sobre IPv4. Caddy no confía en ningún proxy por defecto y reemplaza el `X-Forwarded-For` entrante.
-- **Uvicorn:** `--no-access-log`. Si se usa `--log-config`, el logger `uvicorn.access` se desactiva dentro de esa configuración, porque la opción anterior se ignora con ella. `--forwarded-allow-ips` se limita a la subred fija de la red interna del Compose; nunca `*`. Sin esto, todos los clientes parecerían la IP del proxy y compartirían un único contador de rate limit.
+- **Uvicorn:** `--no-access-log`, sin `--log-config`. Si algún día se usa `--log-config`, el logger `uvicorn.access` debe desactivarse dentro de esa configuración. `--forwarded-allow-ips` se limita a la IP fija del proxy en la red interna `app` (`10.88.0.2`), no a toda la subred; nunca `*`. Sin esto, todos los clientes parecerían la IP del proxy y compartirían un único contador de rate limit.
 - **Redis:** `save ""` y `appendonly no`, sin réplicas, `/data` en tmpfs, contenedor de solo lectura, red interna y comandos peligrosos restringidos. `SAVE` y `BGSAVE` crean un RDB aunque la persistencia automática esté apagada, de ahí la restricción.
 - **IP en memoria:** la API usa la IP del cliente solo para derivar el contador de rate limit (hash con sal rotatoria en memoria). No se escribe en base de datos, logs ni disco.
 
@@ -114,6 +114,18 @@ Nota de defensa en capas: el bloqueo progresivo de una cuenta del personal vive 
 - Los scripts de inicialización solo se ejecutan con el directorio de datos vacío, y si uno falla y el contenedor se reinicia, el resto se salta sin aviso. Para que ese fallo no sea silencioso, al arrancar la API comprueba roles (`rolsuper` y `rolbypassrls` en falso), RLS y `FORCE` en cada tabla y permisos, y se niega a arrancar si algo no coincide.
 - La rotación de contraseñas no pasa por el script de inicialización y requiere un procedimiento propio, documentado.
 
+### 6.11 Frontera con el exterior: proxy y API
+
+- **Redes:** la API solo está en la red `app` (interna, `10.88.0.0/28`); se conectará a `data` y `cache` cuando el núcleo las use. Caddy está en `app`, con la IP fija `10.88.0.2`, y en `edge` (`10.88.1.0/28`), la única red no interna, porque una red interna no puede publicar puertos. Las subredes están fuera de los rangos que Docker asigna por defecto. `ip_range` (`.8/29`) limita las IPs automáticas y reserva de `.2` a `.7` para IPs fijas: sin ello, la API arranca primero, recibe la `.2` y el proxy no puede tomarla.
+- **Puertos:** el único puerto publicado es el de Caddy, `127.0.0.1:8443`, nunca `0.0.0.0` y sin puerto 80. Caddy escucha en 8443, que no es privilegiado, así que no necesita `NET_BIND_SERVICE`.
+- **Caddy:** `admin off` (sin API de administración), `persist_config off` (`admin off` no desactiva el autosave de la configuración en `/config`), `auto_https disable_redirects`, `tls internal` (CA local, sin ACME), `protocols h1 h2` (sin listener UDP de HTTP/3) y `strict_sni_host on`: un `Host` distinto del SNI recibe 421. Sin esto, una petición con un `Host` desconocido no casa con ninguna ruta y Caddy responde 200 vacío.
+- **Imagen de Caddy:** la oficial trae el binario con la file capability `cap_net_bind_service=ep`. Con `cap_drop: ALL` el kernel rechaza el `execve`. Se elimina con `setcap -r` en una imagen propia, en vez de devolver la capability al contenedor. `/data/caddy` (CA y clave privada) pasa de `1777` a `0700`, propiedad del usuario de Caddy. Es el único estado persistente (volumen `caddy_datos`); `/config` no se monta y queda en solo lectura.
+- **API:** solo `GET /salud` (vivacidad, sin tocar base de datos ni Redis), sin `/docs`, `/redoc` ni `/openapi.json` y sin redirección de barra final. `--no-server-header`. El healthcheck no usa curl: solo da sano con 200 y el cuerpo exacto.
+- **Contenedores:** usuarios no root con uid fijo (API 10001, Caddy 10002), `read_only`, `cap_drop: ALL`, `no-new-privileges`, `mem_limit` y `pids_limit`, sin tmpfs.
+- **Cabeceras:** `Strict-Transport-Security: max-age=63072000` (sin `includeSubDomains` ni `preload` mientras el nombre sea `localhost`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`, `Cache-Control: no-store`, y sin cabecera `Server`.
+- **Dependencias:** versión exacta y `sha256` de todos los ficheros publicados en PyPI, instaladas con `--require-hashes` y `--only-binary :all:`. Se resuelven en un contenedor de `python:3.12-slim`, no en Windows, porque los marcadores de plataforma darían otro resultado. La imagen final no lleva pip. `fastapi` exige `opentelemetry-api`: sin SDK es una implementación vacía que no registra ni envía nada (comprobado). Imágenes base fijadas por versión y digest.
+- **Límite asumido:** la red `edge` da a Caddy salida a internet; es inevitable para publicar el puerto. **[VERIFICAR]** Que Caddy funcione sin esa salida (`tls internal` no usa ACME, pero no se ha probado con la red cortada).
+
 ## 7. Tabla de amenazas
 
 | Amenaza | Mitigación | Test que lo demuestra |
@@ -129,7 +141,12 @@ Nota de defensa en capas: el bloqueo progresivo de una cuenta del personal vive 
 | Relleno de credenciales | Rate limit por empresa y por cliente | Ráfaga contra una empresa se bloquea |
 | Redis caído o manipulado | Rechazo con 503, sin camino alternativo sin límite | Con Redis parado, login, seguimiento y denuncia devuelven 503 |
 | Desanonimización por metadatos | Sin IP, fecha a día, secuencia en vez de hora, avisos diferidos | Revisión de filas: no hay IP ni hora exacta |
-| IP en logs de proxy, API o Redis | Sin logs de acceso, logger excluido, campos borrados, Redis sin persistencia | Tras una ráfaga de peticiones, ningún log ni volumen contiene la IP de prueba |
+| IP en logs de proxy, API o Redis | Sin logs de acceso, logger excluido, campos borrados, Redis sin persistencia | Tras una ráfaga de peticiones, ningún log ni volumen contiene la IP de prueba (proxy y API comprobados; Redis pendiente) |
+| IP falsificada con `X-Forwarded-For` | Caddy sin `trusted_proxies`; uvicorn solo confía en la IP fija del proxy | Un XFF falso no llega a la API; directo a la API, uvicorn ignora el XFF |
+| Exposición de servicios internos | API solo en red interna; único puerto publicado el del proxy, en `127.0.0.1` | La API no sale a internet; `docker inspect` solo muestra `127.0.0.1:8443` |
+| Superficie de la API sin autenticar | Solo `/salud`, sin documentación ni OpenAPI, `Host` distinto del SNI rechazado | Otras rutas dan 404; `Host` distinto da 421 |
+| Escalada dentro de un contenedor | No root, `read_only`, `cap_drop: ALL`, `no-new-privileges`, sin file capabilities | `CapEff`, `CapPrm` y `CapBnd` a cero; `NoNewPrivs` a 1 |
+| Pérdida del CA local de Caddy | Volumen con nombre en `/data`, sin estado en `/config` | El CA es el mismo tras `restart` y tras `down` y `up` |
 | Fichero malicioso | Magic bytes, tamaño, UUID, cifrado, fuera de ruta servida | Ejecutable renombrado a `.jpg` rechazado |
 | Fuga de BD o backup | Envelope encryption con AAD | El volcado no contiene texto en claro |
 | Enumeración de empresas y usuarios | Identificadores aleatorios, errores y tiempos uniformes | Empresa inexistente y prohibida responden igual |
@@ -164,7 +181,13 @@ Si el tiempo aprieta, se recorta en este orden: primero notificaciones, después
 
 **Contrastado con fuentes secundarias:** desactivación de persistencia de Redis (`save ""`, `appendonly no`), con la salvedad de `SAVE`/`BGSAVE` y la replicación.
 
+**Contrastado con documentación oficial y código fuente (frontera exterior):** opciones globales de Caddy `admin`, `persist_config`, `auto_https`, `skip_install_trust`, `servers` (`protocols`, `strict_sni_host`, `trusted_proxies`) y `log` (`exclude`, filtro `delete`); en el código de Caddy, que `admin off` no desactiva el autosave y que el directorio de configuración solo se usa para `autosave.json`; en el repositorio `caddy-docker`, que la imagen no declara `VOLUME` desde 2022 y que hace `setcap` sobre el binario; opciones de uvicorn `--proxy-headers`, `--forwarded-allow-ips` y `--no-server-header`.
+
+**Comprobado con pruebas reales (`tests/security/verificar_esqueleto.py`, cada negativo con su control):** que la API no tiene salida a internet; que el único puerto publicado es `127.0.0.1:8443`; rutas, cabeceras y 421; que la IP del cliente y el `X-Forwarded-For` falso no aparecen en los logs de Caddy ni de la API ni en el volumen de Caddy tras una ráfaga (control: un Caddy con la directiva `log` sí los registra); que un XFF falso no llega a la API y que uvicorn solo confía en el proxy; usuarios, solo lectura, capacidades y límites; healthcheck sano y roto; ausencia de file capability, de volúmenes anónimos, de autosave y de HTTP/3; y que el CA sobrevive a reinicios. La imagen sin `VOLUME` se confirmó también con `docker image inspect`.
+
 **Pendiente, se cubrirá con tests:**
 - Valor por defecto de `password_encryption` y `pg_hba` de la imagen de PostgreSQL.
 - Si la imagen de Redis declara un volumen en `/data`, y la sintaxis exacta de las ACL de Redis.
-- Ausencia real de IPs en logs y volúmenes tras una ráfaga de peticiones (test de la sección 7).
+- Ausencia real de IPs en Redis tras una ráfaga de peticiones (proxy y API ya comprobados).
+- Escaneo de vulnerabilidades de las imágenes completas (Trivy o similar): `pip-audit` solo cubre las dependencias de `requirements.txt`.
+- Que Caddy arranque y sirva sin salida a internet.
