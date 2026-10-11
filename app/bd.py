@@ -23,8 +23,11 @@ from contextlib import contextmanager
 import psycopg
 from psycopg_pool import ConnectionPool
 
-# Docker secret montado como fichero: nunca en variables de entorno.
+# Docker secrets montados como fichero: nunca en variables de entorno. La API
+# solo tiene el de aplicacion; el de plataforma solo existe en el servicio de
+# gestión (app/gestion.py).
 FICHERO_CONTRASENA = pathlib.Path("/run/secrets/contrasena_aplicacion")
+FICHERO_CONTRASENA_PLATAFORMA = pathlib.Path("/run/secrets/contrasena_plataforma")
 
 # Tiempos máximos de cada sesión, en milisegundos:
 # * statement_timeout: una consulta colgada no retiene una conexión del pool.
@@ -73,16 +76,16 @@ class ContextoArrastrado(psycopg.ProgrammingError):
     """
 
 
-def _parametros_con_contrasena():
+def _parametros_con_contrasena(usuario="aplicacion", fichero=FICHERO_CONTRASENA):
     """Parámetros de conexión con la contraseña leída del secreto.
 
-    Se llama en cada intento de conexión: si la contraseña se rota, las
-    conexiones nuevas usan la nueva sin reiniciar la API. El contenido no se
-    recorta ni se corrige: un fichero con espacios o saltos de línea es un
-    error de configuración y debe verse.
+    El pool la llama sin argumentos (rol aplicacion) en cada intento de
+    conexión: si la contraseña se rota, las conexiones nuevas usan la nueva
+    sin reiniciar la API. El contenido no se recorta ni se corrige: un fichero
+    con espacios o saltos de línea es un error de configuración y debe verse.
     """
     try:
-        contrasena = FICHERO_CONTRASENA.read_text(encoding="ascii")
+        contrasena = fichero.read_text(encoding="ascii")
     except (OSError, UnicodeDecodeError) as error:
         raise ErrorConfiguracion(
             f"no se puede leer el secreto de la base de datos ({type(error).__name__})"
@@ -91,7 +94,7 @@ def _parametros_con_contrasena():
         raise ErrorConfiguracion(
             "el secreto de la base de datos tiene un formato inesperado"
         )
-    return {**PARAMETROS_CONEXION, "password": contrasena}
+    return {**PARAMETROS_CONEXION, "user": usuario, "password": contrasena}
 
 
 def comprobar_secreto():
@@ -127,18 +130,35 @@ def crear_pool(tamano_maximo=TAMANO_MAXIMO_POOL):
     )
 
 
-@contextmanager
-def transaccion_empresa(pool, empresa_id):
-    """Transacción con el contexto de una empresa fijado.
+def conectar(usuario, fichero):
+    """Conexión suelta, sin pool, para el servicio de gestión.
 
-    empresa_id debe ser un uuid.UUID, no un texto: lo que venga de una
-    petición se convierte y valida antes de llegar aquí, y nada sin validar
-    llega al SQL.
+    Mismas opciones de sesión (tiempos máximos) que las del pool de la API.
+    """
+    return psycopg.connect(**_parametros_con_contrasena(usuario, fichero))
+
+
+def fijar_contexto(conexion, empresa_id):
+    """Fija el contexto de empresa, local a la transacción en curso.
+
+    Único punto donde se fija el contexto. empresa_id debe ser un uuid.UUID,
+    no un texto: lo que venga de una petición se convierte y valida antes de
+    llegar aquí, y nada sin validar llega al SQL.
     """
     if not isinstance(empresa_id, uuid.UUID):
         raise TypeError("empresa_id debe ser uuid.UUID")
+    conexion.execute(SQL_FIJAR_CONTEXTO, [str(empresa_id)])
+
+
+@contextmanager
+def transaccion_empresa(pool, empresa_id):
+    """Transacción con el contexto de una empresa fijado."""
+    # Se valida antes de pedir una conexión al pool: un valor inválido no
+    # llega a ocupar ninguna.
+    if not isinstance(empresa_id, uuid.UUID):
+        raise TypeError("empresa_id debe ser uuid.UUID")
     with pool.connection() as conexion, conexion.transaction():
-        conexion.execute(SQL_FIJAR_CONTEXTO, [str(empresa_id)])
+        fijar_contexto(conexion, empresa_id)
         yield conexion
 
 

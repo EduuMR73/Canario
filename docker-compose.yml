@@ -238,10 +238,15 @@ services:
     networks:
       - app
       - data
-    # Contraseña del rol aplicacion como fichero en /run/secrets, nunca como
-    # variable de entorno. La API la lee en cada conexión nueva.
+    # Secretos como ficheros en /run/secrets, nunca como variables de entorno:
+    # la contraseña del rol aplicacion (se lee en cada conexión nueva), la
+    # clave maestra (desenvuelve las claves de cada empresa) y la clave del
+    # HMAC de los códigos de seguimiento. Sin contrasena_plataforma: la API no
+    # puede dar de alta empresas.
     secrets:
       - contrasena_aplicacion
+      - clave_maestra
+      - clave_hmac_codigos
     healthcheck:
       # Sin curl: un script de la propia imagen que solo da sano con 200 y el
       # cuerpo exacto {"estado":"ok"}. El motivo del fallo queda en stderr.
@@ -251,6 +256,45 @@ services:
       retries: 3
       start_period: 10s
     # Rotación de logs: evita que crezcan sin límite y llenen el disco.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gestion:
+    # Operaciones de administración (alta de empresas y claves de cifrado,
+    # app/gestion.py), fuera de la API pública. Misma imagen que la API con
+    # otro punto de entrada. El perfil hace que "docker compose up" no lo
+    # arranque nunca: solo se ejecuta a mano con
+    # "docker compose run --rm gestion <orden>".
+    build:
+      context: .
+    profiles:
+      - gestion
+    entrypoint: ["python", "-m", "app.gestion"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Mismo endurecimiento que la API.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 32
+    # Solo la red de la base de datos: ni proxy, ni Redis, ni internet.
+    networks:
+      - data
+    # Es el único servicio con el secreto de plataforma (alta de empresas).
+    # Tiene el de aplicacion para guardar la clave de la empresa nueva con su
+    # contexto, y la clave maestra para envolverla. No necesita la del HMAC.
+    secrets:
+      - contrasena_plataforma
+      - contrasena_aplicacion
+      - clave_maestra
     logging:
       driver: json-file
       options:
@@ -347,6 +391,10 @@ secrets:
     file: ./secrets/contrasena_aplicacion.txt
   contrasena_plataforma:
     file: ./secrets/contrasena_plataforma.txt
+  clave_maestra:
+    file: ./secrets/clave_maestra.txt
+  clave_hmac_codigos:
+    file: ./secrets/clave_hmac_codigos.txt
 
 volumes:
   # Persiste entre reinicios, a diferencia de redis. Los scripts de

@@ -353,12 +353,29 @@ def seccion_b():
          f"b) con un secreto mal formado la API no arranca ({TEXTO_BLOQUEADO}secreto) y no lo muestra")
 
 
+def claves_falsas():
+    """Claves de cifrado falsas con el formato correcto, generadas aquí.
+
+    La API comprueba sus claves antes de conectar: sin ellas se bloquearía
+    como "claves" y nunca llegaría a la conexión que estas pruebas quieren
+    observar. Nunca se usan las reales.
+    """
+    directorio = TEMPORAL / "claves_falsas"
+    if not directorio.is_dir():
+        directorio.mkdir()
+        for nombre in ("clave_maestra", "clave_hmac_codigos"):
+            (directorio / nombre).write_text(secrets.token_hex(32), encoding="ascii", newline="")
+    return [arg for nombre in ("clave_maestra", "clave_hmac_codigos")
+            for arg in ("--mount", f"type=bind,src={directorio / nombre},dst=/run/secrets/{nombre},readonly")]
+
+
 def arrancar_api_temporal(etiqueta, fichero):
     """Arranca la imagen de la API con otro secreto y devuelve su log."""
     nombre = f"{PROYECTO}_api_{etiqueta}"
     ejecutar(["docker", "run", "-d", "--name", nombre, "--network", f"{PROYECTO}_data",
               "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-              "--mount", f"type=bind,src={fichero},dst={SECRETO_API},readonly", IMAGEN_API])
+              "--mount", f"type=bind,src={fichero},dst={SECRETO_API},readonly", *claves_falsas(),
+              IMAGEN_API])
     try:
         esperar(lambda: ejecutar(["docker", "inspect", "--format", "{{.State.Running}}", nombre]).out.strip()
                 == "false", 60)
@@ -549,9 +566,11 @@ def main():
     if ocupadas:
         p(f"PARADA: las subredes fijas ya estan en uso por {ocupadas} (pare el proyecto canario)")
         terminar_con_parada()
-    if not (RAIZ / "secrets" / "contrasena_aplicacion.txt").is_file():
-        p("PARADA: secrets/contrasena_aplicacion.txt no existe (scripts/generar_secretos.py)")
-        terminar_con_parada()
+    # Solo se comprueba que existen (is_file), nunca se leen.
+    for fichero in ("contrasena_aplicacion.txt", "clave_maestra.txt", "clave_hmac_codigos.txt"):
+        if not (RAIZ / "secrets" / fichero).is_file():
+            p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
+            terminar_con_parada()
     TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_arranque_"))
     parada = None
     try:

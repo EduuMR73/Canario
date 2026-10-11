@@ -88,8 +88,12 @@ CAP_CERO = "0000000000000000"
 PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}]}
 # La API está en app (con el proxy) y en data (con PostgreSQL), nunca en edge.
 REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data"}, "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
-# Único montaje de la API: el secreto de la base de datos (Docker secret).
-MONTAJES_API = [("bind", "", "/run/secrets/contrasena_aplicacion")]
+# Únicos montajes de la API: sus tres Docker secrets (contraseña de la base de
+# datos, clave maestra y clave del HMAC de los códigos), ordenados por destino
+# porque docker inspect no garantiza el orden. Nunca contrasena_plataforma.
+MONTAJES_API = [("bind", "", "/run/secrets/clave_hmac_codigos"),
+                ("bind", "", "/run/secrets/clave_maestra"),
+                ("bind", "", "/run/secrets/contrasena_aplicacion")]
 
 IMAGEN_CADDY_OFICIAL = ("caddy:2.11.7-alpine@sha256:"
                         "d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f")
@@ -528,7 +532,8 @@ def seccion_g():
              lista == [("volume", f"{PROYECTO}_caddy_datos", "/data")] and not tmpfs,
              control, f"control con volumen anonimo: {lista_control}")
     lista, tmpfs, mounts = montajes(contenedor("api"))
-    pasa(lista == MONTAJES_API and not tmpfs, f"g) api: solo el secreto montado ({lista}, Tmpfs = {tmpfs})")
+    pasa(sorted(lista) == MONTAJES_API and not tmpfs,
+         f"g) api: solo sus secretos montados ({sorted(lista)}, Tmpfs = {tmpfs})")
 
     # Logs de arranque: sin autosave ni HTTP/3. Control: Caddy sin persist_config
     # off y con protocolos por defecto los registra.

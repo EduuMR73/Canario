@@ -1,8 +1,9 @@
 """Aplicación FastAPI de Canario.
 
 Por ahora solo expone GET /salud, una comprobación de vivacidad. Al arrancar
-abre el pool de conexiones a PostgreSQL y verifica la base de datos; si algo
-no es lo esperado, la API no arranca (docs/threat-model.md, 6.10).
+comprueba los secretos (contraseña y claves de cifrado), abre el pool de
+conexiones a PostgreSQL y verifica la base de datos; si algo no es lo
+esperado, la API no arranca (docs/threat-model.md, 6.10).
 """
 import logging
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from psycopg_pool import PoolTimeout
 
-from app import bd, verificacion_arranque
+from app import bd, claves, verificacion_arranque
 
 # Logs propios y del pool de conexiones por la salida de error. Nunca llevan
 # IPs de clientes ni la contraseña: solo nombres de comprobaciones, clases de
@@ -36,6 +37,14 @@ async def ciclo_de_vida(app):
     except bd.ErrorConfiguracion as error:
         registro.error("ARRANQUE BLOQUEADO: secreto: %s", error)
         raise verificacion_arranque.ArranqueBloqueado("secreto") from None
+    # Las claves de cifrado se comprueban antes de conectar, igual que la
+    # contraseña: sin ellas la API no podría ni crear ni leer una denuncia, y
+    # el fallo debe verse al arrancar, no en la primera petición.
+    try:
+        claves_servidor = claves.cargar()
+    except claves.ErrorClaves as error:
+        registro.error("ARRANQUE BLOQUEADO: claves: %s", error)
+        raise verificacion_arranque.ArranqueBloqueado("claves") from None
     pool = bd.crear_pool()
     try:
         try:
@@ -50,6 +59,7 @@ async def ciclo_de_vida(app):
             raise verificacion_arranque.ArranqueBloqueado("conexion") from None
         verificacion_arranque.verificar(pool)
         app.state.pool = pool
+        app.state.claves = claves_servidor
         yield
     finally:
         pool.close()
