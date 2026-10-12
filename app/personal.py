@@ -17,6 +17,13 @@ Cuentas:
   (empresa, email, contraseña, código, cuenta bloqueada o desactivada) da la
   misma respuesta.
 
+Recuperación (NIST SP 800-63B-4, 4.2): los contactos de recuperación son los
+admins de la empresa (reinvitar) y, como último recurso, la plataforma
+(reinvitar_admin_plataforma, con revocación inmediata). No hay códigos de
+recuperación guardados: recuperarían un factor sin que la empresa se
+enterase. Toda reinvitación se ve: fila de auditoría, invitacion_pendiente en
+/yo y en la lista de cuentas, y un admin puede anularla (anular_invitacion).
+
 Bloqueo sin denegación de servicio (OWASP, "Slow Down Online Guessing Attacks
 with Device Cookies"; Microsoft Entra Smart Lockout; NIST SP 800-63B-4,
 3.2.2):
@@ -112,7 +119,9 @@ ACCION_ACTIVACION = "activacion"
 ACCION_CAMBIO_CONTRASENA = "cambio_contrasena"
 ACCION_INVITACION = "invitacion"
 ACCION_BAJA = "baja"
+ACCION_ANULACION_INVITACION = "anulacion_invitacion"
 ACCION_INVITACION_PLATAFORMA = "invitacion_admin_plataforma"
+ACCION_REINVITACION_PLATAFORMA = "reinvitacion_admin_plataforma"
 ACTOR_PLATAFORMA = "plataforma"
 
 _hasher = PasswordHasher(time_cost=ITERACIONES_ARGON2, memory_cost=MEMORIA_ARGON2_KIB,
@@ -290,12 +299,26 @@ SQL_CAMBIAR_CONTRASENA = """
 """
 
 SQL_LISTAR_USUARIOS = """
-    select id, email, rol, activo, totp_activo,
-           intentos_fallidos >= %(tope_sin_confianza)s as camino_cerrado,
-           coalesce(bloqueado_hasta > now(), false) as en_espera
-      from canal.usuario_personal
-     order by email, id
+    select u.id, u.email, u.rol, u.activo, u.totp_activo,
+           u.intentos_fallidos >= %(tope_sin_confianza)s as camino_cerrado,
+           coalesce(u.bloqueado_hasta > now(), false) as en_espera,
+           exists (select 1 from canal.invitacion_personal i
+                    where i.empresa_id = u.empresa_id and i.usuario_id = u.id
+                      and not i.cerrada and i.caduca > now()) as invitacion_pendiente
+      from canal.usuario_personal u
+     order by u.email, u.id
 """
+# Aviso de recuperación (NIST SP 800-63B-4, 4.2.3): una invitación abierta
+# de la propia cuenta. Sin correo, el titular lo ve en /yo y los admins en la
+# lista de cuentas.
+SQL_INVITACION_PENDIENTE_DE = """
+    select exists (select 1 from canal.invitacion_personal
+                    where usuario_id = %s and not cerrada and caduca > now())
+"""
+SQL_ANULAR_INVITACION = (
+    "update canal.invitacion_personal set cerrada = true "
+    "where usuario_id = %s and not cerrada and caduca > now() returning id"
+)
 SQL_NUEVO_USUARIO = "insert into canal.usuario_personal (empresa_id, email, rol) values (%s, %s, %s) returning id"
 SQL_USUARIO = "select id, rol, activo, totp_activo from canal.usuario_personal where id = %s for update"
 # Todos los admins activos, en orden de id: dos bajas simultáneas los
@@ -396,6 +419,7 @@ class Usuario:
     activado: bool
     camino_sin_confianza_cerrado: bool
     en_espera: bool
+    invitacion_pendiente: bool
 
 
 @dataclass(frozen=True)
@@ -719,7 +743,16 @@ def listar_usuarios(pool, sesion):
     with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
         filas = conexion.execute(SQL_LISTAR_USUARIOS, {"tope_sin_confianza": TOPE_SIN_CONFIANZA}).fetchall()
     return [Usuario(usuario_id=f[0], email=f[1], rol=f[2], activo=f[3], activado=f[4],
-                    camino_sin_confianza_cerrado=f[5], en_espera=f[6]) for f in filas]
+                    camino_sin_confianza_cerrado=f[5], en_espera=f[6], invitacion_pendiente=f[7]) for f in filas]
+
+
+def invitacion_pendiente(pool, sesion):
+    """Si la cuenta de la sesión tiene una invitación abierta. Es el aviso de
+    una reinvitación (NIST SP 800-63B-4, 4.2.3): quien la recibe sin haberla
+    pedido sigue entrando hasta que alguien la confirme, y puede pedir a un
+    admin que la anule."""
+    with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
+        return conexion.execute(SQL_INVITACION_PENDIENTE_DE, [sesion.usuario_id]).fetchone()[0]
 
 
 def invitar(pool, sesion, email, rol):
@@ -753,6 +786,21 @@ def reinvitar(pool, sesion, usuario_id):
         token = _emitir_invitacion(conexion, sesion.empresa_id, sesion.identificador, usuario_id)
         conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_INVITACION, usuario_id])
     return Invitacion(usuario_id=usuario_id, token_invitacion=token)
+
+
+def anular_invitacion(pool, sesion, usuario_id):
+    """Cierra la invitación abierta de una cuenta: la respuesta a una
+    reinvitación que nadie pidió. La cuenta queda como estaba (con sus
+    credenciales, o sin ellas si nunca se activó). 404 si la cuenta no existe
+    o no tiene ninguna invitación abierta."""
+    _exigir_admin(sesion)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        if conexion.execute(SQL_USUARIO, [usuario_id]).fetchone() is None:
+            raise NoEncontrado
+        if conexion.execute(SQL_ANULAR_INVITACION, [usuario_id]).fetchone() is None:
+            raise NoEncontrado
+        conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_ANULACION_INVITACION,
+                                       usuario_id])
 
 
 def dar_de_baja(pool, sesion, usuario_id):
@@ -809,4 +857,53 @@ def alta_admin_plataforma(conexion, empresa_id, identificador, email):
         raise AltaAdminRechazada("ya existe una cuenta con ese email que no es un admin pendiente de activar")
     token = _emitir_invitacion(conexion, empresa_id, identificador, usuario_id)
     conexion.execute(SQL_AUDITAR, [empresa_id, ACTOR_PLATAFORMA, ACCION_INVITACION_PLATAFORMA, usuario_id])
+    return Invitacion(usuario_id=usuario_id, token_invitacion=token)
+
+
+def reinvitar_admin_plataforma(conexion, empresa_id, identificador, email):
+    """Recuperación de emergencia ("break glass", como las cuentas de
+    emergencia de Microsoft Entra) de un admin que ya estuvo activado: el
+    caso en que nadie de la empresa puede reinvitarlo, porque es su único
+    admin, o los demás tampoco pueden entrar. Mismo rol, contexto y
+    transacción que alta_admin_plataforma.
+
+    A diferencia de la reinvitación de la API, aquí la cuenta se desactiva y
+    se revocan sus sesiones y dispositivos EN EL ACTO. El motivo: esta orden
+    solo se usa cuando el titular ya no puede autenticarse, así que lo que
+    siga autenticado en esa cuenta no es él (una cuenta comprometida); si
+    siguiera dentro, podría anular la invitación (anular_invitacion) y la
+    recuperación nunca llegaría. Al titular no le cuesta nada: no podía
+    entrar. Las credenciales nuevas las elige él al activar, y la activación
+    vuelve a dejar la cuenta activa (confirmar_activacion).
+
+    Aquí se salta a propósito la regla de dar_de_baja que impide dejar a la
+    empresa sin admins: la cuenta queda pendiente de su titular, no perdida.
+    La empresa ve la fila de auditoría (actor plataforma) y el estado de la
+    cuenta en la lista (activo false, invitación pendiente). Quien opere
+    gestion debe verificar la petición fuera de banda antes de ejecutarla
+    (docs/threat-model.md, 6.3); el límite es el de alta_admin_plataforma:
+    quien tiene todos los secretos no queda impedido, queda a la vista.
+    """
+    email = email.lower()
+    if conexion.execute(SQL_EMPRESA_VISIBLE).fetchone()[0] != 1:
+        raise AltaAdminRechazada("la empresa no existe")
+    if conexion.execute(SQL_CLAVE_ACTUAL).fetchone() is None:
+        raise AltaAdminRechazada("la empresa no tiene clave de cifrado (nueva-clave)")
+    # Mismo orden de bloqueos que alta_admin_plataforma y dar_de_baja: las
+    # tres no se interbloquean entre sí.
+    conexion.execute(SQL_BLOQUEAR_ADMINS)
+    existente = conexion.execute(SQL_USUARIO_POR_EMAIL, [email]).fetchone()
+    # Solo un admin que ya se activó alguna vez: un admin pendiente o una
+    # empresa sin admins es el caso de alta-admin, y un instructor lo recupera
+    # su admin por la API. Así las dos órdenes de plataforma no se solapan.
+    if existente is None or existente[1] != "admin" or not existente[2]:
+        raise AltaAdminRechazada("no hay ningun admin activado con ese email en la empresa "
+                                 "(primer admin: alta-admin; instructores: los reinvita su admin)")
+    usuario_id = existente[0]
+    # Orden de bloqueos: cuenta, invitación, dispositivos, sesiones, auditoría.
+    conexion.execute(SQL_DAR_DE_BAJA, [usuario_id])
+    token = _emitir_invitacion(conexion, empresa_id, identificador, usuario_id)
+    conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [usuario_id, uuid.UUID(int=0)])
+    conexion.execute(SQL_REVOCAR_SESIONES, [usuario_id, uuid.UUID(int=0)])
+    conexion.execute(SQL_AUDITAR, [empresa_id, ACTOR_PLATAFORMA, ACCION_REINVITACION_PLATAFORMA, usuario_id])
     return Invitacion(usuario_id=usuario_id, token_invitacion=token)

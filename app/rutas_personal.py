@@ -8,10 +8,12 @@
   si lo tiene, el token de dispositivo). Devuelve el token de sesión y, si
   el login fue sin dispositivo de confianza, uno nuevo.
 * DELETE /v1/personal/sesiones/actual: cierra la sesión.
-* GET /v1/personal/yo: cuenta de la sesión.
+* GET /v1/personal/yo: cuenta de la sesión, con invitacion_pendiente (el
+  aviso de una reinvitación de esa cuenta).
 * POST /v1/personal/contrasena: cambia la contraseña (actual, nueva y código).
-* GET y POST /v1/personal/usuarios, POST .../{usuario_id}/invitacion y
-  .../{usuario_id}/baja: administración de cuentas, solo admin.
+* GET y POST /v1/personal/usuarios, POST y DELETE .../{usuario_id}/invitacion
+  (reinvitar y anular la invitación abierta) y POST .../{usuario_id}/baja:
+  administración de cuentas, solo admin.
 
 Este módulo es el único que sabe cómo viajan los tokens: el de sesión en la
 cabecera Authorization (Bearer) y el de dispositivo en el cuerpo del login.
@@ -174,7 +176,9 @@ def cerrar_sesion(peticion: Request):
 @router.get("/yo")
 def yo(peticion: Request):
     sesion = _sesion(peticion)
-    return JSONResponse(content={"usuario_id": str(sesion.usuario_id), "email": sesion.email, "rol": sesion.rol})
+    pendiente = personal.invitacion_pendiente(peticion.app.state.pool, sesion)
+    return JSONResponse(content={"usuario_id": str(sesion.usuario_id), "email": sesion.email, "rol": sesion.rol,
+                                 "invitacion_pendiente": pendiente})
 
 
 @router.post("/contrasena", status_code=204)
@@ -193,7 +197,7 @@ def listar_usuarios(peticion: Request):
     return JSONResponse(content={"usuarios": [{
         "usuario_id": str(u.usuario_id), "email": u.email, "rol": u.rol, "activo": u.activo,
         "activado": u.activado, "camino_sin_confianza_cerrado": u.camino_sin_confianza_cerrado,
-        "en_espera": u.en_espera,
+        "en_espera": u.en_espera, "invitacion_pendiente": u.invitacion_pendiente,
     } for u in usuarios]})
 
 
@@ -213,6 +217,13 @@ def reinvitar(usuario_id: str, peticion: Request):
     invitacion = personal.reinvitar(peticion.app.state.pool, sesion, _uuid(usuario_id))
     return JSONResponse(status_code=201, content={"usuario_id": str(invitacion.usuario_id),
                                                   "token_invitacion": invitacion.token_invitacion})
+
+
+@router.delete("/usuarios/{usuario_id}/invitacion", status_code=204)
+def anular_invitacion(usuario_id: str, peticion: Request):
+    sesion = _sesion(peticion)
+    personal.anular_invitacion(peticion.app.state.pool, sesion, _uuid(usuario_id))
+    return Response(status_code=204)
 
 
 @router.post("/usuarios/{usuario_id}/baja", status_code=204)

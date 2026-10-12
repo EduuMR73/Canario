@@ -1,5 +1,5 @@
-"""Gestión de Canario: alta de empresas, claves de cifrado, primer admin y
-supresión legal.
+"""Gestión de Canario: alta de empresas, claves de cifrado, primer admin,
+recuperación de emergencia de un admin y supresión legal.
 
 Operación de administración, fuera de la API pública: corre en el servicio
 gestion de docker-compose.yml (perfil propio, solo en la red data), nunca en
@@ -12,6 +12,7 @@ Uso (PowerShell, desde la raíz del repositorio, con postgres en marcha):
     docker compose run --rm gestion nueva-clave --empresa-id <uuid>
     docker compose run --rm gestion suprimir-caducadas
     docker compose run --rm gestion alta-admin --identificador <32 hex> --email admin@empresa.es
+    docker compose run --rm gestion reinvitar-admin --identificador <32 hex> --email admin@empresa.es
 
 alta-admin emite la invitación del primer admin de una empresa
 (app/personal.py, alta_admin_plataforma): solo si la empresa no tiene ningún
@@ -21,6 +22,17 @@ entregarlo (no hay correo), y solo sirve para que su titular elija su propia
 contraseña y su TOTP, que la plataforma nunca conoce. Caduca a las 72 horas
 y sirve una sola vez; si el admin lo encuentra ya usado, alguien se le
 adelantó y la auditoría de su empresa lo muestra.
+
+reinvitar-admin es la recuperación de emergencia de un admin que ya estuvo
+activado y que nadie de su empresa puede reinvitar (app/personal.py,
+reinvitar_admin_plataforma): desactiva la cuenta, revoca en el acto sus
+sesiones y dispositivos, emite una invitación nueva y deja la fila
+reinvitacion_admin_plataforma en la auditoría. Antes de ejecutarla, quien
+opera la plataforma verifica la petición fuera de banda: llama al contacto
+de la empresa que consta en el contrato (nunca al número o al correo que da
+quien la pide), entrega el token por un canal distinto del de la petición y
+avisa a ese contacto de que se ha hecho (NIST SP 800-63B-4, 4.2.3). El código
+no puede imponer ese procedimiento; docs/threat-model.md (6.3) lo fija.
 
 suprimir-caducadas aplica los arts. 32.4 y 26.2 de la Ley 2/2023 con
 canal.suprimir_denuncias_caducadas() (db/init/04_supresion.sql), el único
@@ -88,6 +100,8 @@ SQL_CONTAR_CADUCADAS = "select canal.contar_denuncias_caducadas()"
 # Mismo intervalo que acepta la función (1 a 500). Un lote pequeño retiene
 # pocos bloqueos y cabe de sobra en el statement_timeout de la sesión.
 LOTE_POR_DEFECTO = 100
+MENSAJE_SEGUNDO_ADMIN = ("recomendacion: cuando este admin active su cuenta, que invite a un segundo admin; "
+                         "con dos, uno recupera al otro sin pasar por la plataforma")
 
 
 class ErrorGestion(Exception):
@@ -147,8 +161,10 @@ def alta_empresa(nombre, zona_horaria, maestra):
     print(f"clave creada: empresa_id={empresa_id} version={version}")
 
 
-def alta_admin(identificador, email):
-    """Invitación del primer admin de una empresa. Devuelve (empresa, invitación)."""
+def _invitacion_plataforma(emitir, identificador, email):
+    """Ejecuta una invitación de plataforma (alta o reinvitación de un admin)
+    con el rol aplicacion y el contexto de la empresa. Devuelve (empresa,
+    invitación)."""
     with bd.conectar("aplicacion", bd.FICHERO_CONTRASENA) as conexion:
         _verificar_base_datos(conexion)
         with conexion.transaction():
@@ -158,10 +174,20 @@ def alta_admin(identificador, email):
         with conexion.transaction():
             bd.fijar_contexto(conexion, empresa_id)
             try:
-                invitacion = personal.alta_admin_plataforma(conexion, empresa_id, identificador, email)
+                invitacion = emitir(conexion, empresa_id, identificador, email)
             except personal.AltaAdminRechazada as error:
                 raise ErrorGestion(str(error)) from None
     return empresa_id, invitacion
+
+
+def alta_admin(identificador, email):
+    """Invitación del primer admin de una empresa. Devuelve (empresa, invitación)."""
+    return _invitacion_plataforma(personal.alta_admin_plataforma, identificador, email)
+
+
+def reinvitar_admin(identificador, email):
+    """Recuperación de emergencia de un admin activado. Devuelve (empresa, invitación)."""
+    return _invitacion_plataforma(personal.reinvitar_admin_plataforma, identificador, email)
 
 
 def suprimir_caducadas(lote):
@@ -222,6 +248,12 @@ def construir_parser():
     admin.add_argument("--identificador", required=True, type=_identificador,
                        help="identificador publico de la empresa (el que imprime alta-empresa)")
     admin.add_argument("--email", required=True)
+    reinvitacion = ordenes.add_parser(
+        "reinvitar-admin",
+        help="recuperacion de emergencia de un admin activado: revoca su acceso y emite una invitacion")
+    reinvitacion.add_argument("--identificador", required=True, type=_identificador,
+                              help="identificador publico de la empresa (el que imprime alta-empresa)")
+    reinvitacion.add_argument("--email", required=True)
     return parser
 
 
@@ -260,10 +292,15 @@ def main(argv=None):
         if args.orden == "suprimir-caducadas":
             return _informar_supresion(*suprimir_caducadas(args.lote))
         # La invitación tampoco: el TOTP lo cifra la API al activar la cuenta.
-        if args.orden == "alta-admin":
-            empresa_id, invitacion = alta_admin(args.identificador, args.email)
+        if args.orden in ("alta-admin", "reinvitar-admin"):
+            emitir = alta_admin if args.orden == "alta-admin" else reinvitar_admin
+            empresa_id, invitacion = emitir(args.identificador, args.email)
             print(f"invitacion creada: empresa_id={empresa_id} usuario_id={invitacion.usuario_id}")
             print(f"token_invitacion={invitacion.token_invitacion}")
+            if args.orden == "alta-admin":
+                # Con dos admins, uno recupera al otro sin la plataforma
+                # (docs/threat-model.md, 6.3).
+                print(MENSAJE_SEGUNDO_ADMIN)
             return 0
         maestra = claves.cargar_maestra()
         if args.orden == "alta-empresa":
