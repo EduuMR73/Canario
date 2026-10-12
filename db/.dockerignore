@@ -1,0 +1,5 @@
+# Contexto de construcción de la imagen de PostgreSQL (db/Dockerfile). La
+# imagen no copia nada: db/init y pg_hba.conf se montan en tiempo de ejecución
+# desde docker-compose.yml. Se excluye todo para que ningún fichero de db/
+# llegue al contexto.
+*

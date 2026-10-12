@@ -22,9 +22,16 @@
 	skip_install_trust
 
 	servers {
-		# Solo HTTP/1.1 y HTTP/2 sobre TCP. Sin HTTP/3 no hay listener UDP que no
-		# se publica ni se usa.
-		protocols h1 h2
+		# Solo HTTP/1.1 sobre TCP. Sin HTTP/3 no hay listener UDP que no se publica
+		# ni se usa. Sin HTTP/2 mientras el binario de la imagen fijada lleve Go
+		# 1.26.8 y golang.org/x/net 0.59.0: CVE-2026-78669 (denegación de servicio
+		# con tramas SETTINGS de HTTP/2) tiene arreglo en Go 1.26.9 pero no hay
+		# imagen oficial de Caddy que lo traiga. Sin h2 el código vulnerable no es
+		# alcanzable; una API sin frontend no pierde nada con HTTP/1.1, y el
+		# reenvío a la API ya era HTTP/1.1. Se vuelve a "h1 h2" con la imagen que
+		# traiga el arreglo (tests/security/verificar_escaneos.py y
+		# tests/security/canario.openvex.json lo vigilan).
+		protocols h1
 
 		# Sin strict_sni_host: su 421 lo genera el servidor antes de entrar en las
 		# rutas, y salía con "Server: Caddy" y sin cabeceras de seguridad
