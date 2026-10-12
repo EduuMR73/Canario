@@ -2,7 +2,7 @@
 """Batería de pruebas de seguridad de la identidad del personal (bloque 4a).
 
 Código probado: app/personal.py, app/rutas_personal.py, app/cripto.py (TOTP y
-tokens), app/gestion.py (alta-admin), la regla acceso de app/limitador.py y
+tokens), app/gestion.py (alta-admin y reinvitar-admin), la regla acceso de app/limitador.py y
 las tablas del personal de db/init/02_esquema.sql (docs/threat-model.md, 6.3
 y 6.9). Qué prueba:
 
@@ -28,6 +28,11 @@ y 6.9). Qué prueba:
   mismo 404 que una inexistente; email duplicado 409; la baja del último
   admin 409; el cambio de contraseña revoca las demás sesiones y
   dispositivos; la auditoría registra cada acción y su cadena es válida.
+* Recuperación: una reinvitación se ve (invitacion_pendiente en /yo y en la
+  lista) y un admin puede anularla; reinvitar-admin solo actúa sobre un admin
+  activado de esa empresa, revoca en el acto su acceso (la sesión anterior ya
+  no puede anular la recuperación) y el único admin de una empresa recupera
+  su cuenta.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento.
 * Ni contraseñas, ni tokens, ni secretos TOTP en los logs ni en el volcado de
@@ -126,8 +131,13 @@ CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos
 REINTENTAR_TRAS = "5"
 CLAVES_ACTIVACION = ["secreto_totp", "uri_totp"]
 CLAVES_LOGIN = ["token_dispositivo", "token_sesion"]
-CLAVES_YO = ["email", "rol", "usuario_id"]
-CLAVES_USUARIO = ["activado", "activo", "camino_sin_confianza_cerrado", "email", "en_espera", "rol", "usuario_id"]
+CLAVES_YO = ["email", "invitacion_pendiente", "rol", "usuario_id"]
+CLAVES_USUARIO = ["activado", "activo", "camino_sin_confianza_cerrado", "email", "en_espera", "invitacion_pendiente",
+                  "rol", "usuario_id"]
+TEXTO_SEGUNDO_ADMIN = ("recomendacion: cuando este admin active su cuenta, que invite a un segundo admin; "
+                       "con dos, uno recupera al otro sin pasar por la plataforma")
+TEXTO_NO_ES_ADMIN = ("ERROR: no hay ningun admin activado con ese email en la empresa "
+                     "(primer admin: alta-admin; instructores: los reinvita su admin)")
 
 # Argon2id con los parámetros de OWASP (m=19 MiB, t=2, p=1).
 PREFIJO_ARGON2 = "$argon2id$v=19$m=19456,t=2,p=1$"
@@ -424,13 +434,20 @@ ULTIMO_PASO = {}
 
 
 def codigo_libre(secreto):
-    """(código, paso) del primer paso aceptable: posterior al último usado y
-    dentro de la ventana de ±1. Si no lo hay, espera al paso siguiente."""
+    """(código, paso) del paso actual, como lo usaría una persona con su
+    aplicación; si ese paso ya se usó (un código solo vale una vez), espera
+    al siguiente.
+
+    Nunca el paso anterior ni el siguiente, aunque la API los acepte (±1):
+    cada petición tarda más de un segundo en llegar (el cliente es un docker
+    run), así que el anterior puede caducar mientras viaja, y el siguiente
+    todavía no vale si el reloj del contenedor va algo por detrás. El actual
+    vale tanto si la API verifica en ese paso como en el siguiente, con
+    desfases de reloj en los dos sentidos."""
     while True:
         actual = int(time.time()) // 30
-        paso = max(actual - 1, ULTIMO_PASO.get(secreto, -1) + 1)
-        if paso <= actual + 1:
-            return totp(secreto, paso), paso
+        if actual > ULTIMO_PASO.get(secreto, -1):
+            return totp(secreto, actual), actual
         time.sleep(30 - time.time() % 30 + 0.5)
 
 
@@ -508,6 +525,18 @@ def activar(cuenta):
         ULTIMO_PASO[cuenta.secreto] = paso
         cuenta.dispositivo = (json_de(r2) or {}).get("token_dispositivo")
     return r1, r2
+
+
+def preparar_cuenta(cuenta):
+    """Activa una cuenta que la sección solo necesita como preparación. Si no
+    se activa, PARADA con el motivo: no es un resultado de la prueba, y sin
+    parar se convertiría en una cascada de FALLA o, peor, en un PASA falso
+    (una cuenta sin activar también da 401). Solo estados, nunca cuerpos: el
+    del paso 1 lleva el secreto TOTP."""
+    r1, r2 = activar(cuenta)
+    if r2 is None or r2.get("estado") != 200:
+        raise Parada(f"no se pudo activar la cuenta de preparacion {cuenta.etiqueta}: "
+                     f"paso 1 {r1.get('estado')}, confirmacion {r2.get('estado') if r2 else None}")
 
 
 def usuario_de(cuenta):
@@ -614,6 +643,7 @@ def seccion_b():
     pasa(r1.rc == 0 and m1 is not None, f"b) alta-admin emite la invitacion del primer admin (codigo {r1.rc})")
     if not m1:
         raise Parada(f"alta-admin no devolvio la invitacion: {r1.todo.strip()[-300:]!r}")
+    pasa(TEXTO_SEGUNDO_ADMIN in r1.out, "b) alta-admin recomienda un segundo admin al emitir la invitacion")
     # Repetirlo antes de activar sustituye la invitación: la anterior deja de valer.
     r2 = gestion("alta-admin", "--identificador", EMPRESAS["A"][1], "--email", admin.email)
     m2 = PATRON_INVITACION_GESTION.search(r2.out)
@@ -762,7 +792,7 @@ def seccion_d():
          "d) sin dispositivo de confianza, 201 con un dispositivo nuevo")
     pendiente, _ = invitar(token_admin, "pendiente", "pendiente@alfa.test")
     baja, _ = invitar(token_admin, "de_baja", "debaja@alfa.test")
-    activar(baja)
+    preparar_cuenta(baja)
     una(pt("POST", f"/v1/personal/usuarios/{baja.usuario_id}/baja", token=token_admin))
     codigo, _ = codigo_libre(instr.secreto)
     casos = {
@@ -831,7 +861,7 @@ def seccion_d():
 def cuenta_tiempos(token_admin):
     if "tiempos" not in CUENTAS:
         cuenta, _ = invitar(token_admin, "tiempos", "tiempos@alfa.test")
-        activar(cuenta)
+        preparar_cuenta(cuenta)
     return CUENTAS["tiempos"]
 
 
@@ -839,7 +869,7 @@ def seccion_e():
     p("=== e) bloqueo sin denegacion de servicio")
     token_admin = CUENTAS["token_admin_a"]
     victima, _ = invitar(token_admin, "victima", "victima@alfa.test")
-    activar(victima)
+    preparar_cuenta(victima)
     control = login_correcto(victima, dispositivo=None)
     pasa(es_201_login(control, True), "e) control: la victima entra sin dispositivo de confianza")
     # e1) Cinco fallos sin dispositivo bloquean ese camino 1 minuto.
@@ -1045,7 +1075,7 @@ def seccion_g():
     pasa(ultimo.get("estado") == 409 and ultimo.get("cuerpo") == CUERPO_409_ULTIMO,
          "g) la baja del unico admin activado da 409")
     admin2, _ = invitar(token_admin, "admin2", "admin2@alfa.test", rol="admin")
-    activar(admin2)
+    preparar_cuenta(admin2)
     token_admin2 = sesion_de(admin2)
     baja = una(pt("POST", f"/v1/personal/usuarios/{admin.usuario_id}/baja", token=token_admin2))
     tras = http([yo(token_admin), login(admin, codigo=codigo_libre(admin.secreto)[0])])
@@ -1103,6 +1133,139 @@ def seccion_g():
                    f"select coalesce(canal.verificar_cadena_auditoria()::text, 'intacta'); commit;").split()[-1]
     pasa(cadena == "intacta", f"g) la cadena de auditoria de la empresa sigue intacta ({cadena})")
     CUENTAS["token_admin_a"] = token_admin2
+
+
+def fila_lista(token, usuario_id):
+    """La fila de una cuenta en GET /usuarios, o {}."""
+    datos = json_de(una(pt("GET", "/v1/personal/usuarios", token=token))) or {}
+    return next((u for u in datos.get("usuarios", []) if u.get("usuario_id") == str(usuario_id)), {})
+
+
+def filas_auditoria(empresa, accion):
+    return valor(f"select actor || '|' || accion || '|' || objeto_id from canal.registro_auditoria "
+                 f"where empresa_id = '{EMPRESAS[empresa][0]}' and accion = '{accion}' order by secuencia;").split()
+
+
+def recuento_plataforma():
+    """Lo que reinvitar-admin podría crear o cambiar."""
+    return valor("select (select count(*) from canal.invitacion_personal) || '|' || "
+                 "(select count(*) from canal.invitacion_personal where not cerrada) || '|' || "
+                 "(select count(*) from canal.usuario_personal where activo) || '|' || "
+                 "(select count(*) from canal.usuario_personal) || '|' || "
+                 "(select count(*) from canal.sesion_personal where not revocada) || '|' || "
+                 "(select count(*) from canal.registro_auditoria);")
+
+
+def seccion_j():
+    p("=== j) recuperacion: aviso, anulacion y reinvitar-admin")
+    admin2, instr, admin_b = CUENTAS["admin2"], CUENTAS["instructor"], CUENTAS["admin_b"]
+    token_admin2 = sesion_de(admin2)
+    token_instr = sesion_de(instr)
+    rutas = f"/v1/personal/usuarios/{instr.usuario_id}/invitacion"
+
+    # Aviso (NIST SP 800-63B-4, 4.2.3): el titular y los admins ven la reinvitación.
+    antes = json_de(una(yo(token_instr))) or {}
+    reinvitacion = una(pt("POST", rutas, token=token_admin2))
+    token_inv = (json_de(reinvitacion) or {}).get("token_invitacion")
+    despues = json_de(una(yo(token_instr))) or {}
+    en_lista = fila_lista(token_admin2, instr.usuario_id)
+    negativo("j) tras una reinvitacion, invitacion_pendiente pasa a true en /yo del titular y en la lista de cuentas",
+             despues.get("invitacion_pendiente") is True and en_lista.get("invitacion_pendiente") is True,
+             antes.get("invitacion_pendiente") is False and reinvitacion.get("estado") == 201,
+             f"antes: {antes}, despues: {despues}, lista: {en_lista}")
+
+    # Anulación: solo admin, mismo 404 fuera de la empresa, y deja la cuenta como estaba.
+    prohibida = una(pt("DELETE", rutas, token=token_instr))
+    fuera = http([pt("DELETE", f"/v1/personal/usuarios/{admin_b.usuario_id}/invitacion", token=token_admin2),
+                  pt("DELETE", f"/v1/personal/usuarios/{uuid.uuid4()}/invitacion", token=token_admin2),
+                  pt("DELETE", "/v1/personal/usuarios/no-es-un-uuid/invitacion", token=token_admin2)])
+    abiertas = valor(f"select count(*) from canal.invitacion_personal where usuario_id = '{instr.usuario_id}' "
+                     f"and not cerrada;")
+    anulada = una(pt("DELETE", rutas, token=token_admin2))
+    control = anulada.get("estado") == 204 and abiertas == "1"
+    pasa(control, f"j) control: un admin anula la invitacion abierta (204; abiertas antes: {abiertas})")
+    negativo("j) un instructor recibe 403 al anular", prohibida.get("estado") == 403
+             and prohibida.get("cuerpo") == CUERPO_403, control, f"respuesta: {prohibida}")
+    negativo("j) anular en una cuenta de otra empresa, inexistente o con id mal formado da el mismo 404",
+             all(x.get("estado") == 404 and x.get("cuerpo") == CUERPO_404 for x in fuera), control,
+             f"estados: {[x.get('estado') for x in fuera]}")
+    usada = una(pt("POST", "/v1/personal/activacion", {"token": token_inv, "contrasena": instr.contrasena}))
+    tras = una(yo(token_instr))
+    negativo("j) tras anular, la invitacion da 401, el aviso vuelve a false y la sesion del titular sigue",
+             es_401(usada, CUERPO_401_INVITACION) and tras.get("estado") == 200
+             and (json_de(tras) or {}).get("invitacion_pendiente") is False, control,
+             f"activacion: {usada.get('estado')}, yo: {tras}")
+    otra = una(pt("DELETE", rutas, token=token_admin2))
+    negativo("j) sin invitacion abierta, anular da 404", otra.get("estado") == 404
+             and otra.get("cuerpo") == CUERPO_404, control, f"respuesta: {otra}")
+    filas = filas_auditoria("A", "anulacion_invitacion")
+    pasa(filas == [f"personal:{admin2.usuario_id}|anulacion_invitacion|{instr.usuario_id}"],
+         f"j) la anulacion deja una fila con el admin que la hizo ({filas})")
+
+    # reinvitar-admin: solo sobre un admin activado de esa empresa. Los
+    # rechazos se ejecutan antes que el control, que cambia la cuenta de B.
+    # Email propio: d) ya usa pendiente@alfa.test para un instructor sin activar.
+    pendiente, _ = invitar(token_admin2, "admin_pendiente", "admin.pendiente@alfa.test", rol="admin")
+    rechazos = {}
+    for nombre, email in (("un instructor", instr.email), ("un email inexistente", "nadie@alfa.test"),
+                          ("un admin sin activar", pendiente.email), ("el admin de otra empresa", admin_b.email)):
+        previo = recuento_plataforma()
+        r = gestion("reinvitar-admin", "--identificador", EMPRESAS["A"][1], "--email", email)
+        rechazos[nombre] = (r.rc == 1 and TEXTO_NO_ES_ADMIN in r.err and recuento_plataforma() == previo,
+                            f"codigo {r.rc}, salida: {r.todo.strip()[-200:]!r}")
+
+    # El caso que motiva la orden: el único admin de B, con una sesión viva.
+    token_b = sesion_de(admin_b)
+    dispositivo_viejo = admin_b.dispositivo
+    ctl_yo = una(yo(token_b)).get("estado")
+    r = gestion("reinvitar-admin", "--identificador", EMPRESAS["B"][1], "--email", admin_b.email)
+    m = PATRON_INVITACION_GESTION.search(r.out)
+    control = r.rc == 0 and m is not None and m.group(2) == admin_b.usuario_id and ctl_yo == 200
+    pasa(control, f"j) control: reinvitar-admin emite la invitacion del unico admin de B (codigo {r.rc}; "
+                  f"su sesion respondia {ctl_yo})")
+    for nombre, (ok, detalle) in rechazos.items():
+        negativo(f"j) reinvitar-admin con {nombre} sale con 1, lo explica y no cambia nada", ok, control, detalle)
+    if not m:
+        raise Parada(f"reinvitar-admin no devolvio la invitacion: {r.todo.strip()[-300:]!r}")
+    tras = http([yo(token_b), pt("DELETE", f"/v1/personal/usuarios/{admin_b.usuario_id}/invitacion", token=token_b),
+                 login(admin_b, codigo=codigo_libre(admin_b.secreto)[0])])
+    negativo("j) en el acto: la sesion anterior da 401 (tampoco puede anular la recuperacion) "
+             "y las credenciales anteriores no entran",
+             es_401(tras[0], CUERPO_401_SESION) and es_401(tras[1], CUERPO_401_SESION) and es_401(tras[2]), control,
+             f"estados: {[x.get('estado') for x in tras]}")
+    usuario_b = admin_b.usuario_id
+    # Concatenado con texto, el booleano sale como true/false.
+    estado_b = valor(f"select activo || '|' "
+                     f"|| (select count(*) from canal.invitacion_personal where usuario_id = '{usuario_b}' "
+                     f"and not cerrada) || '|' "
+                     f"|| (select count(*) from canal.sesion_personal where usuario_id = '{usuario_b}' "
+                     f"and not revocada) || '|' "
+                     f"|| (select count(*) from canal.dispositivo_personal where usuario_id = '{usuario_b}' "
+                     f"and not revocado) "
+                     f"from canal.usuario_personal where id = '{usuario_b}';")
+    pasa(estado_b == "false|1|0|0",
+         f"j) la cuenta queda desactivada, con una invitacion abierta y sin sesiones ni dispositivos vivos ({estado_b})")
+    filas = filas_auditoria("B", "reinvitacion_admin_plataforma")
+    pasa(filas == [f"plataforma|reinvitacion_admin_plataforma|{usuario_b}"],
+         f"j) la reinvitacion de plataforma deja su fila en la auditoria de B ({filas})")
+
+    # Recuperación: el titular elige credenciales nuevas y vuelve a entrar.
+    admin_b.invitacion = m.group(3)
+    admin_b.contrasena = secrets.token_urlsafe(18)
+    _, r_conf = activar(admin_b)
+    entra = login_correcto(admin_b)
+    token_nuevo = (json_de(entra) or {}).get("token_sesion")
+    fila = fila_lista(token_nuevo, usuario_b) if token_nuevo else {}
+    pasa(r_conf is not None and r_conf.get("estado") == 200 and es_201_login(entra, False)
+         and fila.get("activo") is True and fila.get("activado") is True and fila.get("invitacion_pendiente") is False,
+         f"j) el unico admin de B activa la invitacion, entra con su dispositivo nuevo y su cuenta vuelve a estar "
+         f"activa y sin aviso ({fila})")
+    huella = hashlib.sha256(ETIQUETAS["dispositivo"] + leer_token(dispositivo_viejo)).hexdigest()
+    pasa(valor(f"select revocado from canal.dispositivo_personal where token_sha256 = '\\x{huella}';") == "t",
+         "j) el dispositivo anterior sigue revocado tras la recuperacion")
+    cadena = valor(f"begin; set local role aplicacion; select set_config('app.empresa_id', '{EMPRESAS['B'][0]}', true); "
+                   f"select coalesce(canal.verificar_cadena_auditoria()::text, 'intacta'); commit;").split()[-1]
+    pasa(cadena == "intacta", f"j) la cadena de auditoria de B sigue intacta ({cadena})")
 
 
 def seccion_h():
@@ -1260,8 +1423,8 @@ def main():
     preparar_secretos_falsos()
     parada = None
     try:
-        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_i,
-                        seccion_h):
+        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
+                        seccion_i, seccion_h):
             seccion()
     except Parada as e:
         parada = str(e)
