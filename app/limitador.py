@@ -3,7 +3,8 @@
 Qué hace:
 
 * Cada petición, salvo GET /salud, consume una unidad del contador de su
-  regla para su cliente: denuncia, seguimiento, mensajes u otras. Lo que no
+  regla para su cliente: denuncia, seguimiento, mensajes, acceso (login,
+  activación y cambio de contraseña del personal) u otras. Lo que no
   tiene regla propia cae en "otras": una ruta nueva queda limitada sin que
   nadie tenga que acordarse (cerrado por construcción).
 * Ventana fija: el número de ventana va dentro de la clave, y INCR y
@@ -106,12 +107,20 @@ class Limite:
 # de Tor salen por el mismo nodo y comparten IP (docs/threat-model.md, 8).
 # "seguimiento" cuenta también los códigos inexistentes; con 160 bits la
 # enumeración ya es inviable, el límite protege la capacidad.
+# "acceso" (login, activación y cambio de contraseña del personal) es la
+# primera capa contra el relleno de credenciales y protege la capacidad de
+# Argon2. No es la única: el bloqueo por cuenta y por dispositivo vive en
+# PostgreSQL (app/personal.py) y sigue frenando a quien cambia de IP.
 LIMITES_POR_DEFECTO = {
     "denuncia": Limite(10, 3600),
     "seguimiento": Limite(60, 60),
     "mensajes": Limite(30, 3600),
+    "acceso": Limite(10, 300),
     "otras": Limite(60, 60),
 }
+
+RUTAS_ACCESO = {"/v1/personal/sesiones", "/v1/personal/activacion", "/v1/personal/activacion/confirmar",
+                "/v1/personal/contrasena"}
 
 # Rutas exentas: solo la vivacidad, que usa el healthcheck desde dentro del
 # contenedor y no toca ninguna dependencia.
@@ -144,6 +153,8 @@ def regla_de(ruta):
         return "seguimiento"
     if ruta == "/v1/seguimiento/mensajes":
         return "mensajes"
+    if ruta in RUTAS_ACCESO:
+        return "acceso"
     if _RUTA_DENUNCIAS.fullmatch(ruta):
         return "denuncia"
     return "otras"

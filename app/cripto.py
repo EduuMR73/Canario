@@ -32,6 +32,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import urllib.parse
 import uuid
 
 from cryptography.exceptions import InvalidTag
@@ -53,6 +54,12 @@ ETIQUETA_CLAVE_EMPRESA = b"canario/clave_empresa/v1"
 ETIQUETA_DENUNCIA = b"canario/denuncia/v1"
 ETIQUETA_MENSAJE = b"canario/mensaje/v1"
 ETIQUETA_SEGUIMIENTO = b"canario/seguimiento/v1"
+ETIQUETA_TOTP = b"canario/totp/v1"
+# Una etiqueta por tipo de token del personal: el mismo valor no sirve como
+# otro tipo de token aunque alguien lo presente en otro sitio.
+ETIQUETA_INVITACION = b"canario/invitacion/v1"
+ETIQUETA_DISPOSITIVO = b"canario/dispositivo/v1"
+ETIQUETA_SESION = b"canario/sesion/v1"
 
 # Mismos valores que el CHECK de canal.mensaje.autor.
 AUTORES = {"denunciante": b"D", "personal": b"P"}
@@ -248,3 +255,124 @@ def hmac_codigo(clave_hmac, crudo):
     if not isinstance(crudo, bytes) or len(crudo) != LONGITUD_CODIGO:
         raise ValueError("el codigo debe tener 20 bytes")
     return hmac.new(clave_hmac, ETIQUETA_SEGUIMIENTO + crudo, hashlib.sha256).digest()
+
+
+# ---------------------------------------------------------------------------
+# TOTP del personal (RFC 6238 sobre HOTP, RFC 4226)
+# ---------------------------------------------------------------------------
+
+# Los parámetros que entienden todas las aplicaciones de autenticación: SHA-1,
+# 6 dígitos y pasos de 30 s. SHA-1 aquí es HMAC-SHA-1, que sigue siendo seguro
+# como PRF (RFC 4226, apéndice A.2); no se usa como hash resistente a
+# colisiones. 160 bits de secreto, lo que recomienda RFC 4226 (sección 4).
+LONGITUD_SECRETO_TOTP = 20
+DIGITOS_TOTP = 6
+PERIODO_TOTP = 30
+# Pasos de desfase admitidos a cada lado: el reloj del móvil puede ir unos
+# segundos desviado (RFC 6238, sección 5.2). Uno a cada lado: 3 códigos
+# válidos a la vez, y cada uno solo se acepta una vez (ultimo_paso_totp).
+DESFASE_TOTP = 1
+EMISOR_TOTP = "Canario"
+PATRON_CODIGO_TOTP = re.compile(r"[0-9]{6}")
+
+
+def aad_totp(empresa_id, usuario_id):
+    """Ata el secreto TOTP cifrado a su cuenta: copiado a otra fila no se
+    descifra. Es el mismo en la invitación y en la cuenta, así que al
+    confirmar se mueve sin volver a cifrar."""
+    _exigir_uuid(empresa_id, usuario_id)
+    return ETIQUETA_TOTP + empresa_id.bytes + usuario_id.bytes
+
+
+def generar_secreto_totp():
+    return secrets.token_bytes(LONGITUD_SECRETO_TOTP)
+
+
+def paso_totp(instante):
+    return int(instante) // PERIODO_TOTP
+
+
+def codigo_totp(secreto, paso, digitos=DIGITOS_TOTP):
+    """HOTP(secreto, paso) con el truncado dinámico de RFC 4226, sección 5.3.
+
+    digitos solo es parámetro para comprobar los vectores de RFC 6238
+    (apéndice B), que usan 8.
+    """
+    mac = hmac.new(secreto, paso.to_bytes(8, "big"), hashlib.sha1).digest()
+    desplazamiento = mac[-1] & 0x0F
+    binario = int.from_bytes(mac[desplazamiento:desplazamiento + 4], "big") & 0x7FFFFFFF
+    return f"{binario % 10 ** digitos:0{digitos}d}"
+
+
+def verificar_totp(secreto, codigo, instante):
+    """Paso que corresponde al código, o None si no vale.
+
+    Calcula y compara siempre los tres pasos, sin salir antes y en tiempo
+    constante: el tiempo de respuesta no dice si el código casi valía. Un
+    código mal formado también recorre los tres, contra un valor que nunca
+    coincide.
+    """
+    bien_formado = isinstance(codigo, str) and PATRON_CODIGO_TOTP.fullmatch(codigo) is not None
+    recibido = (codigo if bien_formado else "x" * DIGITOS_TOTP).encode("ascii")
+    actual = paso_totp(instante)
+    aceptado = None
+    for paso in range(actual - DESFASE_TOTP, actual + DESFASE_TOTP + 1):
+        if hmac.compare_digest(codigo_totp(secreto, paso).encode("ascii"), recibido) and bien_formado:
+            aceptado = paso
+    return aceptado
+
+
+def secreto_totp_texto(secreto):
+    """Secreto en base32 sin relleno, como lo teclea una persona."""
+    return base64.b32encode(secreto).decode("ascii").rstrip("=")
+
+
+def uri_totp(secreto, email):
+    """URI otpauth:// (Key Uri Format de Google Authenticator) para el QR.
+
+    El separador entre emisor y cuenta va como ':' literal, y el email se
+    codifica aparte: un ':' dentro del email sale como %3A y la etiqueta no
+    es ambigua."""
+    etiqueta = f"{urllib.parse.quote(EMISOR_TOTP, safe='')}:{urllib.parse.quote(email, safe='@')}"
+    return (f"otpauth://totp/{etiqueta}?secret={secreto_totp_texto(secreto)}&issuer={EMISOR_TOTP}"
+            f"&algorithm=SHA1&digits={DIGITOS_TOTP}&period={PERIODO_TOTP}")
+
+
+# ---------------------------------------------------------------------------
+# Tokens del personal (invitación, dispositivo y sesión)
+# ---------------------------------------------------------------------------
+
+# 256 bits aleatorios en base64url sin relleno: 43 caracteres. Con esa
+# entropía basta un SHA-256 para guardarlos (como el HMAC de los códigos, no
+# hace falta un hash lento), y la etiqueta de cada tipo impide usar uno por
+# otro.
+LONGITUD_TOKEN = 32
+PATRON_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+def generar_token():
+    """Devuelve (texto para el cliente, bytes). Solo se guarda la huella."""
+    crudo = secrets.token_bytes(LONGITUD_TOKEN)
+    return base64.urlsafe_b64encode(crudo).decode("ascii").rstrip("="), crudo
+
+
+def leer_token(texto):
+    """Bytes del token, o None si no tiene la forma exacta.
+
+    Solo la forma canónica: el último carácter de 43 lleva 4 bits sobrantes,
+    y sin esta comprobación varios textos distintos darían el mismo token.
+    """
+    if not isinstance(texto, str) or not PATRON_TOKEN.fullmatch(texto):
+        return None
+    crudo = base64.urlsafe_b64decode(texto + "=")
+    if base64.urlsafe_b64encode(crudo).decode("ascii").rstrip("=") != texto:
+        return None
+    return crudo
+
+
+def huella_token(etiqueta, crudo):
+    if etiqueta not in (ETIQUETA_INVITACION, ETIQUETA_DISPOSITIVO, ETIQUETA_SESION):
+        raise ValueError("etiqueta de token desconocida")
+    if not isinstance(crudo, bytes) or len(crudo) != LONGITUD_TOKEN:
+        raise ValueError("el token debe tener 32 bytes")
+    return hashlib.sha256(etiqueta + crudo).digest()

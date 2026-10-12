@@ -14,8 +14,10 @@
 --   forma de averiguar si un id existe en otra empresa).
 -- * Sin marcas de tiempo: las fechas llegan a nivel de día y el orden lo da una
 --   secuencia, para no dejar rastro horario que ayude a correlacionar
---   denunciantes. La única excepción es bloqueado_hasta, de las cuentas del
---   personal, que necesita hora para el bloqueo temporal por intentos fallidos.
+--   denunciantes. Las únicas excepciones son del lado del personal, nunca del
+--   denunciante: el bloqueo temporal por intentos fallidos (bloqueado_hasta)
+--   y las caducidades de invitaciones, sesiones y dispositivos, que necesitan
+--   hora para funcionar.
 -- * La fecha es la del calendario de la empresa: cada empresa tiene su zona
 --   horaria (solo las de España) y los triggers calculan el día con
 --   now() AT TIME ZONE esa zona. La Ley 2/2023 cuenta los plazos desde la
@@ -139,6 +141,20 @@ CREATE TABLE canal.clave_empresa (
     PRIMARY KEY (empresa_id, version)
 );
 
+-- Cuentas del personal (docs/threat-model.md, 6.3). Una cuenta nace por
+-- invitación, sin credenciales, y solo queda activada cuando su titular fija
+-- la contraseña y demuestra que su TOTP funciona (invitacion_personal):
+-- * hash_contrasena: Argon2id (app/personal.py).
+-- * secreto_totp_cifrado: cifrado con la clave de la empresa de la versión
+--   version_clave_totp, con un AAD que lo ata a esta cuenta (app/cripto.py).
+-- * ultimo_paso_totp: último paso de 30 s aceptado. Un código solo vale una
+--   vez (NIST SP 800-63B-4, verificadores OTP).
+-- * intentos_fallidos y bloqueado_hasta: SOLO el camino sin confianza (login
+--   sin un dispositivo de confianza válido). Los fallos de un dispositivo de
+--   confianza se cuentan en su fila, así que un atacante que falla a propósito
+--   no bloquea al titular en sus dispositivos (6.9).
+-- usuario_personal_credenciales_check: una cuenta está activada si y solo si
+-- tiene las tres piezas. Nadie puede dejarla activada a medias.
 CREATE TABLE canal.usuario_personal (
     empresa_id uuid NOT NULL REFERENCES canal.empresa (id),
     id uuid NOT NULL DEFAULT gen_random_uuid(),
@@ -147,15 +163,96 @@ CREATE TABLE canal.usuario_personal (
         AND length(email) BETWEEN 3 AND 254
         AND position('@' in email) > 1
     ),
-    hash_contrasena text NOT NULL,
+    hash_contrasena text,
     rol text NOT NULL CHECK (rol IN ('admin', 'instructor')),
     secreto_totp_cifrado bytea,
     totp_activo boolean NOT NULL DEFAULT false,
     intentos_fallidos integer NOT NULL DEFAULT 0 CHECK (intentos_fallidos >= 0),
     bloqueado_hasta timestamptz,
     activo boolean NOT NULL DEFAULT true,
+    version_clave_totp integer,
+    ultimo_paso_totp bigint CHECK (ultimo_paso_totp >= 0),
     PRIMARY KEY (empresa_id, id),
-    UNIQUE (empresa_id, email)
+    UNIQUE (empresa_id, email),
+    FOREIGN KEY (empresa_id, version_clave_totp) REFERENCES canal.clave_empresa (empresa_id, version),
+    CONSTRAINT usuario_personal_credenciales_check CHECK (
+        totp_activo = (hash_contrasena IS NOT NULL
+                       AND secreto_totp_cifrado IS NOT NULL
+                       AND version_clave_totp IS NOT NULL))
+);
+
+-- Invitación de un solo uso para activar (o reactivar) una cuenta. Del token
+-- solo se guarda su SHA-256: tiene 256 bits aleatorios, así que no hace falta
+-- un hash lento ni una clave (6.3). La contraseña y el secreto TOTP que elige
+-- el titular esperan aquí hasta que confirma un código: solo entonces pasan a
+-- la cuenta, en una transacción, y la cuenta nunca queda a medias.
+-- caduca y cerrada los fija la base de datos: la API no tiene INSERT sobre
+-- esas columnas (permisos por columna, abajo). cerrada = usada o sustituida
+-- por otra más reciente; como mucho hay una abierta por cuenta.
+CREATE TABLE canal.invitacion_personal (
+    empresa_id uuid NOT NULL,
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    usuario_id uuid NOT NULL,
+    token_sha256 bytea NOT NULL CHECK (octet_length(token_sha256) = 32),
+    caduca timestamptz NOT NULL DEFAULT now() + interval '72 hours',
+    cerrada boolean NOT NULL DEFAULT false,
+    hash_contrasena text,
+    secreto_totp_cifrado bytea,
+    version_clave_totp integer,
+    PRIMARY KEY (empresa_id, id),
+    UNIQUE (empresa_id, token_sha256),
+    FOREIGN KEY (empresa_id, usuario_id) REFERENCES canal.usuario_personal (empresa_id, id),
+    FOREIGN KEY (empresa_id, version_clave_totp) REFERENCES canal.clave_empresa (empresa_id, version),
+    -- Las credenciales pendientes llegan juntas o no llegan.
+    CONSTRAINT invitacion_personal_pendiente_check CHECK (
+        (hash_contrasena IS NULL) = (secreto_totp_cifrado IS NULL)
+        AND (secreto_totp_cifrado IS NULL) = (version_clave_totp IS NULL))
+);
+CREATE UNIQUE INDEX invitacion_personal_una_abierta
+    ON canal.invitacion_personal (empresa_id, usuario_id) WHERE NOT cerrada;
+
+-- Dispositivo de confianza (OWASP, "Slow Down Online Guessing Attacks with
+-- Device Cookies"): se emite tras un login correcto o al activar la cuenta.
+-- Un login que lo presenta cuenta sus fallos aquí, no en la cuenta: el
+-- atacante que falla a propósito solo bloquea el camino sin confianza. Con 5
+-- fallos seguidos el dispositivo espera; con 20 deja de ser de confianza
+-- (app/personal.py). Del token solo se guarda su SHA-256.
+-- UNIQUE (empresa_id, usuario_id, id): permite que una sesión exija, con una
+-- clave foránea, que su dispositivo es de su mismo usuario.
+CREATE TABLE canal.dispositivo_personal (
+    empresa_id uuid NOT NULL,
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    usuario_id uuid NOT NULL,
+    token_sha256 bytea NOT NULL CHECK (octet_length(token_sha256) = 32),
+    caduca timestamptz NOT NULL DEFAULT now() + interval '90 days',
+    intentos_fallidos integer NOT NULL DEFAULT 0 CHECK (intentos_fallidos >= 0),
+    bloqueado_hasta timestamptz,
+    revocado boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (empresa_id, id),
+    UNIQUE (empresa_id, token_sha256),
+    UNIQUE (empresa_id, usuario_id, id),
+    FOREIGN KEY (empresa_id, usuario_id) REFERENCES canal.usuario_personal (empresa_id, id)
+);
+
+-- Sesión del personal: token opaco, revocable (a diferencia de un JWT), del
+-- que solo se guarda su SHA-256. Caduca a las 8 horas aunque se use, y antes
+-- si pasan 15 minutos sin uso (app/personal.py). caduca la fija la base de
+-- datos. La clave foránea de tres columnas exige que el dispositivo sea del
+-- mismo usuario.
+CREATE TABLE canal.sesion_personal (
+    empresa_id uuid NOT NULL,
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    usuario_id uuid NOT NULL,
+    dispositivo_id uuid NOT NULL,
+    token_sha256 bytea NOT NULL CHECK (octet_length(token_sha256) = 32),
+    ultimo_uso timestamptz NOT NULL DEFAULT now(),
+    caduca timestamptz NOT NULL DEFAULT now() + interval '8 hours',
+    revocada boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (empresa_id, id),
+    UNIQUE (empresa_id, token_sha256),
+    FOREIGN KEY (empresa_id, usuario_id) REFERENCES canal.usuario_personal (empresa_id, id),
+    FOREIGN KEY (empresa_id, usuario_id, dispositivo_id)
+        REFERENCES canal.dispositivo_personal (empresa_id, usuario_id, id)
 );
 
 -- El id lo genera la API: lo necesita antes de cifrar, porque forma parte del
@@ -243,6 +340,12 @@ ALTER TABLE canal.clave_empresa ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.clave_empresa FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.usuario_personal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.usuario_personal FORCE ROW LEVEL SECURITY;
+ALTER TABLE canal.invitacion_personal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canal.invitacion_personal FORCE ROW LEVEL SECURITY;
+ALTER TABLE canal.dispositivo_personal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canal.dispositivo_personal FORCE ROW LEVEL SECURITY;
+ALTER TABLE canal.sesion_personal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canal.sesion_personal FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.denuncia ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.denuncia FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.mensaje ENABLE ROW LEVEL SECURITY;
@@ -271,6 +374,39 @@ CREATE POLICY usuario_personal_insert ON canal.usuario_personal
     FOR INSERT TO aplicacion
     WITH CHECK (empresa_id = canal.empresa_actual());
 CREATE POLICY usuario_personal_update ON canal.usuario_personal
+    FOR UPDATE TO aplicacion
+    USING (empresa_id = canal.empresa_actual())
+    WITH CHECK (empresa_id = canal.empresa_actual());
+
+CREATE POLICY invitacion_personal_select ON canal.invitacion_personal
+    FOR SELECT TO aplicacion
+    USING (empresa_id = canal.empresa_actual());
+CREATE POLICY invitacion_personal_insert ON canal.invitacion_personal
+    FOR INSERT TO aplicacion
+    WITH CHECK (empresa_id = canal.empresa_actual());
+CREATE POLICY invitacion_personal_update ON canal.invitacion_personal
+    FOR UPDATE TO aplicacion
+    USING (empresa_id = canal.empresa_actual())
+    WITH CHECK (empresa_id = canal.empresa_actual());
+
+CREATE POLICY dispositivo_personal_select ON canal.dispositivo_personal
+    FOR SELECT TO aplicacion
+    USING (empresa_id = canal.empresa_actual());
+CREATE POLICY dispositivo_personal_insert ON canal.dispositivo_personal
+    FOR INSERT TO aplicacion
+    WITH CHECK (empresa_id = canal.empresa_actual());
+CREATE POLICY dispositivo_personal_update ON canal.dispositivo_personal
+    FOR UPDATE TO aplicacion
+    USING (empresa_id = canal.empresa_actual())
+    WITH CHECK (empresa_id = canal.empresa_actual());
+
+CREATE POLICY sesion_personal_select ON canal.sesion_personal
+    FOR SELECT TO aplicacion
+    USING (empresa_id = canal.empresa_actual());
+CREATE POLICY sesion_personal_insert ON canal.sesion_personal
+    FOR INSERT TO aplicacion
+    WITH CHECK (empresa_id = canal.empresa_actual());
+CREATE POLICY sesion_personal_update ON canal.sesion_personal
     FOR UPDATE TO aplicacion
     USING (empresa_id = canal.empresa_actual())
     WITH CHECK (empresa_id = canal.empresa_actual());
@@ -308,10 +444,16 @@ CREATE POLICY registro_auditoria_insert ON canal.registro_auditoria
 -- para aplicacion. Nunca DELETE, TRUNCATE ni REFERENCES a nadie. UPDATE va por
 -- columna: así, por ejemplo, nadie puede cambiar el contenido cifrado de una
 -- denuncia ni el rol o el email de un usuario, ni mover filas de empresa.
+-- En las tablas del personal también INSERT va por columna: la API no puede
+-- crear una cuenta ya activada ni elegir una caducidad, que fija la base de
+-- datos con su valor por defecto.
 REVOKE ALL ON TABLE canal.empresa FROM PUBLIC;
 REVOKE ALL ON TABLE canal.directorio_empresas FROM PUBLIC;
 REVOKE ALL ON TABLE canal.clave_empresa FROM PUBLIC;
 REVOKE ALL ON TABLE canal.usuario_personal FROM PUBLIC;
+REVOKE ALL ON TABLE canal.invitacion_personal FROM PUBLIC;
+REVOKE ALL ON TABLE canal.dispositivo_personal FROM PUBLIC;
+REVOKE ALL ON TABLE canal.sesion_personal FROM PUBLIC;
 REVOKE ALL ON TABLE canal.denuncia FROM PUBLIC;
 REVOKE ALL ON TABLE canal.mensaje FROM PUBLIC;
 REVOKE ALL ON TABLE canal.busqueda_seguimiento FROM PUBLIC;
@@ -319,9 +461,21 @@ REVOKE ALL ON TABLE canal.registro_auditoria FROM PUBLIC;
 
 GRANT SELECT ON canal.empresa TO aplicacion;
 GRANT SELECT, INSERT ON canal.clave_empresa TO aplicacion;
-GRANT SELECT, INSERT ON canal.usuario_personal TO aplicacion;
-GRANT UPDATE (hash_contrasena, secreto_totp_cifrado, totp_activo, intentos_fallidos, bloqueado_hasta, activo)
+GRANT SELECT ON canal.usuario_personal TO aplicacion;
+GRANT INSERT (empresa_id, email, rol) ON canal.usuario_personal TO aplicacion;
+GRANT UPDATE (hash_contrasena, secreto_totp_cifrado, version_clave_totp, totp_activo, ultimo_paso_totp,
+              intentos_fallidos, bloqueado_hasta, activo)
     ON canal.usuario_personal TO aplicacion;
+GRANT SELECT ON canal.invitacion_personal TO aplicacion;
+GRANT INSERT (empresa_id, usuario_id, token_sha256) ON canal.invitacion_personal TO aplicacion;
+GRANT UPDATE (cerrada, hash_contrasena, secreto_totp_cifrado, version_clave_totp)
+    ON canal.invitacion_personal TO aplicacion;
+GRANT SELECT ON canal.dispositivo_personal TO aplicacion;
+GRANT INSERT (empresa_id, usuario_id, token_sha256) ON canal.dispositivo_personal TO aplicacion;
+GRANT UPDATE (intentos_fallidos, bloqueado_hasta, revocado) ON canal.dispositivo_personal TO aplicacion;
+GRANT SELECT ON canal.sesion_personal TO aplicacion;
+GRANT INSERT (empresa_id, usuario_id, dispositivo_id, token_sha256) ON canal.sesion_personal TO aplicacion;
+GRANT UPDATE (ultimo_uso, revocada) ON canal.sesion_personal TO aplicacion;
 GRANT SELECT, INSERT ON canal.denuncia TO aplicacion;
 GRANT UPDATE (estado, asignada_a) ON canal.denuncia TO aplicacion;
 GRANT SELECT, INSERT ON canal.mensaje TO aplicacion;

@@ -1,4 +1,5 @@
-"""Gestión de Canario: alta de empresas, claves de cifrado y supresión legal.
+"""Gestión de Canario: alta de empresas, claves de cifrado, primer admin y
+supresión legal.
 
 Operación de administración, fuera de la API pública: corre en el servicio
 gestion de docker-compose.yml (perfil propio, solo en la red data), nunca en
@@ -10,6 +11,16 @@ Uso (PowerShell, desde la raíz del repositorio, con postgres en marcha):
     docker compose run --rm gestion alta-empresa --nombre "Empresa S.L." --zona Europe/Madrid
     docker compose run --rm gestion nueva-clave --empresa-id <uuid>
     docker compose run --rm gestion suprimir-caducadas
+    docker compose run --rm gestion alta-admin --identificador <32 hex> --email admin@empresa.es
+
+alta-admin emite la invitación del primer admin de una empresa
+(app/personal.py, alta_admin_plataforma): solo si la empresa no tiene ningún
+admin activado, y deja una fila en la auditoría de la empresa con actor
+plataforma. Imprime el token de invitación UNA vez: es la forma de
+entregarlo (no hay correo), y solo sirve para que su titular elija su propia
+contraseña y su TOTP, que la plataforma nunca conoce. Caduca a las 72 horas
+y sirve una sola vez; si el admin lo encuentra ya usado, alguien se le
+adelantó y la auditoría de su empresa lo muestra.
 
 suprimir-caducadas aplica los arts. 32.4 y 26.2 de la Ley 2/2023 con
 canal.suprimir_denuncias_caducadas() (db/init/04_supresion.sql), el único
@@ -60,9 +71,10 @@ import uuid
 
 import psycopg
 
-from app import bd, claves, cripto, verificacion_arranque
+from app import bd, claves, cripto, denuncias, personal, verificacion_arranque
 
 SQL_ALTA = "select empresa_id, identificador_publico from canal.alta_empresa(%s, %s)"
+SQL_RESOLVER = "select canal.resolver_empresa(%s)"
 # Misma lista que el CHECK de canal.empresa.zona_horaria. La autoridad es la
 # base de datos; esta copia solo da un error claro antes de conectar.
 ZONAS_HORARIAS = ("Europe/Madrid", "Atlantic/Canary", "Africa/Ceuta")
@@ -135,6 +147,23 @@ def alta_empresa(nombre, zona_horaria, maestra):
     print(f"clave creada: empresa_id={empresa_id} version={version}")
 
 
+def alta_admin(identificador, email):
+    """Invitación del primer admin de una empresa. Devuelve (empresa, invitación)."""
+    with bd.conectar("aplicacion", bd.FICHERO_CONTRASENA) as conexion:
+        _verificar_base_datos(conexion)
+        with conexion.transaction():
+            empresa_id = conexion.execute(SQL_RESOLVER, [identificador]).fetchone()[0]
+        if empresa_id is None:
+            raise ErrorGestion("no hay ninguna empresa activa con ese identificador")
+        with conexion.transaction():
+            bd.fijar_contexto(conexion, empresa_id)
+            try:
+                invitacion = personal.alta_admin_plataforma(conexion, empresa_id, identificador, email)
+            except personal.AltaAdminRechazada as error:
+                raise ErrorGestion(str(error)) from None
+    return empresa_id, invitacion
+
+
 def suprimir_caducadas(lote):
     """Suprime las denuncias caducadas por lotes. Devuelve (totales, pendientes).
 
@@ -189,7 +218,17 @@ def construir_parser():
         help="suprime las denuncias caducadas (arts. 32.4 y 26.2 de la Ley 2/2023)")
     supresion.add_argument("--lote", type=_lote, default=LOTE_POR_DEFECTO,
                            help="denuncias por transaccion, de 1 a 500")
+    admin = ordenes.add_parser("alta-admin", help="invitacion del primer admin de una empresa sin admins activos")
+    admin.add_argument("--identificador", required=True, type=_identificador,
+                       help="identificador publico de la empresa (el que imprime alta-empresa)")
+    admin.add_argument("--email", required=True)
     return parser
+
+
+def _identificador(texto):
+    if not denuncias.PATRON_IDENTIFICADOR.fullmatch(texto):
+        raise argparse.ArgumentTypeError("no es un identificador publico (32 hexadecimales en minuscula)")
+    return texto
 
 
 def _lote(texto):
@@ -220,6 +259,12 @@ def main(argv=None):
         # La supresión no toca claves: no necesita cargar la clave maestra.
         if args.orden == "suprimir-caducadas":
             return _informar_supresion(*suprimir_caducadas(args.lote))
+        # La invitación tampoco: el TOTP lo cifra la API al activar la cuenta.
+        if args.orden == "alta-admin":
+            empresa_id, invitacion = alta_admin(args.identificador, args.email)
+            print(f"invitacion creada: empresa_id={empresa_id} usuario_id={invitacion.usuario_id}")
+            print(f"token_invitacion={invitacion.token_invitacion}")
+            return 0
         maestra = claves.cargar_maestra()
         if args.orden == "alta-empresa":
             alta_empresa(args.nombre, args.zona, maestra)

@@ -1,0 +1,812 @@
+"""Identidad del personal: invitación, activación, login, sesiones y
+dispositivos de confianza (docs/threat-model.md, 6.3 y 6.9).
+
+Lógica sin HTTP: recibe y devuelve los tokens como texto y nunca sabe si
+llegaron en una cabecera o en una cookie. El transporte vive solo en
+app/rutas_personal.py, así que un frontend web (cookies HttpOnly y defensa
+CSRF) cambiaría esa capa y no esta.
+
+Cuentas:
+* Una cuenta nace por invitación, sin credenciales. Su titular fija la
+  contraseña (Argon2id) y recibe un secreto TOTP; la cuenta solo se activa
+  cuando confirma un código, y entonces recibe su primer dispositivo de
+  confianza. Las credenciales pendientes esperan en la invitación: una
+  reinvitación no deja la cuenta a medias.
+* El login pide en una sola petición empresa, email, contraseña y código
+  TOTP: no hay un estado "medio autenticado" que defender. Cualquier fallo
+  (empresa, email, contraseña, código, cuenta bloqueada o desactivada) da la
+  misma respuesta.
+
+Bloqueo sin denegación de servicio (OWASP, "Slow Down Online Guessing Attacks
+with Device Cookies"; Microsoft Entra Smart Lockout; NIST SP 800-63B-4,
+3.2.2):
+* Con un dispositivo de confianza válido de esa cuenta, los fallos se cuentan
+  en el dispositivo: con 5 seguidos espera (1, 2, 4... hasta 60 minutos) y
+  con 20 deja de ser de confianza. Un atacante que falla a propósito sin ese
+  dispositivo no bloquea al titular en los suyos.
+* Sin dispositivo de confianza (o con uno bloqueado, retirado, caducado o de
+  otra cuenta), los fallos se cuentan en la cuenta, con las mismas esperas.
+  Con 100 seguidos (el máximo de NIST) este camino se cierra hasta que un
+  admin reinvite al usuario; sus dispositivos de confianza siguen sirviendo.
+  El contador solo vuelve a cero con un acierto por este mismo camino: que el
+  titular entre desde su dispositivo no le regala intentos al atacante.
+* El intento se reserva (se cuenta) ANTES de verificar, con un UPDATE
+  atómico, y se libera al acertar: peticiones simultáneas no consiguen
+  intentos extra. Mientras un camino espera, ni siquiera se verifica la
+  contraseña: un acierto en ese tiempo no se distingue de un fallo.
+* Un fallo de contraseña y uno de TOTP cuentan igual: quien tenga la
+  contraseña no puede probar códigos gratis.
+
+Respuestas y tiempos uniformes por construcción: todos los caminos del login
+ejecutan las mismas sentencias (las que no aplican, con cero filas: empresa
+o email inexistentes usan un contexto aleatorio), el mismo Argon2 (con un
+hash ficticio si no hay cuenta) y el mismo cálculo de TOTP (con un secreto
+aleatorio). El bloqueo deja un evento en el log y no en la auditoría: una
+inserción más en ese intento lo haría medible. La reserva confirma sin
+esperar al disco (synchronous_commit off): si no, escribir o no escribir la
+fila del contador se notaría en el tiempo (ver SQL_RESERVA_ASINCRONA).
+
+Argon2id con m=19 MiB, t=2, p=1 (OWASP Password Storage Cheat Sheet). El
+perfil por defecto de argon2-cffi usa 64 MiB y la API tiene 256 MiB de
+memoria (docker-compose.yml): un semáforo acota los hashes simultáneos y, si
+no hay hueco, se responde 503 en vez de agotar la memoria. Argon2 se calcula
+fuera de toda transacción, para no retener conexiones del pool.
+
+Orden de bloqueos en las escrituras: cuenta, invitación, dispositivos,
+sesiones y auditoría. La autenticación de una sesión es su propia
+transacción y solo bloquea la fila de la sesión.
+
+Registro: los eventos de seguridad (bloqueos, cierre del camino, retirada de
+un dispositivo, saturación) llevan la empresa y la cuenta, nunca IPs,
+contraseñas, códigos ni tokens. Un fallo normal no se registra.
+"""
+import logging
+import secrets
+import threading
+import time
+import unicodedata
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
+
+import psycopg
+from argon2 import PasswordHasher, Type
+from argon2.exceptions import InvalidHashError, VerificationError
+
+from app import bd, cripto, denuncias
+
+registro = logging.getLogger("canario.personal")
+
+ROLES = ("admin", "instructor")
+
+# Argon2id, OWASP Password Storage Cheat Sheet (m=19 MiB, t=2, p=1).
+MEMORIA_ARGON2_KIB = 19456
+ITERACIONES_ARGON2 = 2
+PARALELISMO_ARGON2 = 1
+# Hashes de contraseña simultáneos: 2 x 19 MiB caben con margen en los 256
+# MiB de la API. Si no hay hueco en ESPERA_HASH segundos, 503.
+HASHES_SIMULTANEOS = 2
+ESPERA_HASH = 2.0
+
+# Bloqueo progresivo (ver la cabecera).
+FALLOS_ANTES_DE_ESPERAR = 5
+ESPERA_MAXIMA_MINUTOS = 60
+TOPE_SIN_CONFIANZA = 100
+TOPE_DISPOSITIVO = 20
+# Sesión: 15 minutos sin uso o 8 horas en total (la caducidad total la fija
+# la base de datos al crearla).
+INACTIVIDAD_SESION_MINUTOS = 15
+
+# Política de contraseñas (NIST SP 800-63B-4): con un segundo factor
+# obligatorio, 12 como mínimo; 128 como máximo, para acotar lo que se
+# procesa; NFKC, para que la misma contraseña escrita con otra forma Unicode
+# sea la misma.
+LONGITUD_MINIMA_CONTRASENA = 12
+LONGITUD_MAXIMA_CONTRASENA = 128
+# Las piezas más cortas que esto no se buscan dentro de la contraseña:
+# rechazarían contraseñas buenas por casualidad.
+LONGITUD_MINIMA_PROHIBIDA = 4
+
+ACCION_ACCESO = "acceso"
+ACCION_ACTIVACION = "activacion"
+ACCION_CAMBIO_CONTRASENA = "cambio_contrasena"
+ACCION_INVITACION = "invitacion"
+ACCION_BAJA = "baja"
+ACCION_INVITACION_PLATAFORMA = "invitacion_admin_plataforma"
+ACTOR_PLATAFORMA = "plataforma"
+
+_hasher = PasswordHasher(time_cost=ITERACIONES_ARGON2, memory_cost=MEMORIA_ARGON2_KIB,
+                         parallelism=PARALELISMO_ARGON2, hash_len=32, salt_len=16, type=Type.ID)
+# Hash de una contraseña aleatoria que nadie conoce, con los mismos
+# parámetros: cuando no hay cuenta, se verifica contra él y el tiempo es el
+# mismo que con una cuenta real.
+_HASH_FICTICIO = _hasher.hash(secrets.token_urlsafe(32))
+_semaforo = threading.BoundedSemaphore(HASHES_SIMULTANEOS)
+
+
+# Parámetros del bloqueo, enlazados en cada reserva como cualquier otro valor:
+# el SQL es siempre texto fijo, nunca se construye con formato.
+PARAMETROS_BLOQUEO = {"umbral": FALLOS_ANTES_DE_ESPERAR, "espera_maxima": ESPERA_MAXIMA_MINUTOS,
+                      "tope_dispositivo": TOPE_DISPOSITIVO, "tope_sin_confianza": TOPE_SIN_CONFIANZA}
+
+# Reserva de un intento con un dispositivo de confianza. Las tres reservas
+# devuelven las mismas columnas: (dispositivo, cuenta, rol, hash, secreto
+# cifrado, versión de su clave, intentos tras este). La espera tras el fallo
+# n (ya contado) es de 2^(n - umbral) minutos con tope de espera_maxima, a
+# partir del umbral; el exponente se acota a 6 para no calcular potencias
+# enormes.
+SQL_RESERVAR_DISPOSITIVO = """
+    update canal.dispositivo_personal d
+       set intentos_fallidos = d.intentos_fallidos + 1,
+           bloqueado_hasta = case when d.intentos_fallidos + 1 >= %(umbral)s
+               then now() + make_interval(mins => (least(%(espera_maxima)s,
+                    2 ^ least(d.intentos_fallidos + 1 - %(umbral)s, 6)))::integer) end
+      from canal.usuario_personal u
+     where d.token_sha256 = %(huella)s
+       and u.empresa_id = d.empresa_id and u.id = d.usuario_id and u.email = %(email)s
+       and u.activo and u.totp_activo
+       and not d.revocado and d.caduca > now()
+       and d.intentos_fallidos < %(tope_dispositivo)s
+       and (d.bloqueado_hasta is null or d.bloqueado_hasta <= now())
+    returning d.id, u.id, u.rol, u.hash_contrasena, u.secreto_totp_cifrado, u.version_clave_totp,
+              d.intentos_fallidos
+"""
+# Reserva por el camino sin confianza. %(sin_confianza)s es false si ya se
+# reservó con el dispositivo: la sentencia se ejecuta igual (cero filas)
+# para que todos los caminos hagan el mismo trabajo.
+SQL_RESERVAR_CUENTA = """
+    update canal.usuario_personal
+       set intentos_fallidos = intentos_fallidos + 1,
+           bloqueado_hasta = case when intentos_fallidos + 1 >= %(umbral)s
+               then now() + make_interval(mins => (least(%(espera_maxima)s,
+                    2 ^ least(intentos_fallidos + 1 - %(umbral)s, 6)))::integer) end
+     where email = %(email)s and %(sin_confianza)s
+       and activo and totp_activo
+       and intentos_fallidos < %(tope_sin_confianza)s
+       and (bloqueado_hasta is null or bloqueado_hasta <= now())
+    returning null::uuid, id, rol, hash_contrasena, secreto_totp_cifrado, version_clave_totp, intentos_fallidos
+"""
+# Reserva al cambiar la contraseña: por el dispositivo de la sesión.
+SQL_RESERVAR_DISPOSITIVO_SESION = """
+    update canal.dispositivo_personal d
+       set intentos_fallidos = d.intentos_fallidos + 1,
+           bloqueado_hasta = case when d.intentos_fallidos + 1 >= %(umbral)s
+               then now() + make_interval(mins => (least(%(espera_maxima)s,
+                    2 ^ least(d.intentos_fallidos + 1 - %(umbral)s, 6)))::integer) end
+      from canal.usuario_personal u
+     where d.id = %(dispositivo)s and u.empresa_id = d.empresa_id and u.id = d.usuario_id
+       and u.activo and u.totp_activo
+       and not d.revocado
+       and d.intentos_fallidos < %(tope_dispositivo)s
+       and (d.bloqueado_hasta is null or d.bloqueado_hasta <= now())
+    returning d.id, u.id, u.rol, u.hash_contrasena, u.secreto_totp_cifrado, u.version_clave_totp,
+              d.intentos_fallidos
+"""
+# version = 0 nunca existe (CHECK version > 0): cero filas en los caminos sin
+# cuenta, con la misma sentencia.
+SQL_CLAVE_VERSION = "select clave_envuelta from canal.clave_empresa where version = %s"
+SQL_CLAVE_ACTUAL = "select version, clave_envuelta from canal.clave_empresa order by version desc limit 1"
+SQL_RESOLVER = "select canal.resolver_empresa(%s)"
+# La reserva de un intento confirma sin esperar a que el WAL llegue a disco.
+# Sin esto, el tiempo de respuesta revelaba si la cuenta existe: con cuenta,
+# la reserva escribe una fila y el commit espera el fsync (unos 3 ms,
+# medidos por tests/security/verificar_personal.py, d); sin cuenta, o en
+# espera, no escribe nada y no espera. Con OFF ningún camino espera
+# (documentación de PostgreSQL, synchronous_commit). Coste asumido: si
+# PostgreSQL se cae, se pueden perder los fallos contados en sus últimos
+# 600 ms como mucho (tres veces wal_writer_delay), sin inconsistencia.
+SQL_RESERVA_ASINCRONA = "set local synchronous_commit to off"
+
+# Acierto: el código solo vale una vez (paso posterior al último aceptado) y
+# la cuenta tiene que seguir como estaba al verificar (mismo hash, activa).
+SQL_CONFIRMAR_ACCESO = """
+    update canal.usuario_personal
+       set ultimo_paso_totp = %(paso)s,
+           intentos_fallidos = case when %(sin_confianza)s then 0 else intentos_fallidos end,
+           bloqueado_hasta = case when %(sin_confianza)s then null else bloqueado_hasta end
+     where id = %(usuario)s and activo and totp_activo and hash_contrasena = %(hash)s
+       and (ultimo_paso_totp is null or ultimo_paso_totp < %(paso)s)
+    returning id
+"""
+SQL_LIBERAR_DISPOSITIVO = (
+    "update canal.dispositivo_personal set intentos_fallidos = 0, bloqueado_hasta = null "
+    "where id = %s and not revocado returning id"
+)
+SQL_NUEVO_DISPOSITIVO = (
+    "insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256) values (%s, %s, %s) returning id"
+)
+SQL_NUEVA_SESION = (
+    "insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) "
+    "values (%s, %s, %s, %s)"
+)
+SQL_AUDITAR = (
+    "insert into canal.registro_auditoria (empresa_id, actor, accion, objeto_id) values (%s, %s, %s, %s)"
+)
+
+# Autenticación de una sesión: válida, sin caducar, usada en los últimos 15
+# minutos, de una cuenta activa y con su dispositivo sin revocar. Se renueva
+# el último uso en la misma sentencia.
+SQL_AUTENTICAR = """
+    update canal.sesion_personal s
+       set ultimo_uso = now()
+      from canal.usuario_personal u, canal.dispositivo_personal d, canal.empresa e
+     where s.token_sha256 = %(huella)s and not s.revocada and s.caduca > now()
+       and s.ultimo_uso > now() - make_interval(mins => %(inactividad)s)
+       and u.empresa_id = s.empresa_id and u.id = s.usuario_id and u.activo and u.totp_activo
+       and d.empresa_id = s.empresa_id and d.id = s.dispositivo_id and not d.revocado
+       and e.id = s.empresa_id
+    returning s.id, s.usuario_id, s.dispositivo_id, u.rol, u.email, e.nombre
+"""
+SQL_CERRAR_SESION = "update canal.sesion_personal set revocada = true where id = %s"
+
+SQL_INVITACION_ABIERTA = """
+    select i.id, i.usuario_id, u.email, e.nombre
+      from canal.invitacion_personal i
+      join canal.usuario_personal u on u.empresa_id = i.empresa_id and u.id = i.usuario_id
+      join canal.empresa e on e.id = i.empresa_id
+     where i.token_sha256 = %s and not i.cerrada and i.caduca > now()
+"""
+SQL_GUARDAR_PENDIENTE = """
+    update canal.invitacion_personal
+       set hash_contrasena = %s, secreto_totp_cifrado = %s, version_clave_totp = %s
+     where id = %s and not cerrada and caduca > now()
+    returning id
+"""
+SQL_INVITACION_PENDIENTE = """
+    select i.id, i.usuario_id, i.hash_contrasena, i.secreto_totp_cifrado, i.version_clave_totp, k.clave_envuelta
+      from canal.invitacion_personal i
+      join canal.clave_empresa k on k.empresa_id = i.empresa_id and k.version = i.version_clave_totp
+     where i.token_sha256 = %s and not i.cerrada and i.caduca > now() and i.hash_contrasena is not null
+"""
+SQL_BLOQUEAR_CUENTA = "select id from canal.usuario_personal where id = %s for update"
+SQL_CERRAR_INVITACION = (
+    "update canal.invitacion_personal set cerrada = true where id = %s and not cerrada and caduca > now() returning id"
+)
+SQL_ACTIVAR_CUENTA = """
+    update canal.usuario_personal
+       set hash_contrasena = %(hash)s, secreto_totp_cifrado = %(secreto)s, version_clave_totp = %(version)s,
+           totp_activo = true, ultimo_paso_totp = %(paso)s, intentos_fallidos = 0, bloqueado_hasta = null,
+           activo = true
+     where id = %(usuario)s
+"""
+SQL_REVOCAR_DISPOSITIVOS = (
+    "update canal.dispositivo_personal set revocado = true where usuario_id = %s and not revocado and id <> %s"
+)
+SQL_REVOCAR_SESIONES = (
+    "update canal.sesion_personal set revocada = true where usuario_id = %s and not revocada and id <> %s"
+)
+SQL_CERRAR_INVITACIONES = (
+    "update canal.invitacion_personal set cerrada = true where usuario_id = %s and not cerrada"
+)
+SQL_NUEVA_INVITACION = (
+    "insert into canal.invitacion_personal (empresa_id, usuario_id, token_sha256) values (%s, %s, %s)"
+)
+SQL_CAMBIAR_CONTRASENA = """
+    update canal.usuario_personal
+       set hash_contrasena = %(nuevo)s, ultimo_paso_totp = %(paso)s
+     where id = %(usuario)s and activo and totp_activo and hash_contrasena = %(hash)s
+       and (ultimo_paso_totp is null or ultimo_paso_totp < %(paso)s)
+    returning id
+"""
+
+SQL_LISTAR_USUARIOS = """
+    select id, email, rol, activo, totp_activo,
+           intentos_fallidos >= %(tope_sin_confianza)s as camino_cerrado,
+           coalesce(bloqueado_hasta > now(), false) as en_espera
+      from canal.usuario_personal
+     order by email, id
+"""
+SQL_NUEVO_USUARIO = "insert into canal.usuario_personal (empresa_id, email, rol) values (%s, %s, %s) returning id"
+SQL_USUARIO = "select id, rol, activo, totp_activo from canal.usuario_personal where id = %s for update"
+# Todos los admins activos, en orden de id: dos bajas simultáneas los
+# bloquean en el mismo orden y no se interbloquean.
+SQL_BLOQUEAR_ADMINS = (
+    "select id, totp_activo from canal.usuario_personal where rol = 'admin' and activo order by id for update"
+)
+SQL_DAR_DE_BAJA = "update canal.usuario_personal set activo = false where id = %s"
+SQL_ADMIN_ACTIVO = (
+    "select count(*) from canal.usuario_personal where rol = 'admin' and activo and totp_activo"
+)
+SQL_USUARIO_POR_EMAIL = "select id, rol, totp_activo from canal.usuario_personal where email = %s for update"
+SQL_EMPRESA_VISIBLE = "select count(*) from canal.empresa"
+
+SQLSTATE_DUPLICADO = "23505"
+SQLSTATE_CHECK = "23514"
+
+
+class CredencialesNoValidas(Exception):
+    """Cualquier fallo del login. Nunca dice cuál."""
+
+
+class SesionNoValida(Exception):
+    """Token de sesión ausente, mal formado, revocado o caducado."""
+
+
+class InvitacionNoValida(Exception):
+    """Token de invitación desconocido, usado, sustituido o caducado."""
+
+
+class CodigoNoValido(Exception):
+    """El código TOTP de la confirmación no corresponde al secreto."""
+
+
+class ContrasenaNoValida(ValueError):
+    """La contraseña no cumple la política. El motivo no contiene la contraseña."""
+
+
+class Saturado(Exception):
+    """No hay hueco para calcular un hash de contraseña: 503."""
+
+
+class Prohibido(Exception):
+    """La cuenta no tiene el rol necesario: 403."""
+
+
+class NoEncontrado(Exception):
+    """Cuenta inexistente o de otra empresa (invisible bajo RLS): 404."""
+
+
+class EmailDuplicado(Exception):
+    """Ya hay una cuenta con ese email en la empresa: 409."""
+
+
+class UltimoAdmin(Exception):
+    """La baja dejaría a la empresa sin ningún admin activo: 409."""
+
+
+class EmpresaSinClave(Exception):
+    """La empresa no tiene clave de cifrado para el secreto TOTP: 503."""
+
+
+class AltaAdminRechazada(Exception):
+    """gestion alta-admin no puede invitar (ver alta_admin_plataforma)."""
+
+
+@dataclass(frozen=True)
+class Sesion:
+    empresa_id: uuid.UUID
+    identificador: str
+    sesion_id: uuid.UUID
+    usuario_id: uuid.UUID
+    dispositivo_id: uuid.UUID
+    rol: str
+    email: str
+    nombre_empresa: str
+
+
+@dataclass(frozen=True)
+class Acceso:
+    token_sesion: str
+    # Solo si el login fue por el camino sin confianza: el dispositivo nuevo.
+    token_dispositivo: str | None
+
+
+@dataclass(frozen=True)
+class ActivacionPendiente:
+    secreto_totp: str
+    uri_totp: str
+
+
+@dataclass(frozen=True)
+class Usuario:
+    usuario_id: uuid.UUID
+    email: str
+    rol: str
+    activo: bool
+    activado: bool
+    camino_sin_confianza_cerrado: bool
+    en_espera: bool
+
+
+@dataclass(frozen=True)
+class Invitacion:
+    usuario_id: uuid.UUID
+    token_invitacion: str
+
+
+# ---------------------------------------------------------------------------
+# Piezas comunes
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _hueco_hash():
+    if not _semaforo.acquire(timeout=ESPERA_HASH):
+        registro.warning("EVENTO hashes_saturados: no hay hueco para calcular un hash de contrasena")
+        raise Saturado
+    try:
+        yield
+    finally:
+        _semaforo.release()
+
+
+def _verificar_hash(hash_guardado, contrasena):
+    """Siempre un Argon2 completo: contra el hash ficticio si no hay cuenta."""
+    try:
+        return _hasher.verify(hash_guardado or _HASH_FICTICIO, contrasena) and hash_guardado is not None
+    except (VerificationError, InvalidHashError):
+        return False
+
+
+def normalizar_contrasena(texto):
+    return unicodedata.normalize("NFKC", texto)
+
+
+def validar_contrasena(texto, email, nombre_empresa):
+    """Contraseña normalizada si cumple la política; si no, ContrasenaNoValida."""
+    normal = normalizar_contrasena(texto)
+    if not LONGITUD_MINIMA_CONTRASENA <= len(normal) <= LONGITUD_MAXIMA_CONTRASENA:
+        raise ContrasenaNoValida(
+            f"la contraseña debe tener entre {LONGITUD_MINIMA_CONTRASENA} y {LONGITUD_MAXIMA_CONTRASENA} caracteres")
+    plegada = normal.casefold()
+    piezas = (email, email.split("@", 1)[0], nombre_empresa)
+    if any(len(p) >= LONGITUD_MINIMA_PROHIBIDA and p.casefold() in plegada for p in piezas):
+        raise ContrasenaNoValida("la contraseña no puede contener el email ni el nombre de la empresa")
+    return normal
+
+
+def _actor(usuario_id):
+    return f"personal:{usuario_id}"
+
+
+def _resolver(pool, identificador):
+    """Empresa activa de un identificador público, o None. Se consulta
+    siempre, también con un identificador mal formado: el trabajo es el
+    mismo en todos los caminos."""
+    with bd.transaccion_sin_contexto(pool, solo_lectura=True) as conexion:
+        return conexion.execute(SQL_RESOLVER, [identificador]).fetchone()[0]
+
+
+def _leer_compuesto(texto):
+    """(identificador, bytes) de un token "<identificador>.<token>", o None."""
+    if not isinstance(texto, str) or texto.count(".") != 1:
+        return None
+    identificador, token = texto.split(".")
+    if not denuncias.PATRON_IDENTIFICADOR.fullmatch(identificador):
+        return None
+    crudo = cripto.leer_token(token)
+    return None if crudo is None else (identificador, crudo)
+
+
+def _token_compuesto(identificador, token):
+    return f"{identificador}.{token}"
+
+
+def _descifrar_secreto(claves, empresa_id, usuario_id, envuelta, version, cifrado):
+    clave = cripto.desenvolver_clave(claves.maestra, bytes(envuelta), empresa_id, version)
+    secreto = cripto.descifrar(clave, bytes(cifrado), cripto.aad_totp(empresa_id, usuario_id))
+    if len(secreto) != cripto.LONGITUD_SECRETO_TOTP:
+        raise cripto.ErrorIntegridad("secreto TOTP con longitud inesperada")
+    return secreto
+
+
+def _avisar_fallo(empresa_id, reservada, camino):
+    """Evento de seguridad cuando un fallo abre una espera o cierra un camino."""
+    if reservada is None:
+        return
+    dispositivo_id, usuario_id, intentos = reservada[0], reservada[1], reservada[6]
+    if camino == "dispositivo":
+        if intentos >= TOPE_DISPOSITIVO:
+            registro.warning("EVENTO retirada_dispositivo: empresa=%s usuario=%s dispositivo=%s intentos=%d",
+                             empresa_id, usuario_id, dispositivo_id, intentos)
+        elif intentos >= FALLOS_ANTES_DE_ESPERAR:
+            registro.warning("EVENTO espera_dispositivo: empresa=%s usuario=%s dispositivo=%s intentos=%d",
+                             empresa_id, usuario_id, dispositivo_id, intentos)
+    elif intentos >= TOPE_SIN_CONFIANZA:
+        registro.warning("EVENTO cierre_sin_confianza: empresa=%s usuario=%s intentos=%d",
+                         empresa_id, usuario_id, intentos)
+    elif intentos >= FALLOS_ANTES_DE_ESPERAR:
+        registro.warning("EVENTO espera_sin_confianza: empresa=%s usuario=%s intentos=%d",
+                         empresa_id, usuario_id, intentos)
+
+
+def _comprobar_factores(claves, empresa_id, reservada, envuelta, contrasena, codigo, instante):
+    """Contraseña y TOTP, con el mismo trabajo haya cuenta o no. Devuelve el
+    paso TOTP aceptado si los dos valen, o None."""
+    with _hueco_hash():
+        contrasena_ok = _verificar_hash(reservada[3] if reservada else None, normalizar_contrasena(contrasena))
+    if reservada is not None and envuelta is not None:
+        secreto = _descifrar_secreto(claves, empresa_id, reservada[1], envuelta[0], reservada[5], reservada[4])
+    else:
+        secreto = cripto.generar_secreto_totp()
+    paso = cripto.verificar_totp(secreto, codigo, instante)
+    if reservada is None or not contrasena_ok or paso is None:
+        return None
+    return paso
+
+
+# ---------------------------------------------------------------------------
+# Login, sesiones y cambio de contraseña
+# ---------------------------------------------------------------------------
+
+def iniciar_sesion(pool, claves, identificador, email, contrasena, codigo, token_dispositivo, instante=None):
+    """Login en una petición. Devuelve Acceso o lanza CredencialesNoValidas."""
+    instante = time.time() if instante is None else instante
+    email = email.lower()
+    # Sin empresa, un contexto aleatorio: las mismas sentencias con cero filas.
+    empresa_id = _resolver(pool, identificador) or uuid.uuid4()
+    crudo = cripto.leer_token(token_dispositivo) if token_dispositivo is not None else None
+    huella = cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo or secrets.token_bytes(cripto.LONGITUD_TOKEN))
+
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        conexion.execute(SQL_RESERVA_ASINCRONA)
+        por_dispositivo = conexion.execute(
+            SQL_RESERVAR_DISPOSITIVO, {**PARAMETROS_BLOQUEO, "huella": huella, "email": email}).fetchone()
+        por_cuenta = conexion.execute(SQL_RESERVAR_CUENTA, {
+            **PARAMETROS_BLOQUEO, "email": email, "sin_confianza": por_dispositivo is None}).fetchone()
+        reservada = por_dispositivo or por_cuenta
+        envuelta = conexion.execute(SQL_CLAVE_VERSION, [reservada[5] if reservada else 0]).fetchone()
+    camino = "dispositivo" if por_dispositivo else "sin_confianza"
+
+    paso = _comprobar_factores(claves, empresa_id, reservada, envuelta, contrasena, codigo, instante)
+    if paso is None:
+        _avisar_fallo(empresa_id, reservada, camino)
+        raise CredencialesNoValidas
+
+    usuario_id = reservada[1]
+    token_sesion, crudo_sesion = cripto.generar_token()
+    token_nuevo = None
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        confirmado = conexion.execute(SQL_CONFIRMAR_ACCESO, {
+            "paso": paso, "sin_confianza": camino == "sin_confianza", "usuario": usuario_id,
+            "hash": reservada[3]}).fetchone()
+        # Código ya usado (reutilización) o cuenta cambiada entre la reserva
+        # y ahora: el intento ya está contado.
+        if confirmado is None:
+            raise CredencialesNoValidas
+        if camino == "dispositivo":
+            dispositivo_id = reservada[0]
+            if conexion.execute(SQL_LIBERAR_DISPOSITIVO, [dispositivo_id]).fetchone() is None:
+                raise CredencialesNoValidas
+        else:
+            token_nuevo, crudo_nuevo = cripto.generar_token()
+            dispositivo_id = conexion.execute(SQL_NUEVO_DISPOSITIVO, [
+                empresa_id, usuario_id, cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo_nuevo)]).fetchone()[0]
+        conexion.execute(SQL_NUEVA_SESION, [empresa_id, usuario_id, dispositivo_id,
+                                            cripto.huella_token(cripto.ETIQUETA_SESION, crudo_sesion)])
+        conexion.execute(SQL_AUDITAR, [empresa_id, _actor(usuario_id), ACCION_ACCESO, usuario_id])
+    return Acceso(token_sesion=_token_compuesto(identificador, token_sesion), token_dispositivo=token_nuevo)
+
+
+def autenticar(pool, token):
+    """Sesión de un token, o SesionNoValida. Transacción propia y corta: solo
+    bloquea la fila de la sesión (ver el orden de bloqueos en la cabecera)."""
+    leido = _leer_compuesto(token)
+    if leido is None:
+        raise SesionNoValida
+    identificador, crudo = leido
+    empresa_id = _resolver(pool, identificador)
+    if empresa_id is None:
+        raise SesionNoValida
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        fila = conexion.execute(SQL_AUTENTICAR, {"huella": cripto.huella_token(cripto.ETIQUETA_SESION, crudo),
+                                                 "inactividad": INACTIVIDAD_SESION_MINUTOS}).fetchone()
+    if fila is None:
+        raise SesionNoValida
+    sesion_id, usuario_id, dispositivo_id, rol, email, nombre = fila
+    return Sesion(empresa_id=empresa_id, identificador=identificador, sesion_id=sesion_id, usuario_id=usuario_id,
+                  dispositivo_id=dispositivo_id, rol=rol, email=email, nombre_empresa=nombre)
+
+
+def cerrar_sesion(pool, sesion):
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        conexion.execute(SQL_CERRAR_SESION, [sesion.sesion_id])
+
+
+def cambiar_contrasena(pool, claves, sesion, actual, nueva, codigo, instante=None):
+    """Cambia la contraseña de la cuenta de la sesión. Pide la actual y un
+    código TOTP; los fallos cuentan en el dispositivo de la sesión. Revoca
+    las demás sesiones y dispositivos de la cuenta."""
+    instante = time.time() if instante is None else instante
+    # La política va antes de reservar: un error al escribir la nueva no
+    # gasta un intento.
+    nueva = validar_contrasena(nueva, sesion.email, sesion.nombre_empresa)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        conexion.execute(SQL_RESERVA_ASINCRONA)
+        reservada = conexion.execute(SQL_RESERVAR_DISPOSITIVO_SESION,
+                                     {**PARAMETROS_BLOQUEO, "dispositivo": sesion.dispositivo_id}).fetchone()
+        envuelta = conexion.execute(SQL_CLAVE_VERSION, [reservada[5] if reservada else 0]).fetchone()
+    paso = _comprobar_factores(claves, sesion.empresa_id, reservada, envuelta, actual, codigo, instante)
+    if paso is None:
+        _avisar_fallo(sesion.empresa_id, reservada, "dispositivo")
+        raise CredencialesNoValidas
+    with _hueco_hash():
+        hash_nuevo = _hasher.hash(nueva)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        cambiada = conexion.execute(SQL_CAMBIAR_CONTRASENA, {
+            "nuevo": hash_nuevo, "paso": paso, "usuario": sesion.usuario_id, "hash": reservada[3]}).fetchone()
+        if cambiada is None:
+            raise CredencialesNoValidas
+        conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])
+        conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [sesion.usuario_id, sesion.dispositivo_id])
+        conexion.execute(SQL_REVOCAR_SESIONES, [sesion.usuario_id, sesion.sesion_id])
+        conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_CAMBIO_CONTRASENA,
+                                       sesion.usuario_id])
+
+
+# ---------------------------------------------------------------------------
+# Invitación y activación
+# ---------------------------------------------------------------------------
+
+def _empresa_de_invitacion(pool, token):
+    leido = _leer_compuesto(token)
+    if leido is None:
+        raise InvitacionNoValida
+    identificador, crudo = leido
+    empresa_id = _resolver(pool, identificador)
+    if empresa_id is None:
+        raise InvitacionNoValida
+    return empresa_id, cripto.huella_token(cripto.ETIQUETA_INVITACION, crudo)
+
+
+def activar(pool, claves, token, contrasena):
+    """Primer paso: fija la contraseña y el secreto TOTP pendientes de la
+    invitación y devuelve el secreto para la aplicación de autenticación. La
+    cuenta no cambia hasta confirmar. Repetirlo sustituye lo pendiente."""
+    empresa_id, huella = _empresa_de_invitacion(pool, token)
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        fila = conexion.execute(SQL_INVITACION_ABIERTA, [huella]).fetchone()
+        clave = conexion.execute(SQL_CLAVE_ACTUAL).fetchone()
+    if fila is None:
+        raise InvitacionNoValida
+    if clave is None:
+        raise EmpresaSinClave
+    invitacion_id, usuario_id, email, nombre = fila
+    version, envuelta = clave
+    normal = validar_contrasena(contrasena, email, nombre)
+    with _hueco_hash():
+        hash_nuevo = _hasher.hash(normal)
+    secreto = cripto.generar_secreto_totp()
+    clave_empresa = cripto.desenvolver_clave(claves.maestra, bytes(envuelta), empresa_id, version)
+    cifrado = cripto.cifrar(clave_empresa, secreto, cripto.aad_totp(empresa_id, usuario_id))
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        if conexion.execute(SQL_GUARDAR_PENDIENTE, [hash_nuevo, cifrado, version, invitacion_id]).fetchone() is None:
+            raise InvitacionNoValida
+    return ActivacionPendiente(secreto_totp=cripto.secreto_totp_texto(secreto),
+                               uri_totp=cripto.uri_totp(secreto, email))
+
+
+def confirmar_activacion(pool, claves, token, codigo, instante=None):
+    """Segundo paso: con un código válido, las credenciales pendientes pasan a
+    la cuenta, se revocan las sesiones y dispositivos anteriores y se emite
+    el primer dispositivo de confianza. Devuelve su token."""
+    instante = time.time() if instante is None else instante
+    empresa_id, huella = _empresa_de_invitacion(pool, token)
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        fila = conexion.execute(SQL_INVITACION_PENDIENTE, [huella]).fetchone()
+    if fila is None:
+        raise InvitacionNoValida
+    invitacion_id, usuario_id, hash_pendiente, cifrado, version, envuelta = fila
+    secreto = _descifrar_secreto(claves, empresa_id, usuario_id, envuelta, version, cifrado)
+    paso = cripto.verificar_totp(secreto, codigo, instante)
+    if paso is None:
+        raise CodigoNoValido
+    token_dispositivo, crudo = cripto.generar_token()
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        conexion.execute(SQL_BLOQUEAR_CUENTA, [usuario_id])
+        if conexion.execute(SQL_CERRAR_INVITACION, [invitacion_id]).fetchone() is None:
+            raise InvitacionNoValida
+        conexion.execute(SQL_ACTIVAR_CUENTA, {"hash": hash_pendiente, "secreto": cifrado, "version": version,
+                                              "paso": paso, "usuario": usuario_id})
+        # id <> uuid nulo: se revocan todos.
+        conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [usuario_id, uuid.UUID(int=0)])
+        conexion.execute(SQL_REVOCAR_SESIONES, [usuario_id, uuid.UUID(int=0)])
+        conexion.execute(SQL_NUEVO_DISPOSITIVO, [empresa_id, usuario_id,
+                                                 cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo)])
+        conexion.execute(SQL_AUDITAR, [empresa_id, _actor(usuario_id), ACCION_ACTIVACION, usuario_id])
+    return token_dispositivo
+
+
+def _emitir_invitacion(conexion, empresa_id, identificador, usuario_id):
+    """Cierra las invitaciones abiertas de la cuenta y crea una nueva."""
+    token, crudo = cripto.generar_token()
+    conexion.execute(SQL_CERRAR_INVITACIONES, [usuario_id])
+    conexion.execute(SQL_NUEVA_INVITACION, [empresa_id, usuario_id,
+                                            cripto.huella_token(cripto.ETIQUETA_INVITACION, crudo)])
+    return _token_compuesto(identificador, token)
+
+
+# ---------------------------------------------------------------------------
+# Administración de cuentas (solo admin)
+# ---------------------------------------------------------------------------
+
+def _exigir_admin(sesion):
+    if sesion.rol != "admin":
+        raise Prohibido
+
+
+def listar_usuarios(pool, sesion):
+    _exigir_admin(sesion)
+    with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
+        filas = conexion.execute(SQL_LISTAR_USUARIOS, {"tope_sin_confianza": TOPE_SIN_CONFIANZA}).fetchall()
+    return [Usuario(usuario_id=f[0], email=f[1], rol=f[2], activo=f[3], activado=f[4],
+                    camino_sin_confianza_cerrado=f[5], en_espera=f[6]) for f in filas]
+
+
+def invitar(pool, sesion, email, rol):
+    """Crea una cuenta sin credenciales y su invitación."""
+    _exigir_admin(sesion)
+    if rol not in ROLES:
+        raise ValueError("rol desconocido")
+    try:
+        with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+            usuario_id = conexion.execute(SQL_NUEVO_USUARIO, [sesion.empresa_id, email.lower(), rol]).fetchone()[0]
+            token = _emitir_invitacion(conexion, sesion.empresa_id, sesion.identificador, usuario_id)
+            conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_INVITACION,
+                                           usuario_id])
+    except psycopg.Error as error:
+        if error.sqlstate == SQLSTATE_DUPLICADO:
+            raise EmailDuplicado from None
+        if error.sqlstate == SQLSTATE_CHECK:
+            raise ValueError("email no valido") from None
+        raise
+    return Invitacion(usuario_id=usuario_id, token_invitacion=token)
+
+
+def reinvitar(pool, sesion, usuario_id):
+    """Nueva invitación para una cuenta (recuperar el acceso, cerrar el camino
+    sin confianza o reactivarla tras una baja). La anterior se cierra. La
+    cuenta sigue funcionando con sus credenciales hasta que se confirme."""
+    _exigir_admin(sesion)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        if conexion.execute(SQL_USUARIO, [usuario_id]).fetchone() is None:
+            raise NoEncontrado
+        token = _emitir_invitacion(conexion, sesion.empresa_id, sesion.identificador, usuario_id)
+        conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_INVITACION, usuario_id])
+    return Invitacion(usuario_id=usuario_id, token_invitacion=token)
+
+
+def dar_de_baja(pool, sesion, usuario_id):
+    """Desactiva una cuenta y revoca sus sesiones, dispositivos e
+    invitaciones. Nunca deja a la empresa sin un admin activado."""
+    _exigir_admin(sesion)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()
+        fila = conexion.execute(SQL_USUARIO, [usuario_id]).fetchone()
+        if fila is None:
+            raise NoEncontrado
+        _, rol, activo, activado = fila
+        otros = [a for a in admins if a[0] != usuario_id and a[1]]
+        if rol == "admin" and activo and activado and not otros:
+            raise UltimoAdmin
+        conexion.execute(SQL_DAR_DE_BAJA, [usuario_id])
+        conexion.execute(SQL_CERRAR_INVITACIONES, [usuario_id])
+        conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [usuario_id, uuid.UUID(int=0)])
+        conexion.execute(SQL_REVOCAR_SESIONES, [usuario_id, uuid.UUID(int=0)])
+        conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_BAJA, usuario_id])
+
+
+# ---------------------------------------------------------------------------
+# Primer admin de una empresa (servicio gestion, app/gestion.py)
+# ---------------------------------------------------------------------------
+
+def alta_admin_plataforma(conexion, empresa_id, identificador, email):
+    """Invitación del primer admin de una empresa, con el rol aplicacion y el
+    contexto de la empresa ya fijado (transacción abierta por gestion).
+
+    Solo si la empresa no tiene ningún admin activado: después, las cuentas
+    las gestionan sus admins por la API. Deja una fila en la auditoría de la
+    empresa (actor plataforma), así que la empresa ve cualquier invitación
+    emitida desde la plataforma. Límite asumido: quien opera el servicio
+    gestion tiene ya todos los secretos (docs/threat-model.md, 8); esto no
+    impide que abuse de ellos, lo hace visible.
+    """
+    email = email.lower()
+    if conexion.execute(SQL_EMPRESA_VISIBLE).fetchone()[0] != 1:
+        raise AltaAdminRechazada("la empresa no existe")
+    if conexion.execute(SQL_CLAVE_ACTUAL).fetchone() is None:
+        raise AltaAdminRechazada("la empresa no tiene clave de cifrado (nueva-clave)")
+    # Se bloquean los admins activos antes de mirar: dos ejecuciones
+    # simultáneas no ven a la vez "ningún admin".
+    conexion.execute(SQL_BLOQUEAR_ADMINS)
+    if conexion.execute(SQL_ADMIN_ACTIVO).fetchone()[0] != 0:
+        raise AltaAdminRechazada("la empresa ya tiene un admin activo: las cuentas las gestionan sus admins")
+    existente = conexion.execute(SQL_USUARIO_POR_EMAIL, [email]).fetchone()
+    if existente is None:
+        usuario_id = conexion.execute(SQL_NUEVO_USUARIO, [empresa_id, email, "admin"]).fetchone()[0]
+    elif existente[1] == "admin" and not existente[2]:
+        usuario_id = existente[0]
+    else:
+        raise AltaAdminRechazada("ya existe una cuenta con ese email que no es un admin pendiente de activar")
+    token = _emitir_invitacion(conexion, empresa_id, identificador, usuario_id)
+    conexion.execute(SQL_AUDITAR, [empresa_id, ACTOR_PLATAFORMA, ACCION_INVITACION_PLATAFORMA, usuario_id])
+    return Invitacion(usuario_id=usuario_id, token_invitacion=token)

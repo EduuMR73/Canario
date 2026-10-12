@@ -1,7 +1,8 @@
 """Aplicación FastAPI de Canario.
 
-Expone GET /salud (vivacidad) y las rutas del denunciante anónimo
-(app/rutas_denuncias.py), detrás de la frontera HTTP (app/frontera_http.py):
+Expone GET /salud (vivacidad), las rutas del denunciante anónimo
+(app/rutas_denuncias.py) y las del personal (app/rutas_personal.py), detrás
+de la frontera HTTP (app/frontera_http.py):
 límite de cuerpo, limitador de peticiones con Redis (app/limitador.py),
 errores internos sin detalles y respuestas de error uniformes. Al arrancar
 comprueba los secretos (contraseña, claves de cifrado y contraseña de Redis)
@@ -21,6 +22,7 @@ from app import (
     frontera_http,
     limitador,
     rutas_denuncias,
+    rutas_personal,
     verificacion_arranque,
 )
 
@@ -114,7 +116,9 @@ aplicacion = FastAPI(
     lifespan=ciclo_de_vida,
 )
 frontera_http.instalar(aplicacion, limitador.FronteraLimitador)
+rutas_personal.instalar_errores(aplicacion)
 aplicacion.include_router(rutas_denuncias.router)
+aplicacion.include_router(rutas_personal.router)
 
 
 @aplicacion.get("/salud")
