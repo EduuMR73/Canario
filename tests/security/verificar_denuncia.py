@@ -361,17 +361,19 @@ PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +ptt
 # Límites altos para las secciones funcionales, que mandan decenas de
 # peticiones por minuto desde pocas IPs. r) vuelve a arrancar la API sin
 # ellos y prueba los de producción.
-LIMITES_PRUEBA = "denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60"
-TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 denuncia=1000/3600 mensajes=1000/3600 "
+LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
+                  "cuenta=1000/60")
+TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 mensajes=1000/3600 "
                         "otras=1000/60 seguimiento=1000/60")
-TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 denuncia=10/3600 mensajes=30/3600 otras=60/60 "
-                            "seguimiento=60/60")
+TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 mensajes=30/3600 "
+                            "otras=60/60 seguimiento=60/60")
 TEXTO_LIMITADOR_VERIFICADO = "LIMITADOR VERIFICADO"
 # regla -> (peticiones, ventana en segundos), los de producción. La regla
-# acceso (login del personal) la prueba con ráfagas tests/security/
-# verificar_personal.py; aquí solo cuenta para la ventana de sus claves.
+# acceso (login del personal) y cuenta (rutas con sesión) las prueba con
+# ráfagas tests/security/verificar_personal.py; aquí solo cuentan para la
+# ventana de sus claves.
 LIMITES_PRODUCCION = {"denuncia": (10, 3600), "seguimiento": (60, 60), "mensajes": (30, 3600), "acceso": (10, 300),
-                      "otras": (60, 60)}
+                      "otras": (60, 60), "cuenta": (60, 60)}
 CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode("utf-8")
 TEXTO_EVENTO_LIMITADOR = "EVENTO limitador_no_disponible: "
 # Clientes de prueba con IP fija en la red edge (fuera del rango automático):
@@ -381,16 +383,23 @@ IP_CLIENTE_B = "10.88.1.4"
 # Las únicas claves que puede haber en Redis: las de las reglas (ventana y
 # HMAC de 128 bits) y las de la comprobación de arranque.
 PATRON_CLAVE_LIMITE = re.compile(
-    r"limite:(denuncia|seguimiento|mensajes|acceso|otras):[0-9]+:[0-9a-f]{32}|limite:arranque:[0-9a-f]{16}")
-# Rutas de la API y la regla que las limita ({identificador} y {usuario_id}
-# sustituidos por "x"). Una ruta nueva hace fallar r) hasta que alguien
-# decida su regla.
+    r"limite:(denuncia|seguimiento|mensajes|acceso|otras|cuenta):[0-9]+:[0-9a-f]{32}|limite:arranque:[0-9a-f]{16}")
+# Rutas de la API y la regla que las limita ({identificador}, {usuario_id} y
+# {denuncia_id} sustituidos por "x"). Una ruta nueva hace fallar r) hasta que
+# alguien decida su regla. Las de la instrucción (bloque 4b) van a otras, como
+# la administración de cuentas: por IP, otras es la primera capa de toda ruta
+# con sesión, y la segunda es la regla cuenta, por identidad
+# (app/rutas_personal.py, probada en tests/security/verificar_personal.py, h).
 RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguimiento": "seguimiento",
              "/v1/seguimiento/mensajes": "mensajes",
              "/v1/personal/activacion": "acceso", "/v1/personal/activacion/confirmar": "acceso",
              "/v1/personal/sesiones": "acceso", "/v1/personal/contrasena": "acceso",
              "/v1/personal/sesiones/actual": "otras", "/v1/personal/yo": "otras", "/v1/personal/usuarios": "otras",
-             "/v1/personal/usuarios/x/invitacion": "otras", "/v1/personal/usuarios/x/baja": "otras"}
+             "/v1/personal/usuarios/x/invitacion": "otras", "/v1/personal/usuarios/x/baja": "otras",
+             "/v1/personal/denuncias": "otras", "/v1/personal/denuncias/x": "otras",
+             "/v1/personal/denuncias/x/mensajes": "otras", "/v1/personal/denuncias/x/estado": "otras",
+             "/v1/personal/denuncias/x/asignacion": "otras", "/v1/personal/auditoria": "otras",
+             "/v1/personal/auditoria/verificacion": "otras"}
 # Procesos de un contenedor: "<pid> <línea de comandos>" por línea, leídos de
 # /proc con sh (sin ps, que la imagen no trae). Las propias líneas de sh y tr
 # no contienen "python" ni "uvicorn".
@@ -595,7 +604,8 @@ LIMITADOR_DENTRO = """
 import json
 from app import limitador
 from app.principal import aplicacion
-rutas = sorted(r.replace("{identificador}", "x").replace("{usuario_id}", "x") for r in aplicacion.openapi()["paths"])
+rutas = sorted(r.replace("{identificador}", "x").replace("{usuario_id}", "x").replace("{denuncia_id}", "x")
+               for r in aplicacion.openapi()["paths"])
 res = {"rutas": {r: limitador.regla_de(r) for r in rutas},
        "otras": {r: limitador.regla_de(r) for r in ("/v1/nueva", "/otra", "/salud/", "/v1/empresas/a/b/denuncias")}}
 s1, s2 = b"1" * 32, b"2" * 32
@@ -2503,11 +2513,12 @@ def seccion_r():
         (d / nombre).write_text(contenido_fichero, encoding="ascii", newline="")
     base_montajes = [(d / "pg", "contrasena_aplicacion"), (d / "maestra", "clave_maestra"),
                      (d / "hmac", "clave_hmac_codigos")]
-    validos = "denuncia=5/3600,seguimiento=6/60,mensajes=7/3600,acceso=9/300,otras=8/60"
+    validos = "denuncia=5/3600,seguimiento=6/60,mensajes=7/3600,acceso=9/300,otras=8/60,cuenta=4/60"
     control_log = arrancar_api_temporal("r_control", base_montajes + [(d / "redis", "contrasena_redis")],
                                         {"CANARIO_LIMITES": validos})
     control = (f"{TEXTO_BLOQUEADO}conexion" in control_log
-               and "LIMITES (configurados): acceso=9/300 denuncia=5/3600 mensajes=7/3600 otras=8/60 seguimiento=6/60"
+               and "LIMITES (configurados): acceso=9/300 cuenta=4/60 denuncia=5/3600 mensajes=7/3600 otras=8/60 "
+                   "seguimiento=6/60"
                in control_log)
     pasa(control, "r12) control: con el secreto de Redis y CANARIO_LIMITES validos la API los acepta, registra los "
                   "limites configurados y llega a la conexion")
@@ -2519,12 +2530,14 @@ def seccion_r():
         ("r_limites_incompletos", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=10/3600"},
          "limites: CANARIO_LIMITES: reglas ['denuncia'], se esperan "
-         "['acceso', 'denuncia', 'mensajes', 'otras', 'seguimiento']"),
+         "['acceso', 'cuenta', 'denuncia', 'mensajes', 'otras', 'seguimiento']"),
         ("r_limites_ventana", base_montajes + [(d / "redis", "contrasena_redis")],
-         {"CANARIO_LIMITES": "denuncia=10/7,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60"},
+         {"CANARIO_LIMITES": "denuncia=10/7,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,"
+                            "cuenta=60/60"},
          "limites: CANARIO_LIMITES: la ventana de denuncia no divide el dia"),
         ("r_limites_mal_formados", base_montajes + [(d / "redis", "contrasena_redis")],
-         {"CANARIO_LIMITES": "denuncia=0/3600,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60"},
+         {"CANARIO_LIMITES": "denuncia=0/3600,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,"
+                            "cuenta=60/60"},
          "limites: CANARIO_LIMITES: elemento mal formado"),
     ]
     for etiqueta, montajes, entorno_api, motivo in casos:

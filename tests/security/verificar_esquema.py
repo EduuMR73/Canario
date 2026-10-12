@@ -16,7 +16,8 @@ mensaje rechazado entre empresas no bloquea a la otra, que el bloqueo por
 empresa y el healthcheck se comportan como se espera, que las funciones de
 definidor hacen solo lo que deben (también frente a un search_path hostil), y
 que la supresión legal (arts. 32.4 y 26.2 de la Ley 2/2023) borra solo lo
-caducado, con sus bordes, salta lo que está en uso sin esperar, respeta una
+caducado, con sus bordes (también la denuncia inadmitida, a la que no se dio
+curso), salta lo que está en uso sin esperar, respeta una
 denuncia que pasa a instrucción en carrera y deja su evidencia en la
 auditoría.
 Cada prueba negativa lleva su
@@ -101,6 +102,11 @@ SU = {
     "en_uso": ("c0000000-0000-4000-8000-0000000000e6", "interval '5 months'", "nueva"),
     "carrera": ("c0000000-0000-4000-8000-0000000000e7", "interval '5 months'", "nueva"),
     "carrera_ctl": ("c0000000-0000-4000-8000-0000000000e8", "interval '5 months'", "nueva"),
+    # Comunicacion a la que no se dio curso (art. 32.4): se suprime a los 3
+    # meses como 'nueva'; con un dia menos se conserva.
+    "inadmitida": ("c0000000-0000-4000-8000-0000000000e9", "interval '3 months'", "inadmitida"),
+    "inadmitida_borde": ("c0000000-0000-4000-8000-0000000000ea", "(interval '3 months' - interval '1 day')",
+                         "inadmitida"),
 }
 HMAC_SU_ART32 = "a1" * 32
 HMAC_SU_ART26 = "a2" * 32
@@ -134,7 +140,8 @@ COLUMNAS = {
     "mensaje": ["empresa_id", "denuncia_id", "secuencia", "fecha", "id", "autor", "autor_id", "contenido_cifrado",
                 "version_clave"],
     "busqueda_seguimiento": ["codigo_hmac", "empresa_id", "denuncia_id"],
-    "registro_auditoria": ["empresa_id", "secuencia", "fecha", "actor", "accion", "objeto_id", "hash_anterior", "hash"],
+    "registro_auditoria": ["empresa_id", "secuencia", "fecha", "actor", "accion", "objeto_id", "destino_id",
+                           "hash_anterior", "hash"],
 }
 
 CLAVES_PRIMARIAS = [
@@ -1131,15 +1138,16 @@ insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, ve
     negativo("n) autor 'denunciante' con autor_id", app(mensaje("denunciante", INSTR_A), ctx=EMPRESA_A),
              "violates check constraint", sin_error(ctl_personal) and sin_error(ctl_denunciante))
 
-    # Una denuncia resuelta o archivada no admite mensajes, ni del denunciante
-    # ni del personal. Control: nueva y en_instruccion sí. Todo se deshace.
+    # Una denuncia resuelta, archivada o inadmitida no admite mensajes, ni del
+    # denunciante ni del personal. Control: nueva y en_instruccion sí. Todo se
+    # deshace.
     def con_estado(estado_denuncia, autor, autor_id):
         return app("\\set VERBOSITY verbose\n"
                    f"update canal.denuncia set estado = '{estado_denuncia}' where id = '{DEN_A2}';\n"
                    + mensaje(autor, autor_id), ctx=EMPRESA_A, final="ROLLBACK")
     autores = (("denunciante", None), ("personal", INSTR_A))
     controles = [con_estado(e, a, i) for e in ("nueva", "en_instruccion") for a, i in autores]
-    for e in ("resuelta", "archivada"):
+    for e in ("resuelta", "archivada", "inadmitida"):
         for a, i in autores:
             negativo(f"n) mensaje del {a} en una denuncia {e}", con_estado(e, a, i), TEXTO_DENUNCIA_CERRADA,
                      all(sin_error(c) for c in controles))
@@ -1169,13 +1177,14 @@ insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, ve
 
 def filas_auditoria(empresa):
     r = sup("select secuencia, coalesce(encode(hash_anterior, 'hex'), ''), encode(hash, 'hex'), fecha::text, actor, accion, "
-            f"coalesce(objeto_id::text, '') from canal.registro_auditoria where empresa_id = '{empresa}' order by secuencia;")
+            "coalesce(objeto_id::text, ''), coalesce(destino_id::text, '') "
+            f"from canal.registro_auditoria where empresa_id = '{empresa}' order by secuencia;")
     return [l.split("|") for l in r.lineas()]
 
 
 def recalcular(empresa, f):
-    secuencia, anterior, _hash, fecha, actor, accion, objeto = f
-    elementos = [anterior or None, empresa, int(secuencia), fecha, actor, accion, objeto or None]
+    secuencia, anterior, _hash, fecha, actor, accion, objeto, destino = f
+    elementos = [anterior or None, empresa, int(secuencia), fecha, actor, accion, objeto or None, destino or None]
     serializado = json.dumps(elementos, separators=(", ", ": "), ensure_ascii=False)
     return hashlib.sha256(serializado.encode("utf-8")).hexdigest(), serializado
 
@@ -1847,13 +1856,13 @@ COMMIT;
                           f"from canal.suprimir_denuncias_caducadas({lote});")
     contar = "select canal.contar_denuncias_caducadas();"
 
-    # su1) Antes de borrar nada: plataforma ve las 5 caducadas (art32, art26,
-    #      en_uso, carrera y carrera_ctl), y no las 3 de los bordes ni la de
-    #      instruccion. Es tambien el control de los negativos: sin una
+    # su1) Antes de borrar nada: plataforma ve las 6 caducadas (art32, art26,
+    #      en_uso, carrera, carrera_ctl e inadmitida), y no las 4 de los bordes
+    #      ni la de instruccion. Es tambien el control de los negativos: sin una
     #      politica de bloqueo, FOR UPDATE devolveria cero filas en silencio.
     r = plataforma(contar)
-    control = sin_error(r) and valor(r) == "5"
-    pasa(control, f"su1) contar_denuncias_caducadas como plataforma = {valor(r)!r} (esperado 5) {r.err.strip()[:200]}")
+    control = sin_error(r) and valor(r) == "6"
+    pasa(control, f"su1) contar_denuncias_caducadas como plataforma = {valor(r)!r} (esperado 6) {r.err.strip()[:200]}")
     negativo("su1) aplicacion no puede ejecutar suprimir_denuncias_caducadas",
              app("select * from canal.suprimir_denuncias_caducadas(1);"),
              "permission denied for function suprimir_denuncias_caducadas", control)
@@ -1870,7 +1879,7 @@ COMMIT;
                         "select * from canal.suprimir_denuncias_caducadas(1);\nROLLBACK;"),
              TEXTO_AISLAMIENTO, control)
     r = plataforma(contar)
-    negativo_valor(f"su1) tras los rechazos no se ha borrado nada (contar = {valor(r)})", valor(r) == "5", control)
+    negativo_valor(f"su1) tras los rechazos no se ha borrado nada (contar = {valor(r)})", valor(r) == "6", control)
     negativo("su1) login de red como propietario_supresion", cliente_literal("propietario_supresion", "select 1;"),
              "rejects connection", control)
 
@@ -1933,8 +1942,9 @@ COMMIT;
                   f"al terminar la supresion ({siguen})")
     negativo_valor(f"su3) lote de 1: solo la mas antigua, la de 10 anos ({lote1.lineas()})",
                    lote1.lineas() == [f"{EMPRESA_C}|art26|1"] and sin_error(lote1), control)
-    negativo_valor(f"su3) lote de 100: solo la de 3 meses justos; las tres en uso se saltan sin esperar "
-                   f"({lote2.lineas()})", lote2.lineas() == [f"{EMPRESA_C}|art32|1"] and sin_error(lote2), control)
+    negativo_valor(f"su3) lote de 100: solo las dos de 3 meses justos (nueva e inadmitida); las tres en uso se "
+                   f"saltan sin esperar ({lote2.lineas()})",
+                   lote2.lineas() == [f"{EMPRESA_C}|art32|2"] and sin_error(lote2), control)
     negativo_valor(f"su3) mientras tanto, contar ve las 3 en uso ({valor(durante)})", valor(durante) == "3", control)
 
     # su4) Ya sin sesiones: "carrera" se confirmo en instruccion y se conserva;
@@ -1947,9 +1957,10 @@ COMMIT;
 
     # su5) Lo que queda y la evidencia.
     r = sup(f"select id || '|' || estado from canal.denuncia where empresa_id = '{EMPRESA_C}';")
-    comparar("su5) quedan exactamente los dos bordes, la de instruccion y la que paso a instruccion en carrera",
-             r.lineas(), [f"{ids['art32_borde']}|nueva", f"{ids['instruccion']}|en_instruccion",
-                          f"{ids['art26_borde']}|resuelta", f"{ids['carrera']}|en_instruccion"])
+    comparar("su5) quedan exactamente los tres bordes, la de instruccion y la que paso a instruccion en carrera",
+             sorted(r.lineas()), sorted([f"{ids['art32_borde']}|nueva", f"{ids['instruccion']}|en_instruccion",
+                                         f"{ids['art26_borde']}|resuelta", f"{ids['carrera']}|en_instruccion",
+                                         f"{ids['inadmitida_borde']}|inadmitida"]))
     r = sup(f"select denuncia_id || '|' || secuencia from canal.mensaje where empresa_id = '{EMPRESA_C}';")
     comparar("su5) de los mensajes solo queda el de la denuncia en instruccion", r.lineas(), [f"{ids['instruccion']}|1"])
     r = sup(f"select denuncia_id from canal.busqueda_seguimiento where empresa_id = '{EMPRESA_C}';")
@@ -1959,8 +1970,9 @@ COMMIT;
     comparar("su5) auditoria: una fila de sistema por denuncia suprimida, con su articulo y su id", r.lineas(), [
         f"1|sistema|supresion_art26|{ids['art26']}",
         f"2|sistema|supresion_art32|{ids['art32']}",
-        f"3|sistema|supresion_art32|{ids['en_uso']}",
-        f"4|sistema|supresion_art32|{ids['carrera_ctl']}",
+        f"3|sistema|supresion_art32|{ids['inadmitida']}",
+        f"4|sistema|supresion_art32|{ids['en_uso']}",
+        f"5|sistema|supresion_art32|{ids['carrera_ctl']}",
     ])
     pasa(verificar_cadena(EMPRESA_C) == "NULL", "su5) la cadena de auditoria de C sigue intacta")
     comprobar_python(EMPRESA_C, "empresa C tras la supresion")

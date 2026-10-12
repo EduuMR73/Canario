@@ -33,10 +33,28 @@ y 6.9). Qué prueba:
   activado de esa empresa, revoca en el acto su acceso (la sesión anterior ya
   no puede anular la recuperación) y el único admin de una empresa recupera
   su cuenta.
+* Instrucción (app/instruccion.py): el contenido de una denuncia solo lo lee
+  quien la tiene asignada (también un admin: arts. 32.1 y 8.5 de la Ley
+  2/2023); una denuncia ajena, inexistente o de otra empresa da el mismo 404
+  byte a byte; solo un admin asigna, y solo a cuentas activas; la tabla de
+  transiciones completa contra un oráculo literal; cerrar exige un mensaje
+  final y deja la denuncia sin más mensajes; 'inadmitida' es un cierre; el
+  denunciante ve los mensajes del personal sin saber quién los escribió; la
+  cuenta de quien actúa se bloquea con FOR KEY SHARE (un login fallido no la
+  retrasa, una baja sí) y una denuncia ajena no se bloquea nunca (con el SQL
+  real, dentro de la API); una baja confirmada mientras la acción espera la
+  deja sin actuar; cierre y mensaje simultáneos sin interbloqueo; la
+  auditoría registra cada acción, con destino en la asignación, y los admins
+  la leen por la API y verifican la cadena aparte; asignar dos veces a la
+  misma cuenta no deja otra fila; el listado pagina sin huecos ni
+  repeticiones.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
-  sin contar ningún intento.
-* Ni contraseñas, ni tokens, ni secretos TOTP en los logs ni en el volcado de
-  la base de datos.
+  sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
+  misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
+  no; un token que no vale no consume el de ninguna cuenta; el primer
+  exceso deja un único evento sin IP.
+* Ni contraseñas, ni tokens, ni secretos TOTP, ni textos o códigos de
+  denuncias en los logs ni en el volcado de la base de datos.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales; el TOTP
@@ -61,6 +79,7 @@ directorio temporal del sistema. El código de salida es 0 solo si el
 resultado global es OK. Solo usa la biblioteca estándar.
 """
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -95,12 +114,15 @@ TEXTO_BLOQUEADO = "ARRANQUE BLOQUEADO: "
 PERMISOS_ACL_APLICACION = ("resetkeys ~limite:* resetchannels -@all "
                            "+ping +multi +exec +incr +expire +ttl +client|setinfo")
 PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +pttl +dbsize +client|setinfo"
-LIMITES_PRUEBA = "denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60"
-TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 denuncia=1000/3600 mensajes=1000/3600 "
+LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
+                  "cuenta=1000/60")
+TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 mensajes=1000/3600 "
                         "otras=1000/60 seguimiento=1000/60")
-TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 denuncia=10/3600 mensajes=30/3600 otras=60/60 "
-                            "seguimiento=60/60")
+TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 mensajes=30/3600 "
+                            "otras=60/60 seguimiento=60/60")
 LIMITE_ACCESO = (10, 300)
+LIMITE_CUENTA = (60, 60)
+TEXTO_EVENTO_CUENTA = "EVENTO limite_cuenta: "
 IP_CLIENTE_A = "10.88.1.3"
 IP_CLIENTE_B = "10.88.1.4"
 
@@ -139,6 +161,29 @@ TEXTO_SEGUNDO_ADMIN = ("recomendacion: cuando este admin active su cuenta, que i
 TEXTO_NO_ES_ADMIN = ("ERROR: no hay ningun admin activado con ese email en la empresa "
                      "(primer admin: alta-admin; instructores: los reinvita su admin)")
 
+# Instrucción (app/instruccion.py y app/rutas_personal.py), literales.
+CUERPO_409_TRANSICION = '{"detalle": "la denuncia no puede pasar a ese estado desde el actual"}'.encode("utf-8")
+CUERPO_409_CERRADA = '{"detalle": "la denuncia está cerrada"}'.encode("utf-8")
+CUERPO_409_CERRADA_DENUNCIANTE = '{"detalle": "la denuncia está cerrada y no admite mensajes"}'.encode("utf-8")
+CUERPO_409_DESTINO = '{"detalle": "la cuenta de destino no está activa"}'.encode("utf-8")
+CUERPO_422_FINAL = '{"detalle": "cerrar una denuncia exige un mensaje final para el denunciante"}'.encode("utf-8")
+ESTADOS = ["nueva", "en_instruccion", "resuelta", "archivada", "inadmitida"]
+ESTADOS_DESTINO = ["en_instruccion", "resuelta", "archivada", "inadmitida"]
+TRANSICIONES_ESPERADAS = {("nueva", "en_instruccion"), ("nueva", "inadmitida"),
+                          ("en_instruccion", "resuelta"), ("en_instruccion", "archivada")}
+CLAVES_LISTADO = ["denuncias", "siguiente"]
+CLAVES_FILA_DENUNCIA = ["asignada_a", "asignada_activa", "denuncia_id", "estado", "fecha"]
+CLAVES_EXPEDIENTE = ["categoria", "denuncia_id", "estado", "fecha", "mensajes", "texto"]
+CLAVES_MENSAJE_PERSONAL = ["autor", "autor_id", "fecha", "secuencia", "texto"]
+CLAVES_MENSAJE_SEGUIMIENTO = ["autor", "fecha", "secuencia", "texto"]
+CLAVES_AUDITORIA = ["filas", "siguiente"]
+CLAVES_VERIFICACION = ["cadena_intacta", "primera_rota"]
+CLAVES_FILA_AUDITORIA = ["accion", "actor", "destino_id", "fecha", "objeto_id", "secuencia"]
+TAMANO_PAGINA_DENUNCIAS = 100
+# Textos y códigos de las denuncias de la sección k: no deben aparecer en
+# los logs ni en el volcado (sección i).
+TEXTOS_SENSIBLES = {}
+
 # Argon2id con los parámetros de OWASP (m=19 MiB, t=2, p=1).
 PREFIJO_ARGON2 = "$argon2id$v=19$m=19456,t=2,p=1$"
 # Formato 1 + nonce 12 + secreto 20 + tag 16.
@@ -165,7 +210,8 @@ RFC6238_VECTORES = {59: "94287082", 1111111109: "07081804", 1111111111: "1405047
 
 # Cliente HTTP de prueba: corre con la imagen de la API, directo a la API (red
 # app) o a través de Caddy (red edge, TLS). Mide cada petición en
-# milisegundos y puede lanzar copias simultáneas de una petición.
+# milisegundos y puede lanzar copias simultáneas de una petición
+# ("paralelo") o un grupo de peticiones distintas a la vez ("grupo").
 CLIENTE_HTTP = r'''
 import base64, concurrent.futures, http.client, json, socket, ssl, sys, time
 
@@ -198,7 +244,10 @@ def una(pt):
 
 salida = []
 for pt in json.load(sys.stdin):
-    if pt.get("paralelo"):
+    if pt.get("grupo"):
+        with concurrent.futures.ThreadPoolExecutor(len(pt["grupo"])) as grupo:
+            salida.extend(grupo.map(una, pt["grupo"]))
+    elif pt.get("paralelo"):
         with concurrent.futures.ThreadPoolExecutor(pt["paralelo"]) as grupo:
             salida.extend(grupo.map(una, [pt] * pt["paralelo"]))
     else:
@@ -225,6 +274,99 @@ res["token_corto"] = cripto.leer_token(texto[:-1])
 res["token_no_ascii"] = cripto.leer_token("\\u00e1" + texto[1:])
 res["etiquetas_distintas"] = len({{cripto.huella_token(e, crudo) for e in
                                    (cripto.ETIQUETA_INVITACION, cripto.ETIQUETA_DISPOSITIVO, cripto.ETIQUETA_SESION)}})
+print(json.dumps(res, sort_keys=True))
+"""
+
+
+# Se ejecuta dentro de la API con el SQL real de app/instruccion.py: una
+# conexión ejecuta la consulta con su bloqueo y, con esa transacción abierta,
+# otra conexión pide un bloqueo con NOWAIT. "libre" = la segunda lo obtuvo.
+BLOQUEOS_DENTRO = """
+import json, sys, threading, time, types, uuid
+from psycopg import errors
+from app import bd, instruccion, personal
+empresa, denuncia, asignado, otro = (uuid.UUID(x) for x in sys.argv[1:5])
+
+def probar(sql, parametros, sonda, parametros_sonda):
+    a = bd.conectar("aplicacion", bd.FICHERO_CONTRASENA)
+    b = bd.conectar("aplicacion", bd.FICHERO_CONTRASENA)
+    try:
+        bd.fijar_contexto(a, empresa)
+        filas = len(a.execute(sql, parametros).fetchall())
+        bd.fijar_contexto(b, empresa)
+        try:
+            b.execute(sonda, parametros_sonda).fetchall()
+            libre = True
+        except errors.LockNotAvailable:
+            libre = False
+        return [filas, libre]
+    finally:
+        a.rollback()
+        b.rollback()
+        a.close()
+        b.close()
+
+def baja_real(confirmar):
+    # A da de baja a la cuenta "otro" (FOR UPDATE y activo = false) sin
+    # confirmar; un hilo ejecuta _bloquear_actor de app/instruccion.py con esa
+    # cuenta y espera. Cuando se le ve esperando un bloqueo, A confirma o
+    # deshace. Devuelve [se le vio esperando, que hizo la accion].
+    a = bd.conectar("aplicacion", bd.FICHERO_CONTRASENA)
+    b = bd.conectar("aplicacion", bd.FICHERO_CONTRASENA)
+    vigia = bd.conectar("aplicacion", bd.FICHERO_CONTRASENA)
+    resultado = {}
+    try:
+        bd.fijar_contexto(a, empresa)
+        a.execute("select 1 from canal.usuario_personal where id = %s for update", [otro]).fetchall()
+        a.execute("update canal.usuario_personal set activo = false where id = %s", [otro])
+        bd.fijar_contexto(b, empresa)
+        sesion = types.SimpleNamespace(usuario_id=otro)
+
+        def actuar():
+            try:
+                instruccion._bloquear_actor(b, sesion)
+                resultado["accion"] = "actua"
+            except personal.SesionNoValida:
+                resultado["accion"] = "SesionNoValida"
+            except Exception as error:
+                resultado["accion"] = type(error).__name__
+
+        hilo = threading.Thread(target=actuar)
+        hilo.start()
+        esperando = False
+        # Hasta 1,5 s: por debajo del lock_timeout de 2 s de app/bd.py.
+        for _ in range(30):
+            fila = vigia.execute("select count(*) from pg_stat_activity where pid = %s and wait_event_type = 'Lock'",
+                                 [b.info.backend_pid]).fetchone()
+            vigia.rollback()
+            if fila[0] == 1:
+                esperando = True
+                break
+            time.sleep(0.05)
+        if confirmar:
+            a.commit()
+        else:
+            a.rollback()
+        hilo.join(10)
+        return [esperando, resultado.get("accion")]
+    finally:
+        for conexion in (a, b, vigia):
+            conexion.rollback()
+            conexion.close()
+
+ACTUALIZAR = "select 1 from canal.denuncia where id = %s for update nowait"
+LOGIN = "select 1 from canal.usuario_personal where id = %s for no key update nowait"
+BAJA = "select 1 from canal.usuario_personal where id = %s for update nowait"
+res = {
+    "escritura_ajena": probar(instruccion.SQL_ESCRIBIR_ASIGNADA, [denuncia, otro], ACTUALIZAR, [denuncia]),
+    "escritura_propia": probar(instruccion.SQL_ESCRIBIR_ASIGNADA, [denuncia, asignado], ACTUALIZAR, [denuncia]),
+    "lectura_ajena": probar(instruccion.SQL_LEER_ASIGNADA, [denuncia, otro], ACTUALIZAR, [denuncia]),
+    "lectura_propia": probar(instruccion.SQL_LEER_ASIGNADA, [denuncia, asignado], ACTUALIZAR, [denuncia]),
+    "actor_frente_login": probar(instruccion.SQL_BLOQUEAR_ACTOR, [asignado], LOGIN, [asignado]),
+    "actor_frente_baja": probar(instruccion.SQL_BLOQUEAR_ACTOR, [asignado], BAJA, [asignado]),
+    "baja_deshecha": baja_real(False),
+    "baja_confirmada": baja_real(True),
+}
 print(json.dumps(res, sort_keys=True))
 """
 
@@ -1268,6 +1410,420 @@ def seccion_j():
     pasa(cadena == "intacta", f"j) la cadena de auditoria de B sigue intacta ({cadena})")
 
 
+# ---------------------------------------------------------------------------
+# k) Instrucción
+# ---------------------------------------------------------------------------
+def rd(denuncia_id):
+    return f"/v1/personal/denuncias/{denuncia_id}"
+
+
+def ids_denuncias(empresa):
+    return set(valor(f"select id from canal.denuncia where empresa_id = '{EMPRESAS[empresa][0]}';").split())
+
+
+def crear_denuncia(empresa):
+    """Crea una denuncia por la API pública. Devuelve (id, código, texto). El
+    id sale de la base de datos: la API nunca se lo da al denunciante."""
+    texto = f"texto de denuncia k {secrets.token_hex(12)}"
+    antes = ids_denuncias(empresa)
+    r = una(pt("POST", f"/v1/empresas/{EMPRESAS[empresa][1]}/denuncias", {"categoria": "fraude", "texto": texto}))
+    codigo = (json_de(r) or {}).get("codigo_seguimiento")
+    nuevas = ids_denuncias(empresa) - antes
+    if r.get("estado") != 201 or not codigo or len(nuevas) != 1:
+        raise Parada(f"no se pudo crear una denuncia de preparacion: {r.get('estado')}")
+    TEXTOS_SENSIBLES[f"texto de la denuncia {len(TEXTOS_SENSIBLES)}"] = texto
+    TEXTOS_SENSIBLES[f"codigo de la denuncia {len(TEXTOS_SENSIBLES)}"] = codigo
+    return nuevas.pop(), codigo, texto
+
+
+def fila_denuncia(denuncia_id):
+    """estado|asignada_a|número de mensajes."""
+    return valor(f"select estado || '|' || coalesce(asignada_a::text, '') || '|' || "
+                 f"(select count(*) from canal.mensaje m where m.denuncia_id = d.id) "
+                 f"from canal.denuncia d where id = '{denuncia_id}';")
+
+
+def asignar_peticion(token, denuncia_id, usuario_id):
+    return pt("PUT", rd(denuncia_id) + "/asignacion", {"usuario_id": str(usuario_id)}, token=token)
+
+
+def estado_peticion(token, denuncia_id, estado_nuevo, mensaje=None):
+    datos = {"estado": estado_nuevo}
+    if mensaje is not None:
+        datos["mensaje"] = mensaje
+    return pt("POST", rd(denuncia_id) + "/estado", datos, token=token)
+
+
+def mensaje_peticion(token, denuncia_id, texto):
+    return pt("POST", rd(denuncia_id) + "/mensajes", {"texto": texto}, token=token)
+
+
+def seguimiento(codigo):
+    return pt("POST", "/v1/seguimiento", {"codigo": codigo})
+
+
+def mensaje_denunciante(codigo, texto):
+    return pt("POST", "/v1/seguimiento/mensajes", {"codigo": codigo, "texto": texto})
+
+
+def preparar(peticion, nombre):
+    """Una petición que la sección solo necesita como preparación: si falla,
+    PARADA (no es un resultado, y seguir daría una cascada de FALLA)."""
+    r = una(peticion)
+    if r.get("estado") not in (200, 201, 204):
+        raise Parada(f"preparacion fallida ({nombre}): {r.get('estado')} {r.get('cuerpo', b'')[:200]!r}")
+    return r
+
+
+def total_auditoria(empresa):
+    return valor(f"select count(*) from canal.registro_auditoria where empresa_id = '{EMPRESAS[empresa][0]}';")
+
+
+def auditoria_de(empresa, accion, objeto_id):
+    """actor|destino_id de las filas de una acción sobre un objeto."""
+    return valor(f"select actor || '|' || coalesce(destino_id::text, '') from canal.registro_auditoria "
+                 f"where empresa_id = '{EMPRESAS[empresa][0]}' and accion = '{accion}' "
+                 f"and objeto_id = '{objeto_id}' order by secuencia;").split()
+
+
+def fila_lista_denuncia(token, denuncia_id):
+    """La fila de una denuncia en el listado (primera página), o {}."""
+    datos = json_de(una(pt("GET", "/v1/personal/denuncias", token=token))) or {}
+    return next((f for f in datos.get("denuncias", []) if f.get("denuncia_id") == str(denuncia_id)), {})
+
+
+def mientras_se_bloquea(sql_bloqueo, accion, segundos=8):
+    """Ejecuta accion() mientras una sesión de superusuario retiene el
+    bloqueo de sql_bloqueo. Devuelve (resultado, el bloqueo se vio retenido)."""
+    guion = (f"SET application_name = 'k_bloqueo';\nBEGIN;\n{sql_bloqueo}\n"
+             f"select pg_sleep({segundos});\nCOMMIT;\n")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as hilo:
+        futuro = hilo.submit(sup, guion)
+        visto = esperar(lambda: valor("select count(*) from pg_stat_activity where application_name = 'k_bloqueo' "
+                                      "and wait_event = 'PgSleep';") == "1", 20)
+        resultado = accion() if visto else {}
+        sesion_bloqueo = futuro.result()
+    return resultado, visto and sesion_bloqueo.rc == 0
+
+
+def seccion_k():
+    p("=== k) instruccion: acceso, asignacion, estados, mensajes, bloqueos y auditoria")
+    admin2, instr, admin_b = CUENTAS["admin2"], CUENTAS["instructor"], CUENTAS["admin_b"]
+    token_admin2 = sesion_de(admin2)
+    # Email propio de esta sección (los de d y j ya están usados).
+    instr2, _ = invitar(token_admin2, "instructor2", "instructor2@alfa.test")
+    preparar_cuenta(instr2)
+    tokens = {"admin2": token_admin2, "instr": sesion_de(instr), "instr2": sesion_de(instr2),
+              "admin_b": sesion_de(admin_b)}
+    den1, cod1, texto1 = crear_denuncia("A")
+    den2, _, _ = crear_denuncia("A")
+    den3, cod3, _ = crear_denuncia("A")
+    den4, _, _ = crear_denuncia("A")
+    den_b, _, _ = crear_denuncia("B")
+
+    # k1) Listado y asignación.
+    lista = una(pt("GET", "/v1/personal/denuncias", token=tokens["admin2"]))
+    datos = json_de(lista) or {}
+    filas = {f.get("denuncia_id"): f for f in datos.get("denuncias", [])}
+    control_lista = (lista.get("estado") == 200 and sorted(datos) == CLAVES_LISTADO
+                     and {den1, den2, den3, den4} <= set(filas))
+    pasa(control_lista, "k1) control: un admin lista las denuncias de su empresa (200)")
+    negativo("k1) el listado solo lleva fecha, estado y asignacion: ni texto ni categoria",
+             all(sorted(f) == CLAVES_FILA_DENUNCIA for f in filas.values())
+             and texto1.encode("utf-8") not in lista.get("cuerpo", b"") and b"categoria" not in lista.get("cuerpo", b""),
+             control_lista)
+    negativo("k1) el listado de A no incluye la denuncia de B", den_b not in filas, control_lista)
+    vacia = json_de(una(pt("GET", "/v1/personal/denuncias", token=tokens["instr"]))) or {}
+    negativo("k1) un instructor sin denuncias asignadas recibe un listado vacio",
+             vacia.get("denuncias") == [] and vacia.get("siguiente") is None, control_lista, f"{vacia}")
+
+    prohibida = una(asignar_peticion(tokens["instr"], den1, instr.usuario_id))
+    sin_cambio = fila_denuncia(den1)
+    asignada = una(asignar_peticion(tokens["admin2"], den1, instr.usuario_id))
+    control_asig = asignada.get("estado") == 204 and fila_denuncia(den1) == f"nueva|{instr.usuario_id}|0"
+    pasa(control_asig, "k1) control: un admin asigna una denuncia a un instructor (204)")
+    negativo("k1) un instructor no puede asignar: 403 y la denuncia no cambia",
+             prohibida.get("estado") == 403 and prohibida.get("cuerpo") == CUERPO_403 and sin_cambio == "nueva||0",
+             control_asig, f"respuesta: {prohibida}, fila: {sin_cambio}")
+    pasa(auditoria_de("A", "asignacion", den1) == [f"personal:{admin2.usuario_id}|{instr.usuario_id}"],
+         "k1) la asignacion deja su fila con el admin como actor y el instructor como destino")
+    repetida = una(asignar_peticion(tokens["admin2"], den1, instr.usuario_id))
+    negativo("k1) asignar otra vez a la misma cuenta responde 204 sin cambiar nada ni dejar otra fila",
+             repetida.get("estado") == 204 and fila_denuncia(den1) == f"nueva|{instr.usuario_id}|0"
+             and auditoria_de("A", "asignacion", den1) == [f"personal:{admin2.usuario_id}|{instr.usuario_id}"],
+             control_asig, f"respuesta: {repetida.get('estado')}")
+    destinos = {"una cuenta dada de baja": (CUENTAS["de_baja"].usuario_id, 409, CUERPO_409_DESTINO),
+                "una cuenta sin activar": (CUENTAS["pendiente"].usuario_id, 409, CUERPO_409_DESTINO),
+                "una cuenta de otra empresa": (admin_b.usuario_id, 404, CUERPO_404),
+                "una cuenta inexistente": (uuid.uuid4(), 404, CUERPO_404),
+                "un id mal formado": ("no-es-un-uuid", 404, CUERPO_404)}
+    respuestas = http([asignar_peticion(tokens["admin2"], den2, d[0]) for d in destinos.values()])
+    for (nombre, (_, codigo, cuerpo)), r in zip(destinos.items(), respuestas):
+        negativo(f"k1) asignar a {nombre} da {codigo}", r.get("estado") == codigo and r.get("cuerpo") == cuerpo,
+                 control_asig, f"respuesta: {r}")
+    otras = http([asignar_peticion(tokens["admin2"], den_b, instr.usuario_id),
+                  asignar_peticion(tokens["admin2"], uuid.uuid4(), instr.usuario_id)])
+    negativo("k1) asignar una denuncia de otra empresa o inexistente da el mismo 404, y ninguna cambia",
+             all(r.get("estado") == 404 and r.get("cuerpo") == CUERPO_404 for r in otras)
+             and fila_denuncia(den2) == "nueva||0" and fila_denuncia(den_b) == "nueva||0", control_asig,
+             f"estados: {[r.get('estado') for r in otras]}")
+    propia = json_de(una(pt("GET", "/v1/personal/denuncias", token=tokens["instr"]))) or {}
+    negativo("k1) el instructor ve en su listado solo su denuncia asignada",
+             [f.get("denuncia_id") for f in propia.get("denuncias", [])] == [den1], control_asig, f"{propia}")
+
+    # k2) Quién lee el contenido.
+    lectura = una(pt("GET", rd(den1), token=tokens["instr"]))
+    expediente = json_de(lectura) or {}
+    control_lectura = (lectura.get("estado") == 200 and sorted(expediente) == CLAVES_EXPEDIENTE
+                       and expediente.get("texto") == texto1 and expediente.get("categoria") == "fraude"
+                       and expediente.get("estado") == "nueva" and expediente.get("mensajes") == [])
+    pasa(control_lectura, "k2) control: quien tiene la denuncia asignada lee su contenido (200)")
+    pasa(auditoria_de("A", "lectura_denuncia", den1) == [f"personal:{instr.usuario_id}|"],
+         "k2) la lectura deja una fila de auditoria con quien la leyo")
+    ajenas = {
+        "otro instructor": pt("GET", rd(den1), token=tokens["instr2"]),
+        "un admin sin asignacion": pt("GET", rd(den1), token=tokens["admin2"]),
+        "una denuncia sin asignar": pt("GET", rd(den2), token=tokens["instr"]),
+        "una denuncia inexistente": pt("GET", rd(uuid.uuid4()), token=tokens["instr"]),
+        "una denuncia de otra empresa": pt("GET", rd(den_b), token=tokens["instr"]),
+        "el admin de otra empresa": pt("GET", rd(den1), token=tokens["admin_b"]),
+        "un id mal formado": pt("GET", rd("no-es-un-uuid"), token=tokens["instr"]),
+        "mensaje de otro instructor": mensaje_peticion(tokens["instr2"], den1, "intruso"),
+        "estado de otro instructor": estado_peticion(tokens["instr2"], den1, "en_instruccion"),
+        "mensaje de un admin sin asignacion": mensaje_peticion(tokens["admin2"], den1, "intruso"),
+        "estado de un admin sin asignacion": estado_peticion(tokens["admin2"], den1, "en_instruccion"),
+    }
+    respuestas = dict(zip(ajenas, http(list(ajenas.values()))))
+    distintas = {k: v.get("estado") for k, v in respuestas.items()
+                 if not (v.get("estado") == 404 and v.get("cuerpo") == CUERPO_404)}
+    negativo(f"k2) sin asignacion: el mismo 404 byte a byte en lectura, mensaje y estado {distintas or ''}".strip(),
+             not distintas, control_lectura)
+    negativo("k2) los intentos sin asignacion no cambian la denuncia ni dejan auditoria de lectura",
+             fila_denuncia(den1) == f"nueva|{instr.usuario_id}|0"
+             and auditoria_de("A", "lectura_denuncia", den1) == [f"personal:{instr.usuario_id}|"], control_lectura)
+    # Un admin clasifica asignándose la denuncia: entonces la lee, y queda a la vista.
+    preparar(asignar_peticion(tokens["admin2"], den2, admin2.usuario_id), "autoasignacion")
+    autoasignada = una(pt("GET", rd(den2), token=tokens["admin2"]))
+    pasa(autoasignada.get("estado") == 200
+         and auditoria_de("A", "asignacion", den2) == [f"personal:{admin2.usuario_id}|{admin2.usuario_id}"],
+         "k2) un admin que se asigna la denuncia la lee, y la autoasignacion queda en la auditoria")
+
+    # k3) Bloqueos, con el SQL real dentro de la API.
+    preparar(asignar_peticion(tokens["admin2"], den4, instr.usuario_id), "asignar den4")
+    r = dc("exec", "-T", "api", "python", "-c", BLOQUEOS_DENTRO, EMPRESAS["A"][0], den4, str(instr.usuario_id),
+           str(instr2.usuario_id))
+    try:
+        b = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Parada(f"no se pudo ejecutar la prueba de bloqueos dentro de la API: {r.err.strip()[-400:]!r}") from None
+    control_den = b["escritura_propia"] == [1, False] and b["lectura_propia"] == [1, False]
+    pasa(control_den, f"k3) control: con la asignacion, la escritura y la lectura bloquean la denuncia ({b})")
+    negativo("k3) sin la asignacion, ni la escritura ni la lectura bloquean la denuncia (cero filas y libre)",
+             b["escritura_ajena"] == [0, True] and b["lectura_ajena"] == [0, True], control_den, f"{b}")
+    control_baja = b["actor_frente_baja"] == [1, False]
+    pasa(control_baja, "k3) control: el bloqueo de la cuenta de quien actua choca con el de una baja (FOR UPDATE)")
+    negativo("k3) y no choca con el de un login fallido (FOR NO KEY UPDATE, el del UPDATE de contadores)",
+             b["actor_frente_login"] == [1, True], control_baja, f"{b}")
+    control_real = b["baja_deshecha"] == [True, "actua"]
+    pasa(control_real, f"k3) control: si la baja se deshace, la accion que esperaba actua ({b['baja_deshecha']})")
+    negativo("k3) una baja confirmada mientras la accion espera: al soltarse, la accion no actua (SesionNoValida, "
+             "401)", b["baja_confirmada"] == [True, "SesionNoValida"], control_real, f"{b['baja_confirmada']}")
+    # La prueba dio de baja a instructor2 solo en la base de datos: se devuelve.
+    valor(f"update canal.usuario_personal set activo = true where id = '{instr2.usuario_id}'; select 1;")
+    # De extremo a extremo, con la fila de la cuenta retenida por otra sesión.
+    id_instr = instr.usuario_id
+    login_retenido, visto_login = mientras_se_bloquea(
+        f"update canal.usuario_personal set intentos_fallidos = intentos_fallidos where id = '{id_instr}';",
+        lambda: una(pt("GET", rd(den4), token=tokens["instr"])))
+    baja_retenida, visto_baja = mientras_se_bloquea(
+        f"select 1 from canal.usuario_personal where id = '{id_instr}' for update;",
+        lambda: una(pt("GET", rd(den4), token=tokens["instr"])))
+    control_e2e = (visto_baja and baja_retenida.get("estado") == 503
+                   and baja_retenida.get("cuerpo") == CUERPO_503_OCUPADO)
+    pasa(control_e2e, "k3) control: con la cuenta retenida como en una baja mas que lock_timeout, la accion "
+                      "espera y da 503 (no actua)")
+    negativo("k3) mientras un login fallido actualiza los contadores de la cuenta, la accion responde 200",
+             visto_login and login_retenido.get("estado") == 200, control_e2e, f"{login_retenido.get('estado')}")
+
+    # k4) Mensajes: el personal escribe y el denunciante lee sin saber quién.
+    texto_personal = f"mensaje del personal k {secrets.token_hex(8)}"
+    TEXTOS_SENSIBLES["mensaje del personal"] = texto_personal
+    enviado = una(mensaje_peticion(tokens["instr"], den1, texto_personal))
+    control_msj = enviado.get("estado") == 201 and (json_de(enviado) or {}).get("secuencia") == 1
+    pasa(control_msj, "k4) control: quien tiene la denuncia asignada envia un mensaje (201, secuencia 1)")
+    seg = json_de(una(seguimiento(cod1))) or {}
+    msj = (seg.get("mensajes") or [{}])[0]
+    negativo("k4) el denunciante ve el mensaje como del personal, sin autor_id ni id de la cuenta",
+             sorted(msj) == CLAVES_MENSAJE_SEGUIMIENTO and msj.get("autor") == "personal"
+             and msj.get("texto") == texto_personal and str(instr.usuario_id) not in json.dumps(seg), control_msj,
+             f"{msj}")
+    preparar(mensaje_denunciante(cod1, "respuesta del denunciante"), "respuesta del denunciante")
+    vista = json_de(una(pt("GET", rd(den1), token=tokens["instr"]))) or {}
+    mensajes = vista.get("mensajes", [])
+    negativo("k4) el personal ve la conversacion con autor_id: el suyo en su mensaje, null en el del denunciante",
+             len(mensajes) == 2 and all(sorted(m) == CLAVES_MENSAJE_PERSONAL for m in mensajes)
+             and mensajes[0].get("autor_id") == str(instr.usuario_id) and mensajes[1].get("autor") == "denunciante"
+             and mensajes[1].get("autor_id") is None, control_msj, f"{mensajes}")
+    pasa(auditoria_de("A", "mensaje_personal", den1) == [f"personal:{instr.usuario_id}|"],
+         "k4) el mensaje del personal deja su fila de auditoria")
+    vacios = http([mensaje_peticion(tokens["instr"], den1, "   "), estado_peticion(tokens["instr"], den1, "nueva")])
+    negativo("k4) un mensaje solo de espacios y el estado 'nueva' como destino dan 422",
+             all(r.get("estado") == 422 and r.get("cuerpo") == CUERPO_422 for r in vacios), control_msj,
+             f"estados: {[r.get('estado') for r in vacios]}")
+
+    # k5) La tabla de transiciones completa, contra el oráculo literal.
+    resultados = {}
+    for origen in ESTADOS:
+        for destino in ESTADOS_DESTINO:
+            valor(f"update canal.denuncia set estado = '{origen}' where id = '{den4}'; select 1;")
+            antes = fila_denuncia(den4)
+            r = una(estado_peticion(tokens["instr"], den4, destino, "mensaje de la transicion"))
+            resultados[(origen, destino)] = (r, antes, fila_denuncia(den4))
+    validas = [k for k in resultados if k in TRANSICIONES_ESPERADAS]
+    control_trans = len(validas) == 4 and all(
+        resultados[k][0].get("estado") == 204 and resultados[k][2].split("|")[0] == k[1]
+        and int(resultados[k][2].split("|")[2]) == int(resultados[k][1].split("|")[2]) + 1 for k in validas)
+    pasa(control_trans, "k5) control: las 4 transiciones permitidas responden 204 y aplican el estado y el mensaje")
+    rechazadas = {k: v for k, v in resultados.items() if k not in TRANSICIONES_ESPERADAS}
+    malas = {f"{k[0]}->{k[1]}": v[0].get("estado") for k, v in rechazadas.items()
+             if not (v[0].get("estado") == 409 and v[0].get("cuerpo") == CUERPO_409_TRANSICION and v[2] == v[1])}
+    negativo(f"k5) las {len(rechazadas)} transiciones no permitidas dan 409 y no cambian estado ni mensajes "
+             f"{malas or ''}".strip(), not malas and len(rechazadas) == 16, control_trans)
+    valor(f"update canal.denuncia set estado = 'en_instruccion' where id = '{den4}'; select 1;")
+    antes = fila_denuncia(den4)
+    sin_final = http([estado_peticion(tokens["instr"], den4, e) for e in ("resuelta", "archivada")])
+    tras_instruccion = fila_denuncia(den4)
+    valor(f"update canal.denuncia set estado = 'nueva' where id = '{den4}'; select 1;")
+    antes_nueva = fila_denuncia(den4)
+    sin_final.append(una(estado_peticion(tokens["instr"], den4, "inadmitida")))
+    negativo("k5) cerrar (resuelta, archivada o inadmitida) sin mensaje final da 422 y no cambia nada",
+             all(r.get("estado") == 422 and r.get("cuerpo") == CUERPO_422_FINAL for r in sin_final)
+             and tras_instruccion == antes and fila_denuncia(den4) == antes_nueva, control_trans,
+             f"estados: {[r.get('estado') for r in sin_final]}")
+
+    # k6) Cierre e inadmisión, vistos por el denunciante.
+    preparar(estado_peticion(tokens["instr"], den1, "en_instruccion"), "iniciar instruccion")
+    final = f"mensaje final k {secrets.token_hex(8)}"
+    TEXTOS_SENSIBLES["mensaje final"] = final
+    cierre = una(estado_peticion(tokens["instr"], den1, "resuelta", final))
+    seg = json_de(una(seguimiento(cod1))) or {}
+    control_cierre = cierre.get("estado") == 204 and seg.get("estado") == "resuelta"
+    pasa(control_cierre, "k6) control: cerrar con mensaje final (204) deja la denuncia resuelta")
+    ultimo = (seg.get("mensajes") or [{}])[-1]
+    negativo("k6) el mensaje final es el ultimo de la conversacion, del personal",
+             ultimo.get("texto") == final and ultimo.get("autor") == "personal", control_cierre, f"{ultimo}")
+    tras = http([mensaje_denunciante(cod1, "despues del cierre"), mensaje_peticion(tokens["instr"], den1, "tarde"),
+                 asignar_peticion(tokens["admin2"], den1, instr2.usuario_id)])
+    negativo("k6) cerrada: el mensaje del denunciante, el del personal y la asignacion dan 409, sin cambios",
+             tras[0].get("estado") == 409 and tras[0].get("cuerpo") == CUERPO_409_CERRADA_DENUNCIANTE
+             and tras[1].get("estado") == 409 and tras[1].get("cuerpo") == CUERPO_409_CERRADA
+             and tras[2].get("estado") == 409 and tras[2].get("cuerpo") == CUERPO_409_CERRADA
+             and fila_denuncia(den1) == f"resuelta|{instr.usuario_id}|3", control_cierre,
+             f"estados: {[r.get('estado') for r in tras]}, fila: {fila_denuncia(den1)}")
+    pasa(auditoria_de("A", "estado_en_instruccion", den1) == [f"personal:{instr.usuario_id}|"]
+         and auditoria_de("A", "estado_resuelta", den1) == [f"personal:{instr.usuario_id}|"],
+         "k6) cada cambio de estado deja su fila de auditoria")
+    preparar(asignar_peticion(tokens["admin2"], den3, instr.usuario_id), "asignar den3")
+    inadmision = una(estado_peticion(tokens["instr"], den3, "inadmitida", "no se da curso a esta comunicacion"))
+    seg3 = json_de(una(seguimiento(cod3))) or {}
+    control_inad = inadmision.get("estado") == 204 and seg3.get("estado") == "inadmitida"
+    pasa(control_inad, "k6) control: una denuncia nueva se inadmite con mensaje (204) y el denunciante lo ve")
+    tarde = una(mensaje_denunciante(cod3, "despues de inadmitir"))
+    negativo("k6) inadmitida es un cierre: el denunciante recibe 409", tarde.get("estado") == 409
+             and tarde.get("cuerpo") == CUERPO_409_CERRADA_DENUNCIANTE, control_inad, f"{tarde}")
+
+    # k7) Carrera: cierre con mensaje final y mensaje del denunciante a la vez.
+    rondas = []
+    for _ in range(3):
+        den, cod, _ = crear_denuncia("A")
+        preparar(asignar_peticion(tokens["admin2"], den, instr.usuario_id), "asignar carrera")
+        preparar(estado_peticion(tokens["instr"], den, "en_instruccion"), "instruccion carrera")
+        cerrar, escribir = http([{"grupo": [estado_peticion(tokens["instr"], den, "resuelta", "final de carrera"),
+                                            mensaje_denunciante(cod, "mensaje en carrera")]}])
+        orden = valor(f"select string_agg(autor, ',' order by secuencia) from canal.mensaje "
+                      f"where denuncia_id = '{den}';")
+        rondas.append((cerrar.get("estado"), escribir.get("estado"), orden, fila_denuncia(den).split("|")[0]))
+    pasa(all(c == 204 and e in (201, 409) and estado_final == "resuelta" and orden.split(",")[-1] == "personal"
+             and orden.count("denunciante") == (1 if e == 201 else 0) for c, e, orden, estado_final in rondas),
+         f"k7) cierre y mensaje simultaneos: sin interbloqueo ni 5xx; el mensaje entra antes del final o recibe 409 "
+         f"({rondas})")
+
+    # k8) Auditoría por la API.
+    antes = total_auditoria("A")
+    auditoria = una(pt("GET", "/v1/personal/auditoria", token=tokens["admin2"]))
+    verificacion = una(pt("GET", "/v1/personal/auditoria/verificacion", token=tokens["admin2"]))
+    lista_otra = una(pt("GET", "/v1/personal/denuncias", token=tokens["admin2"]))
+    datos = json_de(auditoria) or {}
+    filas_aud = datos.get("filas", [])
+    control_aud = (auditoria.get("estado") == 200 and sorted(datos) == CLAVES_AUDITORIA
+                   and lista_otra.get("estado") == 200)
+    pasa(control_aud and all(sorted(f) == CLAVES_FILA_AUDITORIA for f in filas_aud)
+         and [f.get("secuencia") for f in filas_aud] == list(range(1, len(filas_aud) + 1)),
+         "k8) un admin lee la auditoria de su empresa desde el principio, en orden y sin huecos")
+    datos_ver = json_de(verificacion) or {}
+    pasa(verificacion.get("estado") == 200 and sorted(datos_ver) == CLAVES_VERIFICACION
+         and datos_ver.get("cadena_intacta") is True and datos_ver.get("primera_rota") is None,
+         f"k8) la verificacion, aparte del listado, da la cadena intacta ({datos_ver})")
+    negativo("k8) en ella se ve la autoasignacion del admin (actor y destino el mismo)",
+             any(f.get("accion") == "asignacion" and f.get("objeto_id") == den2
+                 and f.get("actor") == f"personal:{admin2.usuario_id}" and f.get("destino_id") == str(admin2.usuario_id)
+                 for f in filas_aud), control_aud)
+    negativo("k8) leer la auditoria, verificarla y el listado no dejan filas de auditoria",
+             total_auditoria("A") == antes, control_aud)
+    desde = json_de(una(pt("GET", "/v1/personal/auditoria?desde=3", token=tokens["admin2"]))) or {}
+    negativo("k8) desde=3 empieza en la secuencia 3",
+             [f.get("secuencia") for f in desde.get("filas", [])][:1] == [3], control_aud)
+    malas = http([pt("GET", "/v1/personal/auditoria", token=tokens["instr"]),
+                  pt("GET", "/v1/personal/auditoria/verificacion", token=tokens["instr"]),
+                  pt("GET", "/v1/personal/auditoria?desde=0", token=tokens["admin2"]),
+                  pt("GET", "/v1/personal/auditoria?desde=x", token=tokens["admin2"])])
+    negativo("k8) un instructor recibe 403 en el listado y en la verificacion; desde=0 o no numerico da 422",
+             all(r.get("estado") == 403 and r.get("cuerpo") == CUERPO_403 for r in malas[:2])
+             and all(r.get("estado") == 422 and r.get("cuerpo") == CUERPO_422 for r in malas[2:]), control_aud,
+             f"estados: {[r.get('estado') for r in malas]}")
+    ajena = una(pt("GET", "/v1/personal/auditoria", token=tokens["admin_b"]))
+    negativo("k8) el admin de B no ve ninguna fila de A", ajena.get("estado") == 200
+             and den1.encode() not in ajena.get("cuerpo", b"") and den2.encode() not in ajena.get("cuerpo", b""),
+             control_aud)
+
+    # k9) Baja de una cuenta con denuncias asignadas, y paginación.
+    preparar(asignar_peticion(tokens["admin2"], den2, instr2.usuario_id), "asignar den2 a instr2")
+    activa = fila_lista_denuncia(tokens["admin2"], den2).get("asignada_activa")
+    preparar(pt("POST", f"/v1/personal/usuarios/{instr2.usuario_id}/baja", token=tokens["admin2"]), "baja instr2")
+    tras_baja = fila_lista_denuncia(tokens["admin2"], den2)
+    negativo("k9) tras la baja de su instructor, la denuncia sigue asignada y el listado la marca como inactiva",
+             tras_baja.get("asignada_a") == str(instr2.usuario_id) and tras_baja.get("asignada_activa") is False,
+             activa is True, f"antes: {activa}, despues: {tras_baja}")
+    # 101 denuncias más en B: 102 en total, dos páginas sin huecos ni repeticiones.
+    peticion = pt("POST", f"/v1/empresas/{EMPRESAS['B'][1]}/denuncias", {"categoria": "otros", "texto": "lote k9"})
+    creadas = http([peticion] * (TAMANO_PAGINA_DENUNCIAS + 1))
+    esperadas = ids_denuncias("B")
+    if not all(r.get("estado") == 201 for r in creadas) or len(esperadas) != TAMANO_PAGINA_DENUNCIAS + 2:
+        raise Parada(f"no se pudieron crear las denuncias de la paginacion ({len(esperadas)})")
+    p1 = json_de(una(pt("GET", "/v1/personal/denuncias", token=tokens["admin_b"]))) or {}
+    siguiente = p1.get("siguiente") or ""
+    p2 = json_de(una(pt("GET", f"/v1/personal/denuncias?cursor={siguiente}", token=tokens["admin_b"]))) or {}
+    vistas = [f.get("denuncia_id") for f in p1.get("denuncias", []) + p2.get("denuncias", [])]
+    control_pag = len(p1.get("denuncias", [])) == TAMANO_PAGINA_DENUNCIAS and bool(siguiente)
+    pasa(control_pag, f"k9) control: la primera pagina trae {TAMANO_PAGINA_DENUNCIAS} denuncias y un cursor")
+    negativo("k9) las dos paginas suman todas las denuncias de B, sin repetir, y la segunda no tiene siguiente",
+             len(vistas) == len(set(vistas)) and set(vistas) == esperadas and p2.get("siguiente") is None,
+             control_pag, f"{len(vistas)} vistas, {len(set(vistas))} distintas, {len(esperadas)} esperadas")
+    filtro = json_de(una(pt("GET", "/v1/personal/denuncias?estado=resuelta", token=tokens["admin2"]))) or {}
+    negativo("k9) el filtro por estado solo devuelve ese estado",
+             bool(filtro.get("denuncias")) and all(f.get("estado") == "resuelta" for f in filtro["denuncias"]),
+             control_pag, f"{filtro}")
+    malos = http([pt("GET", f"/v1/personal/denuncias?cursor={c}", token=tokens["admin2"])
+                  for c in ("20261012", "2026-10-12", f"2026-13-01.{den1}", f"2026-10-12.{den1}x")]
+                 + [pt("GET", "/v1/personal/denuncias?estado=inventado", token=tokens["admin2"])])
+    negativo("k9) un cursor mal formado o un estado desconocido dan 422",
+             all(r.get("estado") == 422 and r.get("cuerpo") == CUERPO_422 for r in malos), control_pag,
+             f"estados: {[r.get('estado') for r in malos]}")
+    cadena = valor(f"begin; set local role aplicacion; select set_config('app.empresa_id', '{EMPRESAS['A'][0]}', true); "
+                   f"select coalesce(canal.verificar_cadena_auditoria()::text, 'intacta'); commit;").split()[-1]
+    pasa(cadena == "intacta", f"k9) la cadena de auditoria de A sigue intacta al terminar ({cadena})")
+
+
 def seccion_h():
     p("=== h) regla acceso del limitador (limites de produccion)")
     r = dc_produccion("up", "-d", "--wait", "api")
@@ -1307,6 +1863,48 @@ def seccion_h():
              and sin_redis[0].get("cabeceras", {}).get("retry-after") == REINTENTAR_TRAS
              and contadores(victima)[0] == antes, sin_redis[1].get("estado") == 200, f"{sin_redis}")
     esperar(lambda: salud(contenedor("redis")) == "healthy", 60)
+    seccion_h_cuenta()
+
+
+def seccion_h_cuenta():
+    """Regla cuenta (segunda capa, por identidad), con los límites de
+    producción: la misma cuenta desde dos IPs agota su límite aunque ninguna
+    IP agote el suyo (otras, 60/60 por IP); otra cuenta desde la misma IP no
+    comparte el contador; un token que no vale no consume el de ninguna
+    cuenta."""
+    maximo, ventana = LIMITE_CUENTA
+    cuenta, otra = CUENTAS["admin2"], CUENTAS["instructor"]
+    token, token_otra = sesion_de(cuenta), sesion_de(otra)
+    resto = ventana - int(time.time()) % ventana
+    if resto < 40:
+        p(f"   espera de {resto + 1} s a la ventana siguiente")
+        time.sleep(resto + 1)
+    lineas_antes = sum(TEXTO_EVENTO_CUENTA in l for l in lineas_log("api"))
+    mitad = maximo // 2
+    falso = token[:-1] + ("A" if token[-1] != "A" else "B")
+    invalidos = http([por_caddy(yo(falso))] * 10, red="edge", ip=IP_CLIENTE_A)
+    desde_a = http([por_caddy(yo(token))] * mitad, red="edge", ip=IP_CLIENTE_A)
+    desde_b = http([por_caddy(yo(token))] * (maximo - mitad + 2), red="edge", ip=IP_CLIENTE_B)
+    de_otra = http([por_caddy(yo(token_otra))], red="edge", ip=IP_CLIENTE_A)[0]
+    control = (all(r.get("estado") == 200 for r in desde_a + desde_b[:maximo - mitad])
+               and de_otra.get("estado") == 200)
+    pasa(control, f"h) control: la cuenta hace {maximo} peticiones repartidas entre dos IPs (200) y otra cuenta "
+                  f"desde la misma IP sigue entrando")
+    pasa(all(es_401(r, CUERPO_401_SESION) for r in invalidos),
+         "h) 10 peticiones con un token que no vale dan 401 y no consumen el contador de la cuenta (las 60 "
+         "siguientes entran)")
+    excesos = desde_b[maximo - mitad:]
+    tras = [r.get("cabeceras", {}).get("retry-after", "") for r in excesos]
+    negativo(f"h) la peticion {maximo + 1} de la cuenta, desde una IP que no ha agotado el suyo, es 429 con "
+             f"Retry-After entre 1 y {ventana}",
+             all(r.get("estado") == 429 and r.get("cuerpo") == CUERPO_429 for r in excesos)
+             and all(x.isdigit() and 1 <= int(x) <= ventana for x in tras), control,
+             f"estados: {[r.get('estado') for r in excesos]}")
+    nuevas = [l for l in lineas_log("api") if TEXTO_EVENTO_CUENTA in l][lineas_antes:]
+    esperada = f"{TEXTO_EVENTO_CUENTA}empresa={EMPRESAS['A'][0]} cuenta={cuenta.usuario_id}"
+    negativo("h) dos excesos dejan un unico evento limite_cuenta, con empresa y cuenta y sin IP",
+             len(nuevas) == 1 and nuevas[0].endswith(esperada)
+             and IP_CLIENTE_A not in nuevas[0] and IP_CLIENTE_B not in nuevas[0], control, f"{nuevas}")
 
 
 def seccion_i():
@@ -1321,13 +1919,15 @@ def seccion_i():
                 sensibles[f"{nombre} de {cuenta.etiqueta}"] = v
         if cuenta.secreto:
             sensibles[f"secreto_hex de {cuenta.etiqueta}"] = base64.b32decode(cuenta.secreto).hex()
+    sensibles.update(TEXTOS_SENSIBLES)
     textos = {s: dc("logs", "--no-color", "--no-log-prefix", s).todo for s in ("api", "postgres", "caddy", "redis")}
     volcado = dc("exec", "-T", "postgres", "pg_dump", "-U", "postgres", "-d", "canario", "--data-only",
                  "-n", "canal").out
     control = "usuario_personal" in volcado and "$argon2id$" in volcado and len(sensibles) > 10
     fugas = sorted({f"{n} en {s}" for s, t in {**textos, "volcado": volcado}.items()
                     for n, v in sensibles.items() if v in t})
-    negativo(f"i) ni contrasenas, ni secretos TOTP, ni tokens aparecen en los logs ni en el volcado "
+    negativo(f"i) ni contrasenas, ni secretos TOTP, ni tokens, ni textos ni codigos de denuncias aparecen en "
+             f"los logs ni en el volcado "
              f"({len(sensibles)} valores) {fugas if fugas else ''}".strip(), not fugas, control)
     ips = [s for s, t in textos.items() if IP_CLIENTE_A in t or IP_CLIENTE_B in t]
     pasa(not ips, f"i) ninguna IP de cliente en los logs {ips if ips else ''}".strip())
@@ -1424,7 +2024,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
-                        seccion_i, seccion_h):
+                        seccion_k, seccion_i, seccion_h):
             seccion()
     except Parada as e:
         parada = str(e)
