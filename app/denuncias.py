@@ -143,13 +143,29 @@ class EstadoDenuncia:
     mensajes: tuple
 
 
-def _serializar(**campos):
+@dataclass(frozen=True)
+class MensajeCompleto:
+    """Un mensaje descifrado con autor_id, solo para el personal
+    (app/instruccion.py). Nunca sale hacia el denunciante."""
+    secuencia: int
+    fecha: object
+    autor: str
+    autor_id: object
+    texto: str
+
+
+# ---------------------------------------------------------------------------
+# Piezas compartidas con app/instruccion.py: el personal lee y escribe la
+# misma denuncia con el mismo formato y los mismos AAD.
+# ---------------------------------------------------------------------------
+
+def serializar(**campos):
     contenido = {"v": VERSION_CONTENIDO, **campos}
     return json.dumps(contenido, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
-def _deserializar(datos, campos):
-    """Inverso estricto de _serializar(): exige exactamente {v, *campos}, con
+def deserializar(datos, campos):
+    """Inverso estricto de serializar(): exige exactamente {v, *campos}, con
     textos. Los datos ya están autenticados por GCM: una desviación indicaría
     un error propio, no un ataque, y se trata como fallo de integridad."""
     try:
@@ -164,6 +180,51 @@ def _deserializar(datos, campos):
     return contenido
 
 
+def clave_actual(conexion, claves, empresa_id):
+    """Versión más alta de la clave de la empresa del contexto, desenvuelta."""
+    fila = conexion.execute(SQL_CLAVE_ACTUAL).fetchone()
+    if fila is None:
+        raise EmpresaSinClave
+    version, envuelta = fila
+    return version, cripto.desenvolver_clave(claves.maestra, bytes(envuelta), empresa_id, version)
+
+
+def leer_mensajes_y_claves(conexion, denuncia_id, version_denuncia):
+    """Mensajes de una denuncia y las claves envueltas de todas las versiones
+    que hacen falta para leerla, dentro de la transacción de quien llama."""
+    filas = conexion.execute(SQL_MENSAJES, [denuncia_id]).fetchall()
+    versiones = sorted({version_denuncia} | {fila[6] for fila in filas})
+    envueltas = dict(conexion.execute(SQL_CLAVES, [versiones]).fetchall())
+    return filas, envueltas
+
+
+def descifrar_expediente(claves, empresa_id, denuncia_id, cifrado, version, filas, envueltas):
+    """Contenido de la denuncia y sus mensajes en claro. Se llama fuera de la
+    transacción, para no retener la conexión. Cada versión de clave se
+    desenvuelve una sola vez; la clave foránea de version_clave garantiza que
+    todas existen. Devuelve los mensajes con autor_id: quien llama decide qué
+    sale de la API."""
+    claves_empresa = {v: cripto.desenvolver_clave(claves.maestra, bytes(envuelta), empresa_id, v)
+                      for v, envuelta in envueltas.items()}
+    datos = cripto.descifrar_contenido(claves_empresa[version], bytes(cifrado),
+                                       cripto.aad_denuncia(empresa_id, denuncia_id))
+    contenido = deserializar(datos, ("categoria", "texto"))
+    mensajes = []
+    for secuencia, fecha_mensaje, mensaje_id, autor, autor_id, cifrado_mensaje, version_mensaje in filas:
+        # El AAD lleva el id, el autor y autor_id: un mensaje movido de fila o
+        # con el autor cambiado no se descifra.
+        aad = cripto.aad_mensaje(empresa_id, denuncia_id, mensaje_id, autor, autor_id)
+        texto = deserializar(cripto.descifrar_contenido(claves_empresa[version_mensaje],
+                                                        bytes(cifrado_mensaje), aad), ("texto",))["texto"]
+        mensajes.append(MensajeCompleto(secuencia=secuencia, fecha=fecha_mensaje, autor=autor, autor_id=autor_id,
+                                        texto=texto))
+    return contenido, mensajes
+
+
+# ---------------------------------------------------------------------------
+# Denunciante
+# ---------------------------------------------------------------------------
+
 def _resolver_codigo(pool, claves, codigo):
     """Empresa y denuncia de un código de seguimiento, o CodigoNoEncontrado."""
     crudo = cripto.leer_codigo(codigo)
@@ -174,15 +235,6 @@ def _resolver_codigo(pool, claves, codigo):
     if fila is None:
         raise CodigoNoEncontrado
     return fila
-
-
-def _clave_actual(conexion, claves, empresa_id):
-    """Versión más alta de la clave de la empresa del contexto, desenvuelta."""
-    fila = conexion.execute(SQL_CLAVE_ACTUAL).fetchone()
-    if fila is None:
-        raise EmpresaSinClave
-    version, envuelta = fila
-    return version, cripto.desenvolver_clave(claves.maestra, bytes(envuelta), empresa_id, version)
 
 
 def crear(pool, claves, identificador, categoria, texto):
@@ -199,8 +251,8 @@ def crear(pool, claves, identificador, categoria, texto):
     denuncia_id = uuid.uuid4()
     codigo, crudo = cripto.generar_codigo()
     with bd.transaccion_empresa(pool, empresa_id) as conexion:
-        version, clave = _clave_actual(conexion, claves, empresa_id)
-        cifrado = cripto.cifrar_contenido(clave, _serializar(categoria=categoria, texto=texto),
+        version, clave = clave_actual(conexion, claves, empresa_id)
+        cifrado = cripto.cifrar_contenido(clave, serializar(categoria=categoria, texto=texto),
                                           cripto.aad_denuncia(empresa_id, denuncia_id))
         fecha = conexion.execute(SQL_INSERTAR, [empresa_id, denuncia_id, cifrado, version]).fetchone()[0]
         conexion.execute(SQL_REGISTRAR_CODIGO, [cripto.hmac_codigo(claves.hmac_codigos, crudo), denuncia_id])
@@ -218,28 +270,13 @@ def consultar(pool, claves, codigo):
         if denuncia is None:
             raise CodigoNoEncontrado
         fecha, estado, cifrado, version = denuncia
-        filas = conexion.execute(SQL_MENSAJES, [denuncia_id]).fetchall()
-        versiones = sorted({version} | {fila[6] for fila in filas})
-        envueltas = dict(conexion.execute(SQL_CLAVES, [versiones]).fetchall())
+        filas, envueltas = leer_mensajes_y_claves(conexion, denuncia_id, version)
 
-    # Cada versión se desenvuelve una sola vez. La clave foránea de
-    # version_clave garantiza que todas existen.
-    claves_empresa = {v: cripto.desenvolver_clave(claves.maestra, bytes(envueltas[v]), empresa_id, v)
-                      for v in versiones}
-    datos = cripto.descifrar_contenido(claves_empresa[version], bytes(cifrado),
-                                       cripto.aad_denuncia(empresa_id, denuncia_id))
-    contenido = _deserializar(datos, ("categoria", "texto"))
-
-    mensajes = []
-    for secuencia, fecha_mensaje, mensaje_id, autor, autor_id, cifrado_mensaje, version_mensaje in filas:
-        # El AAD lleva el id, el autor y autor_id: un mensaje movido de fila o
-        # con el autor cambiado no se descifra.
-        aad = cripto.aad_mensaje(empresa_id, denuncia_id, mensaje_id, autor, autor_id)
-        texto = _deserializar(cripto.descifrar_contenido(claves_empresa[version_mensaje],
-                                                         bytes(cifrado_mensaje), aad), ("texto",))["texto"]
-        mensajes.append(Mensaje(secuencia=secuencia, fecha=fecha_mensaje, autor=autor, texto=texto))
-    return EstadoDenuncia(estado=estado, fecha=fecha, categoria=contenido["categoria"],
-                          texto=contenido["texto"], mensajes=tuple(mensajes))
+    contenido, mensajes = descifrar_expediente(claves, empresa_id, denuncia_id, cifrado, version, filas, envueltas)
+    # Sin autor_id: identificaría a la persona del personal.
+    return EstadoDenuncia(estado=estado, fecha=fecha, categoria=contenido["categoria"], texto=contenido["texto"],
+                          mensajes=tuple(Mensaje(secuencia=m.secuencia, fecha=m.fecha, autor=m.autor, texto=m.texto)
+                                         for m in mensajes))
 
 
 def enviar_mensaje(pool, claves, codigo, texto):
@@ -248,9 +285,9 @@ def enviar_mensaje(pool, claves, codigo, texto):
     mensaje_id = uuid.uuid4()
     try:
         with bd.transaccion_empresa(pool, empresa_id) as conexion:
-            version, clave = _clave_actual(conexion, claves, empresa_id)
+            version, clave = clave_actual(conexion, claves, empresa_id)
             cifrado = cripto.cifrar_contenido(
-                clave, _serializar(texto=texto),
+                clave, serializar(texto=texto),
                 cripto.aad_mensaje(empresa_id, denuncia_id, mensaje_id, "denunciante", None))
             secuencia, fecha = conexion.execute(
                 SQL_INSERTAR_MENSAJE, [empresa_id, denuncia_id, mensaje_id, cifrado, version]).fetchone()

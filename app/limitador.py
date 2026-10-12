@@ -30,6 +30,14 @@ Qué hace:
 * 429 con Retry-After (los segundos hasta el fin de la ventana) cuando se
   supera el límite. No se registra: un 429 es flujo normal del camino
   anónimo, y una línea con hora situaría la petición (6.5).
+* Segunda capa, por cuenta (OWASP API4:2023, consumo de recursos sin
+  restricción): las rutas con sesión del personal consumen además la regla
+  "cuenta" con la identidad autenticada, después de autenticar
+  (app/rutas_personal.py, la única forma de obtener una sesión). Frena a una
+  cuenta concreta aunque reparta sus peticiones entre varias IPs o sesiones.
+  La clave lleva un HMAC de empresa y cuenta con la misma sal del día y su
+  propia etiqueta. Esta capa no puede ir en el middleware: ahí todavía no se
+  sabe de quién es la petición.
 
 Configuración: los límites de producción son los literales de
 LIMITES_POR_DEFECTO. La variable de entorno CANARIO_LIMITES los sustituye
@@ -87,6 +95,7 @@ ESPERA_ARRANQUE_SEGUNDOS = 15
 
 SEGUNDOS_DIA = 86_400
 ETIQUETA_CLIENTE = b"canario/limite/v1"
+ETIQUETA_CUENTA = b"canario/limite/cuenta/v1"
 
 VARIABLE_LIMITES = "CANARIO_LIMITES"
 # Topes de lo que admite CANARIO_LIMITES: un valor fuera de ellos es un error
@@ -111,12 +120,16 @@ class Limite:
 # primera capa contra el relleno de credenciales y protege la capacidad de
 # Argon2. No es la única: el bloqueo por cuenta y por dispositivo vive en
 # PostgreSQL (app/personal.py) y sigue frenando a quien cambia de IP.
+# "cuenta" no es una regla de ruta: es la segunda capa de las rutas con
+# sesión, por identidad. Una persona no sostiene más de una petición por
+# segundo; un frontend que haga varias llamadas por pantalla sigue holgado.
 LIMITES_POR_DEFECTO = {
     "denuncia": Limite(10, 3600),
     "seguimiento": Limite(60, 60),
     "mensajes": Limite(30, 3600),
     "acceso": Limite(10, 300),
     "otras": Limite(60, 60),
+    "cuenta": Limite(60, 60),
 }
 
 RUTAS_ACCESO = {"/v1/personal/sesiones", "/v1/personal/activacion", "/v1/personal/activacion/confirmar",
@@ -234,6 +247,12 @@ def huella_cliente(sal, direccion):
     return hmac.new(sal, ETIQUETA_CLIENTE + _bytes_cliente(direccion), hashlib.sha256).hexdigest()[:32]
 
 
+def huella_cuenta(sal, empresa_id, usuario_id):
+    """HMAC-SHA256 de una cuenta del personal con la sal, truncado a 128 bits.
+    Etiqueta propia: una cuenta y un cliente nunca comparten huella."""
+    return hmac.new(sal, ETIQUETA_CUENTA + empresa_id.bytes + usuario_id.bytes, hashlib.sha256).hexdigest()[:32]
+
+
 class _Sal:
     """Sal aleatoria del día (UTC). Solo existe en la memoria del proceso."""
 
@@ -282,9 +301,22 @@ class Limitador:
         dirección no es una IP.
         """
         instante = time.time() if instante is None else instante
+        huella = huella_cliente(self._sal.del_instante(instante), direccion)
+        cuenta, limite, segundos = await self._contar(regla, huella, instante)
+        return cuenta <= limite.peticiones, segundos
+
+    async def consumir_cuenta(self, empresa_id, usuario_id, instante=None):
+        """Cuenta una petición de una cuenta autenticada en la regla "cuenta".
+        Devuelve (permitida, segundos hasta el fin de la ventana, primer
+        exceso de la ventana). Lanza NoDisponible si Redis no la ha contado."""
+        instante = time.time() if instante is None else instante
+        huella = huella_cuenta(self._sal.del_instante(instante), empresa_id, usuario_id)
+        cuenta, limite, segundos = await self._contar("cuenta", huella, instante)
+        return cuenta <= limite.peticiones, segundos, cuenta == limite.peticiones + 1
+
+    async def _contar(self, regla, huella, instante):
         limite = self.limites[regla]
         segundo = int(instante)
-        huella = huella_cliente(self._sal.del_instante(instante), direccion)
         clave = f"limite:{regla}:{segundo // limite.ventana}:{huella}"
         try:
             # Los comandos se envían por su nombre exacto: Redis.incr() envía
@@ -295,7 +327,7 @@ class Limitador:
                 cuenta, _ = await tubo.execute()
         except (RedisError, OSError) as error:
             raise NoDisponible(type(error).__name__) from None
-        return cuenta <= limite.peticiones, limite.ventana - segundo % limite.ventana
+        return cuenta, limite, limite.ventana - segundo % limite.ventana
 
     async def verificar(self):
         """Comprueba Redis al arrancar. Devuelve la lista de fallos (sin secretos).

@@ -14,6 +14,11 @@
 * GET y POST /v1/personal/usuarios, POST y DELETE .../{usuario_id}/invitacion
   (reinvitar y anular la invitación abierta) y POST .../{usuario_id}/baja:
   administración de cuentas, solo admin.
+* Instrucción (app/instruccion.py): GET /v1/personal/denuncias (listado sin
+  contenido), GET .../{denuncia_id} (contenido y mensajes, solo quien la
+  tiene asignada), POST .../{denuncia_id}/mensajes, POST .../{denuncia_id}/estado
+  y PUT .../{denuncia_id}/asignacion (solo admin). GET /v1/personal/auditoria
+  y GET /v1/personal/auditoria/verificacion (solo admin).
 
 Este módulo es el único que sabe cómo viajan los tokens: el de sesión en la
 cabecera Authorization (Bearer) y el de dispositivo en el cuerpo del login.
@@ -25,21 +30,35 @@ Respuestas: cualquier fallo del login da el mismo 401, con el mismo cuerpo
 (app/personal.py explica por qué el tiempo también es el mismo). Un token
 de sesión que no vale da otro 401 con WWW-Authenticate: Bearer. Una cuenta de
 otra empresa es invisible (RLS) y da el 404 genérico, igual que una
-inexistente. Un rol insuficiente da 403.
+inexistente. Un rol insuficiente da 403. Una denuncia que no es de quien la
+pide da el mismo 404 que una inexistente o de otra empresa.
 
-Las funciones son síncronas (def): FastAPI las ejecuta en su pool de hilos,
-y tanto la base de datos como Argon2 son síncronos.
+Límite por cuenta (docs/threat-model.md, 6.9): toda ruta con sesión la
+obtiene de la dependencia _sesion, que autentica y después consume la regla
+"cuenta" del limitador con la identidad autenticada. Es la única forma de
+obtener una sesión en este módulo, así que ninguna ruta con sesión queda sin
+ese límite (cerrado por construcción, como la regla "otras" del middleware).
+Comprobado en la versión fijada de FastAPI: la dependencia se ejecuta aunque
+el cuerpo no valide (un 422 autenticado también cuenta), salvo con un JSON
+que ni siquiera se puede analizar, que se rechaza antes de autenticar.
+
+Las rutas son síncronas (def): FastAPI las ejecuta en su pool de hilos, y
+tanto la base de datos como Argon2 son síncronos. La dependencia _sesion es
+asíncrona porque el limitador lo es; la autenticación, que es síncrona, la
+envía al pool de hilos.
 """
 import logging
 import uuid
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app import cripto, personal
+from app import cripto, denuncias, instruccion, limitador, personal
 from app.frontera_http import REINTENTAR_TRAS, cuerpo_error
+from app.rutas_denuncias import LONGITUD_MAXIMA_TEXTO
 
 registro = logging.getLogger("canario.personal")
 
@@ -53,6 +72,11 @@ MENSAJE_PROHIBIDO = "permiso denegado"
 MENSAJE_DUPLICADO = "ya existe una cuenta con ese email"
 MENSAJE_ULTIMO_ADMIN = "la empresa se quedaría sin ningún admin activo"
 MENSAJE_SIN_CLAVE = "el canal de esta empresa no está disponible; inténtelo más tarde"
+MENSAJE_TRANSICION = "la denuncia no puede pasar a ese estado desde el actual"
+MENSAJE_CERRADA = "la denuncia está cerrada"
+MENSAJE_LIMITE = "la denuncia ha alcanzado el máximo de mensajes"
+MENSAJE_DESTINO = "la cuenta de destino no está activa"
+MENSAJE_FINAL = "cerrar una denuncia exige un mensaje final para el denunciante"
 
 # Topes de forma de la petición, holgados respecto a lo válido: lo que pase
 # de aquí es un 422, sin llegar a la lógica. La política de contraseñas
@@ -119,17 +143,83 @@ class NuevoUsuario(BaseModel):
         return _email(texto)
 
 
+def _texto_no_vacio(texto):
+    # Como en app/rutas_denuncias.py: se guarda tal cual, pero un texto solo
+    # de espacios no es un mensaje.
+    if not texto.strip():
+        raise ValueError("texto vacio")
+    return texto
+
+
+class MensajePersonal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    texto: str = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+
+    @field_validator("texto")
+    @classmethod
+    def no_vacio(cls, texto):
+        return _texto_no_vacio(texto)
+
+
+class CambioEstado(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    estado: Literal[instruccion.ESTADOS_DESTINO]
+    mensaje: str | None = Field(default=None, min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+
+    @field_validator("mensaje")
+    @classmethod
+    def no_vacio(cls, texto):
+        return None if texto is None else _texto_no_vacio(texto)
+
+
+class Asignacion(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    # Texto y no uuid: un id mal formado es una cuenta que no existe (404),
+    # como en la ruta (_uuid).
+    usuario_id: str = Field(max_length=64)
+
+
 def _error(codigo, mensaje=None, cabeceras=None):
     return Response(cuerpo_error(codigo, mensaje), status_code=codigo, media_type="application/json",
                     headers=cabeceras)
 
 
-def _sesion(peticion):
-    """Sesión del token Bearer, o SesionNoValida."""
+class LimiteCuentaSuperado(Exception):
+    """La cuenta autenticada ha superado su regla "cuenta" en esta ventana."""
+
+    def __init__(self, segundos):
+        super().__init__(segundos)
+        self.segundos = segundos
+
+
+async def _sesion(peticion: Request):
+    """Dependencia: sesión del token Bearer, o SesionNoValida; después, la
+    segunda capa del limitador, por cuenta. Un token que no vale no consume
+    el contador de ninguna cuenta (no se sabe de quién es); lo frena la capa
+    por IP del middleware.
+
+    El primer exceso de cada ventana deja un evento con empresa y cuenta (es
+    del personal, no del denunciante, y sin IP): es la señal de una sesión
+    que se usa de forma anómala. Solo el primero, para que el log no se
+    pueda inundar con 429."""
     esquema, _, token = peticion.headers.get("authorization", "").partition(" ")
     if esquema != "Bearer" or not token:
         raise personal.SesionNoValida
-    return personal.autenticar(peticion.app.state.pool, token)
+    sesion = await run_in_threadpool(personal.autenticar, peticion.app.state.pool, token)
+    permitida, segundos, primer_exceso = await peticion.app.state.limitador.consumir_cuenta(
+        sesion.empresa_id, sesion.usuario_id)
+    if not permitida:
+        if primer_exceso:
+            registro.warning("EVENTO limite_cuenta: empresa=%s cuenta=%s", sesion.empresa_id, sesion.usuario_id)
+        raise LimiteCuentaSuperado(segundos)
+    return sesion
+
+
+# El único tipo con el que una ruta recibe la sesión.
+SesionPersonal = Annotated[personal.Sesion, Depends(_sesion)]
 
 
 def _uuid(texto):
@@ -168,30 +258,29 @@ def iniciar_sesion(datos: Login, peticion: Request):
 
 
 @router.delete("/sesiones/actual", status_code=204)
-def cerrar_sesion(peticion: Request):
-    personal.cerrar_sesion(peticion.app.state.pool, _sesion(peticion))
+def cerrar_sesion(peticion: Request, sesion: SesionPersonal):
+    personal.cerrar_sesion(peticion.app.state.pool, sesion)
     return Response(status_code=204)
 
 
 @router.get("/yo")
-def yo(peticion: Request):
-    sesion = _sesion(peticion)
+def yo(peticion: Request, sesion: SesionPersonal):
     pendiente = personal.invitacion_pendiente(peticion.app.state.pool, sesion)
     return JSONResponse(content={"usuario_id": str(sesion.usuario_id), "email": sesion.email, "rol": sesion.rol,
                                  "invitacion_pendiente": pendiente})
 
 
 @router.post("/contrasena", status_code=204)
-def cambiar_contrasena(datos: CambioContrasena, peticion: Request):
+def cambiar_contrasena(datos: CambioContrasena, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
-    personal.cambiar_contrasena(estado.pool, estado.claves, _sesion(peticion), datos.contrasena_actual,
+    personal.cambiar_contrasena(estado.pool, estado.claves, sesion, datos.contrasena_actual,
                                 datos.contrasena_nueva, datos.codigo_totp)
     return Response(status_code=204)
 
 
 @router.get("/usuarios")
-def listar_usuarios(peticion: Request):
-    usuarios = personal.listar_usuarios(peticion.app.state.pool, _sesion(peticion))
+def listar_usuarios(peticion: Request, sesion: SesionPersonal):
+    usuarios = personal.listar_usuarios(peticion.app.state.pool, sesion)
     # Lista explícita de campos: lo que no está aquí no sale (nunca hashes,
     # secretos ni contadores).
     return JSONResponse(content={"usuarios": [{
@@ -202,9 +291,9 @@ def listar_usuarios(peticion: Request):
 
 
 @router.post("/usuarios", status_code=201)
-def invitar(datos: NuevoUsuario, peticion: Request):
+def invitar(datos: NuevoUsuario, peticion: Request, sesion: SesionPersonal):
     try:
-        invitacion = personal.invitar(peticion.app.state.pool, _sesion(peticion), datos.email, datos.rol)
+        invitacion = personal.invitar(peticion.app.state.pool, sesion, datos.email, datos.rol)
     except ValueError:
         return _error(422)
     return JSONResponse(status_code=201, content={"usuario_id": str(invitacion.usuario_id),
@@ -212,25 +301,96 @@ def invitar(datos: NuevoUsuario, peticion: Request):
 
 
 @router.post("/usuarios/{usuario_id}/invitacion", status_code=201)
-def reinvitar(usuario_id: str, peticion: Request):
-    sesion = _sesion(peticion)
+def reinvitar(usuario_id: str, peticion: Request, sesion: SesionPersonal):
     invitacion = personal.reinvitar(peticion.app.state.pool, sesion, _uuid(usuario_id))
     return JSONResponse(status_code=201, content={"usuario_id": str(invitacion.usuario_id),
                                                   "token_invitacion": invitacion.token_invitacion})
 
 
 @router.delete("/usuarios/{usuario_id}/invitacion", status_code=204)
-def anular_invitacion(usuario_id: str, peticion: Request):
-    sesion = _sesion(peticion)
+def anular_invitacion(usuario_id: str, peticion: Request, sesion: SesionPersonal):
     personal.anular_invitacion(peticion.app.state.pool, sesion, _uuid(usuario_id))
     return Response(status_code=204)
 
 
 @router.post("/usuarios/{usuario_id}/baja", status_code=204)
-def dar_de_baja(usuario_id: str, peticion: Request):
-    sesion = _sesion(peticion)
+def dar_de_baja(usuario_id: str, peticion: Request, sesion: SesionPersonal):
     personal.dar_de_baja(peticion.app.state.pool, sesion, _uuid(usuario_id))
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Instrucción (app/instruccion.py)
+# ---------------------------------------------------------------------------
+
+def _opcional(valor):
+    return None if valor is None else str(valor)
+
+
+@router.get("/denuncias")
+def listar_denuncias(peticion: Request, sesion: SesionPersonal,
+                     estado: str | None = Query(default=None, max_length=32),
+                     cursor: str | None = Query(default=None, max_length=64)):
+    try:
+        pagina = instruccion.listar_denuncias(peticion.app.state.pool, sesion, estado, cursor)
+    except ValueError:
+        return _error(422)
+    # Lista explícita de campos: nunca contenido (ni la categoría).
+    return JSONResponse(content={"denuncias": [{
+        "denuncia_id": str(d.denuncia_id), "fecha": d.fecha.isoformat(), "estado": d.estado,
+        "asignada_a": _opcional(d.asignada_a), "asignada_activa": d.asignada_activa,
+    } for d in pagina.denuncias], "siguiente": pagina.siguiente})
+
+
+@router.get("/denuncias/{denuncia_id}")
+def leer_denuncia(denuncia_id: str, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
+    expediente = instruccion.leer_denuncia(estado.pool, estado.claves, sesion, _uuid(denuncia_id))
+    return JSONResponse(content={
+        "denuncia_id": str(expediente.denuncia_id), "fecha": expediente.fecha.isoformat(),
+        "estado": expediente.estado, "categoria": expediente.categoria, "texto": expediente.texto,
+        # El personal sí ve quién del personal escribió cada mensaje.
+        "mensajes": [{"secuencia": m.secuencia, "fecha": m.fecha.isoformat(), "autor": m.autor,
+                      "autor_id": _opcional(m.autor_id), "texto": m.texto} for m in expediente.mensajes],
+    })
+
+
+@router.post("/denuncias/{denuncia_id}/mensajes", status_code=201)
+def enviar_mensaje(denuncia_id: str, datos: MensajePersonal, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
+    enviado = instruccion.enviar_mensaje(estado.pool, estado.claves, sesion, _uuid(denuncia_id), datos.texto)
+    return JSONResponse(status_code=201, content={"secuencia": enviado.secuencia,
+                                                  "fecha": enviado.fecha.isoformat()})
+
+
+@router.post("/denuncias/{denuncia_id}/estado", status_code=204)
+def cambiar_estado(denuncia_id: str, datos: CambioEstado, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
+    instruccion.cambiar_estado(estado.pool, estado.claves, sesion, _uuid(denuncia_id), datos.estado, datos.mensaje)
+    return Response(status_code=204)
+
+
+@router.put("/denuncias/{denuncia_id}/asignacion", status_code=204)
+def asignar(denuncia_id: str, datos: Asignacion, peticion: Request, sesion: SesionPersonal):
+    instruccion.asignar(peticion.app.state.pool, sesion, _uuid(denuncia_id), _uuid(datos.usuario_id))
+    return Response(status_code=204)
+
+
+@router.get("/auditoria")
+def listar_auditoria(peticion: Request, sesion: SesionPersonal, desde: int = Query(default=1, ge=1, le=2 ** 62)):
+    pagina = instruccion.listar_auditoria(peticion.app.state.pool, sesion, desde)
+    return JSONResponse(content={
+        "filas": [{"secuencia": f.secuencia, "fecha": f.fecha.isoformat(), "actor": f.actor, "accion": f.accion,
+                   "objeto_id": _opcional(f.objeto_id), "destino_id": _opcional(f.destino_id)}
+                  for f in pagina.filas],
+        "siguiente": pagina.siguiente,
+    })
+
+
+@router.get("/auditoria/verificacion")
+def verificar_auditoria(peticion: Request, sesion: SesionPersonal):
+    primera_rota = instruccion.verificar_auditoria(peticion.app.state.pool, sesion)
+    return JSONResponse(content={"cadena_intacta": primera_rota is None, "primera_rota": primera_rota})
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +413,17 @@ async def _sin_clave(_peticion, _error_capturado):
     return _error(503, MENSAJE_SIN_CLAVE)
 
 
+async def _limite_cuenta(_peticion, error):
+    # Mismo cuerpo y misma cabecera que el 429 del middleware.
+    return _error(429, None, {"Retry-After": str(error.segundos)})
+
+
+async def _limitador_no_disponible(_peticion, error):
+    # Falla cerrado, como el middleware (app/limitador.py).
+    registro.error("EVENTO limitador_no_disponible: %s", error.clase)
+    return _error(503, None, {"Retry-After": REINTENTAR_TRAS})
+
+
 async def _integridad(_peticion, _error_capturado):
     registro.error("INTEGRIDAD: un secreto o una clave del personal no se puede descifrar en su sitio")
     return _error(500)
@@ -272,3 +443,13 @@ def instalar_errores(aplicacion):
     aplicacion.add_exception_handler(personal.UltimoAdmin, _manejador(409, MENSAJE_ULTIMO_ADMIN))
     aplicacion.add_exception_handler(personal.EmpresaSinClave, _sin_clave)
     aplicacion.add_exception_handler(cripto.ErrorIntegridad, _integridad)
+    aplicacion.add_exception_handler(LimiteCuentaSuperado, _limite_cuenta)
+    aplicacion.add_exception_handler(limitador.NoDisponible, _limitador_no_disponible)
+    # Instrucción. La de la clave es la de app/denuncias.py: el mensaje del
+    # personal se cifra con la misma pieza que el del denunciante.
+    aplicacion.add_exception_handler(denuncias.EmpresaSinClave, _sin_clave)
+    aplicacion.add_exception_handler(instruccion.TransicionNoValida, _manejador(409, MENSAJE_TRANSICION))
+    aplicacion.add_exception_handler(instruccion.DenunciaCerrada, _manejador(409, MENSAJE_CERRADA))
+    aplicacion.add_exception_handler(instruccion.LimiteMensajes, _manejador(409, MENSAJE_LIMITE))
+    aplicacion.add_exception_handler(instruccion.DestinoNoValido, _manejador(409, MENSAJE_DESTINO))
+    aplicacion.add_exception_handler(instruccion.MensajeFinalObligatorio, _manejador(422, MENSAJE_FINAL))

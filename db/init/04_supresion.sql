@@ -12,7 +12,9 @@
 -- Diseño:
 -- * El criterio vive en un solo sitio, canal.articulo_supresion(), que recibe
 --   las columnas de la fila (estado, fecha) y la zona horaria de su empresa.
---   "Iniciar la investigación" es salir del estado 'nueva'. "Hoy" es el día
+--   "Iniciar la investigación" es pasar a 'en_instruccion': una denuncia en
+--   'nueva' todavía no la ha iniciado, y una 'inadmitida' (comunicación a la
+--   que no se dio curso) no la inició nunca. "Hoy" es el día
 --   en la zona de la empresa, con el mismo cálculo que las fechas de
 --   recepción (02_esquema.sql): los plazos se cuentan en su calendario.
 -- * Lotes acotados (p_lote): todas las sesiones tienen statement_timeout, y un
@@ -132,7 +134,10 @@ CREATE POLICY registro_auditoria_insert_supresion ON canal.registro_auditoria
 
 -- Artículo por el que una denuncia debe suprimirse hoy, o NULL si se
 -- conserva. Diez años (art. 26.2) se aplica en cualquier estado y tiene
--- prioridad; tres meses (art. 32.4), solo si sigue en 'nueva'. Los plazos
+-- prioridad; tres meses (art. 32.4), solo si no se inició la investigación:
+-- 'nueva' o 'inadmitida'. Las cerradas tras instruirse ('resuelta' y
+-- 'archivada') solo pasan por en_instruccion (app/instruccion.py), así que
+-- nunca escapan del art. 32.4 sin haber investigado. Los plazos
 -- vencen el mismo día del mes (fecha + 3 meses <= hoy): una denuncia del 15 de
 -- enero se suprime desde el 15 de abril. Si ese día no existe, PostgreSQL usa
 -- el último del mes (31 de agosto + 3 meses = 30 de noviembre).
@@ -148,7 +153,7 @@ AS $$
     select case
         when (p_fecha + interval '10 years')::date <= (now() AT TIME ZONE p_zona_horaria)::date
             then 'art26'
-        when p_estado = 'nueva'
+        when p_estado IN ('nueva', 'inadmitida')
              and (p_fecha + interval '3 months')::date <= (now() AT TIME ZONE p_zona_horaria)::date
             then 'art32'
     end

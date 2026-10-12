@@ -260,12 +260,17 @@ CREATE TABLE canal.sesion_personal (
 -- valor por defecto: si el trigger no pudiera calcularla, NOT NULL lo
 -- rechazaría en vez de guardar otra fecha en silencio. La categoría va dentro
 -- de contenido_cifrado.
+-- estado: 'inadmitida' es la comunicación a la que no se da curso (Ley
+-- 2/2023, art. 32.4). Se distingue de 'archivada' porque no inició la
+-- investigación: la supresión de los tres meses la alcanza igual que a
+-- 'nueva' (04_supresion.sql). Archivar sin investigar la libraría de esa
+-- supresión y la conservaría diez años.
 CREATE TABLE canal.denuncia (
     empresa_id uuid NOT NULL REFERENCES canal.empresa (id),
     id uuid NOT NULL DEFAULT gen_random_uuid(),
     fecha date NOT NULL,
     estado text NOT NULL DEFAULT 'nueva'
-        CHECK (estado IN ('nueva', 'en_instruccion', 'resuelta', 'archivada')),
+        CHECK (estado IN ('nueva', 'en_instruccion', 'resuelta', 'archivada', 'inadmitida')),
     asignada_a uuid,
     contenido_cifrado bytea NOT NULL CHECK (octet_length(contenido_cifrado) > 0),
     version_clave integer NOT NULL,
@@ -315,6 +320,11 @@ CREATE TABLE canal.busqueda_seguimiento (
 
 -- secuencia, fecha, hash_anterior y hash los fija siempre el trigger de
 -- encadenado; lo que traiga el INSERT en esas columnas se sobrescribe.
+-- destino_id: el segundo objeto de una acción que tiene dos, como la
+-- asignación de una denuncia (objeto_id) a una cuenta (destino_id). Va dentro
+-- del hash: sin él, quién recibió una denuncia se podría cambiar sin romper la
+-- cadena. Sin clave foránea, igual que objeto_id: la auditoría sobrevive a lo
+-- que describe (una denuncia suprimida sigue apareciendo por su id).
 CREATE TABLE canal.registro_auditoria (
     empresa_id uuid NOT NULL REFERENCES canal.empresa (id),
     secuencia bigint NOT NULL,
@@ -322,6 +332,7 @@ CREATE TABLE canal.registro_auditoria (
     actor text NOT NULL CHECK (length(actor) BETWEEN 1 AND 100),
     accion text NOT NULL CHECK (length(accion) BETWEEN 1 AND 100),
     objeto_id uuid,
+    destino_id uuid,
     hash_anterior bytea,
     hash bytea NOT NULL,
     PRIMARY KEY (empresa_id, secuencia)
@@ -529,7 +540,8 @@ BEGIN
             NEW.fecha,
             NEW.actor,
             NEW.accion,
-            NEW.objeto_id
+            NEW.objeto_id,
+            NEW.destino_id
         )::text,
         'UTF8'
     ));
@@ -571,10 +583,11 @@ $$;
 --    de otra empresa es invisible, igual que una inexistente, y las dos dan el
 --    mismo error sin bloquear nada. FOR NO KEY UPDATE y no FOR UPDATE: no
 --    choca con el FOR KEY SHARE que toman las claves foráneas.
--- 2. Una denuncia resuelta o archivada no admite mensajes (SQLSTATE CN001): el
---    expediente está cerrado y nadie leería lo que llegue, que sería un fallo
---    silencioso. El personal que cierre con un mensaje final lo inserta antes
---    de cambiar el estado, en la misma transacción.
+-- 2. Una denuncia resuelta, archivada o inadmitida no admite mensajes
+--    (SQLSTATE CN001): el expediente está cerrado y nadie leería lo que
+--    llegue, que sería un fallo silencioso. El personal cierra siempre con un
+--    mensaje final (app/instruccion.py), que inserta antes de cambiar el
+--    estado, en la misma transacción.
 -- 3. Numera los mensajes de cada denuncia (1, 2, 3...) sin huecos, ignorando
 --    la secuencia que traiga el INSERT. Así no hace falta una hora para
 --    ordenar la conversación. Requiere READ COMMITTED (el nivel por defecto,
@@ -608,7 +621,7 @@ BEGIN
             USING ERRCODE = 'foreign_key_violation';
     END IF;
 
-    IF v_estado IN ('resuelta', 'archivada') THEN
+    IF v_estado IN ('resuelta', 'archivada', 'inadmitida') THEN
         RAISE EXCEPTION 'la denuncia esta cerrada y no admite mensajes'
             USING ERRCODE = 'CN001';
     END IF;
@@ -669,7 +682,7 @@ DECLARE
 BEGIN
     FOR r IN
         SELECT a.empresa_id, a.secuencia, a.fecha, a.actor, a.accion,
-               a.objeto_id, a.hash_anterior, a.hash
+               a.objeto_id, a.destino_id, a.hash_anterior, a.hash
           FROM canal.registro_auditoria a
          ORDER BY a.empresa_id, a.secuencia
     LOOP
@@ -694,7 +707,8 @@ BEGIN
                 r.fecha,
                 r.actor,
                 r.accion,
-                r.objeto_id
+                r.objeto_id,
+                r.destino_id
             )::text,
             'UTF8'
         ));
