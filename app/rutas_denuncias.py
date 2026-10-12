@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app import cripto, denuncias
 from app.frontera_http import cuerpo_error
+from app.validacion import TextoLibre, TextoLinea
 
 registro = logging.getLogger("canario.denuncias")
 
@@ -59,11 +60,13 @@ def _texto_no_vacio(texto):
 
 # extra="forbid": un campo desconocido es un error, no se ignora.
 # strict=True: sin conversiones implícitas (un número no pasa por texto).
+# Cada campo de texto es TextoLinea o TextoLibre (app/validacion.py): sin
+# NUL, surrogates ni caracteres de control.
 class NuevaDenuncia(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     categoria: Literal[denuncias.CATEGORIAS]
-    texto: str = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+    texto: TextoLibre = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
 
     @field_validator("texto")
     @classmethod
@@ -78,15 +81,15 @@ class ConsultaSeguimiento(BaseModel):
     # formado y debe dar el mismo 404 que uno inexistente, no un 422. El
     # cuerpo ya está acotado por LimiteCuerpo y cripto.leer_codigo descarta
     # lo que pase de su longitud máxima antes de procesarlo.
-    codigo: str
+    codigo: TextoLinea
 
 
 class NuevoMensaje(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     # Como en ConsultaSeguimiento: sin límite propio.
-    codigo: str
-    texto: str = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+    codigo: TextoLinea
+    texto: TextoLibre = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
 
     @field_validator("texto")
     @classmethod

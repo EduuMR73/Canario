@@ -57,6 +57,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app import cripto, denuncias, instruccion, limitador, personal
+from app.validacion import TextoLibre, TextoLinea, validar_email
 from app.frontera_http import REINTENTAR_TRAS, cuerpo_error
 from app.rutas_denuncias import LONGITUD_MAXIMA_TEXTO
 
@@ -88,59 +89,51 @@ LONGITUD_MAXIMA_EMAIL = 254
 LONGITUD_MAXIMA_IDENTIFICADOR = 64
 
 
-def _email(texto):
-    """ASCII, sin espacios y con '@' después del primer carácter. En
-    minúsculas, como exige el CHECK de la tabla. Solo ASCII: lower() de
-    Python y de PostgreSQL coinciden en ASCII, no siempre fuera de él."""
-    if (not texto.isascii() or any(c.isspace() for c in texto)
-            or not 3 <= len(texto) <= LONGITUD_MAXIMA_EMAIL or texto.find("@") < 1):
-        raise ValueError("email no valido")
-    return texto.lower()
-
-
-# extra="forbid" y strict=True, como en app/rutas_denuncias.py.
+# extra="forbid" y strict=True, como en app/rutas_denuncias.py. Cada campo de
+# texto es TextoLinea o TextoLibre (app/validacion.py): sin NUL, surrogates
+# ni caracteres de control.
 class Activacion(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    token: str = Field(max_length=LONGITUD_MAXIMA_TOKEN)
-    contrasena: str = Field(min_length=1, max_length=LONGITUD_MAXIMA_CONTRASENA)
+    token: TextoLinea = Field(max_length=LONGITUD_MAXIMA_TOKEN)
+    contrasena: TextoLinea = Field(min_length=1, max_length=LONGITUD_MAXIMA_CONTRASENA)
 
 
 class Confirmacion(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    token: str = Field(max_length=LONGITUD_MAXIMA_TOKEN)
-    codigo_totp: str = Field(max_length=LONGITUD_MAXIMA_CODIGO)
+    token: TextoLinea = Field(max_length=LONGITUD_MAXIMA_TOKEN)
+    codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
 
 
 class Login(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    empresa: str = Field(max_length=LONGITUD_MAXIMA_IDENTIFICADOR)
-    email: str = Field(max_length=LONGITUD_MAXIMA_EMAIL)
-    contrasena: str = Field(max_length=LONGITUD_MAXIMA_CONTRASENA)
-    codigo_totp: str = Field(max_length=LONGITUD_MAXIMA_CODIGO)
-    token_dispositivo: str | None = Field(default=None, max_length=LONGITUD_MAXIMA_TOKEN)
+    empresa: TextoLinea = Field(max_length=LONGITUD_MAXIMA_IDENTIFICADOR)
+    email: TextoLinea = Field(max_length=LONGITUD_MAXIMA_EMAIL)
+    contrasena: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CONTRASENA)
+    codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
+    token_dispositivo: TextoLinea | None = Field(default=None, max_length=LONGITUD_MAXIMA_TOKEN)
 
 
 class CambioContrasena(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    contrasena_actual: str = Field(max_length=LONGITUD_MAXIMA_CONTRASENA)
-    contrasena_nueva: str = Field(min_length=1, max_length=LONGITUD_MAXIMA_CONTRASENA)
-    codigo_totp: str = Field(max_length=LONGITUD_MAXIMA_CODIGO)
+    contrasena_actual: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CONTRASENA)
+    contrasena_nueva: TextoLinea = Field(min_length=1, max_length=LONGITUD_MAXIMA_CONTRASENA)
+    codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
 
 
 class NuevoUsuario(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    email: str
+    email: TextoLinea
     rol: Literal[personal.ROLES]
 
     @field_validator("email")
     @classmethod
     def email_valido(cls, texto):
-        return _email(texto)
+        return validar_email(texto)
 
 
 def _texto_no_vacio(texto):
@@ -154,7 +147,7 @@ def _texto_no_vacio(texto):
 class MensajePersonal(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    texto: str = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+    texto: TextoLibre = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
 
     @field_validator("texto")
     @classmethod
@@ -166,7 +159,7 @@ class CambioEstado(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     estado: Literal[instruccion.ESTADOS_DESTINO]
-    mensaje: str | None = Field(default=None, min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+    mensaje: TextoLibre | None = Field(default=None, min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
 
     @field_validator("mensaje")
     @classmethod
@@ -179,7 +172,7 @@ class Asignacion(BaseModel):
 
     # Texto y no uuid: un id mal formado es una cuenta que no existe (404),
     # como en la ruta (_uuid).
-    usuario_id: str = Field(max_length=64)
+    usuario_id: TextoLinea = Field(max_length=64)
 
 
 def _error(codigo, mensaje=None, cabeceras=None):

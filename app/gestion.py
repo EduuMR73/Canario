@@ -83,7 +83,7 @@ import uuid
 
 import psycopg
 
-from app import bd, claves, cripto, denuncias, personal, verificacion_arranque
+from app import bd, claves, cripto, denuncias, personal, validacion, verificacion_arranque
 
 SQL_ALTA = "select empresa_id, identificador_publico from canal.alta_empresa(%s, %s)"
 SQL_RESOLVER = "select canal.resolver_empresa(%s)"
@@ -234,7 +234,7 @@ def construir_parser():
     parser = argparse.ArgumentParser(prog="gestion", description="Gestion de empresas de Canario.")
     ordenes = parser.add_subparsers(dest="orden", required=True)
     alta = ordenes.add_parser("alta-empresa", help="da de alta una empresa con su clave version 1")
-    alta.add_argument("--nombre", required=True)
+    alta.add_argument("--nombre", required=True, type=_nombre)
     alta.add_argument("--zona", required=True, choices=ZONAS_HORARIAS,
                       help="zona horaria de la empresa: fija el calendario de sus fechas")
     clave = ordenes.add_parser("nueva-clave", help="crea la version siguiente de la clave de una empresa")
@@ -247,14 +247,32 @@ def construir_parser():
     admin = ordenes.add_parser("alta-admin", help="invitacion del primer admin de una empresa sin admins activos")
     admin.add_argument("--identificador", required=True, type=_identificador,
                        help="identificador publico de la empresa (el que imprime alta-empresa)")
-    admin.add_argument("--email", required=True)
+    admin.add_argument("--email", required=True, type=_email)
     reinvitacion = ordenes.add_parser(
         "reinvitar-admin",
         help="recuperacion de emergencia de un admin activado: revoca su acceso y emite una invitacion")
     reinvitacion.add_argument("--identificador", required=True, type=_identificador,
                               help="identificador publico de la empresa (el que imprime alta-empresa)")
-    reinvitacion.add_argument("--email", required=True)
+    reinvitacion.add_argument("--email", required=True, type=_email)
     return parser
+
+
+def _email(texto):
+    # La misma regla que la API (app/validacion.py): gestion no puede dar de
+    # alta un email que la API rechazaría al invitar o al iniciar sesión.
+    try:
+        return validacion.validar_email(texto)
+    except ValueError:
+        raise argparse.ArgumentTypeError("no es un email valido (ASCII imprimible, sin espacios, con @)") from None
+
+
+def _nombre(texto):
+    # Sin caracteres de control: el nombre sale en la salida de gestion y en
+    # la política de contraseñas. La longitud la fija el CHECK de la tabla.
+    try:
+        return validacion.texto_linea(texto)
+    except ValueError:
+        raise argparse.ArgumentTypeError("el nombre tiene caracteres de control") from None
 
 
 def _identificador(texto):
