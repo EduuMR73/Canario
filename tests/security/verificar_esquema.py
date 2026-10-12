@@ -111,16 +111,24 @@ TEXTO_AISLAMIENTO = "la supresion exige el nivel de aislamiento READ COMMITTED"
 # ---------------------------------------------------------------------------
 # Oráculos literales
 # ---------------------------------------------------------------------------
-TABLAS = ["busqueda_seguimiento", "clave_empresa", "denuncia", "directorio_empresas",
-          "empresa", "mensaje", "registro_auditoria", "usuario_personal"]
-TABLAS_RLS = ["clave_empresa", "denuncia", "empresa", "mensaje", "registro_auditoria", "usuario_personal"]
+TABLAS = ["busqueda_seguimiento", "clave_empresa", "denuncia", "directorio_empresas", "dispositivo_personal",
+          "empresa", "invitacion_personal", "mensaje", "registro_auditoria", "sesion_personal", "usuario_personal"]
+TABLAS_RLS = ["clave_empresa", "denuncia", "dispositivo_personal", "empresa", "invitacion_personal", "mensaje",
+              "registro_auditoria", "sesion_personal", "usuario_personal"]
 TABLAS_SIN_RLS = ["busqueda_seguimiento", "directorio_empresas"]
 COLUMNAS = {
     "empresa": ["id", "nombre", "activa", "fecha_alta", "zona_horaria"],
     "directorio_empresas": ["identificador_publico", "empresa_id"],
     "clave_empresa": ["empresa_id", "version", "clave_envuelta"],
     "usuario_personal": ["empresa_id", "id", "email", "hash_contrasena", "rol", "secreto_totp_cifrado",
-                         "totp_activo", "intentos_fallidos", "bloqueado_hasta", "activo"],
+                         "totp_activo", "intentos_fallidos", "bloqueado_hasta", "activo", "version_clave_totp",
+                         "ultimo_paso_totp"],
+    "invitacion_personal": ["empresa_id", "id", "usuario_id", "token_sha256", "caduca", "cerrada", "hash_contrasena",
+                            "secreto_totp_cifrado", "version_clave_totp"],
+    "dispositivo_personal": ["empresa_id", "id", "usuario_id", "token_sha256", "caduca", "intentos_fallidos",
+                             "bloqueado_hasta", "revocado"],
+    "sesion_personal": ["empresa_id", "id", "usuario_id", "dispositivo_id", "token_sha256", "ultimo_uso", "caduca",
+                        "revocada"],
     # Sin categoria: va dentro de contenido_cifrado.
     "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "contenido_cifrado", "version_clave"],
     "mensaje": ["empresa_id", "denuncia_id", "secuencia", "fecha", "id", "autor", "autor_id", "contenido_cifrado",
@@ -138,6 +146,9 @@ CLAVES_PRIMARIAS = [
     "mensaje|PRIMARY KEY (empresa_id, denuncia_id, secuencia)",
     "registro_auditoria|PRIMARY KEY (empresa_id, secuencia)",
     "usuario_personal|PRIMARY KEY (empresa_id, id)",
+    "invitacion_personal|PRIMARY KEY (empresa_id, id)",
+    "dispositivo_personal|PRIMARY KEY (empresa_id, id)",
+    "sesion_personal|PRIMARY KEY (empresa_id, id)",
 ]
 # tabla|columnas|tabla referenciada|columnas referenciadas|accion al borrar (a = NO ACTION)
 CLAVES_FORANEAS = [
@@ -152,8 +163,15 @@ CLAVES_FORANEAS = [
     "mensaje|empresa_id,version_clave|clave_empresa|empresa_id,version|a",
     "registro_auditoria|empresa_id|empresa|id|a",
     "usuario_personal|empresa_id|empresa|id|a",
+    "usuario_personal|empresa_id,version_clave_totp|clave_empresa|empresa_id,version|a",
+    "invitacion_personal|empresa_id,usuario_id|usuario_personal|empresa_id,id|a",
+    "invitacion_personal|empresa_id,version_clave_totp|clave_empresa|empresa_id,version|a",
+    "dispositivo_personal|empresa_id,usuario_id|usuario_personal|empresa_id,id|a",
+    "sesion_personal|empresa_id,usuario_id|usuario_personal|empresa_id,id|a",
+    # La sesión exige que su dispositivo sea de su mismo usuario.
+    "sesion_personal|empresa_id,usuario_id,dispositivo_id|dispositivo_personal|empresa_id,usuario_id,id|a",
 ]
-# tabla|politica|comando (13 de aplicacion + 2 de propietario_funciones + 8 de propietario_supresion)
+# tabla|politica|comando (22 de aplicacion + 2 de propietario_funciones + 8 de propietario_supresion)
 POLITICAS_APLICACION = [
     "empresa|empresa_select|SELECT",
     "clave_empresa|clave_empresa_select|SELECT",
@@ -161,6 +179,15 @@ POLITICAS_APLICACION = [
     "usuario_personal|usuario_personal_select|SELECT",
     "usuario_personal|usuario_personal_insert|INSERT",
     "usuario_personal|usuario_personal_update|UPDATE",
+    "invitacion_personal|invitacion_personal_select|SELECT",
+    "invitacion_personal|invitacion_personal_insert|INSERT",
+    "invitacion_personal|invitacion_personal_update|UPDATE",
+    "dispositivo_personal|dispositivo_personal_select|SELECT",
+    "dispositivo_personal|dispositivo_personal_insert|INSERT",
+    "dispositivo_personal|dispositivo_personal_update|UPDATE",
+    "sesion_personal|sesion_personal_select|SELECT",
+    "sesion_personal|sesion_personal_insert|INSERT",
+    "sesion_personal|sesion_personal_update|UPDATE",
     "denuncia|denuncia_select|SELECT",
     "denuncia|denuncia_insert|INSERT",
     "denuncia|denuncia_update|UPDATE",
@@ -193,10 +220,15 @@ NOMBRES_POLITICAS_SUPRESION = {l.split("|")[1] for l in POLITICAS_SUPRESION_COMP
 
 # Privilegios de tabla por rol (UPDATE solo por columna, nunca a nivel de tabla)
 PRIVILEGIOS_TABLA = {
+    # En las tablas del personal, INSERT solo por columna: la API no puede
+    # crear una cuenta ya activada ni elegir una caducidad.
     "aplicacion": {
         "empresa": {"SELECT"},
         "clave_empresa": {"SELECT", "INSERT"},
-        "usuario_personal": {"SELECT", "INSERT"},
+        "usuario_personal": {"SELECT"},
+        "invitacion_personal": {"SELECT"},
+        "dispositivo_personal": {"SELECT"},
+        "sesion_personal": {"SELECT"},
         "denuncia": {"SELECT", "INSERT"},
         "mensaje": {"SELECT", "INSERT"},
         "registro_auditoria": {"SELECT", "INSERT"},
@@ -207,6 +239,7 @@ PRIVILEGIOS_TABLA = {
     "propietario_funciones": {
         "empresa": set(), "clave_empresa": set(), "usuario_personal": set(), "denuncia": set(),
         "mensaje": set(), "registro_auditoria": set(),
+        "invitacion_personal": set(), "dispositivo_personal": set(), "sesion_personal": set(),
         "directorio_empresas": {"SELECT"},
         "busqueda_seguimiento": {"SELECT", "INSERT"},
     },
@@ -214,6 +247,7 @@ PRIVILEGIOS_TABLA = {
     # INSERT solo por columna.
     "propietario_supresion": {
         "empresa": set(), "clave_empresa": set(), "usuario_personal": set(),
+        "invitacion_personal": set(), "dispositivo_personal": set(), "sesion_personal": set(),
         "denuncia": {"DELETE"}, "mensaje": {"DELETE"}, "busqueda_seguimiento": {"DELETE"},
         "registro_auditoria": set(), "directorio_empresas": set(),
     },
@@ -221,8 +255,17 @@ PRIVILEGIOS_TABLA = {
 # Privilegios concedidos solo en algunas columnas: rol -> (tabla, privilegio) -> columnas
 PRIVILEGIOS_COLUMNA = {
     "aplicacion": {
-        ("usuario_personal", "UPDATE"): {"hash_contrasena", "secreto_totp_cifrado", "totp_activo",
-                                         "intentos_fallidos", "bloqueado_hasta", "activo"},
+        ("usuario_personal", "INSERT"): {"empresa_id", "email", "rol"},
+        ("usuario_personal", "UPDATE"): {"hash_contrasena", "secreto_totp_cifrado", "version_clave_totp",
+                                         "totp_activo", "ultimo_paso_totp", "intentos_fallidos", "bloqueado_hasta",
+                                         "activo"},
+        ("invitacion_personal", "INSERT"): {"empresa_id", "usuario_id", "token_sha256"},
+        ("invitacion_personal", "UPDATE"): {"cerrada", "hash_contrasena", "secreto_totp_cifrado",
+                                            "version_clave_totp"},
+        ("dispositivo_personal", "INSERT"): {"empresa_id", "usuario_id", "token_sha256"},
+        ("dispositivo_personal", "UPDATE"): {"intentos_fallidos", "bloqueado_hasta", "revocado"},
+        ("sesion_personal", "INSERT"): {"empresa_id", "usuario_id", "dispositivo_id", "token_sha256"},
+        ("sesion_personal", "UPDATE"): {"ultimo_uso", "revocada"},
         ("denuncia", "UPDATE"): {"estado", "asignada_a"},
     },
     "plataforma": {},
@@ -243,8 +286,11 @@ PRIVILEGIOS_COLUMNA = {
     },
 }
 COLUMNAS_UPDATE = {
-    "usuario_personal": {"hash_contrasena", "secreto_totp_cifrado", "totp_activo",
-                         "intentos_fallidos", "bloqueado_hasta", "activo"},
+    "usuario_personal": {"hash_contrasena", "secreto_totp_cifrado", "version_clave_totp", "totp_activo",
+                         "ultimo_paso_totp", "intentos_fallidos", "bloqueado_hasta", "activo"},
+    "invitacion_personal": {"cerrada", "hash_contrasena", "secreto_totp_cifrado", "version_clave_totp"},
+    "dispositivo_personal": {"intentos_fallidos", "bloqueado_hasta", "revocado"},
+    "sesion_personal": {"ultimo_uso", "revocada"},
     "denuncia": {"estado", "asignada_a"},
 }
 PRIVILEGIOS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -306,7 +352,23 @@ TEXTO_PLAZO_BLOQUEO = "canceling statement due to lock timeout"
 CONTEOS = {
     "empresa": (1, 1), "clave_empresa": (1, 1), "usuario_personal": (2, 2),
     "denuncia": (2, 2), "mensaje": (2, 1), "registro_auditoria": (2, 1),
+    "invitacion_personal": (1, 1), "dispositivo_personal": (1, 2), "sesion_personal": (1, 1),
 }
+# Fixture del personal (g): huellas de token de 32 bytes y uuid fijos.
+DISP_A = "a0000000-0000-4000-8000-0000000000f1"
+DISP_B = "b0000000-0000-4000-8000-0000000000f1"
+DISP_B2 = "b0000000-0000-4000-8000-0000000000f2"
+TOKEN_INV_A = "11" * 32
+TOKEN_INV_B = "12" * 32
+TOKEN_DISP_A = "21" * 32
+TOKEN_DISP_B = "22" * 32
+TOKEN_DISP_B2 = "23" * 32
+TOKEN_SES_A = "31" * 32
+TOKEN_SES_B = "32" * 32
+ADMIN_DE = {EMPRESA_A: ADMIN_A, EMPRESA_B: ADMIN_B}
+DISP_DE = {EMPRESA_A: DISP_A, EMPRESA_B: DISP_B}
+TEXTO_CREDENCIALES = "usuario_personal_credenciales_check"
+TEXTO_PENDIENTE = "invitacion_personal_pendiente_check"
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +558,7 @@ def seccion_c():
     comparar("c) esquema canal de migrador", r.lineas(), ["migrador"])
     r = sup("select c.relname, pg_get_userbyid(c.relowner) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
             "where n.nspname = 'canal' and c.relkind in ('r', 'p');")
-    comparar("c) exactamente las 8 tablas, todas de migrador", r.lineas(), [f"{t}|migrador" for t in TABLAS])
+    comparar("c) exactamente las 11 tablas, todas de migrador", r.lineas(), [f"{t}|migrador" for t in TABLAS])
     r = sup("select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
             "where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S');")
     comparar("c) ninguna tabla ni objeto en public", r.lineas(), ["0"])
@@ -530,7 +592,35 @@ select c.relname,
     r = sup("select c.relname, c.relrowsecurity, c.relforcerowsecurity from pg_class c "
             "join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'canal' and c.relkind = 'r';")
     esperado = [f"{t}|t|t" for t in TABLAS_RLS] + [f"{t}|f|f" for t in TABLAS_SIN_RLS]
-    comparar("c) RLS ENABLE y FORCE en las 6 tablas y ninguna en directorio_empresas ni busqueda_seguimiento", r.lineas(), esperado)
+    comparar("c) RLS ENABLE y FORCE en las 9 tablas y ninguna en directorio_empresas ni busqueda_seguimiento", r.lineas(), esperado)
+    # Personal: tokens unicos por empresa y como mucho una invitacion abierta
+    # por cuenta (indice parcial).
+    r = sup("select c.relname || '|' || pg_get_constraintdef(co.oid) from pg_constraint co "
+            "join pg_class c on c.oid = co.conrelid join pg_namespace n on n.oid = c.relnamespace "
+            "where co.contype = 'u' and n.nspname = 'canal' "
+            "and c.relname in ('invitacion_personal', 'dispositivo_personal', 'sesion_personal');")
+    comparar("c) UNIQUE de las tablas del personal", r.lineas(), [
+        "invitacion_personal|UNIQUE (empresa_id, token_sha256)",
+        "dispositivo_personal|UNIQUE (empresa_id, token_sha256)",
+        "dispositivo_personal|UNIQUE (empresa_id, usuario_id, id)",
+        "sesion_personal|UNIQUE (empresa_id, token_sha256)"])
+    r = sup("select pg_get_indexdef('canal.invitacion_personal_una_abierta'::regclass);")
+    comparar("c) una sola invitacion abierta por cuenta (indice unico parcial)", r.lineas(), [
+        "CREATE UNIQUE INDEX invitacion_personal_una_abierta ON canal.invitacion_personal "
+        "USING btree (empresa_id, usuario_id) WHERE (NOT cerrada)"])
+    r = sup("select pg_get_constraintdef(oid) from pg_constraint "
+            f"where conname = '{TEXTO_CREDENCIALES}' and conrelid = 'canal.usuario_personal'::regclass;")
+    comparar("c) una cuenta esta activada si y solo si tiene hash, secreto TOTP y version de clave", r.lineas(), [
+        "CHECK ((totp_activo = ((hash_contrasena IS NOT NULL) AND (secreto_totp_cifrado IS NOT NULL) "
+        "AND (version_clave_totp IS NOT NULL))))"])
+    r = sup("select c.relname || '.' || a.attname || '|' || pg_get_expr(d.adbin, d.adrelid) from pg_attrdef d "
+            "join pg_class c on c.oid = d.adrelid join pg_namespace n on n.oid = c.relnamespace "
+            "join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum "
+            "where n.nspname = 'canal' and a.attname = 'caduca';")
+    comparar("c) las caducidades las fija la base de datos: 72 horas, 90 dias y 8 horas", r.lineas(), [
+        "invitacion_personal.caduca|(now() + '72:00:00'::interval)",
+        "dispositivo_personal.caduca|(now() + '90 days'::interval)",
+        "sesion_personal.caduca|(now() + '08:00:00'::interval)"])
 
 
 def seccion_d():
@@ -538,7 +628,7 @@ def seccion_d():
     r = sup("select tablename, policyname, cmd, roles, coalesce(qual, ''), coalesce(with_check, '') "
             "from pg_policies where schemaname = 'canal' order by 1, 2;")
     filas = [l.split("|") for l in r.lineas()]
-    comparar("d) conjunto exacto de las 23 politicas (tabla, nombre, comando)",
+    comparar("d) conjunto exacto de las 32 politicas (tabla, nombre, comando)",
              ["|".join(f[:3]) for f in filas], POLITICAS)
 
     def rol_esperado(nombre):
@@ -548,7 +638,7 @@ def seccion_d():
             return "{propietario_supresion}"
         return "{aplicacion}"
     pasa(all(f[3] == rol_esperado(f[1]) for f in filas),
-         "d) las 13 de siempre son TO aplicacion, las 2 del definidor solo TO propietario_funciones "
+         "d) las 22 de aplicacion son TO aplicacion, las 2 del definidor solo TO propietario_funciones "
          "y las 8 de supresion solo TO propietario_supresion")
     pasa(all(f[2] != "ALL" for f in filas), "d) ninguna con comando ALL")
     con_delete = sorted(f[1] for f in filas if f[2] == "DELETE")
@@ -576,7 +666,7 @@ def seccion_d():
         if esperado_check != ("empresa_actual" in check) or (not esperado_check and check):
             ok = False
             p(f"   {nombre}: with_check inesperado {check!r}")
-    pasa(ok, "d) las 13 de aplicacion usan empresa_actual (SELECT solo qual, INSERT solo with_check, UPDATE ambos) y las 2 del definidor llevan true")
+    pasa(ok, "d) las 22 de aplicacion usan empresa_actual (SELECT solo qual, INSERT solo with_check, UPDATE ambos) y las 2 del definidor llevan true")
 
 
 def seccion_e():
@@ -698,6 +788,15 @@ INSERT INTO canal.usuario_personal (empresa_id, id, email, hash_contrasena, rol)
     ('{EMPRESA_A}', '{INSTR_A}', 'luis@ejemplo.test', 'x', 'instructor'),
     ('{EMPRESA_B}', '{ADMIN_B}', 'ana@ejemplo.test', 'x', 'admin'),
     ('{EMPRESA_B}', '{INSTR_B}', 'eva@ejemplo.test', 'x', 'instructor');
+INSERT INTO canal.invitacion_personal (empresa_id, usuario_id, token_sha256) VALUES
+    ('{EMPRESA_A}', '{INSTR_A}', '\\x{TOKEN_INV_A}'), ('{EMPRESA_B}', '{INSTR_B}', '\\x{TOKEN_INV_B}');
+INSERT INTO canal.dispositivo_personal (empresa_id, id, usuario_id, token_sha256) VALUES
+    ('{EMPRESA_A}', '{DISP_A}', '{ADMIN_A}', '\\x{TOKEN_DISP_A}'),
+    ('{EMPRESA_B}', '{DISP_B}', '{ADMIN_B}', '\\x{TOKEN_DISP_B}'),
+    ('{EMPRESA_B}', '{DISP_B2}', '{INSTR_B}', '\\x{TOKEN_DISP_B2}');
+INSERT INTO canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) VALUES
+    ('{EMPRESA_A}', '{ADMIN_A}', '{DISP_A}', '\\x{TOKEN_SES_A}'),
+    ('{EMPRESA_B}', '{ADMIN_B}', '{DISP_B}', '\\x{TOKEN_SES_B}');
 INSERT INTO canal.denuncia (empresa_id, id, contenido_cifrado, version_clave, asignada_a) VALUES
     ('{EMPRESA_A}', '{DEN_A1}', {BYTES_FALSOS}, 1, '{INSTR_A}'),
     ('{EMPRESA_A}', '{DEN_A2}', {BYTES_FALSOS}, 1, NULL),
@@ -763,7 +862,12 @@ def seccion_i():
     inserciones = {
         "denuncia": lambda e, d: f"insert into canal.denuncia (empresa_id, contenido_cifrado, version_clave) values ('{e}', {BYTES_FALSOS}, 1);",
         "mensaje": lambda e, d: f"insert into canal.mensaje (empresa_id, denuncia_id, autor, contenido_cifrado, version_clave) values ('{e}', '{d}', 'denunciante', {BYTES_FALSOS}, 1);",
-        "usuario_personal": lambda e, d: f"insert into canal.usuario_personal (empresa_id, email, hash_contrasena, rol) values ('{e}', 'nuevo@ejemplo.test', 'x', 'admin');",
+        "usuario_personal": lambda e, d: f"insert into canal.usuario_personal (empresa_id, email, rol) values ('{e}', 'nuevo@ejemplo.test', 'admin');",
+        # Personal: con la cuenta admin de cada empresa (sin invitacion en el
+        # fixture) y su dispositivo.
+        "invitacion_personal": lambda e, d: f"insert into canal.invitacion_personal (empresa_id, usuario_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '\\x{'41' * 32}');",
+        "dispositivo_personal": lambda e, d: f"insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '\\x{'42' * 32}');",
+        "sesion_personal": lambda e, d: f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '{DISP_DE[e]}', '\\x{'43' * 32}');",
         "clave_empresa": lambda e, d: f"insert into canal.clave_empresa (empresa_id, version, clave_envuelta) values ('{e}', 2, {BYTES_FALSOS});",
         "registro_auditoria": lambda e, d: f"insert into canal.registro_auditoria (empresa_id, actor, accion) values ('{e}', 'prueba', 'accion');",
     }
@@ -808,7 +912,7 @@ def normalizar_uuid(texto):
 def seccion_k():
     p("=== k) fugas por duplicados y claves foraneas")
     def usuario(empresa, email):
-        return f"insert into canal.usuario_personal (empresa_id, email, hash_contrasena, rol) values ('{empresa}', '{email}', 'x', 'admin');"
+        return f"insert into canal.usuario_personal (empresa_id, email, rol) values ('{empresa}', '{email}', 'admin');"
     neg = app(usuario(EMPRESA_B, "ana@ejemplo.test"), ctx=EMPRESA_A)
     ctl1 = app(usuario(EMPRESA_A, "ana@ejemplo.test"), ctx=EMPRESA_A)
     if "duplicate key" not in ctl1.err:
@@ -897,6 +1001,71 @@ def seccion_l():
     ctl_dueno = sup("SET ROLE migrador;\nBEGIN;\nALTER TABLE canal.denuncia DISABLE ROW LEVEL SECURITY;\nROLLBACK;\n")
     negativo("l) ALTER TABLE ... DISABLE ROW LEVEL SECURITY",
              actualizar("alter table canal.denuncia disable row level security;"), "must be owner", sin_error(ctl_dueno))
+
+    # Personal: la API no puede crear una cuenta ya activada, elegir una
+    # caducidad ni cambiar un token o una caducidad. Cada negativo con su
+    # control: la misma operacion con solo las columnas permitidas.
+    def en_a(sentencia):
+        return app(sentencia, ctx=EMPRESA_A, final="ROLLBACK")
+    ctl = en_a(f"insert into canal.usuario_personal (empresa_id, email, rol) values ('{EMPRESA_A}', 'l@ejemplo.test', 'instructor');")
+    for columna, v in (("totp_activo", "true"), ("hash_contrasena", "'x'"), ("intentos_fallidos", "0"), ("activo", "true")):
+        negativo(f"l) INSERT de usuario_personal con {columna}",
+                 en_a(f"insert into canal.usuario_personal (empresa_id, email, rol, {columna}) values ('{EMPRESA_A}', 'l@ejemplo.test', 'instructor', {v});"),
+                 "permission denied", sin_error(ctl))
+    ctl = en_a(f"insert into canal.invitacion_personal (empresa_id, usuario_id, token_sha256) values ('{EMPRESA_A}', '{ADMIN_A}', '\\x{'51' * 32}');")
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("cerrada", "false"), ("hash_contrasena", "'x'")):
+        negativo(f"l) INSERT de invitacion_personal con {columna}",
+                 en_a(f"insert into canal.invitacion_personal (empresa_id, usuario_id, token_sha256, {columna}) values ('{EMPRESA_A}', '{ADMIN_A}', '\\x{'51' * 32}', {v});"),
+                 "permission denied", sin_error(ctl))
+    ctl = en_a(f"insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256) values ('{EMPRESA_A}', '{ADMIN_A}', '\\x{'52' * 32}');")
+    negativo("l) INSERT de dispositivo_personal con caduca",
+             en_a(f"insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256, caduca) values ('{EMPRESA_A}', '{ADMIN_A}', '\\x{'52' * 32}', now() + interval '10 years');"),
+             "permission denied", sin_error(ctl))
+    ctl = en_a(f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) values ('{EMPRESA_A}', '{ADMIN_A}', '{DISP_A}', '\\x{'53' * 32}');")
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("ultimo_uso", "now()")):
+        negativo(f"l) INSERT de sesion_personal con {columna}",
+                 en_a(f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256, {columna}) values ('{EMPRESA_A}', '{ADMIN_A}', '{DISP_A}', '\\x{'53' * 32}', {v});"),
+                 "permission denied", sin_error(ctl))
+    ctl = en_a("update canal.sesion_personal set revocada = true;")
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("token_sha256", f"'\\x{'54' * 32}'"), ("usuario_id", f"'{INSTR_A}'")):
+        negativo(f"l) UPDATE de sesion_personal.{columna}", en_a(f"update canal.sesion_personal set {columna} = {v};"),
+                 "permission denied", sin_error(ctl))
+    ctl = en_a("update canal.dispositivo_personal set revocado = true;")
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("token_sha256", f"'\\x{'55' * 32}'")):
+        negativo(f"l) UPDATE de dispositivo_personal.{columna}", en_a(f"update canal.dispositivo_personal set {columna} = {v};"),
+                 "permission denied", sin_error(ctl))
+    ctl = en_a("update canal.invitacion_personal set cerrada = true;")
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("token_sha256", f"'\\x{'56' * 32}'")):
+        negativo(f"l) UPDATE de invitacion_personal.{columna}", en_a(f"update canal.invitacion_personal set {columna} = {v};"),
+                 "permission denied", sin_error(ctl))
+
+    # Invariantes del personal en la propia tabla (como superusuario, que se
+    # salta permisos y RLS pero no los CHECK ni los indices).
+    def como_sup(sentencia):
+        return sup(f"BEGIN;\n{sentencia}\nROLLBACK;\n")
+    ctl = como_sup(f"update canal.usuario_personal set secreto_totp_cifrado = '\\x01', version_clave_totp = 1, "
+                   f"totp_activo = true where id = '{INSTR_A}';")
+    negativo("l) cuenta activada sin secreto TOTP (CHECK de credenciales)",
+             como_sup(f"update canal.usuario_personal set totp_activo = true where id = '{INSTR_A}';"),
+             TEXTO_CREDENCIALES, sin_error(ctl))
+    negativo("l) cuenta con credenciales completas sin activar (CHECK de credenciales)",
+             como_sup(f"update canal.usuario_personal set secreto_totp_cifrado = '\\x01', version_clave_totp = 1 "
+                      f"where id = '{INSTR_A}';"), TEXTO_CREDENCIALES, sin_error(ctl))
+    ctl = como_sup(f"update canal.invitacion_personal set hash_contrasena = 'x', secreto_totp_cifrado = '\\x01', "
+                   f"version_clave_totp = 1 where usuario_id = '{INSTR_A}';")
+    negativo("l) invitacion con credenciales pendientes a medias (CHECK de pendientes)",
+             como_sup(f"update canal.invitacion_personal set hash_contrasena = 'x' where usuario_id = '{INSTR_A}';"),
+             TEXTO_PENDIENTE, sin_error(ctl))
+    otra = f"insert into canal.invitacion_personal (empresa_id, usuario_id, token_sha256) values ('{EMPRESA_A}', '{INSTR_A}', '\\x{'57' * 32}');"
+    ctl = como_sup(f"update canal.invitacion_personal set cerrada = true where usuario_id = '{INSTR_A}';\n{otra}")
+    negativo("l) dos invitaciones abiertas para la misma cuenta (indice parcial)", como_sup(otra),
+             "invitacion_personal_una_abierta", sin_error(ctl))
+    ctl = como_sup(f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) "
+                   f"values ('{EMPRESA_A}', '{ADMIN_A}', '{DISP_A}', '\\x{'58' * 32}');")
+    negativo("l) sesion con el dispositivo de otra cuenta (clave foranea de tres columnas)",
+             como_sup(f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) "
+                      f"values ('{EMPRESA_A}', '{INSTR_A}', '{DISP_A}', '\\x{'58' * 32}');"),
+             "violates foreign key constraint", sin_error(ctl))
 
 
 def cliente_red(sql, rol="aplicacion"):
@@ -1554,7 +1723,8 @@ def seccion_v():
     ctl = como_propietario("select count(id) from canal.empresa;")
     ctl_ok = sin_error(ctl) and valor(ctl).isdigit() and int(valor(ctl)) >= 3
     pasa(ctl_ok, f"v) control: propietario_funciones si puede leer empresa(id) ({valor(ctl)} empresas)")
-    for t in ("denuncia", "mensaje", "usuario_personal", "clave_empresa", "registro_auditoria"):
+    for t in ("denuncia", "mensaje", "usuario_personal", "clave_empresa", "registro_auditoria",
+              "invitacion_personal", "dispositivo_personal", "sesion_personal"):
         negativo(f"v) propietario_funciones: select de {t}", como_propietario(f"select count(*) from canal.{t};"),
                  "permission denied", ctl_ok)
     # suposicion 2: INSERT ... RETURNING bajo RLS exige privilegio y politica de SELECT.
@@ -1718,7 +1888,8 @@ COMMIT;
     negativo("su2) propietario_supresion no lee el contenido cifrado",
              como_supresion("select contenido_cifrado from canal.denuncia limit 1;"),
              "permission denied for table denuncia", ctl_ok)
-    for t in ("clave_empresa", "usuario_personal", "empresa", "registro_auditoria", "directorio_empresas"):
+    for t in ("clave_empresa", "usuario_personal", "empresa", "registro_auditoria", "directorio_empresas",
+              "invitacion_personal", "dispositivo_personal", "sesion_personal"):
         negativo(f"su2) propietario_supresion no borra en {t}", como_supresion(f"delete from canal.{t};"),
                  "permission denied", ctl_ok)
     # Suposicion comprobada: sin la politica de bloqueo, FOR UPDATE no da
@@ -1817,13 +1988,13 @@ def seccion_r():
     CID = dc("ps", "-q", "postgres").out.strip()
     registro = dc("logs", "--no-log-prefix", "postgres").todo
     pasa("Skipping initialization" in registro, "r) el log del contenedor nuevo contiene 'Skipping initialization'")
-    comparar("r) siguen las 8 tablas", sup("select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+    comparar("r) siguen las 11 tablas", sup("select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace "
                                          "where n.nspname = 'canal' and c.relkind = 'r';").lineas(), TABLAS)
     politicas = sup("select tablename, policyname, cmd from pg_policies where schemaname = 'canal';").lineas()
     tablas_con_politicas = {l.split("|")[0] for l in politicas}
-    comparar("r) siguen las 23 politicas definidas en d)", politicas, POLITICAS)
-    pasa(len(politicas) == 23 and len(tablas_con_politicas) == 6,
-         f"r) exactamente 23 politicas repartidas en exactamente 6 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
+    comparar("r) siguen las 32 politicas definidas en d)", politicas, POLITICAS)
+    pasa(len(politicas) == 32 and len(tablas_con_politicas) == 9,
+         f"r) exactamente 32 politicas repartidas en exactamente 9 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
     funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
     comparar("r) siguen las 13 funciones", funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
