@@ -29,8 +29,9 @@ Cómo se ejecuta (desde la raíz del repositorio, con Docker en marcha):
     python tests/security/verificar_esquema.py
 
 Usa un proyecto de Docker propio (canario_esquema), con su red y su volumen, y
-solo levanta el servicio postgres. Nunca toca el proyecto canario. Al terminar
-lo borra todo (down -v). Necesita que existan secrets/contrasena_*.txt (solo
+solo levanta el servicio postgres (con su imagen, db/Dockerfile). Nunca toca el
+proyecto canario. Al terminar lo borra todo (down -v y la imagen construida).
+Necesita que existan secrets/contrasena_*.txt (solo
 comprueba que son ficheros; los de aplicacion y plataforma llegan a un
 contenedor temporal montados en solo lectura, y nunca se leen ni se imprimen).
 
@@ -498,9 +499,9 @@ ESTADO_GIT_ARRANQUE = None
 
 def seccion_a():
     p("=== a) arranque")
-    r = dc("up", "-d", "--wait", "postgres")
-    p(f"up -d --wait postgres -> codigo {r.rc}\n{r.todo.strip()}")
-    pasa(r.rc == 0, "a) up -d --wait postgres termina con codigo 0")
+    r = dc("up", "-d", "--build", "--wait", "postgres")
+    p(f"up -d --build --wait postgres -> codigo {r.rc}\n{r.todo.strip()}")
+    pasa(r.rc == 0, "a) up -d --build --wait postgres termina con codigo 0")
     registro = dc("logs", "--no-log-prefix", "postgres").todo
     if r.rc != 0:
         p("--- log completo de postgres ---")
@@ -2014,12 +2015,15 @@ def seccion_r():
 
 def seccion_s():
     p("=== s) limpieza")
-    r = dc("down", "-v")
-    p(f"down -v -> codigo {r.rc}")
+    # --rmi local: la imagen de postgres se construye (db/Dockerfile) y lleva el
+    # prefijo del proyecto; sin esto quedaría huérfana tras cada ejecución.
+    r = dc("down", "-v", "--rmi", "local")
+    p(f"down -v --rmi local -> codigo {r.rc}")
     for etiqueta, orden in [
         ("contenedor", ["docker", "ps", "-a", "--format", "{{.Names}}"]),
         ("red", ["docker", "network", "ls", "--format", "{{.Name}}"]),
         ("volumen", ["docker", "volume", "ls", "--format", "{{.Name}}"]),
+        ("imagen", ["docker", "image", "ls", "--format", "{{.Repository}}"]),
     ]:
         restos = [n for n in ejecutar(orden).out.split() if n.startswith(PROYECTO)]
         pasa(not restos, f"s) ningun {etiqueta} con prefijo {PROYECTO} {restos if restos else ''}".strip())
@@ -2062,7 +2066,8 @@ def recursos_previos():
     previos = []
     for orden in (["docker", "ps", "-a", "--format", "{{.Names}}"],
                   ["docker", "network", "ls", "--format", "{{.Name}}"],
-                  ["docker", "volume", "ls", "--format", "{{.Name}}"]):
+                  ["docker", "volume", "ls", "--format", "{{.Name}}"],
+                  ["docker", "image", "ls", "--format", "{{.Repository}}"]):
         previos += [n for n in ejecutar(orden).out.split() if n.startswith(PROYECTO)]
     return previos
 
@@ -2083,15 +2088,16 @@ def main():
         if not (RAIZ / "secrets" / f"{nombre}.txt").is_file():
             p(f"PARADA: secrets/{nombre}.txt no existe como fichero")
             terminar_con_parada()
-    imagenes = [l.strip() for l in dc("config", "--images").out.splitlines() if l.strip().startswith("postgres")]
-    IMAGEN = imagenes[0] if imagenes else ""
-    p(f"imagen de postgres: {IMAGEN}")
     parada = None
     try:
-        if not IMAGEN:
-            raise Parada("no hay imagen que empiece por postgres")
         seccion_a()
         CID = dc("ps", "-q", "postgres").out.strip()
+        # La imagen se lee del contenedor en marcha: es la que se construyó con
+        # db/Dockerfile y la que usan los clientes temporales de m) y r).
+        IMAGEN = ejecutar(["docker", "inspect", "--format", "{{.Config.Image}}", CID]).out.strip() if CID else ""
+        p(f"imagen de postgres: {IMAGEN}")
+        if not IMAGEN:
+            raise Parada("no se pudo leer la imagen del contenedor postgres")
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
                         seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_z, seccion_p,
                         seccion_q,
@@ -2105,7 +2111,7 @@ def main():
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
         if parada is not None:
-            dc("down", "-v")
+            dc("down", "-v", "--rmi", "local")
         else:
             seccion_s()
     if parada is not None:

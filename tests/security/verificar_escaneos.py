@@ -1,0 +1,897 @@
+#!/usr/bin/env python3
+"""Batería de escaneos de seguridad: secretos en Git, dependencias de Python,
+análisis estático, vulnerabilidades y secretos de las imágenes, configuración
+de los Dockerfiles y SBOM.
+
+Qué prueba:
+  a) que las herramientas son las fijadas (versión y digest) y responden;
+  b) gitleaks sobre el historial de Git y sobre lo que se podría commitear (lo
+     seguido más lo nuevo no ignorado, sin secrets/), con el secreto
+     enmascarado en la salida, y que en secrets/ Git solo sigue .gitkeep y
+     README.md;
+  c) pip-audit sobre requirements.txt (sin vulnerabilidades conocidas) y que
+     sus hashes coinciden con los ficheros que publica PyPI;
+  d) bandit sobre app/ (sin hallazgos de severidad media o alta y sin # nosec);
+  e) Trivy sobre las cuatro imágenes (api, caddy, postgres y redis): ninguna
+     vulnerabilidad HIGH o CRITICAL con arreglo publicado que no esté declarada
+     como no explotable en tests/security/canario.openvex.json, ningún secreto,
+     declaraciones VEX vigentes (30 días como máximo), con efecto y atadas a la
+     versión exacta del componente; postgres sin gosu y sin root por defecto;
+     las vulnerabilidades sin arreglo se listan (riesgo residual, sección 8 del
+     modelo de amenazas);
+  f) que lo que el VEX declara no alcanzable no lo es: Caddy solo con HTTP/1.1
+     (configuración adaptada y ALPN real), sin file_server y sin ECH;
+  g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL);
+  h) un SBOM CycloneDX por imagen, que se deja en el directorio temporal del
+     sistema (canario_sbom);
+  i) versiones de las herramientas y fecha de la base de datos de Trivy, para
+     poder reproducir el resultado.
+Cada prueba negativa lleva su control positivo con datos sintéticos: si el
+control falla, el resultado es SIN CONCLUSION, nunca PASA. Los oráculos son
+literales.
+
+Cómo se ejecuta (desde la raíz del repositorio, en PowerShell, con Docker en
+marcha y conexión a internet):
+
+    python tests/security/verificar_escaneos.py
+
+Necesita red para descargar las imágenes de las herramientas, los paquetes de
+pip-audit y bandit (con hashes), la base de datos de Trivy y los avisos de OSV.
+Si falla algo de eso, el resultado es SIN CONCLUSION. Los escaneos de Trivy y
+de gitleaks se ejecutan después sin red (--network none).
+
+Usa un proyecto de Docker propio (canario_escaneos): construye las imágenes de
+postgres, api y caddy con docker-compose.yml y no levanta ningún servicio. Los
+contenedores de las herramientas no reciben el socket de Docker (las imágenes
+se les pasan exportadas con docker save), ni secretos, ni el directorio
+secrets/: el historial de Git se monta como .git en solo lectura y lo demás es
+una copia temporal sin secrets/. Todos corren con el sistema de ficheros de
+solo lectura, sin capacidades, sin escalada de privilegios y sin root. Al
+terminar lo borra todo (imágenes construidas, volumen de caché, red y
+contenedores). No lee ningún secreto: solo comprueba que los ficheros de
+secrets/ existen.
+
+Los ficheros auxiliares van a un directorio temporal del sistema, nunca dentro
+del repositorio. La salida completa se guarda en verificacion_escaneos.txt
+dentro del directorio temporal del sistema. El código de salida es 0 solo si
+el resultado global es OK.
+
+Solo usa la biblioteca estándar.
+"""
+import datetime
+import json
+import pathlib
+import re
+import secrets
+import shutil
+import string
+import subprocess
+import sys
+import tempfile
+import traceback
+
+RAIZ = pathlib.Path.cwd()
+PROYECTO = "canario_escaneos"
+SALIDA = pathlib.Path(tempfile.gettempdir()) / "verificacion_escaneos.txt"
+DIR_SBOM = pathlib.Path(tempfile.gettempdir()) / "canario_sbom"
+BASE = ["docker", "compose", "-p", PROYECTO, "-f", "docker-compose.yml"]
+
+lineas_salida = []
+estado = {"falla": False, "sin_conclusion": False}
+
+# ---------------------------------------------------------------------------
+# Oráculos literales
+# ---------------------------------------------------------------------------
+# Herramientas fijadas por versión y digest (índice multiarquitectura).
+# Trivy 0.74.0: release inmutable del 14 de agosto de 2026, posterior al
+# compromiso de marzo (GHSA-69fq-xp46-6x23); el mismo digest en Docker Hub y
+# GHCR; firma cosign verificada al fijarlo con la identidad
+# reusable-release.yaml@refs/tags/v0.74.0. gitleaks 8.30.1: el mismo digest en
+# Docker Hub y GHCR; no publica firma. Ninguna tenía menos de 14 días.
+IMG_TRIVY = "aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969"
+IMG_GITLEAKS = "ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
+# El mismo Python que la imagen de la API.
+IMG_PYTHON = "python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"
+VERSION_TRIVY = "Version: 0.74.0"
+VERSION_GITLEAKS = "v8.30.1"
+VERSION_PIP_AUDIT = "pip-audit 2.10.1"
+VERSION_BANDIT = "bandit 1.9.4"
+# Repositorio de la base de datos explícito: el oficial, no un espejo.
+DB_TRIVY = "ghcr.io/aquasecurity/trivy-db:2"
+
+# Controles
+REGLA_GITLEAKS = "github-pat"
+REGLA_SECRETO_TRIVY = "github-pat"
+AVISO_CONTROL_PIP = "PYSEC-2019-217"  # Jinja2 2.10, CVE-2019-10906
+CVE_CONTROL_TRIVY = "CVE-2019-10906"
+REQUISITO_VULNERABLE = (
+    "jinja2==2.10 \\\n"
+    "    --hash=sha256:74c935a1b8bb9a3947c50a54766a969d4846290e1e788ea44c1392163723c3bd \\\n"
+    "    --hash=sha256:f84be1bb0040caca4cea721fcbbbbd61f9be9464ca236387158b0feea01914a4\n"
+)
+MENSAJE_HASH = "THESE PACKAGES DO NOT MATCH THE HASHES"
+PAQUETE_ALTERADO = "fastapi"
+TEST_BANDIT_CONTROL = "B602"
+CODIGO_BANDIT_CONTROL = "import subprocess\n\n\ndef f(orden):\n    return subprocess.call(orden, shell=True)\n"
+CHECK_CONTROL_DOCKERFILE = "DS-0002"
+DOCKERFILE_CONTROL = "FROM alpine:3.20\nRUN echo hola\n"
+SEGUIDOS_EN_SECRETS = ["secrets/.gitkeep", "secrets/README.md"]
+SBOM_API_CONTROL = ("fastapi", "0.143.0")
+
+# Postgres
+GOSU = "/usr/local/bin/gosu"
+USUARIO_POSTGRES = "70:70"
+IMG_POSTGRES_BASE = "postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+
+# VEX
+VEX = RAIZ / "tests" / "security" / "canario.openvex.json"
+MAX_DIAS_VEX = 30
+JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present",
+                           "vulnerable_code_not_in_execute_path",
+                           "vulnerable_code_cannot_be_controlled_by_adversary",
+                           "inline_mitigations_already_exist"}
+CVES_VEX_CADDY = {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031"}
+# Para el control de atadura a la versión: las mismas declaraciones con la
+# versión siguiente del componente no deben suprimir nada.
+VERSIONES_VEX = {"pkg:golang/stdlib@v1.26.8": "pkg:golang/stdlib@v1.26.9",
+                 "pkg:golang/golang.org/x/net@v0.59.0": "pkg:golang/golang.org/x/net@v0.60.0"}
+
+# Caddy
+PROTOCOLOS_CADDY = ["h1"]
+ALPN_REAL = "http/1.1"
+ALPN_CONTROL = "h2"
+
+IMAGENES = ("api", "caddy", "postgres", "redis")
+SEVERIDADES = "HIGH,CRITICAL"
+
+TEMPORAL = None
+ESTADO_GIT_ARRANQUE = None
+NOMBRES = {}
+
+
+# ---------------------------------------------------------------------------
+# Utilidades de ejecución y de informe
+# ---------------------------------------------------------------------------
+class R:
+    def __init__(self, rc, out, err):
+        self.rc, self.out, self.err = rc, out, err
+
+    @property
+    def todo(self):
+        return self.out + self.err
+
+
+class Parada(Exception):
+    pass
+
+
+class SinRed(Exception):
+    """Un paso que necesita red falló: lo que depende de él queda SIN CONCLUSION."""
+
+
+def p(texto=""):
+    print(texto, flush=True)
+    lineas_salida.append(texto)
+
+
+def ejecutar(args, entrada=None, timeout=900, cwd=None):
+    # check=False explícito: el código de salida lo revisa cada prueba.
+    r = subprocess.run(args, input=entrada, capture_output=True, timeout=timeout, check=False, cwd=cwd)
+    return R(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
+
+
+def dc(*args):
+    return ejecutar(BASE + list(args))
+
+
+def pasa(cond, texto):
+    p(("PASA  " if cond else "FALLA ") + texto)
+    if not cond:
+        estado["falla"] = True
+
+
+def sinc(texto):
+    p("SIN CONCLUSION " + texto)
+    estado["sin_conclusion"] = True
+
+
+def negativo(nombre, cond, control_ok, detalle=""):
+    if not control_ok:
+        sinc(f"{nombre}: el control positivo fallo {detalle}".rstrip())
+        return
+    pasa(cond, nombre)
+    if not cond and detalle:
+        p(f"   {detalle}")
+
+
+def montaje(origen, destino, escritura=False):
+    return ["--mount", f"type=bind,src={origen},dst={destino}" + ("" if escritura else ",readonly")]
+
+
+def herramienta(imagen, args, montajes=(), red=False, entrypoint=None, timeout=900, tmp_exec=False):
+    """Contenedor desechable con mínimo privilegio: raíz de solo lectura, sin
+    capacidades, sin escalada, usuario nobody, /tmp en memoria y sin red salvo
+    que la necesite."""
+    orden = ["docker", "run", "--rm", "--read-only", "--cap-drop", "ALL",
+             "--security-opt", "no-new-privileges", "--user", "65534:65534", "-e", "HOME=/tmp",
+             "--tmpfs", "/tmp:size=1g" + (",exec" if tmp_exec else "")]
+    if not red:
+        orden += ["--network", "none"]
+    if entrypoint:
+        orden += ["--entrypoint", entrypoint]
+    for m in montajes:
+        orden += m
+    return ejecutar(orden + [imagen] + list(args), timeout=timeout)
+
+
+def token_sintetico():
+    """Token con la forma de un PAT de GitHub, aleatorio en cada ejecución: no
+    es de nadie y nunca se imprime."""
+    alfabeto = string.ascii_letters + string.digits
+    return "ghp_" + "".join(secrets.choice(alfabeto) for _ in range(36))
+
+
+def json_de(ruta):
+    try:
+        return json.loads(pathlib.Path(ruta).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def escribir(ruta, texto):
+    ruta = pathlib.Path(ruta)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text(texto, encoding="utf-8", newline="\n")
+    return ruta
+
+
+# ---------------------------------------------------------------------------
+# a) Herramientas
+# ---------------------------------------------------------------------------
+def seccion_a():
+    p("=== a) herramientas fijadas")
+    for imagen in (IMG_TRIVY, IMG_GITLEAKS, IMG_PYTHON):
+        r = ejecutar(["docker", "pull", "-q", imagen], timeout=600)
+        if r.rc != 0:
+            raise SinRed(f"no se pudo descargar {imagen}: {r.err.strip()[-200:]}")
+        digest = imagen.split("@", 1)[1]
+        repo_digests = ejecutar(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", imagen]).out
+        pasa(digest in repo_digests, f"a) {imagen.split('@')[0]} tiene el digest fijado")
+    r = herramienta(IMG_TRIVY, ["--version"])
+    pasa(VERSION_TRIVY in r.out, f"a) trivy --version contiene '{VERSION_TRIVY}'")
+    r = herramienta(IMG_GITLEAKS, ["version"])
+    pasa(r.out.strip() == VERSION_GITLEAKS, f"a) gitleaks version es '{VERSION_GITLEAKS}'")
+
+
+# ---------------------------------------------------------------------------
+# b) Secretos en Git (gitleaks)
+# ---------------------------------------------------------------------------
+GIT_SEGURO = ["-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=*"]
+
+
+def gitleaks(modo, origen, informe, montaje_origen):
+    """gitleaks sin red, con el secreto enmascarado (--redact) y el informe en JSON."""
+    salida = TEMPORAL / "gitleaks"
+    salida.mkdir(exist_ok=True)
+    r = herramienta(IMG_GITLEAKS, [modo, origen, "--redact", "--no-banner", "--report-format", "json",
+                                   "--report-path", f"/out/{informe}"],
+                    montajes=[montaje_origen, montaje(salida, "/out", escritura=True)])
+    return r, json_de(salida / informe)
+
+
+def gitleaks_git(ruta_git, informe):
+    salida = TEMPORAL / "gitleaks"
+    salida.mkdir(exist_ok=True)
+    orden = ["docker", "run", "--rm", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+             "--user", "65534:65534", "--network", "none", *GIT_SEGURO,
+             *montaje(ruta_git, "/repo/.git"), *montaje(salida, "/out", escritura=True),
+             IMG_GITLEAKS, "git", "/repo", "--redact", "--no-banner", "--report-format", "json",
+             "--report-path", f"/out/{informe}"]
+    r = ejecutar(orden)
+    return r, json_de(salida / informe)
+
+
+def git_control(*args, cwd):
+    """git en el repositorio de control, sin la configuración global ni hooks."""
+    ganchos = TEMPORAL / "sin_ganchos"
+    ganchos.mkdir(exist_ok=True)
+    base = ["git", "-c", "user.name=control", "-c", "user.email=control@canario.invalid",
+            "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", f"core.hooksPath={ganchos}"]
+    return ejecutar(base + list(args), cwd=cwd)
+
+
+def seccion_b():
+    p("=== b) secretos en Git (gitleaks)")
+    # Control: un repositorio temporal, fuera del proyecto, con un token
+    # sintético commiteado. gitleaks debe encontrarlo en el historial y en el
+    # directorio, y la salida no debe contener el token.
+    token = token_sintetico()
+    ctl = TEMPORAL / "control_git"
+    ctl.mkdir()
+    escribir(ctl / "config.py", f'token = "{token}"\n')
+    ok_git = all(git_control(*a, cwd=ctl).rc == 0 for a in (["init", "-q"], ["add", "config.py"], ["commit", "-qm", "control"]))
+    if not ok_git:
+        raise Parada("no se pudo crear el repositorio de control con git")
+    r_ch, rep_ch = gitleaks_git(ctl / ".git", "control_historial.json")
+    control_historial = r_ch.rc == 1 and bool(rep_ch) and rep_ch[0].get("RuleID") == REGLA_GITLEAKS
+    pasa(control_historial, f"b) control: gitleaks git encuentra el token sintetico con la regla {REGLA_GITLEAKS}")
+    copia = TEMPORAL / "control_dir"
+    copia.mkdir()
+    shutil.copyfile(ctl / "config.py", copia / "config.py")
+    r_cd, rep_cd = gitleaks("dir", "/c", "control_dir.json", montaje(copia, "/c"))
+    control_dir = r_cd.rc == 1 and bool(rep_cd) and rep_cd[0].get("RuleID") == REGLA_GITLEAKS
+    pasa(control_dir, f"b) control: gitleaks dir encuentra el token sintetico con la regla {REGLA_GITLEAKS}")
+    textos = r_ch.todo + r_cd.todo + json.dumps(rep_ch) + json.dumps(rep_cd)
+    negativo("b) --redact: el token no aparece en la salida ni en los informes (Secret y Match = REDACTED)",
+             token not in textos and all(x.get("Secret") == "REDACTED" for x in (rep_ch or []) + (rep_cd or [])),
+             control_historial and control_dir)
+
+    # Historial real: solo se monta .git, en solo lectura.
+    r, rep = gitleaks_git(RAIZ / ".git", "historial.json")
+    negativo("b) historial de Git: ningun hallazgo", r.rc == 0 and rep == [], control_historial,
+             f"rc={r.rc} reglas={[x.get('RuleID') for x in rep or []]} ficheros={[x.get('File') for x in rep or []]}")
+    commits = re.search(r"(\d+) commits scanned", r.todo)
+    p(f"   commits escaneados: {commits.group(1) if commits else 'desconocido'}")
+
+    # Candidatos a commit: lo seguido y lo nuevo no ignorado, copiado a un
+    # directorio temporal SIN secrets/ (no se abre nada de ese directorio).
+    r = ejecutar(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=RAIZ)
+    if r.rc != 0:
+        raise Parada("git ls-files falla")
+    candidatos = TEMPORAL / "candidatos"
+    copiados = []
+    for ruta in r.out.split("\0"):
+        if not ruta or ruta.startswith("secrets/"):
+            continue
+        origen = RAIZ / ruta
+        if not origen.is_file():  # borrado en el árbol de trabajo
+            continue
+        destino = candidatos / ruta
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(origen, destino)
+        copiados.append(ruta)
+    en_secrets = [c.relative_to(candidatos).as_posix() for c in candidatos.rglob("*")
+                  if c.relative_to(candidatos).as_posix().startswith("secrets")]
+    pasa(copiados and not en_secrets, f"b) copia de candidatos: {len(copiados)} ficheros, ninguno bajo secrets/ {en_secrets if en_secrets else ''}".strip())
+    r, rep = gitleaks("dir", "/c", "candidatos.json", montaje(candidatos, "/c"))
+    negativo("b) candidatos a commit (seguidos y nuevos no ignorados, sin secrets/): ningun hallazgo",
+             r.rc == 0 and rep == [], control_dir,
+             f"rc={r.rc} reglas={[x.get('RuleID') for x in rep or []]} ficheros={[x.get('File') for x in rep or []]}")
+
+    # secrets/: Git solo sigue los dos ficheros públicos y nada más es candidato.
+    seguidos = sorted(ejecutar(["git", "ls-files", "secrets/"], cwd=RAIZ).out.split())
+    pasa(seguidos == SEGUIDOS_EN_SECRETS, f"b) en secrets/ Git solo sigue {SEGUIDOS_EN_SECRETS} (sigue {seguidos})")
+    nuevos = ejecutar(["git", "ls-files", "-o", "--exclude-standard", "secrets/"], cwd=RAIZ).out.split()
+    pasa(not nuevos, f"b) en secrets/ no hay ficheros nuevos sin ignorar {nuevos if nuevos else ''}".strip())
+
+
+# ---------------------------------------------------------------------------
+# c) y d) Dependencias de Python (pip-audit, hashes) y análisis estático (bandit)
+# ---------------------------------------------------------------------------
+GUION_PYTHON = """set -u
+python -m venv --without-pip /tmp/v || exit 10
+python -m pip --python /tmp/v/bin/python install -q --require-hashes --only-binary :all: \\
+    -r /h/requisitos.txt > /out/instalar.txt 2>&1
+echo $? > /out/instalar.rc
+[ "$(cat /out/instalar.rc)" = 0 ] || exit 0
+/tmp/v/bin/pip-audit --version > /out/version_pip_audit.txt 2>&1
+/tmp/v/bin/bandit --version > /out/version_bandit.txt 2>&1
+A="/tmp/v/bin/pip-audit --require-hashes --disable-pip --vulnerability-service osv --progress-spinner off --format json"
+$A -r /control/vulnerable.txt > /out/audit_control.json 2> /out/audit_control.err; echo $? > /out/audit_control.rc
+$A -r /repo/requirements.txt > /out/audit_real.json 2> /out/audit_real.err; echo $? > /out/audit_real.rc
+D="python -m pip download -q --no-deps --require-hashes --only-binary :all:"
+$D -d /tmp/dl_real -r /repo/requirements.txt > /out/hash_real.txt 2>&1; echo $? > /out/hash_real.rc
+$D -d /tmp/dl_control -r /control/alterado.txt > /out/hash_control.txt 2>&1; echo $? > /out/hash_control.rc
+/tmp/v/bin/bandit -f json -q /control/control_bandit.py > /out/bandit_control.json 2> /out/bandit_control.err
+/tmp/v/bin/bandit -r -f json -q /repo/app > /out/bandit_real.json 2> /out/bandit_real.err
+exit 0
+"""
+
+
+def requirements_alterado():
+    """requirements.txt con TODOS los hashes de un paquete alterados en un dígito."""
+    texto = (RAIZ / "requirements.txt").read_text(encoding="utf-8")
+    bloque = re.search(rf"^{PAQUETE_ALTERADO}==\S+ \\\n(?:\s+--hash=sha256:[0-9a-f]{{64}}(?: \\)?\n)+", texto, re.M)
+    if not bloque:
+        raise Parada(f"no se encuentra {PAQUETE_ALTERADO} con hashes en requirements.txt")
+    nuevo = bloque.group(0)
+    for h in re.findall(r"sha256:([0-9a-f]{64})", nuevo):
+        nuevo = nuevo.replace(h, ("0" if h[0] != "0" else "1") + h[1:])
+    return texto.replace(bloque.group(0), nuevo)
+
+
+def leer(ruta):
+    try:
+        return pathlib.Path(ruta).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def seccion_c_d():
+    p("=== c) dependencias de Python (pip-audit y hashes de requirements.txt)")
+    control = TEMPORAL / "control_python"
+    escribir(control / "vulnerable.txt", REQUISITO_VULNERABLE)
+    escribir(control / "alterado.txt", requirements_alterado())
+    escribir(control / "control_bandit.py", CODIGO_BANDIT_CONTROL)
+    guion = escribir(TEMPORAL / "python" / "guion.sh", GUION_PYTHON)
+    salida = TEMPORAL / "python" / "salida"
+    salida.mkdir(parents=True)
+    r = herramienta(IMG_PYTHON, ["sh", "/trabajo/guion.sh"], red=True, tmp_exec=True, timeout=1200, montajes=[
+        montaje(guion.parent, "/trabajo"), montaje(salida, "/out", escritura=True), montaje(control, "/control"),
+        montaje(RAIZ / "requirements.txt", "/repo/requirements.txt"),
+        montaje(RAIZ / "tests" / "security" / "requisitos_escaneos.txt", "/h/requisitos.txt"),
+        montaje(RAIZ / "app", "/repo/app")])
+    if r.rc != 0 or leer(salida / "instalar.rc").strip() != "0":
+        p(leer(salida / "instalar.txt")[-600:])
+        raise SinRed("no se pudieron instalar pip-audit y bandit con --require-hashes")
+    pasa(leer(salida / "version_pip_audit.txt").strip() == VERSION_PIP_AUDIT, f"c) {VERSION_PIP_AUDIT} instalado con --require-hashes")
+
+    # pip-audit: control con Jinja2 2.10 y requirements.txt real.
+    ctl = json_de(salida / "audit_control.json")
+    avisos_ctl = {v["id"] for d in (ctl or {}).get("dependencies", []) for v in d.get("vulns", [])}
+    control_audit = AVISO_CONTROL_PIP in avisos_ctl
+    pasa(control_audit, f"c) control: pip-audit (OSV) detecta {AVISO_CONTROL_PIP} en jinja2 2.10")
+    if not control_audit and not ctl:
+        p(leer(salida / "audit_control.err")[-400:])
+    real = json_de(salida / "audit_real.json")
+    dependencias = (real or {}).get("dependencies", [])
+    avisos = [(d["name"], d["version"], v["id"]) for d in dependencias for v in d.get("vulns", [])]
+    leida = any(d["name"] == "fastapi" for d in dependencias)
+    negativo(f"c) requirements.txt: ninguna vulnerabilidad conocida en {len(dependencias)} dependencias",
+             leer(salida / "audit_real.rc").strip() == "0" and not avisos, control_audit and leida, str(avisos))
+
+    # Integridad: pip-audit con --disable-pip solo exige que haya hash, no que
+    # sea válido (pip_audit/_dependency_source/requirement.py). La validez la
+    # comprueba pip al descargar los wheels de esta plataforma, igual que al
+    # construir la imagen.
+    control_hash = leer(salida / "hash_control.rc").strip() != "0" and MENSAJE_HASH in leer(salida / "hash_control.txt")
+    pasa(control_hash, f"c) control: con los hashes de {PAQUETE_ALTERADO} alterados, pip download falla con '{MENSAJE_HASH}'")
+    negativo("c) los hashes de requirements.txt coinciden con los ficheros de PyPI (pip download --require-hashes)",
+             leer(salida / "hash_real.rc").strip() == "0", control_hash, leer(salida / "hash_real.txt")[-400:])
+
+    p("=== d) analisis estatico de app/ (bandit)")
+    pasa(leer(salida / "version_bandit.txt").splitlines()[:1] == [VERSION_BANDIT], f"d) {VERSION_BANDIT} instalado con --require-hashes")
+    ctl = json_de(salida / "bandit_control.json")
+    control_bandit = any(x["test_id"] == TEST_BANDIT_CONTROL for x in (ctl or {}).get("results", []))
+    pasa(control_bandit, f"d) control: bandit detecta {TEST_BANDIT_CONTROL} (subprocess con shell=True)")
+    real = json_de(salida / "bandit_real.json")
+    if real is None:
+        raise Parada("bandit no produjo JSON sobre app/")
+    graves = [(x["test_id"], x["issue_severity"], x["filename"], x["line_number"]) for x in real["results"]
+              if x["issue_severity"] in ("MEDIUM", "HIGH")]
+    leves = [(x["test_id"], x["filename"], x["line_number"]) for x in real["results"] if x["issue_severity"] == "LOW"]
+    totales = real["metrics"]["_totals"]
+    negativo("d) app/: ningun hallazgo de severidad media o alta", not graves, control_bandit and totales["loc"] > 0, str(graves))
+    # Un # nosec silencia a bandit: cualquiera nuevo debe revisarse, no pasar solo.
+    pasa(totales["nosec"] == 0, f"d) app/: ningun # nosec (hay {totales['nosec']})")
+    p(f"   lineas analizadas: {totales['loc']}; hallazgos leves: {leves if leves else 'ninguno'}")
+
+
+# ---------------------------------------------------------------------------
+# e) Imágenes (Trivy)
+# ---------------------------------------------------------------------------
+def trivy(args, montajes=(), red=False, timeout=900):
+    cache = ["-v", f"{NOMBRES['cache']}:/cache"]
+    return herramienta(IMG_TRIVY, ["--cache-dir", "/cache", *args], montajes=[cache, *montajes], red=red, timeout=timeout)
+
+
+def escanear(nombre, vex=None, extra=()):
+    """Trivy sobre la imagen exportada, sin red y sin actualizar la base de datos."""
+    montajes = [montaje(TEMPORAL / "imagenes", "/img")]
+    args = ["image", "--input", f"/img/{nombre}.tar", "--scanners", "vuln,secret", "--severity", SEVERIDADES,
+            "--skip-db-update", "--offline-scan", "--skip-version-check", "--no-progress", "-q", "--format", "json",
+            "--show-suppressed", *extra]
+    if vex is not None:
+        montajes.append(montaje(vex.parent, "/vex"))
+        args += ["--vex", f"/vex/{vex.name}"]
+    r = trivy(args, montajes=montajes)
+    try:
+        return r, json.loads(r.out)
+    except ValueError:
+        return r, None
+
+
+def hallazgos(informe):
+    vulns, suprimidas, secretos_img = [], [], []
+    for res in (informe or {}).get("Results") or []:
+        for v in res.get("Vulnerabilities") or []:
+            vulns.append((res["Target"], v))
+        for s in res.get("Secrets") or []:
+            secretos_img.append((res["Target"], s["RuleID"]))
+        for m in res.get("ExperimentalModifiedFindings") or []:
+            suprimidas.append(m)
+    return vulns, suprimidas, secretos_img
+
+
+def preparar_imagenes():
+    # gestion está bajo su perfil: sin --profile, config no lo incluye.
+    r = dc("--profile", "gestion", "config", "--format", "json")
+    try:
+        servicios = json.loads(r.out)["services"]
+    except (ValueError, KeyError):
+        raise Parada("docker compose config no devuelve JSON") from None
+    # gestion se construye con el mismo Dockerfile y contexto que la API: su
+    # escaneo es el de la API.
+    pasa(servicios["gestion"].get("build") == servicios["api"].get("build"),
+         "e) gestion se construye exactamente como la API (mismo build): escanear api la cubre")
+    r = dc("build", "postgres", "api", "caddy")
+    if r.rc != 0:
+        raise SinRed(f"no se pudieron construir las imagenes: {r.err.strip()[-300:]}")
+    NOMBRES["redis"] = servicios["redis"]["image"]
+    r = ejecutar(["docker", "pull", "-q", NOMBRES["redis"]], timeout=600)
+    if r.rc != 0:
+        raise SinRed(f"no se pudo descargar {NOMBRES['redis']}")
+    for servicio in ("api", "caddy", "postgres"):
+        NOMBRES[servicio] = f"{PROYECTO}-{servicio}"
+    (TEMPORAL / "imagenes").mkdir()
+    for nombre in IMAGENES:
+        r = ejecutar(["docker", "save", "-o", str(TEMPORAL / "imagenes" / f"{nombre}.tar"), NOMBRES[nombre]])
+        if r.rc != 0:
+            raise Parada(f"docker save {NOMBRES[nombre]} falla: {r.err.strip()[-200:]}")
+    # Caché de la base de datos en un volumen del proyecto (se borra al final),
+    # del usuario nobody: el único paso como root es este chown, con solo la
+    # capacidad CHOWN.
+    r = ejecutar(["docker", "volume", "create", NOMBRES["cache"]])
+    if r.rc != 0:
+        raise Parada("no se pudo crear el volumen de cache")
+    r = ejecutar(["docker", "run", "--rm", "--network", "none", "--user", "0", "--cap-drop", "ALL", "--cap-add", "CHOWN",
+                  "--entrypoint", "chown", "-v", f"{NOMBRES['cache']}:/cache", IMG_TRIVY, "65534:65534", "/cache"])
+    if r.rc != 0:
+        raise Parada("no se pudo preparar el volumen de cache")
+    r = trivy(["image", "--download-db-only", "--db-repository", DB_TRIVY, "--skip-version-check", "--no-progress", "-q"],
+              red=True, timeout=600)
+    if r.rc != 0:
+        raise SinRed(f"no se pudo descargar la base de datos de Trivy: {r.err.strip()[-300:]}")
+
+
+def seccion_e():
+    p("=== e) imagenes (Trivy: vulnerabilidades y secretos)")
+    preparar_imagenes()
+
+    # Postgres: sin gosu y sin root por defecto. Control: la imagen base lo
+    # trae y no declara usuario.
+    def tiene_gosu(imagen):
+        r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--user", "70:70",
+                      "--entrypoint", "sh", imagen, "-c", f"test -e {GOSU} && echo si || echo no"])
+        return r.out.strip()
+
+    def usuario(imagen):
+        return ejecutar(["docker", "image", "inspect", "--format", "{{.Config.User}}", imagen]).out.strip()
+
+    ejecutar(["docker", "pull", "-q", IMG_POSTGRES_BASE], timeout=600)
+    negativo(f"e) postgres: la imagen no contiene {GOSU}", tiene_gosu(NOMBRES["postgres"]) == "no",
+             tiene_gosu(IMG_POSTGRES_BASE) == "si")
+    negativo(f"e) postgres: la imagen declara USER {USUARIO_POSTGRES}", usuario(NOMBRES["postgres"]) == USUARIO_POSTGRES,
+             usuario(IMG_POSTGRES_BASE) == "")
+
+    # Control de Trivy: rootfs sintético con Jinja2 2.10 y un token.
+    token = token_sintetico()
+    rfs = TEMPORAL / "control_rootfs"
+    escribir(rfs / "usr/lib/python3.12/site-packages/Jinja2-2.10.dist-info/METADATA",
+             "Metadata-Version: 2.1\nName: Jinja2\nVersion: 2.10\n")
+    escribir(rfs / "etc/config.py", f'token = "{token}"\n')
+    r = trivy(["rootfs", "/rfs", "--scanners", "vuln,secret", "--severity", SEVERIDADES, "--skip-db-update",
+               "--offline-scan", "--skip-version-check", "--no-progress", "-q", "--format", "json"],
+              montajes=[montaje(rfs, "/rfs")])
+    vulns, _, secretos_ctl = hallazgos(json_de_texto(r.out))
+    control_vuln = any(v["VulnerabilityID"] == CVE_CONTROL_TRIVY for _, v in vulns)
+    control_secreto = any(regla == REGLA_SECRETO_TRIVY for _, regla in secretos_ctl)
+    pasa(control_vuln, f"e) control: Trivy detecta {CVE_CONTROL_TRIVY} en un rootfs con Jinja2 2.10")
+    pasa(control_secreto, f"e) control: Trivy detecta un secreto {REGLA_SECRETO_TRIVY} en el rootfs")
+    negativo("e) control: el token sintetico no aparece en la salida de Trivy", token not in r.todo, control_secreto)
+
+    # VEX: forma y vigencia de cada declaración.
+    documento = json_de(VEX)
+    if documento is None:
+        raise Parada(f"{VEX} no es JSON valido")
+    ahora = datetime.datetime.now(datetime.timezone.utc)
+    for d in documento.get("statements", []):
+        cve = d["vulnerability"]["name"]
+        momento = datetime.datetime.fromisoformat(d.get("timestamp") or documento["timestamp"])
+        dias = (ahora - momento).total_seconds() / 86400
+        pasa(-1 <= dias <= MAX_DIAS_VEX, f"e) VEX {cve}: declaracion con {dias:.1f} dias (maximo {MAX_DIAS_VEX}; caducada obliga a revisarla)")
+        pasa(d.get("status") == "not_affected" and d.get("justification") in JUSTIFICACIONES_OPENVEX
+             and len(d.get("impact_statement", "")) > 40,
+             f"e) VEX {cve}: not_affected con justificacion OpenVEX valida ({d.get('justification')}) e impact_statement")
+        subcomponentes = [s["@id"] for prod in d["products"] for s in prod.get("subcomponents", [])]
+        pasa(subcomponentes and all("@" in s for s in subcomponentes),
+             f"e) VEX {cve}: atada a version exacta del componente {subcomponentes}")
+
+    # Caddy sin VEX (control: el VEX es lo que las suprime), con VEX y con el
+    # VEX movido a la versión siguiente (control de atadura a la versión).
+    _, sin_vex = escanear("caddy")
+    cves_sin_vex = {v["VulnerabilityID"] for _, v in hallazgos(sin_vex)[0]}
+    control_vex = CVES_VEX_CADDY <= cves_sin_vex
+    pasa(control_vex, f"e) control: sin VEX, Trivy reporta en caddy {sorted(CVES_VEX_CADDY)}")
+    texto = VEX.read_text(encoding="utf-8")
+    for actual, siguiente in VERSIONES_VEX.items():
+        texto = texto.replace(actual, siguiente)
+    vex_movido = escribir(TEMPORAL / "vex_movido" / "movido.openvex.json", texto)
+    _, movido = escanear("caddy", vex=vex_movido)
+    cves_movido = {v["VulnerabilityID"] for _, v in hallazgos(movido)[0]}
+    negativo("e) VEX atado a la version: con otra version del componente no suprime nada",
+             CVES_VEX_CADDY <= cves_movido, control_vex, f"siguen {sorted(cves_movido & CVES_VEX_CADDY)}")
+
+    # Las cuatro imágenes con el VEX real.
+    suprimidas_total = set()
+    for nombre in IMAGENES:
+        r, informe = escanear(nombre, vex=VEX)
+        if informe is None:
+            raise Parada(f"Trivy no produjo JSON para {nombre}: {r.err.strip()[-300:]}")
+        vulns, suprimidas, secretos_img = hallazgos(informe)
+        con_arreglo = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("InstalledVersion"), v.get("FixedVersion"))
+                              for _, v in vulns if v.get("FixedVersion")})
+        sin_arreglo = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("Status")) for _, v in vulns if not v.get("FixedVersion")})
+        for m in suprimidas:
+            if m.get("Status") == "not_affected" and str(m.get("Source", "")).endswith(VEX.name):
+                suprimidas_total.add((nombre, m["Finding"]["VulnerabilityID"]))
+        negativo(f"e) {nombre}: ninguna vulnerabilidad {SEVERIDADES} con arreglo sin declarar en el VEX",
+                 not con_arreglo, control_vuln, str(con_arreglo))
+        negativo(f"e) {nombre}: ningun secreto en la imagen", not secretos_img, control_secreto, str(secretos_img))
+        so = (informe.get("Metadata") or {}).get("OS") or {}
+        p(f"   {nombre} ({so.get('Family', '?')} {so.get('Name', '')}): sin arreglo publicado {len(sin_arreglo)}"
+          + (f" -> {sorted({c for c, _, _ in sin_arreglo})}" if sin_arreglo else ""))
+    for cve in sorted(CVES_VEX_CADDY):
+        negativo(f"e) VEX {cve}: suprime el hallazgo en caddy (una declaracion sin efecto se revisa y se retira)",
+                 ("caddy", cve) in suprimidas_total, control_vex)
+
+
+def json_de_texto(texto):
+    try:
+        return json.loads(texto)
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# f) Alcanzabilidad en Caddy (lo que sostiene el VEX)
+# ---------------------------------------------------------------------------
+CLIENTE_ALPN = """import socket
+import ssl
+import sys
+import time
+
+# Ofrece h2 y http/1.1 por ALPN y escribe el protocolo que elige cada servidor.
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+ctx.set_alpn_protocols(["h2", "http/1.1"])
+for host in sys.argv[1:]:
+    for _ in range(60):
+        try:
+            with socket.create_connection((host, 8443), timeout=5) as s:
+                with ctx.wrap_socket(s, server_hostname="localhost") as t:
+                    print(host, t.selected_alpn_protocol())
+                    break
+        except OSError:
+            time.sleep(0.5)
+    else:
+        print(host, "sin-conexion")
+"""
+
+
+def caddyfile_control(cambios):
+    texto = (RAIZ / "proxy" / "Caddyfile").read_text(encoding="utf-8")
+    for viejo, nuevo in cambios:
+        if viejo not in texto:
+            raise Parada(f"el Caddyfile no contiene {viejo.strip()!r}: el control no se puede construir")
+        texto = texto.replace(viejo, nuevo, 1)
+    return texto
+
+
+def adaptar(caddyfile=None):
+    montajes, ruta = [], "/etc/caddy/Caddyfile"
+    if caddyfile is not None:
+        montajes, ruta = [montaje(caddyfile.parent, "/c")], f"/c/{caddyfile.name}"
+    r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                  *[x for m in montajes for x in m], "--entrypoint", "caddy", NOMBRES["caddy"], "adapt", "--config", ruta])
+    configuracion = json_de_texto(r.out)
+    if configuracion is None:
+        raise Parada(f"caddy adapt falla: {r.err.strip()[-300:]}")
+    servidores = configuracion["apps"]["http"]["servers"].values()
+    return {"protocolos": [s.get("protocols") for s in servidores],
+            "file_server": '"handler": "file_server"' in json.dumps(configuracion),
+            "ech": "encrypted_client_hello" in json.dumps(configuracion["apps"].get("tls", {}))}
+
+
+def seccion_f():
+    p("=== f) alcanzabilidad en Caddy (lo que sostiene el VEX)")
+    real = adaptar()
+    control = adaptar(escribir(TEMPORAL / "caddy_adapt" / "Caddyfile", caddyfile_control([
+        ("\tprotocols h1\n", "\tprotocols h1 h2\n"),
+        ("\tskip_install_trust\n", "\tskip_install_trust\n\tech ech.canario.invalid\n"),
+        ("\treverse_proxy api:8000 {", "\tfile_server /estatico/*\n\treverse_proxy api:8000 {")])))
+    negativo(f"f) configuracion adaptada: todos los servidores con protocols {PROTOCOLOS_CADDY} (sin HTTP/2)",
+             real["protocolos"] and all(x == PROTOCOLOS_CADDY for x in real["protocolos"]),
+             control["protocolos"] == [["h1", "h2"]], str(real["protocolos"]))
+    negativo("f) configuracion adaptada: sin manejador file_server (CVE-2026-78667)", not real["file_server"], control["file_server"])
+    negativo("f) configuracion adaptada: sin encrypted_client_hello (CVE-2026-97031)", not real["ech"], control["ech"])
+
+    # ALPN real contra dos Caddy en marcha en una red interna: el de la imagen
+    # y uno de control con "protocols h1 h2".
+    red = NOMBRES["red"]
+    if ejecutar(["docker", "network", "create", "--internal", red]).rc != 0:
+        raise Parada("no se pudo crear la red de la prueba ALPN")
+    control_h2 = escribir(TEMPORAL / "caddy_alpn" / "Caddyfile", caddyfile_control([("\tprotocols h1\n", "\tprotocols h1 h2\n")]))
+    comun = ["docker", "run", "-d", "--network", red, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+             "--tmpfs", "/data:uid=10002,gid=10002", "--tmpfs", "/config:uid=10002,gid=10002"]
+    for alias, extra in (("real", []), ("control", montaje(control_h2, "/etc/caddy/Caddyfile"))):
+        r = ejecutar(comun + ["--name", f"{PROYECTO}_caddy_{alias}", "--network-alias", alias, *extra, NOMBRES["caddy"]])
+        if r.rc != 0:
+            raise Parada(f"no arranca el Caddy {alias}: {r.err.strip()[-200:]}")
+    cliente = escribir(TEMPORAL / "alpn" / "alpn.py", CLIENTE_ALPN)
+    r = ejecutar(["docker", "run", "--rm", "--network", red, "--read-only", "--cap-drop", "ALL", "--security-opt",
+                  "no-new-privileges", "--user", "65534:65534", *montaje(cliente.parent, "/alpn"),
+                  IMG_PYTHON, "python", "-I", "/alpn/alpn.py", "real", "control"], timeout=120)
+    elegido = dict(l.split(" ", 1) for l in r.out.splitlines() if " " in l)
+    negativo(f"f) ALPN: ofreciendo h2 y http/1.1, Caddy elige {ALPN_REAL}", elegido.get("real") == ALPN_REAL,
+             elegido.get("control") == ALPN_CONTROL, f"real={elegido.get('real')} control={elegido.get('control')}")
+
+
+# ---------------------------------------------------------------------------
+# g) Configuración de los Dockerfiles (Trivy config)
+# ---------------------------------------------------------------------------
+def seccion_g():
+    p("=== g) configuracion de los Dockerfiles (Trivy config)")
+    cfg = TEMPORAL / "dockerfiles"
+    for nombre, origen in (("api", RAIZ / "Dockerfile"), ("proxy", RAIZ / "proxy" / "Dockerfile"), ("db", RAIZ / "db" / "Dockerfile")):
+        (cfg / nombre).mkdir(parents=True)
+        shutil.copyfile(origen, cfg / nombre / "Dockerfile")
+    escribir(cfg / "control" / "Dockerfile", DOCKERFILE_CONTROL)
+    # --skip-check-update: las comprobaciones que trae el binario fijado, sin
+    # descargar otro artefacto que cambia.
+    r = trivy(["config", "/cfg", "--severity", SEVERIDADES, "--skip-check-update", "--skip-version-check", "-q", "--format", "json"],
+              montajes=[montaje(cfg, "/cfg")])
+    informe = json_de_texto(r.out)
+    if informe is None:
+        raise Parada(f"trivy config no produjo JSON: {r.err.strip()[-300:]}")
+    fallos = {res["Target"]: [m["ID"] for m in res.get("Misconfigurations") or []] for res in informe.get("Results") or []}
+    control = CHECK_CONTROL_DOCKERFILE in fallos.get("control/Dockerfile", [])
+    pasa(control, f"g) control: un Dockerfile sin USER da {CHECK_CONTROL_DOCKERFILE}")
+    for nombre in ("api", "proxy", "db"):
+        objetivo = f"{nombre}/Dockerfile"
+        negativo(f"g) {objetivo if nombre != 'api' else 'Dockerfile'}: ningun fallo {SEVERIDADES}",
+                 objetivo in fallos and not fallos[objetivo], control, str(fallos.get(objetivo)))
+
+
+# ---------------------------------------------------------------------------
+# h) SBOM e i) reproducibilidad
+# ---------------------------------------------------------------------------
+def seccion_h():
+    p("=== h) SBOM CycloneDX por imagen")
+    salida = TEMPORAL / "sbom"
+    salida.mkdir()
+    shutil.rmtree(DIR_SBOM, ignore_errors=True)
+    DIR_SBOM.mkdir()
+    for nombre in IMAGENES:
+        r = trivy(["image", "--input", f"/img/{nombre}.tar", "--format", "cyclonedx", "--output", f"/out/{nombre}.cdx.json",
+                   "--skip-db-update", "--offline-scan", "--skip-version-check", "--no-progress", "-q"],
+                  montajes=[montaje(TEMPORAL / "imagenes", "/img"), montaje(salida, "/out", escritura=True)])
+        sbom = json_de(salida / f"{nombre}.cdx.json")
+        componentes = (sbom or {}).get("components") or []
+        pasa(r.rc == 0 and (sbom or {}).get("bomFormat") == "CycloneDX" and len(componentes) > 0,
+             f"h) {nombre}: SBOM CycloneDX con {len(componentes)} componentes")
+        if sbom is not None:
+            shutil.copyfile(salida / f"{nombre}.cdx.json", DIR_SBOM / f"{nombre}.cdx.json")
+        if nombre == "api":
+            pasa(any((c.get("name"), c.get("version")) == SBOM_API_CONTROL for c in componentes),
+                 f"h) api: el SBOM contiene {SBOM_API_CONTROL[0]} {SBOM_API_CONTROL[1]} (el de requirements.txt)")
+    p(f"   SBOM guardados en {DIR_SBOM}")
+
+
+def seccion_i():
+    p("=== i) reproducibilidad")
+    r = trivy(["version", "--format", "json"])
+    datos = json_de_texto(r.out) or {}
+    bd = datos.get("VulnerabilityDB") or {}
+    p(f"   trivy {datos.get('Version')} ({IMG_TRIVY.split('@')[1][:19]}); base de datos {DB_TRIVY} "
+      f"version {bd.get('Version')}, actualizada {bd.get('UpdatedAt')}, descargada {bd.get('DownloadedAt')}")
+    p(f"   gitleaks {VERSION_GITLEAKS} ({IMG_GITLEAKS.split('@')[1][:19]}); {VERSION_PIP_AUDIT} (OSV); {VERSION_BANDIT}")
+    pasa(bool(bd.get("UpdatedAt")), "i) la fecha de la base de datos de Trivy queda registrada")
+
+
+# ---------------------------------------------------------------------------
+# s) Limpieza y ejecución
+# ---------------------------------------------------------------------------
+def limpiar():
+    for alias in ("real", "control"):
+        ejecutar(["docker", "rm", "-f", f"{PROYECTO}_caddy_{alias}"])
+    ejecutar(["docker", "network", "rm", NOMBRES["red"]])
+    ejecutar(["docker", "volume", "rm", NOMBRES["cache"]])
+    return dc("down", "-v", "--rmi", "local")
+
+
+def seccion_s():
+    p("=== s) limpieza")
+    r = limpiar()
+    p(f"down -v --rmi local -> codigo {r.rc}")
+    for etiqueta, orden in [
+        ("contenedor", ["docker", "ps", "-a", "--format", "{{.Names}}"]),
+        ("red", ["docker", "network", "ls", "--format", "{{.Name}}"]),
+        ("volumen", ["docker", "volume", "ls", "--format", "{{.Name}}"]),
+        ("imagen", ["docker", "image", "ls", "--format", "{{.Repository}}"]),
+    ]:
+        restos = [n for n in ejecutar(orden).out.split() if n.startswith(PROYECTO)]
+        pasa(not restos, f"s) ningun {etiqueta} con prefijo {PROYECTO} {restos if restos else ''}".strip())
+    final = estado_git()
+    if ESTADO_GIT_ARRANQUE is None or final is None:
+        sinc("s) no se pudo comparar el estado de Git")
+    else:
+        pasa(final == ESTADO_GIT_ARRANQUE, "s) la bateria no ha modificado el repo (git status igual al del arranque)")
+
+
+def terminar(parada=False):
+    if parada:
+        resultado = "NO OK (PARADA)"
+    else:
+        resultado = "NO OK (hay FALLA o SIN CONCLUSION)" if estado["falla"] or estado["sin_conclusion"] else "OK"
+    p("RESULTADO GLOBAL: " + resultado)
+    SALIDA.write_text("\n".join(lineas_salida) + "\n", encoding="utf-8", newline="\n")
+    sys.exit(0 if resultado == "OK" else 1)
+
+
+def estado_git():
+    try:
+        r = ejecutar(["git", "status", "--short", "-uall"], timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [l.rstrip() for l in r.out.splitlines() if l.strip()] if r.rc == 0 else None
+
+
+def recursos_previos():
+    previos = []
+    for orden in (["docker", "ps", "-a", "--format", "{{.Names}}"],
+                  ["docker", "network", "ls", "--format", "{{.Name}}"],
+                  ["docker", "volume", "ls", "--format", "{{.Name}}"],
+                  ["docker", "image", "ls", "--format", "{{.Repository}}"]):
+        previos += [n for n in ejecutar(orden).out.split() if n.startswith(PROYECTO)]
+    return previos
+
+
+def main():
+    global ESTADO_GIT_ARRANQUE, TEMPORAL
+    ESTADO_GIT_ARRANQUE = estado_git()
+    NOMBRES.update(cache=f"{PROYECTO}_trivy", red=f"{PROYECTO}_alpn")
+    if ejecutar(["docker", "info", "--format", "{{.ServerVersion}}"]).rc != 0:
+        p("PARADA: docker info falla")
+        terminar(parada=True)
+    previos = recursos_previos()
+    if previos:
+        p(f"PARADA: ya existen recursos con prefijo {PROYECTO}: {previos}")
+        terminar(parada=True)
+    # docker compose valida que los secretos existan; solo se comprueba con
+    # is_file, nunca se leen.
+    for fichero in ("contrasena_redis.txt", "redis_acl.conf", "contrasena_postgres_superusuario.txt",
+                    "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt",
+                    "clave_maestra.txt", "clave_hmac_codigos.txt"):
+        if not (RAIZ / "secrets" / fichero).is_file():
+            p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
+            terminar(parada=True)
+    TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_escaneos_"))
+    parada = None
+    try:
+        for seccion in (seccion_a, seccion_b, seccion_c_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i):
+            try:
+                seccion()
+            except SinRed as e:
+                # Sin red no hay conclusión posible sobre lo que dependía de ella.
+                sinc(f"{seccion.__name__}: {e}")
+                if seccion is seccion_e:
+                    break  # f), g), h) e i) dependen de las imágenes y de la base de datos
+    except Parada as e:
+        parada = str(e)
+        p(f"PARADA: {parada}")
+    except Exception:  # error inesperado del propio test: se informa y se limpia
+        parada = "error inesperado en el test"
+        p("ERROR INESPERADO:\n" + traceback.format_exc())
+    finally:
+        if parada is not None:
+            limpiar()
+        else:
+            seccion_s()
+        shutil.rmtree(TEMPORAL, ignore_errors=True)
+    terminar(parada=parada is not None)
+
+
+if __name__ == "__main__":
+    main()
