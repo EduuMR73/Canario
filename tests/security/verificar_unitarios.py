@@ -58,6 +58,8 @@ estado = {"falla": False, "sin_conclusion": False}
 # Pruebas por fichero de tests/unit/. Al añadir o quitar una prueba hay que
 # cambiar este número a mano: es lo que hace visible un fichero que no corre.
 PRUEBAS_POR_FICHERO = {
+    "test_arranque": 4,
+    "test_bd": 9,
     "test_claves": 7,
     "test_cripto": 38,
     "test_denuncias": 10,
@@ -65,10 +67,11 @@ PRUEBAS_POR_FICHERO = {
     "test_frontera": 10,
     "test_instruccion": 18,
     "test_limitador": 12,
+    "test_login": 8,
     "test_personal": 8,
     "test_validacion": 8,
 }
-TOTAL_PRUEBAS = 117
+TOTAL_PRUEBAS = 138
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -88,6 +91,22 @@ MUTANTES = [
      "test_cripto.Relleno.test_literales", "relleno en tramos de 128 bytes"),
     ("denuncias.py", '            or type(contenido["v"]) is not int\n', "",
      "test_denuncias.Deserializar.test_formato_desconocido", 'deserializar admite {"v": true}'),
+    ("bd.py", "SQL_FIJAR_CONTEXTO = \"select set_config('app.empresa_id', %s, true)\"",
+     "SQL_FIJAR_CONTEXTO = \"select set_config('app.empresa_id', %s, false)\"",
+     "test_bd.FijarContexto.test_local_a_la_transaccion_y_enlazado",
+     "el contexto de empresa dura toda la sesion y pasa a la peticion siguiente"),
+    ("bd.py", '    if valor not in (None, ""):', "    if False:",
+     "test_bd.ConexionDevueltaAlPool.test_con_contexto_se_descarta",
+     "una conexion con contexto de empresa vuelve al pool"),
+    ("verificacion_arranque.py", "atributos == (False, False, False, False, False)", "atributos[0] is False",
+     "test_arranque.Comprobar.test_cada_desviacion_su_identificador", "el arranque acepta un rol con BYPASSRLS"),
+    ("personal.py", "if reservada is None or not contrasena_ok or paso is None:", "if reservada is None or paso is None:",
+     "test_login.ComprobarFactores.test_contrasena_incorrecta", "el login no exige la contrasena"),
+    ("personal.py", "    paso = cripto.verificar_totp(secreto, codigo, instante)\n    if reservada is None",
+     ("    paso = cripto.verificar_totp(secreto, codigo, instante) if reservada is not None else None\n"
+      "    if reservada is None"),
+     "test_login.ComprobarFactores.test_mismo_trabajo_en_todos_los_caminos",
+     "sin cuenta no se calcula el TOTP (el tiempo delata si la cuenta existe)"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest
