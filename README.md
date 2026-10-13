@@ -32,7 +32,7 @@ Las órdenes se ejecutan en PowerShell desde la raíz del repositorio. Como la r
    python scripts\generar_secretos.py
    ```
 
-   Crea en `secrets/` solo los que faltan y nunca sobrescribe uno existente: una clave maestra regenerada dejaría ilegibles los datos ya cifrados. No imprime ningún valor. `secrets/` está fuera de Git; haz copia de seguridad de la clave maestra por un canal seguro, porque sin ella los datos no se pueden descifrar.
+   Crea en `secrets/` solo los que faltan y nunca sobrescribe uno existente: una clave maestra regenerada dejaría ilegibles los datos ya cifrados. No imprime ningún valor. `secrets/` está fuera de Git; haz copia de seguridad de la clave maestra por un canal seguro, porque sin ella los datos no se pueden descifrar. Guárdala **separada** de las copias de la base de datos: una copia de la base de datos junto con la clave maestra descifra todo lo que contenga, también lo ya suprimido o tachado (modelo de amenazas, 8).
 
 2. Arrancar:
 
@@ -76,6 +76,7 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `GET /v1/personal/yo`, `POST /v1/personal/contrasena` | personal | Datos de la propia cuenta y cambio de contraseña |
 | `/v1/personal/usuarios...` | admin | Invitar, reinvitar, anular invitaciones y dar de baja |
 | `/v1/personal/denuncias...` | personal | Listar, leer, asignar, cambiar de estado y escribir mensajes |
+| `POST /v1/personal/denuncias/{id}/redaccion` y `.../mensajes/{secuencia}/redaccion` | admin con la denuncia asignada | Tachar datos que no deben conservarse (art. 32.2) |
 | `GET /v1/personal/auditoria` y `/auditoria/verificacion` | admin | Leer la auditoría y verificar su cadena |
 
 El código de seguimiento es lo único que identifica al denunciante: va en el cuerpo, nunca en la URL, para que no quede en ningún log.
@@ -173,6 +174,24 @@ docker compose run --rm gestion suprimir-caducadas
 ```
 
 El Programador de tareas de Windows no sirve para producción: según el foro y el roadmap de Docker, Docker Desktop necesita una sesión de usuario abierta, y sin Docker la tarea no corre. No hay documentación oficial que lo confirme ni lo desmienta.
+
+## Protección de datos: log y copias de seguridad
+
+Dos acciones del personal destruyen datos sin vuelta atrás: declarar una denuncia no veraz (art. 32.3) y tachar una parte de su texto (art. 32.2). Cada una deja una línea en el log de la API, sin contenido:
+
+```
+EVENTO declaracion_no_veraz: empresa=<uuid> cuenta=<uuid> denuncia=<uuid>
+EVENTO redaccion: empresa=<uuid> cuenta=<uuid> denuncia=<uuid> mensaje=<secuencia o -> tramos=<desde>+<longitud>,...
+```
+
+Si se restaura una copia de la base de datos, todo lo declarado no veraz o tachado después de la copia vuelve a aparecer (modelo de amenazas, 8). Esas líneas son el registro para volver a aplicarlo, así que en producción:
+
+- **El log de la API sale del anfitrión** y se conserva al menos tanto como las copias. El compose lo rota en 3 ficheros de 10 MB: sin enviarlo fuera, se pierde antes que la copia. Cómo enviarlo depende de cada despliegue.
+- **Tras restaurar una copia**, antes de nada:
+  1. Busca en ese log las líneas `EVENTO declaracion_no_veraz` y `EVENTO redaccion` posteriores a la fecha de la copia.
+  2. Por cada declaración, un admin se asigna la denuncia y la vuelve a declarar no veraz.
+  3. Por cada redacción, el admin asignado vuelve a tachar los mismos tramos: el evento da la posición y la longitud, y el texto lo ve al leer la denuncia.
+  4. Ejecuta `suprimir-caducadas`. Las denuncias caducadas se suprimen solas; las no veraces, con esta ejecución.
 
 ## Pruebas de seguridad
 
