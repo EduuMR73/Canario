@@ -34,13 +34,15 @@ quien la pide), entrega el token por un canal distinto del de la petición y
 avisa a ese contacto de que se ha hecho (NIST SP 800-63B-4, 4.2.3). El código
 no puede imponer ese procedimiento; docs/threat-model.md (6.3) lo fija.
 
-suprimir-caducadas aplica los arts. 32.4 y 26.2 de la Ley 2/2023 con
+suprimir-caducadas aplica los arts. 32.4, 26.2 y 32.3 de la Ley 2/2023 con
 canal.suprimir_denuncias_caducadas() (db/init/04_supresion.sql), el único
-camino de borrado. Hay que ejecutarla periódicamente (por ejemplo, cada día).
+camino de borrado. Hay que ejecutarla cada hora: el art. 32.3 pide supresión
+inmediata y la frecuencia es el retraso máximo (docs/threat-model.md, 6.14).
 Repite lotes, cada uno en su transacción, hasta que uno vuelve vacío. Las
 denuncias que estaban en uso se saltan: al terminar se cuentan las que siguen
 cumpliendo el criterio y, si queda alguna, la orden lo dice y sale con código
-1, para que una ejecución programada no lo pase por alto. No verifica la base
+75, distinto del 1 de los errores, para que una ejecución programada separe
+"se suprime en la siguiente" de "hay que investigar". No verifica la base
 de datos como el arranque de la API: esas comprobaciones son las del rol
 aplicacion, y plataforma solo puede ejecutar la función, cuyo criterio está
 fijo en la base de datos.
@@ -100,6 +102,13 @@ SQL_CONTAR_CADUCADAS = "select canal.contar_denuncias_caducadas()"
 # Mismo intervalo que acepta la función (1 a 500). Un lote pequeño retiene
 # pocos bloqueos y cabe de sobra en el statement_timeout de la sesión.
 LOTE_POR_DEFECTO = 100
+# Código de salida de suprimir-caducadas cuando quedan denuncias en uso: no
+# es un error, la ejecución siguiente las suprime. Es EX_TEMPFAIL de
+# sysexits(3) ("Temporary failure, indicating something that is not really
+# an error"), el mismo que systemd.service(5) pone de ejemplo en
+# SuccessExitStatus=. Un código propio, y no el 1 de los errores, permite que
+# el programador avise solo de lo que hay que investigar.
+SALIDA_EN_USO = 75
 MENSAJE_SEGUNDO_ADMIN = ("recomendacion: cuando este admin active su cuenta, que invite a un segundo admin; "
                          "con dos, uno recupera al otro sin pasar por la plataforma")
 
@@ -248,7 +257,7 @@ def construir_parser():
     clave.add_argument("--empresa-id", required=True, type=_uuid)
     supresion = ordenes.add_parser(
         "suprimir-caducadas",
-        help="suprime las denuncias caducadas (arts. 32.4 y 26.2 de la Ley 2/2023)")
+        help="suprime las denuncias caducadas o no veraces (arts. 32.4, 26.2 y 32.3 de la Ley 2/2023)")
     supresion.add_argument("--lote", type=_lote, default=LOTE_POR_DEFECTO,
                            help="denuncias por transaccion, de 1 a 500")
     admin = ordenes.add_parser("alta-admin", help="invitacion del primer admin de una empresa sin admins activos")
@@ -306,7 +315,7 @@ def _informar_supresion(totales, pendientes):
     if pendientes:
         print(f"AVISO: quedan {pendientes} denuncias caducadas que estaban en uso; "
               "vuelva a ejecutar suprimir-caducadas", file=sys.stderr)
-        return 1
+        return SALIDA_EN_USO
     return 0
 
 
