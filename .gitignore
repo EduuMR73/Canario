@@ -15,7 +15,6 @@ build/
 # Environment and secrets (order matters because of the negations)
 .env
 .env.*
-!.env.example
 secrets/*
 !secrets/.gitkeep
 !secrets/README.md
