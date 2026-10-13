@@ -6,6 +6,12 @@
 --   comunicaciones a las que no se ha dado curso solo pueden constar de forma
 --   anonimizada.
 -- * Art. 26.2: en ningún caso se conservan más de diez años.
+-- * Art. 32.3: si se acredita que la información no es veraz, se suprime
+--   inmediatamente, salvo que pueda constituir un ilícito penal (entonces se
+--   conserva lo necesario para el procedimiento judicial). Es supresión real,
+--   no bloqueo: la enmienda núm. 30 que introdujo ese inciso (BOCG-14-A-123-3,
+--   pág. 20) lo justifica en que, si se suprime inmediatamente, no se podría
+--   iniciar ninguna acción judicial; la excepción penal sustituye al bloqueo.
 -- El resto del esquema no tiene ningún permiso ni política de DELETE: esta
 -- función es la única excepción, con un dueño propio y un criterio fijo.
 --
@@ -17,6 +23,13 @@
 --   que no se dio curso) no la inició nunca. "Hoy" es el día
 --   en la zona de la empresa, con el mismo cálculo que las fechas de
 --   recepción (02_esquema.sql): los plazos se cuentan en su calendario.
+-- * 'no_veraz' no tiene plazo: la declara un admin (app/instruccion.py) y
+--   desde ese momento la API ya no la muestra a nadie. La destrucción la hace
+--   la siguiente ejecución de esta función, no la API: el borrado sigue
+--   teniendo un único camino, con su evidencia. "Inmediatamente" depende, por
+--   tanto, de la frecuencia con que se programe (README: cada hora).
+--   Si es un posible ilícito penal, el admin no la declara no veraz: la deja
+--   como está y la remite al Ministerio Fiscal (art. 9.2.j).
 -- * Lotes acotados (p_lote): todas las sesiones tienen statement_timeout, y un
 --   lote pequeño retiene pocos bloqueos y poco tiempo. Quien la invoca repite
 --   lotes hasta que uno vuelve vacío (app/gestion.py).
@@ -39,7 +52,8 @@
 --   claves foráneas (todas NO ACTION).
 -- * Evidencia anonimizada (art. 32.4, "dejar evidencia del funcionamiento del
 --   sistema"): una fila de auditoría por denuncia suprimida, con actor
---   'sistema', la acción supresion_art32 o supresion_art26 y el id de la
+--   'sistema', la acción supresion_art32, supresion_art26 o
+--   supresion_art32_3 y el id de la
 --   denuncia. El id es un uuid aleatorio que, tras el borrado, no apunta a
 --   ningún dato; sin esa fila, un borrado legítimo no se distinguiría de una
 --   manipulación.
@@ -65,8 +79,10 @@
 -- * La auditoría es inmutable: conserva los ids del personal que actuó sobre
 --   una denuncia más allá de los diez años. Anonimizarlos rompería la cadena
 --   de hashes.
--- * La función no se programa sola: hay que ejecutarla periódicamente (por
---   ejemplo, cada día) con docker compose run --rm gestion suprimir-caducadas.
+-- * La función no se programa sola: hay que ejecutarla periódicamente con
+--   docker compose run --rm gestion suprimir-caducadas. Cada hora, por el
+--   art. 32.3: con una ejecución diaria, una denuncia no veraz seguiría
+--   existiendo (oculta) hasta un día.
 --
 -- Como 03_funciones.sql: lo ejecuta el superusuario, en una sola transacción.
 -- Estas funciones no heredan el ALTER DEFAULT PRIVILEGES de migrador, así que
@@ -133,8 +149,10 @@ CREATE POLICY registro_auditoria_insert_supresion ON canal.registro_auditoria
 -- ---------------------------------------------------------------------------
 
 -- Artículo por el que una denuncia debe suprimirse hoy, o NULL si se
--- conserva. Diez años (art. 26.2) se aplica en cualquier estado y tiene
--- prioridad; tres meses (art. 32.4), solo si no se inició la investigación:
+-- conserva. 'no_veraz' (art. 32.3) se suprime siempre, sin plazo, y tiene
+-- prioridad sobre los otros dos: la evidencia dice por qué se borró, y el
+-- motivo real es la declaración, aunque además hubiera caducado.
+-- Diez años (art. 26.2) se aplica en cualquier otro estado; tres meses (art. 32.4), solo si no se inició la investigación:
 -- 'nueva' o 'inadmitida'. Las cerradas tras instruirse ('resuelta' y
 -- 'archivada') solo pasan por en_instruccion (app/instruccion.py), así que
 -- nunca escapan del art. 32.4 sin haber investigado. Los plazos
@@ -151,6 +169,8 @@ LANGUAGE sql STABLE
 SET search_path = pg_catalog
 AS $$
     select case
+        when p_estado = 'no_veraz'
+            then 'art32_3'
         when (p_fecha + interval '10 years')::date <= (now() AT TIME ZONE p_zona_horaria)::date
             then 'art26'
         when p_estado IN ('nueva', 'inadmitida')

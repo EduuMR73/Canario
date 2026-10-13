@@ -78,6 +78,7 @@ MENSAJE_CERRADA = "la denuncia está cerrada"
 MENSAJE_LIMITE = "la denuncia ha alcanzado el máximo de mensajes"
 MENSAJE_DESTINO = "la cuenta de destino no está activa"
 MENSAJE_FINAL = "cerrar una denuncia exige un mensaje final para el denunciante"
+MENSAJE_NO_VERAZ = "declarar una denuncia no veraz no admite mensaje"
 
 # Topes de forma de la petición, holgados respecto a lo válido: lo que pase
 # de aquí es un 422, sin llegar a la lógica. La política de contraseñas
@@ -359,7 +360,14 @@ def enviar_mensaje(denuncia_id: str, datos: MensajePersonal, peticion: Request, 
 @router.post("/denuncias/{denuncia_id}/estado", status_code=204)
 def cambiar_estado(denuncia_id: str, datos: CambioEstado, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
-    instruccion.cambiar_estado(estado.pool, estado.claves, sesion, _uuid(denuncia_id), datos.estado, datos.mensaje)
+    identificador = _uuid(denuncia_id)
+    instruccion.cambiar_estado(estado.pool, estado.claves, sesion, identificador, datos.estado, datos.mensaje)
+    # Solo tras confirmar (cambiar_estado ya ha vuelto sin error). Ids ya
+    # validados como uuid, nunca el texto de la ruta ni contenido. Ver la
+    # cabecera de app/instruccion.py.
+    if datos.estado == instruccion.ESTADO_NO_VERAZ:
+        registro.warning("EVENTO declaracion_no_veraz: empresa=%s cuenta=%s denuncia=%s",
+                         sesion.empresa_id, sesion.usuario_id, identificador)
     return Response(status_code=204)
 
 
@@ -446,3 +454,4 @@ def instalar_errores(aplicacion):
     aplicacion.add_exception_handler(instruccion.LimiteMensajes, _manejador(409, MENSAJE_LIMITE))
     aplicacion.add_exception_handler(instruccion.DestinoNoValido, _manejador(409, MENSAJE_DESTINO))
     aplicacion.add_exception_handler(instruccion.MensajeFinalObligatorio, _manejador(422, MENSAJE_FINAL))
+    aplicacion.add_exception_handler(instruccion.MensajeNoPermitido, _manejador(422, MENSAJE_NO_VERAZ))

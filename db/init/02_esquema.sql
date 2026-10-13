@@ -265,12 +265,16 @@ CREATE TABLE canal.sesion_personal (
 -- investigación: la supresión de los tres meses la alcanza igual que a
 -- 'nueva' (04_supresion.sql). Archivar sin investigar la libraría de esa
 -- supresión y la conservaría diez años.
+-- 'no_veraz': la información se ha declarado no veraz (art. 32.3). Para la
+-- API no existe (ni el personal ni el denunciante la ven, y no admite
+-- mensajes: preparar_mensaje) y la supresión la borra en su siguiente
+-- ejecución, sin esperar a ningún plazo (04_supresion.sql).
 CREATE TABLE canal.denuncia (
     empresa_id uuid NOT NULL REFERENCES canal.empresa (id),
     id uuid NOT NULL DEFAULT gen_random_uuid(),
     fecha date NOT NULL,
     estado text NOT NULL DEFAULT 'nueva'
-        CHECK (estado IN ('nueva', 'en_instruccion', 'resuelta', 'archivada', 'inadmitida')),
+        CHECK (estado IN ('nueva', 'en_instruccion', 'resuelta', 'archivada', 'inadmitida', 'no_veraz')),
     asignada_a uuid,
     contenido_cifrado bytea NOT NULL CHECK (octet_length(contenido_cifrado) > 0),
     version_clave integer NOT NULL,
@@ -583,6 +587,10 @@ $$;
 --    de otra empresa es invisible, igual que una inexistente, y las dos dan el
 --    mismo error sin bloquear nada. FOR NO KEY UPDATE y no FOR UPDATE: no
 --    choca con el FOR KEY SHARE que toman las claves foráneas.
+--    Una denuncia 'no_veraz' da ese mismo error: para la API no existe
+--    (art. 32.3), y quien escribe no debe poder distinguirla de una
+--    suprimida. Este caso sí la bloquea, lo que no revela nada: el error es
+--    idéntico.
 -- 2. Una denuncia resuelta, archivada o inadmitida no admite mensajes
 --    (SQLSTATE CN001): el expediente está cerrado y nadie leería lo que
 --    llegue, que sería un fallo silencioso. El personal cierra siempre con un
@@ -616,7 +624,7 @@ BEGIN
      WHERE d.empresa_id = NEW.empresa_id
        AND d.id = NEW.denuncia_id
        FOR NO KEY UPDATE;
-    IF NOT FOUND THEN
+    IF NOT FOUND OR v_estado = 'no_veraz' THEN
         RAISE EXCEPTION 'el mensaje no corresponde a ninguna denuncia visible'
             USING ERRCODE = 'foreign_key_violation';
     END IF;

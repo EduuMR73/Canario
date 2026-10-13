@@ -62,7 +62,8 @@ SQLSTATE_DENUNCIA_CERRADA = "CN001"
 SQLSTATE_LIMITE_MENSAJES = "CN002"
 # foreign_key_violation: preparar_mensaje lo lanza cuando la denuncia no es
 # visible. Con un código resuelto, solo pasa si la denuncia se ha suprimido
-# entre resolver el código e insertar (db/init/04_supresion.sql): la clave de
+# entre resolver el código e insertar (db/init/04_supresion.sql), o si está
+# declarada no veraz y espera a esa supresión (art. 32.3): la clave de
 # cifrado se acaba de leer en la misma transacción y nunca se borra.
 SQLSTATE_DENUNCIA_NO_VISIBLE = "23503"
 
@@ -77,8 +78,11 @@ SQL_INSERTAR = (
 )
 SQL_REGISTRAR_CODIGO = "select canal.registrar_codigo(%s, %s)"
 SQL_BUSCAR_CODIGO = "select empresa_id, denuncia_id from canal.buscar_codigo(%s)"
+# Una denuncia no veraz no existe para el denunciante (art. 32.3,
+# app/instruccion.py): su código da el mismo 404 que uno suprimido.
 SQL_DENUNCIA = (
-    "select fecha, estado, contenido_cifrado, version_clave from canal.denuncia where id = %s"
+    "select fecha, estado, contenido_cifrado, version_clave from canal.denuncia "
+    "where id = %s and estado <> 'no_veraz'"
 )
 # El denunciante nunca tiene autor_id (CHECK de canal.mensaje).
 SQL_INSERTAR_MENSAJE = (
@@ -266,7 +270,8 @@ def consultar(pool, claves, codigo):
     with bd.transaccion_empresa(pool, empresa_id, solo_lectura=True) as conexion:
         denuncia = conexion.execute(SQL_DENUNCIA, [denuncia_id]).fetchone()
         # Suprimida entre resolver el código y leerla
-        # (db/init/04_supresion.sql): el código ya no existe, mismo 404.
+        # (db/init/04_supresion.sql), o declarada no veraz y pendiente de
+        # esa supresión: el código ya no existe, mismo 404.
         if denuncia is None:
             raise CodigoNoEncontrado
         fecha, estado, cifrado, version = denuncia
@@ -297,7 +302,8 @@ def enviar_mensaje(pool, claves, codigo, texto):
             raise DenunciaCerrada from None
         if error.sqlstate == SQLSTATE_LIMITE_MENSAJES:
             raise LimiteMensajes from None
-        # Denuncia suprimida en carrera: el código ya no existe, mismo 404.
+        # Denuncia suprimida en carrera, o no veraz: el código ya no existe,
+        # mismo 404.
         if error.sqlstate == SQLSTATE_DENUNCIA_NO_VISIBLE:
             raise CodigoNoEncontrado from None
         raise

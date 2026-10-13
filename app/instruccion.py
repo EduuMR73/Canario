@@ -24,11 +24,29 @@ Quién ve qué (Ley 2/2023, arts. 32.1 y 8.5):
   mismo 404 que una inexistente o de otra empresa: no puede saber si existe.
 
 Estados (TRANSICIONES, literal): nueva -> en_instruccion | inadmitida;
-en_instruccion -> resuelta | archivada. Los cerrados no cambian. 'inadmitida'
+en_instruccion -> resuelta | archivada; cualquiera -> no_veraz (abajo). Los
+cerrados solo pueden pasar a no_veraz. 'inadmitida'
 es la comunicación a la que no se da curso (art. 32.4): sigue sujeta a la
 supresión de los tres meses (db/init/04_supresion.sql). Cerrar exige un
 mensaje final para el denunciante (art. 9.2.d, dar respuesta): una denuncia
 cerrada no admite mensajes, y sin él nunca sabría el resultado.
+
+No veraz (art. 32.3: si se acredita que la información no es veraz, se
+suprime inmediatamente):
+* Se llega desde cualquier estado, incluidos los cerrados: la falta de
+  veracidad puede acreditarse después de resolver. Es terminal.
+* Solo un admin con la denuncia asignada (403 para un instructor, antes de
+  tocar la base de datos). Es la decisión del Responsable del Sistema que
+  destruye el expediente: no la toma quien solo instruye.
+* Sin mensaje (422 si lo trae): nadie lo leería. Ni el denunciante ni el
+  personal vuelven a ver la denuncia.
+* Para la API, una denuncia no veraz no existe: todas las consultas de aquí
+  y de app/denuncias.py la excluyen (404, igual que una suprimida) y el
+  trigger de mensajes la rechaza como no visible. La destrucción la hace la
+  siguiente ejecución de la supresión (db/init/04_supresion.sql, art32_3):
+  el borrado sigue teniendo un único camino, con su evidencia.
+* Si los hechos pueden ser delito, no se declara no veraz: la excepción del
+  propio art. 32.3 obliga a conservarla para el procedimiento judicial.
 
 Concurrencia: la autenticación de la sesión es su propia transacción
 (app/personal.py), así que cada acción vuelve a comprobar, en su transacción
@@ -60,7 +78,10 @@ entre autenticar y actuar dejaría actuar a una cuenta ya dada de baja.
   transacción.
 
 Registro (logs): nada en el flujo normal. Las acciones quedan en la
-auditoría, que no lleva hora.
+auditoría, que no lleva hora. La única excepción es la declaración de no
+veraz, que registra app/rutas_personal.py: destruye un expediente sin
+vuelta atrás, y su abuso (un admin que entierra denuncias) debe dejar una
+señal fuera de la base de datos que la propia empresa administra.
 """
 import datetime
 import re
@@ -71,14 +92,20 @@ import psycopg
 
 from app import bd, cripto, denuncias, personal
 
+# Los estados visibles: los únicos que el listado admite como filtro.
+# 'no_veraz' no está: para la API no existe (ver la cabecera).
 ESTADOS = ("nueva", "en_instruccion", "resuelta", "archivada", "inadmitida")
 ESTADOS_CERRADOS = ("resuelta", "archivada", "inadmitida")
+ESTADO_NO_VERAZ = "no_veraz"
 # Las únicas transiciones permitidas. Lo que no está aquí es un 409.
 TRANSICIONES = {
-    "nueva": ("en_instruccion", "inadmitida"),
-    "en_instruccion": ("resuelta", "archivada"),
+    "nueva": ("en_instruccion", "inadmitida", "no_veraz"),
+    "en_instruccion": ("resuelta", "archivada", "no_veraz"),
+    "resuelta": ("no_veraz",),
+    "archivada": ("no_veraz",),
+    "inadmitida": ("no_veraz",),
 }
-ESTADOS_DESTINO = ("en_instruccion", "resuelta", "archivada", "inadmitida")
+ESTADOS_DESTINO = ("en_instruccion", "resuelta", "archivada", "inadmitida", "no_veraz")
 
 ACCION_LECTURA = "lectura_denuncia"
 ACCION_MENSAJE = "mensaje_personal"
@@ -110,14 +137,20 @@ SQL_BLOQUEAR_DESTINO = (
 # lectura: la comprobación y la consulta salen de la misma foto.
 SQL_ACTOR_ACTIVO = "select count(*) from canal.usuario_personal where id = %s and activo and totp_activo"
 
+# Cada consulta sobre una denuncia excluye 'no_veraz' en su propio WHERE: no
+# la devuelve (404) ni la bloquea. Un filtro aparte que alguien olvidara en
+# una consulta nueva la volvería visible; aquí cada una lo lleva escrito.
 SQL_LEER_ASIGNADA = (
     "select fecha, estado, contenido_cifrado, version_clave from canal.denuncia "
-    "where id = %s and asignada_a = %s for share"
+    "where id = %s and asignada_a = %s and estado <> 'no_veraz' for share"
 )
 SQL_ESCRIBIR_ASIGNADA = (
-    "select estado from canal.denuncia where id = %s and asignada_a = %s for no key update"
+    "select estado from canal.denuncia where id = %s and asignada_a = %s and estado <> 'no_veraz' "
+    "for no key update"
 )
-SQL_BLOQUEAR_DENUNCIA = "select estado, asignada_a from canal.denuncia where id = %s for no key update"
+SQL_BLOQUEAR_DENUNCIA = (
+    "select estado, asignada_a from canal.denuncia where id = %s and estado <> 'no_veraz' for no key update"
+)
 SQL_INSERTAR_MENSAJE = (
     "insert into canal.mensaje (empresa_id, denuncia_id, id, autor, autor_id, contenido_cifrado, version_clave) "
     "values (%s, %s, %s, 'personal', %s, %s, %s) returning secuencia, fecha"
@@ -136,6 +169,7 @@ SQL_LISTAR = """
       from canal.denuncia d
       left join canal.usuario_personal u on u.empresa_id = d.empresa_id and u.id = d.asignada_a
      where (%(todas)s or d.asignada_a = %(actor)s)
+       and d.estado <> 'no_veraz'
        and (%(estado)s::text is null or d.estado = %(estado)s::text)
        and (%(cursor_fecha)s::date is null or (d.fecha, d.id) < (%(cursor_fecha)s::date, %(cursor_id)s::uuid))
      order by d.fecha desc, d.id desc
@@ -169,6 +203,10 @@ class DestinoNoValido(Exception):
 
 class MensajeFinalObligatorio(Exception):
     """Se cierra una denuncia sin mensaje final para el denunciante."""
+
+
+class MensajeNoPermitido(Exception):
+    """Se declara no veraz una denuncia con un mensaje que nadie leería."""
 
 
 class CursorNoValido(ValueError):
@@ -378,9 +416,14 @@ def enviar_mensaje(pool, claves, sesion, denuncia_id, texto):
 
 def cambiar_estado(pool, claves, sesion, denuncia_id, nuevo, mensaje):
     """Cambia el estado de una denuncia asignada según TRANSICIONES. Cerrar
-    exige mensaje final, que se inserta antes del cambio."""
+    exige mensaje final, que se inserta antes del cambio. Declarar no veraz
+    exige ser admin y no admite mensaje (ver la cabecera)."""
     if nuevo not in ESTADOS_DESTINO:
         raise ValueError("estado desconocido")
+    if nuevo == ESTADO_NO_VERAZ:
+        _exigir_admin(sesion)
+        if mensaje is not None:
+            raise MensajeNoPermitido
     if nuevo in ESTADOS_CERRADOS and mensaje is None:
         raise MensajeFinalObligatorio
     try:
