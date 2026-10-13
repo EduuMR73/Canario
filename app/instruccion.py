@@ -48,6 +48,34 @@ suprime inmediatamente):
 * Si los hechos pueden ser delito, no se declara no veraz: la excepción del
   propio art. 32.3 obliga a conservarla para el procedimiento judicial.
 
+Redacción (art. 32.2: los datos innecesarios y los de categorías especiales
+se suprimen de inmediato; art. 29: los recopilados por accidente, sin
+dilación indebida). Suprime una parte del texto, no la denuncia:
+* Solo un admin con la denuncia asignada, como la declaración de no veraz:
+  destruye una parte de la prueba sin vuelta atrás. Vale en cualquier estado
+  salvo no_veraz, también en los cerrados (un dato sobrante puede verse
+  después de resolver), y sobre el texto de la denuncia o de cualquier
+  mensaje, sea del denunciante o del personal. La categoría no se redacta: es
+  de una lista cerrada.
+* Cada tramo dice dónde empieza (en caracteres de Python, es decir, code
+  points) y qué texto exacto tacha. Si en esa posición no está ese texto, no
+  se escribe nada (409). La redacción es destructiva: un cliente que contara
+  en otra unidad (un navegador cuenta en UTF-16, y un emoji antes del tramo
+  desplazaría la máscara y dejaría ver parte del dato, como advierte el código
+  de GlobaLeaks) fallaría de forma visible, nunca en silencio.
+* Cada carácter tachado pasa a ser U+2588: el texto conserva su longitud y
+  las posiciones del resto no se mueven entre una redacción y la siguiente.
+* Se vuelve a cifrar con la versión actual de la clave de la empresa y el
+  mismo AAD. La escritura la hace canal.redactar_denuncia o
+  canal.redactar_mensaje (db/init/05_redaccion.sql): la API no tiene UPDATE
+  sobre el contenido, y la función escribe la fila de auditoría en la misma
+  sentencia y solo si el contenido sigue siendo el que se leyó.
+* Idempotente: si lo pedido ya está tachado, no se escribe ni se deja fila,
+  como en la asignación.
+* Se descifra y se vuelve a cifrar con la denuncia bloqueada (FOR NO KEY
+  UPDATE, el bloqueo del trigger de mensajes): son milisegundos, y así nadie
+  cambia el contenido entre leerlo y escribirlo.
+
 Concurrencia: la autenticación de la sesión es su propia transacción
 (app/personal.py), así que cada acción vuelve a comprobar, en su transacción
 y con un bloqueo, que la cuenta sigue activa. Sin eso, una baja confirmada
@@ -78,10 +106,13 @@ entre autenticar y actuar dejaría actuar a una cuenta ya dada de baja.
   transacción.
 
 Registro (logs): nada en el flujo normal. Las acciones quedan en la
-auditoría, que no lleva hora. La única excepción es la declaración de no
-veraz, que registra app/rutas_personal.py: destruye un expediente sin
-vuelta atrás, y su abuso (un admin que entierra denuncias) debe dejar una
-señal fuera de la base de datos que la propia empresa administra.
+auditoría, que no lleva hora. Las únicas excepciones son la declaración de
+no veraz y la redacción, que registra app/rutas_personal.py: destruyen
+prueba sin vuelta atrás, y su abuso (un admin que entierra denuncias o tacha
+lo que le incrimina) debe dejar una señal fuera de la base de datos que la
+propia empresa administra. Esa señal es también el registro que permite
+volver a aplicarlas si se restaura una copia anterior (docs/threat-model.md,
+8).
 """
 import datetime
 import re
@@ -184,6 +215,22 @@ SQL_AUDITORIA = """
 """
 SQL_VERIFICAR_CADENA = "select canal.verificar_cadena_auditoria()"
 
+# Redacción. Carácter con el que se tacha: U+2588 (FULL BLOCK), el mismo que
+# GlobaLeaks.
+MASCARA = "█"
+SQL_REDACTAR_BLOQUEAR = (
+    "select contenido_cifrado, version_clave from canal.denuncia "
+    "where id = %s and asignada_a = %s and estado <> 'no_veraz' for no key update"
+)
+# Sin bloqueo propio: un mensaje solo se reescribe con su denuncia bloqueada
+# (aquí y en canal.redactar_mensaje).
+SQL_REDACTAR_MENSAJE_LEER = (
+    "select id, autor, autor_id, contenido_cifrado, version_clave from canal.mensaje "
+    "where denuncia_id = %s and secuencia = %s"
+)
+SQL_REDACTAR_DENUNCIA = "select canal.redactar_denuncia(%s, %s, %s, %s, %s)"
+SQL_REDACTAR_MENSAJE = "select canal.redactar_mensaje(%s, %s, %s, %s, %s, %s)"
+
 
 class TransicionNoValida(Exception):
     """El cambio de estado pedido no está en TRANSICIONES."""
@@ -211,6 +258,10 @@ class MensajeNoPermitido(Exception):
 
 class CursorNoValido(ValueError):
     """El cursor de paginación no tiene la forma exacta."""
+
+
+class FragmentoNoCoincide(Exception):
+    """Un tramo de la redacción no señala el texto que dice tachar."""
 
 
 @dataclass(frozen=True)
@@ -472,3 +523,82 @@ def asignar(pool, sesion, denuncia_id, destino_id):
             return
         conexion.execute(SQL_ASIGNAR, [destino_id, denuncia_id])
         _auditar(conexion, sesion, ACCION_ASIGNACION, denuncia_id, destino_id)
+
+
+# ---------------------------------------------------------------------------
+# Redacción (art. 32.2; ver la cabecera)
+# ---------------------------------------------------------------------------
+
+def tachar(texto, tramos):
+    """El texto con cada tramo (desde, fragmento) sustituido por MASCARA, o
+    FragmentoNoCoincide si alguno no señala exactamente su fragmento. Cada
+    tramo se compara con el texto original, así que el orden y el solape
+    entre tramos no cambian el resultado."""
+    caracteres = list(texto)
+    for desde, fragmento in tramos:
+        hasta = desde + len(fragmento)
+        if desde < 0 or not fragmento or hasta > len(texto) or texto[desde:hasta] != fragmento:
+            raise FragmentoNoCoincide
+        caracteres[desde:hasta] = MASCARA * len(fragmento)
+    return "".join(caracteres)
+
+
+def _clave_de_version(conexion, claves, empresa_id, version):
+    # La clave foránea de version_clave garantiza que la versión existe.
+    envuelta = conexion.execute(denuncias.SQL_CLAVES, [[version]]).fetchone()[1]
+    return cripto.desenvolver_clave(claves.maestra, bytes(envuelta), empresa_id, version)
+
+
+def _bloquear_para_redactar(conexion, sesion, denuncia_id):
+    """Cifrado y versión de una denuncia asignada a quien la pide, con la fila
+    bloqueada; NoEncontrado si no lo está (o es no_veraz)."""
+    _bloquear_actor(conexion, sesion)
+    fila = conexion.execute(SQL_REDACTAR_BLOQUEAR, [denuncia_id, sesion.usuario_id]).fetchone()
+    if fila is None:
+        raise personal.NoEncontrado
+    return bytes(fila[0]), fila[1]
+
+
+def redactar_denuncia(pool, claves, sesion, denuncia_id, tramos):
+    """Tacha los tramos del texto de una denuncia. Devuelve True si ha
+    escrito y False si ya estaba todo tachado (no deja fila)."""
+    _exigir_admin(sesion)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        cifrado, version = _bloquear_para_redactar(conexion, sesion, denuncia_id)
+        aad = cripto.aad_denuncia(sesion.empresa_id, denuncia_id)
+        contenido = denuncias.deserializar(
+            cripto.descifrar_contenido(_clave_de_version(conexion, claves, sesion.empresa_id, version), cifrado, aad),
+            ("categoria", "texto"))
+        texto = tachar(contenido["texto"], tramos)
+        if texto == contenido["texto"]:
+            return False
+        version_nueva, clave = denuncias.clave_actual(conexion, claves, sesion.empresa_id)
+        nuevo = cripto.cifrar_contenido(clave, denuncias.serializar(categoria=contenido["categoria"], texto=texto),
+                                        aad)
+        conexion.execute(SQL_REDACTAR_DENUNCIA, [denuncia_id, sesion.usuario_id, cifrado, nuevo, version_nueva])
+    return True
+
+
+def redactar_mensaje(pool, claves, sesion, denuncia_id, secuencia, tramos):
+    """Tacha los tramos de un mensaje, del denunciante o del personal, de una
+    denuncia asignada. Mismo resultado que redactar_denuncia."""
+    _exigir_admin(sesion)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        _bloquear_para_redactar(conexion, sesion, denuncia_id)
+        fila = conexion.execute(SQL_REDACTAR_MENSAJE_LEER, [denuncia_id, secuencia]).fetchone()
+        if fila is None:
+            raise personal.NoEncontrado
+        mensaje_id, autor, autor_id, cifrado, version = fila
+        cifrado = bytes(cifrado)
+        aad = cripto.aad_mensaje(sesion.empresa_id, denuncia_id, mensaje_id, autor, autor_id)
+        contenido = denuncias.deserializar(
+            cripto.descifrar_contenido(_clave_de_version(conexion, claves, sesion.empresa_id, version), cifrado, aad),
+            ("texto",))
+        texto = tachar(contenido["texto"], tramos)
+        if texto == contenido["texto"]:
+            return False
+        version_nueva, clave = denuncias.clave_actual(conexion, claves, sesion.empresa_id)
+        nuevo = cripto.cifrar_contenido(clave, denuncias.serializar(texto=texto), aad)
+        conexion.execute(SQL_REDACTAR_MENSAJE, [denuncia_id, secuencia, sesion.usuario_id, cifrado, nuevo,
+                                                version_nueva])
+    return True

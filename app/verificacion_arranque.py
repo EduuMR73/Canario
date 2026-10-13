@@ -100,10 +100,14 @@ FUNCIONES_EJECUTABLES = {
     "canal.resolver_empresa(text)",
     "canal.buscar_codigo(bytea)",
     "canal.registrar_codigo(bytea,uuid)",
+    "canal.redactar_denuncia(uuid,uuid,bytea,bytea,integer)",
+    "canal.redactar_mensaje(uuid,integer,uuid,bytea,bytea,integer)",
 }
 
 # Funciones SECURITY DEFINER del esquema canal y su dueño. Las de supresión
-# tienen un dueño propio, el único rol con permiso de borrar (04_supresion.sql).
+# tienen un dueño propio, el único rol con permiso de borrar (04_supresion.sql),
+# y las de redacción otro, el único que puede reescribir contenido cifrado
+# (05_redaccion.sql).
 FUNCIONES_DEFINIDOR = {
     "alta_empresa|propietario_funciones",
     "buscar_codigo|propietario_funciones",
@@ -111,6 +115,8 @@ FUNCIONES_DEFINIDOR = {
     "resolver_empresa|propietario_funciones",
     "suprimir_denuncias_caducadas|propietario_supresion",
     "contar_denuncias_caducadas|propietario_supresion",
+    "redactar_denuncia|propietario_redaccion",
+    "redactar_mensaje|propietario_redaccion",
 }
 
 # Todas las políticas del esquema canal:
@@ -154,6 +160,15 @@ POLITICAS = {
     "mensaje|mensaje_delete_supresion|d|t|propietario_supresion|true|",
     "registro_auditoria|registro_auditoria_select_supresion|r|t|propietario_supresion|true|",
     "registro_auditoria|registro_auditoria_insert_supresion|a|t|propietario_supresion||true",
+    # Redacción: todas dentro del contexto de la empresa.
+    "empresa|empresa_select_redaccion|r|t|propietario_redaccion|(id = canal.empresa_actual())|",
+    f"usuario_personal|usuario_personal_select_redaccion|r|t|propietario_redaccion|{_MISMA_EMPRESA}|",
+    f"denuncia|denuncia_select_redaccion|r|t|propietario_redaccion|{_MISMA_EMPRESA}|",
+    f"denuncia|denuncia_update_redaccion|w|t|propietario_redaccion|{_MISMA_EMPRESA}|{_MISMA_EMPRESA}",
+    f"mensaje|mensaje_select_redaccion|r|t|propietario_redaccion|{_MISMA_EMPRESA}|",
+    f"mensaje|mensaje_update_redaccion|w|t|propietario_redaccion|{_MISMA_EMPRESA}|{_MISMA_EMPRESA}",
+    f"registro_auditoria|registro_auditoria_select_redaccion|r|t|propietario_redaccion|{_MISMA_EMPRESA}|",
+    f"registro_auditoria|registro_auditoria_insert_redaccion|a|t|propietario_redaccion||{_MISMA_EMPRESA}",
 }
 
 # Consultas. Se ejecutan con search_path = pg_catalog (SET LOCAL), para que
@@ -325,6 +340,13 @@ def comprobar(conexion):
         "where rolname = 'propietario_supresion'").fetchone()
     exigir("propietario_supresion", supresion == (False, False, False),
            f"super, bypassrls, login = {supresion}")
+    # Y para el de la redacción, el único que puede reescribir contenido
+    # cifrado: con BYPASSRLS, sus funciones cruzarían empresas.
+    redaccion = conexion.execute(
+        "select rolsuper, rolbypassrls, rolcanlogin from pg_roles "
+        "where rolname = 'propietario_redaccion'").fetchone()
+    exigir("propietario_redaccion", redaccion == (False, False, False),
+           f"super, bypassrls, login = {redaccion}")
 
     politicas = _conjunto(conexion, SQL_POLITICAS)
     exigir("politicas", politicas == POLITICAS, _diferencia(politicas, POLITICAS))

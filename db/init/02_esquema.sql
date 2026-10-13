@@ -457,8 +457,9 @@ CREATE POLICY registro_auditoria_insert ON canal.registro_auditoria
 
 -- REVOKE explícito a PUBLIC en cada tabla, y después solo lo imprescindible
 -- para aplicacion. Nunca DELETE, TRUNCATE ni REFERENCES a nadie. UPDATE va por
--- columna: así, por ejemplo, nadie puede cambiar el contenido cifrado de una
--- denuncia ni el rol o el email de un usuario, ni mover filas de empresa.
+-- columna: así, por ejemplo, la API no puede cambiar el contenido cifrado de
+-- una denuncia (solo a través de la redacción auditada de 05_redaccion.sql)
+-- ni el rol o el email de un usuario, ni mover filas de empresa.
 -- En las tablas del personal también INSERT va por columna: la API no puede
 -- crear una cuenta ya activada ni elegir una caducidad, que fija la base de
 -- datos con su valor por defecto.

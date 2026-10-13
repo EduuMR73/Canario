@@ -17,8 +17,11 @@
 * Instrucción (app/instruccion.py): GET /v1/personal/denuncias (listado sin
   contenido), GET .../{denuncia_id} (contenido y mensajes, solo quien la
   tiene asignada), POST .../{denuncia_id}/mensajes, POST .../{denuncia_id}/estado
-  y PUT .../{denuncia_id}/asignacion (solo admin). GET /v1/personal/auditoria
-  y GET /v1/personal/auditoria/verificacion (solo admin).
+  y PUT .../{denuncia_id}/asignacion (solo admin). POST .../{denuncia_id}/redaccion
+  y POST .../{denuncia_id}/mensajes/{secuencia}/redaccion (tachar parte del
+  texto, art. 32.2; solo admin con la denuncia asignada).
+  GET /v1/personal/auditoria y GET /v1/personal/auditoria/verificacion (solo
+  admin).
 
 Este módulo es el único que sabe cómo viajan los tokens: el de sesión en la
 cabecera Authorization (Bearer) y el de dispositivo en el cuerpo del login.
@@ -51,7 +54,7 @@ import logging
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -79,6 +82,7 @@ MENSAJE_LIMITE = "la denuncia ha alcanzado el máximo de mensajes"
 MENSAJE_DESTINO = "la cuenta de destino no está activa"
 MENSAJE_FINAL = "cerrar una denuncia exige un mensaje final para el denunciante"
 MENSAJE_NO_VERAZ = "declarar una denuncia no veraz no admite mensaje"
+MENSAJE_FRAGMENTO = "el texto indicado no está en esa posición"
 
 # Topes de forma de la petición, holgados respecto a lo válido: lo que pase
 # de aquí es un 422, sin llegar a la lógica. La política de contraseñas
@@ -88,6 +92,12 @@ LONGITUD_MAXIMA_TOKEN = 128
 LONGITUD_MAXIMA_CODIGO = 16
 LONGITUD_MAXIMA_EMAIL = 254
 LONGITUD_MAXIMA_IDENTIFICADOR = 64
+# Tramos por redacción: acota el trabajo de una petición. Más tramos, en
+# otra petición.
+MAXIMO_TRAMOS = 50
+# Una secuencia de mensaje fuera de 1..200 (el tope de canal.preparar_mensaje,
+# db/init/02_esquema.sql) no puede existir: 422 sin consultar.
+MAXIMO_MENSAJES = 200
 
 
 # extra="forbid" y strict=True, como en app/rutas_denuncias.py. Cada campo de
@@ -174,6 +184,21 @@ class Asignacion(BaseModel):
     # Texto y no uuid: un id mal formado es una cuenta que no existe (404),
     # como en la ruta (_uuid).
     usuario_id: TextoLinea = Field(max_length=64)
+
+
+class Tramo(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    # Posición en caracteres (code points) y el texto exacto que se tacha: si
+    # no coinciden, 409 sin escribir nada (app/instruccion.py, cabecera).
+    desde: int = Field(ge=0, le=LONGITUD_MAXIMA_TEXTO)
+    texto: TextoLibre = Field(min_length=1, max_length=LONGITUD_MAXIMA_TEXTO)
+
+
+class Redaccion(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    tramos: list[Tramo] = Field(min_length=1, max_length=MAXIMO_TRAMOS)
 
 
 def _error(codigo, mensaje=None, cabeceras=None):
@@ -371,6 +396,36 @@ def cambiar_estado(denuncia_id: str, datos: CambioEstado, peticion: Request, ses
     return Response(status_code=204)
 
 
+def _registrar_redaccion(sesion, denuncia_id, secuencia, tramos):
+    # Solo tras confirmar. Posiciones y longitudes, nunca el texto tachado:
+    # con ellas, quien restaure una copia anterior sabe qué volver a tachar
+    # (docs/threat-model.md, 8). Ver la cabecera de app/instruccion.py.
+    registro.warning("EVENTO redaccion: empresa=%s cuenta=%s denuncia=%s mensaje=%s tramos=%s",
+                     sesion.empresa_id, sesion.usuario_id, denuncia_id, "-" if secuencia is None else secuencia,
+                     ",".join(f"{t.desde}+{len(t.texto)}" for t in tramos))
+
+
+@router.post("/denuncias/{denuncia_id}/redaccion", status_code=204)
+def redactar_denuncia(denuncia_id: str, datos: Redaccion, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
+    identificador = _uuid(denuncia_id)
+    if instruccion.redactar_denuncia(estado.pool, estado.claves, sesion, identificador,
+                                     [(t.desde, t.texto) for t in datos.tramos]):
+        _registrar_redaccion(sesion, identificador, None, datos.tramos)
+    return Response(status_code=204)
+
+
+@router.post("/denuncias/{denuncia_id}/mensajes/{secuencia}/redaccion", status_code=204)
+def redactar_mensaje(denuncia_id: str, datos: Redaccion, peticion: Request, sesion: SesionPersonal,
+                     secuencia: int = Path(ge=1, le=MAXIMO_MENSAJES)):
+    estado = peticion.app.state
+    identificador = _uuid(denuncia_id)
+    if instruccion.redactar_mensaje(estado.pool, estado.claves, sesion, identificador, secuencia,
+                                    [(t.desde, t.texto) for t in datos.tramos]):
+        _registrar_redaccion(sesion, identificador, secuencia, datos.tramos)
+    return Response(status_code=204)
+
+
 @router.put("/denuncias/{denuncia_id}/asignacion", status_code=204)
 def asignar(denuncia_id: str, datos: Asignacion, peticion: Request, sesion: SesionPersonal):
     instruccion.asignar(peticion.app.state.pool, sesion, _uuid(denuncia_id), _uuid(datos.usuario_id))
@@ -455,3 +510,4 @@ def instalar_errores(aplicacion):
     aplicacion.add_exception_handler(instruccion.DestinoNoValido, _manejador(409, MENSAJE_DESTINO))
     aplicacion.add_exception_handler(instruccion.MensajeFinalObligatorio, _manejador(422, MENSAJE_FINAL))
     aplicacion.add_exception_handler(instruccion.MensajeNoPermitido, _manejador(422, MENSAJE_NO_VERAZ))
+    aplicacion.add_exception_handler(instruccion.FragmentoNoCoincide, _manejador(409, MENSAJE_FRAGMENTO))

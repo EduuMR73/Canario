@@ -2,14 +2,15 @@
 # Inicialización de roles y privilegios de la base de datos de Canario.
 #
 # Qué hace: crea los tres roles de login (migrador, aplicacion, plataforma) y
-# los roles sin login propietario_funciones y propietario_supresion, deja la
+# los roles sin login propietario_funciones, propietario_supresion y
+# propietario_redaccion, deja la
 # base canario en manos de migrador y cierra los permisos por defecto de
 # PUBLIC.
 #
 # Cuándo corre: el entrypoint de la imagen ejecuta los scripts de
 # /docker-entrypoint-initdb.d SOLO cuando el volumen de datos está vacío, es
 # decir, en el primer arranque. Si el volumen ya existe, se los salta sin
-# aviso. Por eso el healthcheck del compose comprueba que existen los cinco
+# aviso. Por eso el healthcheck del compose comprueba que existen los seis
 # roles: la lista de roles está también allí y debe mantenerse igual.
 #
 # Contraseñas: se leen de /run/secrets con \set y comillas invertidas dentro
@@ -51,6 +52,12 @@ CREATE ROLE propietario_funciones NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NO
 -- borrado. Es un rol aparte para que el permiso de borrar no lo hereden las
 -- funciones que usa la API (las de propietario_funciones). Sin LOGIN.
 CREATE ROLE propietario_supresion NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+-- Dueña de las funciones de redacción (05_redaccion.sql), el único camino para
+-- reescribir el contenido cifrado de una denuncia o de un mensaje. Rol aparte
+-- por lo mismo que el de supresión: ni las funciones de la API ni la supresión
+-- heredan ese permiso. Sin LOGIN.
+CREATE ROLE propietario_redaccion NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
 ALTER DATABASE canario OWNER TO migrador;
 
