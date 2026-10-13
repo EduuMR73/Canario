@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Batería de las pruebas unitarias (tests/unit/): la lógica pura de app/ sin
+base de datos, sin Redis y sin red.
+
+Qué comprueba:
+a) Controles del propio ejecutor: un directorio con una prueba que falla a
+   propósito debe salir con código 1 y uno vacío con 5 (unittest en Python
+   3.12 sale con 5 si no ejecuta nada). Si alguno no se cumple, el resto no
+   tendría conclusión.
+b) Las pruebas unitarias pasan dentro de la imagen de la API (Python y
+   dependencias exactos de producción), con el número EXACTO de pruebas por
+   fichero: un fichero que unittest no descubra se saltaría en silencio y los
+   demás seguirían pasando.
+c) Mutantes: una copia de app/ con un cambio que rompe una medida de
+   seguridad debe hacer fallar la prueba que la cubre. Una prueba que nunca
+   se ha visto fallar no demuestra nada. Antes, dos controles: la copia sin
+   mutar pasa (el montaje de la copia no rompe nada) y una copia que no se
+   puede importar falla (la copia montada es la que se usa). Si el texto que
+   se muta no aparece exactamente una vez, SIN CONCLUSION: un mutante que no
+   cambia nada no prueba nada.
+s) Limpieza: la imagen construida se borra y el repositorio queda igual.
+
+Cómo se ejecuta (desde la raíz del repositorio, en PowerShell, con Docker en
+marcha):
+
+    python tests/security/verificar_unitarios.py
+
+No necesita los secretos ni levanta servicios: construye la imagen de la API
+con la etiqueta canario_unitarios-api:prueba y ejecuta cada pasada en un
+contenedor efímero sin red, de solo lectura (con /tmp en memoria), sin
+capacidades y con el código montado en solo lectura. Las copias de app/ y los
+controles se escriben en un directorio temporal del sistema, nunca dentro del
+repositorio, y se borran al terminar. La salida completa se guarda en
+verificacion_unitarios.txt dentro del directorio temporal del sistema. El
+código de salida es 0 solo si el resultado global es OK.
+
+Solo usa la biblioteca estándar.
+"""
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import traceback
+
+RAIZ = pathlib.Path.cwd()
+PROYECTO = "canario_unitarios"
+IMAGEN = f"{PROYECTO}-api:prueba"
+SALIDA = pathlib.Path(tempfile.gettempdir()) / "verificacion_unitarios.txt"
+
+lineas_salida = []
+estado = {"falla": False, "sin_conclusion": False}
+
+# ---------------------------------------------------------------------------
+# Oráculos literales
+# ---------------------------------------------------------------------------
+# Pruebas por fichero de tests/unit/. Al añadir o quitar una prueba hay que
+# cambiar este número a mano: es lo que hace visible un fichero que no corre.
+PRUEBAS_POR_FICHERO = {
+    "test_claves": 7,
+    "test_cripto": 38,
+    "test_denuncias": 10,
+    "test_errores": 6,
+    "test_frontera": 10,
+    "test_instruccion": 18,
+    "test_limitador": 12,
+    "test_personal": 8,
+    "test_validacion": 8,
+}
+TOTAL_PRUEBAS = 117
+SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
+
+B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
+# Mutantes: (fichero de app/, texto exacto, sustituto, prueba que debe fallar, qué rompe).
+# La prueba va con su identificador completo (fichero.Clase.metodo): hay
+# métodos con el mismo nombre en ficheros distintos.
+MUTANTES = [
+    ("instruccion.py", "if desde < 0 or not fragmento", "if not fragmento",
+     "test_instruccion.Tachar.test_desde_negativo", "tachar acepta posiciones negativas (contadas desde el final)"),
+    ("validacion.py", B + "x7f-" + B + "x9f", B + "x7f",
+     "test_validacion.TextoLinea.test_bordes_rechazados", "texto_linea admite los controles C1"),
+    ("limitador.py", "LIMITE_MAXIMO = 1_000_000", "LIMITE_MAXIMO = 10_000_000",
+     "test_limitador.CargarLimites.test_errores", "CANARIO_LIMITES admite mas de un millon de peticiones"),
+    ("claves.py", "if maestra == hmac_codigos:", "if False:",
+     "test_claves.Carga.test_iguales", "clave maestra y clave HMAC iguales"),
+    ("cripto.py", "BLOQUE_RELLENO = 256", "BLOQUE_RELLENO = 128",
+     "test_cripto.Relleno.test_literales", "relleno en tramos de 128 bytes"),
+    ("denuncias.py", '            or type(contenido["v"]) is not int\n', "",
+     "test_denuncias.Deserializar.test_formato_desconocido", 'deserializar admite {"v": true}'),
+]
+
+PRUEBA_QUE_FALLA = '''import unittest
+
+
+class Control(unittest.TestCase):
+    def test_falla_a_proposito(self):
+        self.assertEqual(1, 2)
+'''
+
+
+class R:
+    """Resultado de un comando: código, stdout y stderr por separado."""
+
+    def __init__(self, rc, out, err):
+        self.rc, self.out, self.err = rc, out, err
+
+    @property
+    def todo(self):
+        return self.out + self.err
+
+
+class Parada(Exception):
+    pass
+
+
+def p(texto=""):
+    print(texto, flush=True)
+    lineas_salida.append(texto)
+
+
+def ejecutar(args, timeout=900):
+    # check=False explícito: el código de salida se comprueba en cada llamada.
+    r = subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+    return R(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
+
+
+def pasa(cond, texto):
+    p(("PASA  " if cond else "FALLA ") + texto)
+    if not cond:
+        estado["falla"] = True
+
+
+def sinc(texto):
+    p("SIN CONCLUSION " + texto)
+    estado["sin_conclusion"] = True
+
+
+def negativo(nombre, cond, control_ok, detalle=""):
+    """Prueba negativa con control: si el control falla, SIN CONCLUSION."""
+    if not control_ok:
+        sinc(f"{nombre}: el control positivo fallo {detalle}".rstrip())
+        return
+    pasa(cond, nombre)
+    if not cond and detalle:
+        p(f"   {detalle}")
+
+
+def unittest_en_imagen(pruebas, app=None):
+    """Ejecuta unittest sobre el directorio pruebas dentro de la imagen de la
+    API. Con app, monta esa copia en lugar del app/ de la imagen."""
+    orden = ["docker", "run", "--rm", "--network", "none", "--read-only",
+             "--tmpfs", "/tmp:size=16m,mode=1777", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+             "--mount", f"type=bind,src={pruebas},dst=/pruebas,readonly"]
+    if app is not None:
+        orden += ["--mount", f"type=bind,src={app},dst=/srv/app,readonly"]
+    orden += ["--entrypoint", "python", IMAGEN, "-m", "unittest", "discover", "-s", "/pruebas", "-t", "/pruebas", "-v"]
+    return ejecutar(orden)
+
+
+def recuento(salida):
+    """Pruebas ejecutadas por fichero, leídas de la salida de unittest -v."""
+    cuentas = {}
+    for linea in salida.splitlines():
+        encaje = re.match(r"test_\w+ \((test_\w+)\.", linea)
+        if encaje:
+            cuentas[encaje.group(1)] = cuentas.get(encaje.group(1), 0) + 1
+    return cuentas
+
+
+def pruebas_falladas(salida):
+    """Identificadores (fichero.Clase.metodo) de las pruebas con FAIL o ERROR
+    en la salida de unittest, por ejemplo "FAIL: test_x (fichero.Clase.test_x)"."""
+    return set(re.findall(r"^(?:FAIL|ERROR): test_\w+ \(([\w.]+)\)", salida, re.MULTILINE))
+
+
+def seccion_a(temporal):
+    p("=== a) controles del ejecutor")
+    con_fallo = temporal / "control_fallo"
+    con_fallo.mkdir()
+    (con_fallo / "test_control.py").write_text(PRUEBA_QUE_FALLA, encoding="utf-8", newline="\n")
+    vacio = temporal / "control_vacio"
+    vacio.mkdir()
+    r_fallo = unittest_en_imagen(con_fallo)
+    r_vacio = unittest_en_imagen(vacio)
+    ok_fallo = r_fallo.rc == 1 and "test_control.Control.test_falla_a_proposito" in pruebas_falladas(r_fallo.err)
+    ok_vacio = r_vacio.rc == SALIDA_SIN_PRUEBAS
+    pasa(ok_fallo, f"a) una prueba que falla da codigo 1 (codigo {r_fallo.rc})")
+    pasa(ok_vacio, f"a) un directorio sin pruebas da codigo {SALIDA_SIN_PRUEBAS} (codigo {r_vacio.rc})")
+    if not (ok_fallo and ok_vacio):
+        raise Parada("los controles del ejecutor fallan: ninguna otra conclusion es fiable")
+
+
+def seccion_b():
+    p("=== b) pruebas unitarias en la imagen de la API")
+    r = unittest_en_imagen(RAIZ / "tests" / "unit")
+    cuentas = recuento(r.err)
+    pasa(r.rc == 0 and re.search(r"^OK$", r.err, re.MULTILINE) is not None,
+         f"b) todas las pruebas pasan (codigo {r.rc})")
+    if r.rc != 0:
+        for nombre in sorted(pruebas_falladas(r.err)):
+            p(f"   falla: {nombre}")
+        p("   " + "\n   ".join(r.err.strip().splitlines()[-40:]))
+    pasa(f"Ran {TOTAL_PRUEBAS} tests" in r.err, f"b) se ejecutan exactamente {TOTAL_PRUEBAS} pruebas")
+    pasa(cuentas == PRUEBAS_POR_FICHERO, "b) cada fichero ejecuta su numero exacto de pruebas")
+    if cuentas != PRUEBAS_POR_FICHERO:
+        p(f"   esperado: {PRUEBAS_POR_FICHERO}")
+        p(f"   real:     {cuentas}")
+    return r.rc == 0
+
+
+def copia_de_app(temporal, nombre):
+    destino = temporal / nombre / "app"
+    shutil.copytree(RAIZ / "app", destino, ignore=shutil.ignore_patterns("__pycache__"))
+    return destino
+
+
+def seccion_c(temporal, base_ok):
+    p("=== c) mutantes: cada medida rota hace fallar su prueba")
+    pruebas = RAIZ / "tests" / "unit"
+    sana = copia_de_app(temporal, "copia_sana")
+    rota = copia_de_app(temporal, "copia_rota")
+    fichero = rota / "cripto.py"
+    fichero.write_bytes(fichero.read_bytes() + b"\nraise ImportError('copia rota a proposito')\n")
+    r_sana = unittest_en_imagen(pruebas, sana)
+    r_rota = unittest_en_imagen(pruebas, rota)
+    control_sana = r_sana.rc == 0 and f"Ran {TOTAL_PRUEBAS} tests" in r_sana.err
+    control_rota = r_rota.rc != 0
+    pasa(control_sana, f"c) control: la copia sin mutar de app/ pasa entera (codigo {r_sana.rc})")
+    pasa(control_rota, f"c) control: una copia que no se puede importar falla (codigo {r_rota.rc})")
+    controles = base_ok and control_sana and control_rota
+    for i, (nombre, viejo, nuevo, prueba, rompe) in enumerate(MUTANTES, 1):
+        etiqueta = f"c) mutante {i} ({nombre}: {rompe}) lo detecta {prueba}"
+        app = copia_de_app(temporal, f"mutante_{i}")
+        ruta = app / nombre
+        texto = ruta.read_bytes().decode("utf-8")
+        apariciones = texto.count(viejo)
+        if apariciones != 1:
+            sinc(f"{etiqueta}: el texto a mutar aparece {apariciones} veces, no 1")
+            continue
+        ruta.write_bytes(texto.replace(viejo, nuevo).encode("utf-8"))
+        r = unittest_en_imagen(pruebas, app)
+        falladas = pruebas_falladas(r.err)
+        negativo(etiqueta, r.rc == 1 and prueba in falladas, controles,
+                 f"codigo {r.rc}, fallan {sorted(falladas)}")
+
+
+def estado_git():
+    """Líneas de "git status --short -uall", o None si git no está disponible o falla."""
+    try:
+        r = ejecutar(["git", "status", "--short", "-uall"], timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.rc != 0:
+        return None
+    return [l.rstrip() for l in r.out.splitlines() if l.strip()]
+
+
+def imagenes_propias():
+    r = ejecutar(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"])
+    return [n for n in r.out.split() if n.startswith(PROYECTO)]
+
+
+def seccion_s(estado_git_arranque):
+    p("=== s) limpieza")
+    r = ejecutar(["docker", "image", "rm", IMAGEN])
+    p(f"docker image rm {IMAGEN} -> codigo {r.rc}")
+    restos = imagenes_propias()
+    pasa(not restos, f"s) ninguna imagen con prefijo {PROYECTO} {restos if restos else ''}".strip())
+    final = estado_git()
+    if estado_git_arranque is None or final is None:
+        sinc("s) no se pudo comparar el estado de Git (git no disponible, fallo o el directorio no es un repositorio)")
+    else:
+        iguales = final == estado_git_arranque
+        pasa(iguales, "s) la bateria no ha modificado el repo (git status igual al del arranque)")
+        if not iguales:
+            p(f"   al arrancar: {estado_git_arranque}")
+            p(f"   al terminar: {final}")
+
+
+def terminar():
+    if estado["falla"] or estado["sin_conclusion"]:
+        resultado = "NO OK (hay FALLA o SIN CONCLUSION)"
+    else:
+        resultado = "OK"
+    p("RESULTADO GLOBAL: " + resultado)
+    SALIDA.write_text("\n".join(lineas_salida) + "\n", encoding="utf-8", newline="\n")
+    sys.exit(0 if resultado == "OK" else 1)
+
+
+def terminar_con_parada():
+    p("RESULTADO GLOBAL: NO OK (PARADA)")
+    SALIDA.write_text("\n".join(lineas_salida) + "\n", encoding="utf-8", newline="\n")
+    sys.exit(1)
+
+
+def main():
+    # Estado de Git al arrancar: s) lo compara con el final.
+    estado_git_arranque = estado_git()
+    # Precondiciones: si fallan, no se limpia nada (podrían ser recursos ajenos).
+    if ejecutar(["docker", "info", "--format", "{{.ServerVersion}}"]).rc != 0:
+        p("PARADA: docker info falla")
+        terminar_con_parada()
+    previas = imagenes_propias()
+    if previas:
+        p(f"PARADA: ya existen imagenes con prefijo {PROYECTO}: {previas}")
+        terminar_con_parada()
+    temporal = pathlib.Path(tempfile.mkdtemp(prefix=f"{PROYECTO}_"))
+    parada = None
+    try:
+        r = ejecutar(["docker", "build", "-q", "-t", IMAGEN, "."])
+        if r.rc != 0:
+            raise Parada(f"no se puede construir la imagen de la API: {r.err.strip()[-300:]}")
+        seccion_a(temporal)
+        base_ok = seccion_b()
+        seccion_c(temporal, base_ok)
+    except Parada as e:
+        parada = str(e)
+        p(f"PARADA: {parada}")
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
+        parada = "error inesperado en el test"
+        p("ERROR INESPERADO:\n" + traceback.format_exc())
+    finally:
+        seccion_s(estado_git_arranque)
+        shutil.rmtree(temporal, ignore_errors=True)
+    if parada is not None:
+        estado["falla"] = True
+    terminar()
+
+
+if __name__ == "__main__":
+    main()
