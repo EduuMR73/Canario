@@ -51,6 +51,12 @@ y 6.9). Qué prueba:
   la leen por la API y verifican la cadena aparte; asignar dos veces a la
   misma cuenta no deja otra fila; el listado pagina sin huecos ni
   repeticiones.
+* No veraz (art. 32.3): solo la declara un admin con la denuncia asignada,
+  desde cualquier estado visible y sin mensaje (403 instructor, 404 sin
+  asignación, 422 con mensaje); después no existe para nadie (el mismo 404
+  para el personal y el denunciante, fuera del listado), deja su fila de
+  auditoría y un EVENTO por declaración, y gestion suprimir-caducadas la
+  destruye con sus mensajes y su código (art32_3) sin tocar el control.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
   misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
@@ -171,9 +177,16 @@ CUERPO_409_CERRADA_DENUNCIANTE = '{"detalle": "la denuncia está cerrada y no ad
 CUERPO_409_DESTINO = '{"detalle": "la cuenta de destino no está activa"}'.encode("utf-8")
 CUERPO_422_FINAL = '{"detalle": "cerrar una denuncia exige un mensaje final para el denunciante"}'.encode("utf-8")
 ESTADOS = ["nueva", "en_instruccion", "resuelta", "archivada", "inadmitida"]
+# Los destinos de un instructor (k5). 'no_veraz' es solo de admin y va en k10.
 ESTADOS_DESTINO = ["en_instruccion", "resuelta", "archivada", "inadmitida"]
 TRANSICIONES_ESPERADAS = {("nueva", "en_instruccion"), ("nueva", "inadmitida"),
                           ("en_instruccion", "resuelta"), ("en_instruccion", "archivada")}
+# Art. 32.3: desde cualquier estado visible, incluidos los cerrados.
+TRANSICIONES_NO_VERAZ = {("nueva", "no_veraz"), ("en_instruccion", "no_veraz"), ("resuelta", "no_veraz"),
+                         ("archivada", "no_veraz"), ("inadmitida", "no_veraz")}
+CUERPO_422_NO_VERAZ = '{"detalle": "declarar una denuncia no veraz no admite mensaje"}'.encode("utf-8")
+CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode("utf-8")
+TEXTO_EVENTO_NO_VERAZ = "EVENTO declaracion_no_veraz: "
 CLAVES_LISTADO = ["denuncias", "siguiente"]
 CLAVES_FILA_DENUNCIA = ["asignada_a", "asignada_activa", "denuncia_id", "estado", "fecha"]
 CLAVES_EXPEDIENTE = ["categoria", "denuncia_id", "estado", "fecha", "mensajes", "texto"]
@@ -1880,6 +1893,128 @@ def seccion_k():
     pasa(cadena == "intacta", f"k9) la cadena de auditoria de A sigue intacta al terminar ({cadena})")
 
 
+def seccion_k_no_veraz():
+    p("=== k10) no veraz (art. 32.3): solo admin, sin mensaje, invisible para todos y suprimida por gestion")
+    admin2, instr = CUENTAS["admin2"], CUENTAS["instructor"]
+    token_admin, token_instr = sesion_de(admin2), sesion_de(instr)
+    # Una denuncia por estado de origen, asignadas al admin; otra asignada al
+    # instructor (403 y 404 del admin) y otra que no se toca (control).
+    origenes = {}
+    for origen in ESTADOS:
+        den, cod, _ = crear_denuncia("A")
+        preparar(asignar_peticion(token_admin, den, admin2.usuario_id), f"asignar {origen}")
+        origenes[origen] = (den, cod)
+    den_instr, _, _ = crear_denuncia("A")
+    preparar(asignar_peticion(token_admin, den_instr, instr.usuario_id), "asignar al instructor")
+    den_ctl, cod_ctl, _ = crear_denuncia("A")
+    preparar(asignar_peticion(token_admin, den_ctl, admin2.usuario_id), "asignar el control")
+    den_n, cod_n = origenes["nueva"]
+    # La nueva lleva un mensaje de cada lado, para ver que la supresion los borra.
+    preparar(mensaje_denunciante(cod_n, "mensaje antes de no veraz"), "mensaje del denunciante")
+    preparar(mensaje_peticion(token_admin, den_n, "mensaje del personal antes de no veraz"), "mensaje del personal")
+    for origen, (den, _) in origenes.items():
+        valor(f"update canal.denuncia set estado = '{origen}' where id = '{den}'; select 1;")
+    eventos_antes = sum(TEXTO_EVENTO_NO_VERAZ in l for l in lineas_log("api"))
+
+    # k10a) Antes de declararla, todos la ven (control de los 404 de despues).
+    antes = {"lectura del admin": una(pt("GET", rd(den_n), token=token_admin)),
+             "seguimiento": una(seguimiento(cod_n))}
+    control_vista = all(r.get("estado") == 200 for r in antes.values()) and den_n in {
+        f.get("denuncia_id") for f in (json_de(una(pt("GET", "/v1/personal/denuncias", token=token_admin))) or {})
+        .get("denuncias", [])}
+    pasa(control_vista, "k10a) control: antes de declararla, el admin la lee y la lista y el denunciante la sigue")
+
+    # k10b) Quien no puede declararla: instructor (403), admin sin la denuncia
+    #       asignada (404) y con mensaje (422). Nada cambia ni deja rastro.
+    antes_instr, antes_n = fila_denuncia(den_instr), fila_denuncia(den_n)
+    rechazos = [una(estado_peticion(token_instr, den_instr, "no_veraz")),
+                una(estado_peticion(token_admin, den_instr, "no_veraz")),
+                una(estado_peticion(token_admin, den_n, "no_veraz", "mensaje que nadie leeria"))]
+    tras_rechazos_instr, tras_rechazos_n = fila_denuncia(den_instr), fila_denuncia(den_n)
+    # k10c) Desde cada estado visible, el admin con la denuncia asignada la
+    #       declara no veraz (204), sin mensaje y sin cambiar los mensajes.
+    resultados = {}
+    for origen, (den, _) in origenes.items():
+        previa = fila_denuncia(den)
+        r = una(estado_peticion(token_admin, den, "no_veraz"))
+        resultados[(origen, "no_veraz")] = (r.get("estado"), previa, fila_denuncia(den))
+    control_decl = set(resultados) == TRANSICIONES_NO_VERAZ and all(
+        codigo == 204 and despues.split("|")[0] == "no_veraz" and despues.split("|")[1:] == previa.split("|")[1:]
+        for codigo, previa, despues in resultados.values())
+    pasa(control_decl, f"k10c) control: desde los 5 estados visibles el admin la declara no veraz (204) sin "
+                       f"mensaje y sin tocar los demas campos ({ {k[0]: v[0] for k, v in resultados.items()} })")
+    negativo("k10b) un instructor no puede declararla: 403, y la denuncia no cambia",
+             rechazos[0].get("estado") == 403 and rechazos[0].get("cuerpo") == CUERPO_403
+             and tras_rechazos_instr == antes_instr, control_decl, f"{rechazos[0]}")
+    negativo("k10b) un admin sin la denuncia asignada recibe el 404 generico, y no cambia",
+             rechazos[1].get("estado") == 404 and rechazos[1].get("cuerpo") == CUERPO_404
+             and fila_denuncia(den_instr) == antes_instr, control_decl, f"{rechazos[1]}")
+    negativo("k10b) declararla con mensaje da 422 y no la cambia ni le anade el mensaje",
+             rechazos[2].get("estado") == 422 and rechazos[2].get("cuerpo") == CUERPO_422_NO_VERAZ
+             and tras_rechazos_n == antes_n, control_decl, f"{rechazos[2]}, fila: {tras_rechazos_n}")
+    pasa(all(auditoria_de("A", "estado_no_veraz", den) == [f"personal:{admin2.usuario_id}|"]
+             for den, _ in origenes.values()) and auditoria_de("A", "estado_no_veraz", den_instr) == [],
+         "k10c) cada declaracion deja su fila estado_no_veraz con el admin; los rechazos no dejan ninguna")
+
+    # k10d) Para la API ya no existe: el mismo 404 que una inexistente, para
+    #       el personal (lectura, mensaje, estado y asignacion) y para el
+    #       denunciante (seguimiento y mensaje). El listado no la muestra y el
+    #       filtro por no_veraz no es un estado visible (422).
+    personal_404 = http([pt("GET", rd(den_n), token=token_admin),
+                         mensaje_peticion(token_admin, den_n, "despues"),
+                         estado_peticion(token_admin, den_n, "en_instruccion"),
+                         estado_peticion(token_admin, den_n, "no_veraz"),
+                         asignar_peticion(token_admin, den_n, admin2.usuario_id)])
+    denunciante_404 = http([seguimiento(cod_n), mensaje_denunciante(cod_n, "despues")])
+    ctl_vivo = una(seguimiento(cod_ctl))
+    control_vivo = control_vista and ctl_vivo.get("estado") == 200
+    negativo("k10d) el personal recibe el 404 generico byte a byte en lectura, mensaje, estado y asignacion",
+             all(r.get("estado") == 404 and r.get("cuerpo") == CUERPO_404 for r in personal_404), control_vivo,
+             f"estados: {[r.get('estado') for r in personal_404]}")
+    negativo("k10d) el denunciante recibe el 404 de codigo no valido en seguimiento y en mensaje",
+             all(r.get("estado") == 404 and r.get("cuerpo") == CUERPO_404_CODIGO for r in denunciante_404),
+             control_vivo, f"estados: {[r.get('estado') for r in denunciante_404]}")
+    listado = json_de(una(pt("GET", "/v1/personal/denuncias", token=token_admin))) or {}
+    vistas = {f.get("denuncia_id") for f in listado.get("denuncias", [])}
+    filtro = una(pt("GET", "/v1/personal/denuncias?estado=no_veraz", token=token_admin))
+    negativo("k10d) el listado no muestra ninguna no veraz (si el control) y filtrar por no_veraz da 422",
+             not vistas & {den for den, _ in origenes.values()} and den_ctl in vistas
+             and filtro.get("estado") == 422 and filtro.get("cuerpo") == CUERPO_422, control_vivo,
+             f"filtro: {filtro.get('estado')}")
+    negativo("k10d) los intentos posteriores no cambian la denuncia (sigue no_veraz con sus 2 mensajes)",
+             fila_denuncia(den_n) == f"no_veraz|{admin2.usuario_id}|2", control_vivo, fila_denuncia(den_n))
+
+    # k10e) Un evento por declaracion, con empresa, cuenta y denuncia; los
+    #       rechazos no dejan ninguno.
+    nuevos = [l for l in lineas_log("api") if TEXTO_EVENTO_NO_VERAZ in l][eventos_antes:]
+    esperados = sorted(f"{TEXTO_EVENTO_NO_VERAZ}empresa={EMPRESAS['A'][0]} cuenta={admin2.usuario_id} denuncia={den}"
+                       for den, _ in origenes.values())
+    negativo("k10e) el log tiene exactamente un EVENTO declaracion_no_veraz por declaracion, sin contenido",
+             sorted(l[l.index(TEXTO_EVENTO_NO_VERAZ):] for l in nuevos) == esperados, control_decl, f"{nuevos}")
+
+    # k10f) gestion suprimir-caducadas las destruye (art32_3), con sus
+    #       mensajes y sus codigos, y deja la evidencia; el control sigue.
+    ids_nv = [den for den, _ in origenes.values()]
+    lista_sql = ", ".join(f"'{d}'" for d in ids_nv)
+    r = gestion("suprimir-caducadas")
+    esperado = [f"suprimidas: empresa_id={EMPRESAS['A'][0]} articulo=art32_3 denuncias=5", "total suprimidas: 5"]
+    control_sup = r.rc == 0 and r.out.strip().splitlines() == esperado
+    pasa(control_sup, f"k10f) gestion suprimir-caducadas suprime las 5 por art32_3 y sale con 0 ({r.out.strip()!r})")
+    restos = valor(f"select (select count(*) from canal.denuncia where id in ({lista_sql})) || '|' || "
+                   f"(select count(*) from canal.mensaje where denuncia_id in ({lista_sql})) || '|' || "
+                   f"(select count(*) from canal.busqueda_seguimiento where denuncia_id in ({lista_sql})) || '|' || "
+                   f"(select count(*) from canal.denuncia where id = '{den_ctl}');")
+    negativo("k10f) no queda ni la denuncia, ni sus mensajes, ni su codigo; la de control sigue",
+             restos == "0|0|0|1", control_sup, restos)
+    evidencia = sorted(valor(f"select actor || '|' || objeto_id from canal.registro_auditoria "
+                             f"where accion = 'supresion_art32_3' and objeto_id in ({lista_sql});").split())
+    negativo("k10f) una fila sistema|supresion_art32_3 por denuncia suprimida",
+             evidencia == sorted(f"sistema|{d}" for d in ids_nv), control_sup, f"{evidencia}")
+    tras = una(seguimiento(cod_n))
+    negativo("k10f) tras la supresion el codigo sigue dando el mismo 404",
+             tras.get("estado") == 404 and tras.get("cuerpo") == CUERPO_404_CODIGO, control_sup, f"{tras}")
+
+
 def seccion_l():
     p("=== l) gestion lee en solo lectura y con una sola foto")
     r = dc("run", "--rm", "-T", "--entrypoint", "python", "gestion", "-c", GESTION_DENTRO, EMPRESAS["A"][1])
@@ -2100,7 +2235,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
-                        seccion_k, seccion_l, seccion_i, seccion_h):
+                        seccion_k, seccion_k_no_veraz, seccion_l, seccion_i, seccion_h):
             seccion()
     except Parada as e:
         parada = str(e)
