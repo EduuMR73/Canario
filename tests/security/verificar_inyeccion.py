@@ -350,7 +350,10 @@ def una(pt):
         ms = (time.perf_counter() - inicio) * 1000
         return {"estado": respuesta.status, "cuerpo": base64.b64encode(datos).decode("ascii"), "ms": ms}
     except Exception as error:
-        return {"error": type(error).__name__}
+        # Solo el tipo: el mensaje de algunas excepciones de http.client
+        # puede llevar parte de la respuesta. El método y la ruta van aquí,
+        # igual que en tests/security/verificar_personal.py.
+        return {"error": type(error).__name__, "metodo": pt["metodo"], "ruta": pt["ruta"]}
     finally:
         if conexion is not None:
             conexion.close()
@@ -494,6 +497,12 @@ def http(peticiones):
     except (ValueError, IndexError):
         raise Parada(f"el cliente HTTP no devolvio resultado: {r.err.strip()[-400:]!r}") from None
     for respuesta in respuestas:
+        # Diagnóstico: una petición sin respuesta deja un control SIN
+        # CONCLUSION; se imprime el tipo de error para que la causa sea
+        # visible en la salida y no haya que adivinarla. No cambia ningún
+        # oráculo ni condición.
+        if "error" in respuesta:
+            p(f"  [cliente HTTP] {respuesta['error']} en {respuesta['metodo']} {respuesta['ruta']}")
         if "cuerpo" in respuesta:
             respuesta["cuerpo"] = base64.b64decode(respuesta["cuerpo"])
     return respuestas
