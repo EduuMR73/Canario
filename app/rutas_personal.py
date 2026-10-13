@@ -60,9 +60,9 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app import cripto, denuncias, instruccion, limitador, personal
-from app.validacion import TextoLibre, TextoLinea, validar_email
 from app.frontera_http import REINTENTAR_TRAS, cuerpo_error
 from app.rutas_denuncias import LONGITUD_MAXIMA_TEXTO
+from app.validacion import TextoLibre, TextoLinea, validar_email
 
 registro = logging.getLogger("canario.personal")
 

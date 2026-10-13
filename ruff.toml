@@ -1,0 +1,19 @@
+# Configuración de ruff, el analizador estático de Python. No se instala en el
+# equipo: se ejecuta con la imagen oficial fijada por versión y digest (ver
+# README, sección Pruebas). Desde ruff 0.16.0 el conjunto de reglas por defecto
+# es amplio (413 reglas) y es el que se usa: aquí solo va lo que el proyecto
+# decide distinto, cada cosa con su porqué.
+
+target-version = "py312"
+
+# Ancho real del proyecto: ninguna línea de app/ pasa de 119 columnas. Se
+# declara el ancho que se usa en vez de reformatear el código al de por defecto
+# (88).
+line-length = 120
+
+[lint]
+# EXE002 (fichero con permiso de ejecución y sin shebang): al montar el
+# proyecto desde Windows en un contenedor Linux todos los ficheros aparecen como
+# ejecutables, así que la regla salta en cada fichero sin decir nada del
+# código. En git los ficheros son 100644 (git ls-files -s).
+ignore = ["EXE002"]

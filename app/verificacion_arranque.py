@@ -131,8 +131,7 @@ POLITICAS = {
     f"clave_empresa|clave_empresa_insert|a|t|aplicacion||{_MISMA_EMPRESA}",
     f"usuario_personal|usuario_personal_select|r|t|aplicacion|{_MISMA_EMPRESA}|",
     f"usuario_personal|usuario_personal_insert|a|t|aplicacion||{_MISMA_EMPRESA}",
-    f"usuario_personal|usuario_personal_update|w|t|aplicacion|{_MISMA_EMPRESA}"
-    f"|{_MISMA_EMPRESA}",
+    f"usuario_personal|usuario_personal_update|w|t|aplicacion|{_MISMA_EMPRESA}|{_MISMA_EMPRESA}",
     f"invitacion_personal|invitacion_personal_select|r|t|aplicacion|{_MISMA_EMPRESA}|",
     f"invitacion_personal|invitacion_personal_insert|a|t|aplicacion||{_MISMA_EMPRESA}",
     f"invitacion_personal|invitacion_personal_update|w|t|aplicacion|{_MISMA_EMPRESA}|{_MISMA_EMPRESA}",
