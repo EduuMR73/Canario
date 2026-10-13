@@ -171,13 +171,19 @@ def serializar(**campos):
 def deserializar(datos, campos):
     """Inverso estricto de serializar(): exige exactamente {v, *campos}, con
     textos. Los datos ya están autenticados por GCM: una desviación indicaría
-    un error propio, no un ataque, y se trata como fallo de integridad."""
+    un error propio, no un ataque, y se trata como fallo de integridad.
+
+    La versión tiene que ser el entero exacto: en Python True == 1 y 1.0 == 1,
+    así que comparar solo el valor admitiría {"v": true} o {"v": 1.0}, que
+    serializar() nunca escribe (el mismo criterio que la versión de clave en
+    app/cripto.py)."""
     try:
         contenido = json.loads(datos.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise cripto.ErrorIntegridad("contenido descifrado con formato invalido") from None
     if (not isinstance(contenido, dict)
             or set(contenido) != {"v", *campos}
+            or type(contenido["v"]) is not int
             or contenido["v"] != VERSION_CONTENIDO
             or not all(isinstance(contenido[c], str) for c in campos)):
         raise cripto.ErrorIntegridad("contenido descifrado con formato desconocido")
