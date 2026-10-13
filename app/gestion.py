@@ -111,7 +111,11 @@ class ErrorGestion(Exception):
 def _verificar_base_datos(conexion):
     """Mismas comprobaciones que el arranque de la API, en solo lectura."""
     with conexion.transaction():
-        conexion.execute("set transaction read only")
+        # La misma sentencia que el arranque de la API: solo lectura, para que
+        # un error del código no pueda escribir, y REPEATABLE READ, para que
+        # todas las comprobaciones vean la misma foto de la base de datos (en
+        # READ COMMITTED cada sentencia vería la suya).
+        conexion.execute(bd.SQL_SOLO_LECTURA)
         fallos = verificacion_arranque.comprobar(conexion)
     if fallos:
         detalle = "; ".join(f"{identificador}: {texto}" for identificador, texto in fallos)
@@ -168,6 +172,9 @@ def _invitacion_plataforma(emitir, identificador, email):
     with bd.conectar("aplicacion", bd.FICHERO_CONTRASENA) as conexion:
         _verificar_base_datos(conexion)
         with conexion.transaction():
+            # Resolver el identificador solo lee: en solo lectura un error no
+            # puede escribir nada. La escritura va en la transacción siguiente.
+            conexion.execute(bd.SQL_SOLO_LECTURA)
             empresa_id = conexion.execute(SQL_RESOLVER, [identificador]).fetchone()[0]
         if empresa_id is None:
             raise ErrorGestion("no hay ninguna empresa activa con ese identificador")
