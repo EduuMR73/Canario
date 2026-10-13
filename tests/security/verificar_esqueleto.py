@@ -12,8 +12,9 @@ un X-Forwarded-For falsificado no llega a la API tal cual y que uvicorn solo
 confía en las cabeceras de reenvío del proxy; usuario no root, solo lectura,
 capacidades y límites; el healthcheck sano y roto; la imagen y el estado de
 Caddy (sin file capability, /data/caddy cerrado, /config de solo lectura, sin
-volúmenes anónimos, sin autosave ni HTTP/3); y que el CA de Caddy sobrevive a
-reinicios. Cada prueba negativa lleva su control positivo: si el control falla,
+volúmenes anónimos, sin autosave ni HTTP/3); que el CA de Caddy sobrevive a
+reinicios; y que Caddy funciona sin internet (en una red interna, con un
+volumen vacío, crea su CA y sirve con TLS validado sin intentar ACME ni OCSP). Cada prueba negativa lleva su control positivo: si el control falla,
 el resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
 
 Cómo se ejecuta (desde la raíz del repositorio, en PowerShell, con Docker en
@@ -780,6 +781,99 @@ def seccion_l():
          f"l) configuracion efectiva: read_header 10s, read_body 30s, write 30s e idle 2m en todos los servidores ({reales})")
 
 
+# m) Caddy funciona sin internet. Nombres propios (con el prefijo del
+# proyecto, así s) detecta cualquier resto) y cliente que valida el TLS contra
+# la raíz que el propio Caddy acaba de crear en su volumen vacío.
+RED_SIN_INTERNET = f"{PROYECTO}_sin_internet"
+VOLUMEN_SIN_INTERNET = f"{PROYECTO}_datos_sin_internet"
+CADDY_SIN_INTERNET = f"{PROYECTO}_caddy_sin_internet"
+API_FALSA = f"{PROYECTO}_api_falsa"
+# Términos que delatarían que Caddy intenta salir: ACME, OCSP o una conexión
+# saliente fallida ("dial"). Comprobado: el log de Caddy en una red interna
+# no contiene ninguno (solo el aviso de la API de administración desactivada).
+TERMINOS_SALIDA = ("acme", "ocsp", "dial")
+CLIENTE_TLS_VALIDADO = r'''
+import http.client, json, socket, ssl
+contexto = ssl.create_default_context(cafile="/prueba/raiz_sin_internet.crt")
+s = contexto.wrap_socket(socket.create_connection(("proxy", 8443), timeout=10), server_hostname="localhost")
+c = http.client.HTTPConnection("localhost", 8443, timeout=10)
+c.sock = s
+c.request("GET", "/salud", headers={"Host": "localhost:8443"})
+r = c.getresponse()
+print(json.dumps({"estado": r.status, "cuerpo": r.read().decode("latin-1")}))
+'''
+
+
+def seccion_m():
+    p("=== m) Caddy funciona sin internet (red interna, volumen vacio)")
+    # Precondición: la red interna de verdad no tiene salida, y desde una red
+    # normal sí la hay (si no, no se puede concluir nada sobre "sin internet").
+    r = ejecutar(["docker", "network", "create", "--internal", RED_SIN_INTERNET])
+    if r.rc != 0:
+        raise Parada(f"no se pudo crear la red interna de m): {r.err.strip()[:200]}")
+    control = docker_run("--network", "bridge", "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_SALIDA)
+    sin_salida = docker_run("--network", RED_SIN_INTERNET, "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_SALIDA)
+    p(f"   salida a 1.1.1.1:443: red interna -> {sin_salida.out.strip()!r}; red bridge -> {control.out.strip()!r}")
+    if control.out.strip() != "CONECTA" or not sin_salida.out.startswith("SIN_SALIDA"):
+        sinc("m) la red de la prueba no es una red sin internet comprobada (control: bridge CONECTA, interna "
+             "SIN_SALIDA): no se puede concluir")
+        return
+
+    # API falsa con el alias api: sirve /salud desde un fichero, sin la API real.
+    (TEMPORAL / "api_falsa").mkdir()
+    (TEMPORAL / "api_falsa" / "salud").write_bytes(CUERPO_SALUD)
+    (TEMPORAL / "cliente_tls.py").write_text(CLIENTE_TLS_VALIDADO, encoding="utf-8", newline="\n")
+    ejecutar(["docker", "run", "-d", "--name", API_FALSA, "--network", RED_SIN_INTERNET, "--network-alias", "api",
+              "--mount", f"type=bind,src={TEMPORAL / 'api_falsa'},dst=/web,readonly",
+              "--entrypoint", "python", IMAGEN_API, "-m", "http.server", "8000", "--directory", "/web"])
+    # La imagen construida del proyecto con el mismo endurecimiento que el
+    # compose y un volumen nuevo, vacío: tiene que crear su CA sin red.
+    ejecutar(["docker", "volume", "create", VOLUMEN_SIN_INTERNET])
+    ejecutar(["docker", "run", "-d", "--name", CADDY_SIN_INTERNET, "--network", RED_SIN_INTERNET,
+              "--network-alias", "proxy", "--read-only", "--cap-drop", "ALL",
+              "--security-opt", "no-new-privileges:true",
+              "--mount", f"type=volume,src={VOLUMEN_SIN_INTERNET},dst=/data", IMAGEN_PROXY])
+    raiz = TEMPORAL / "raiz_sin_internet.crt"
+    copiada = esperar_raiz(raiz)
+    respuesta = {}
+    if copiada:
+        r = docker_run("--network", RED_SIN_INTERNET,
+                       "--mount", f"type=bind,src={TEMPORAL},dst=/prueba,readonly",
+                       "--entrypoint", "python", IMAGEN_API, "-I", "/prueba/cliente_tls.py")
+        try:
+            respuesta = json.loads(r.out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            p(f"   cliente TLS: codigo {r.rc} {r.err.strip()[-300:]!r}")
+    pasa(copiada and respuesta == {"estado": 200, "cuerpo": CUERPO_SALUD.decode("latin-1")},
+         f"m) sin internet y con el volumen vacio, Caddy crea su CA y sirve /salud con TLS validado contra esa "
+         f"raiz y SNI localhost ({respuesta})")
+    registro = ejecutar(["docker", "logs", CADDY_SIN_INTERNET]).todo
+    delatoras = [l for l in registro.splitlines() if any(t in l.lower() for t in TERMINOS_SALIDA)]
+    pasa(bool(registro.strip()) and not delatoras,
+         f"m) el log de Caddy no menciona {', '.join(TERMINOS_SALIDA)} ({len(delatoras)} lineas)")
+    for l in delatoras[:5]:
+        p(f"   {l[:300]}")
+
+
+def esperar_raiz(destino, maximo=30):
+    """Copia la raíz del CA del Caddy de m) en cuanto existe."""
+    limite = time.monotonic() + maximo
+    while time.monotonic() < limite:
+        if ejecutar(["docker", "cp", f"{CADDY_SIN_INTERNET}:{RAIZ_CA}", str(destino)]).rc == 0 and destino.is_file():
+            # Un margen para que el servidor TLS termine de arrancar tras crear el CA.
+            time.sleep(2)
+            return True
+        time.sleep(1)
+    return False
+
+
+def limpiar_sin_internet():
+    for nombre in (CADDY_SIN_INTERNET, API_FALSA):
+        ejecutar(["docker", "rm", "-f", "-v", nombre])
+    ejecutar(["docker", "volume", "rm", VOLUMEN_SIN_INTERNET])
+    ejecutar(["docker", "network", "rm", RED_SIN_INTERNET])
+
+
 def seccion_k():
     p("=== k) el CA de Caddy sobrevive a reinicios")
     inicial = huella_ca()
@@ -910,7 +1004,7 @@ def main():
     try:
         seccion_a()
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g,
-                        seccion_h, seccion_i, seccion_j, seccion_k, seccion_l):
+                        seccion_h, seccion_i, seccion_j, seccion_k, seccion_l, seccion_m):
             seccion()
     except Parada as e:
         parada = str(e)
@@ -921,6 +1015,7 @@ def main():
     finally:
         for nombre in ("cliente", "control_volumen", "control_autosave", "control_log"):
             ejecutar(["docker", "rm", "-f", "-v", f"{PROYECTO}_{nombre}"])
+        limpiar_sin_internet()
         if parada is not None:
             dc("down", "-v", "--rmi", "local")
         else:

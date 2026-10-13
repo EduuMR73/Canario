@@ -33,6 +33,9 @@ y 6.9). Qué prueba:
   activado de esa empresa, revoca en el acto su acceso (la sesión anterior ya
   no puede anular la recuperación) y el único admin de una empresa recupera
   su cuenta.
+* Gestion: la verificación de la base de datos y la resolución del
+  identificador corren en solo lectura y REPEATABLE READ, con el código real
+  y preguntando a PostgreSQL; sus transacciones de escritura son el control.
 * Instrucción (app/instruccion.py): el contenido de una denuncia solo lo lee
   quien la tiene asignada (también un admin: arts. 32.1 y 8.5 de la Ley
   2/2023); una denuncia ajena, inexistente o de otra empresa da el mismo 404
@@ -369,6 +372,59 @@ res = {
 }
 print(json.dumps(res, sort_keys=True))
 """
+
+
+# Se ejecuta con la imagen de gestion y el código real de app/gestion.py. En
+# cada punto que interesa le pregunta a PostgreSQL el modo de la transacción en
+# curso, sin cambiar el SQL que se prueba: las lecturas (verificación de la
+# base de datos y resolución del identificador) y, como control, las dos
+# transacciones de escritura (la de la invitación y la de nueva-clave). No
+# escribe nada: la invitación espía aborta y nueva-clave recibe una empresa
+# inexistente, que se rechaza antes del INSERT.
+GESTION_DENTRO = """
+import json, sys, uuid
+import psycopg
+from app import gestion, personal, verificacion_arranque
+
+ESTADO = "select current_setting('transaction_read_only'), current_setting('transaction_isolation')"
+res = {}
+execute_real = psycopg.Connection.execute
+comprobar_real = verificacion_arranque.comprobar
+
+def anotar(clave, conexion):
+    res.setdefault(clave, []).append("|".join(execute_real(conexion, ESTADO).fetchone()))
+
+def execute(self, query, *args, **kwargs):
+    cursor = execute_real(self, query, *args, **kwargs)
+    if query == gestion.SQL_RESOLVER:
+        anotar("resolver", self)
+    elif query == gestion.SQL_EMPRESA_VISIBLE:
+        anotar("clave", self)
+    return cursor
+
+def comprobar(conexion):
+    anotar("verificacion", conexion)
+    return comprobar_real(conexion)
+
+def emitir(conexion, empresa_id, identificador, email):
+    anotar("emision", conexion)
+    raise personal.AltaAdminRechazada("espia")
+
+psycopg.Connection.execute = execute
+verificacion_arranque.comprobar = comprobar
+try:
+    gestion._invitacion_plataforma(emitir, sys.argv[1], "espia@alfa.test")
+except gestion.ErrorGestion as error:
+    res["fin_invitacion"] = str(error)
+try:
+    gestion.nueva_clave(uuid.uuid4(), bytes(32))
+except gestion.ErrorGestion as error:
+    res["fin_clave"] = str(error)
+print(json.dumps(res, sort_keys=True))
+"""
+# Oráculos literales: show transaction_read_only y transaction_isolation.
+MODO_SOLO_LECTURA = "on|repeatable read"
+MODO_ESCRITURA = "off|read committed"
 
 
 # ---------------------------------------------------------------------------
@@ -1824,6 +1880,26 @@ def seccion_k():
     pasa(cadena == "intacta", f"k9) la cadena de auditoria de A sigue intacta al terminar ({cadena})")
 
 
+def seccion_l():
+    p("=== l) gestion lee en solo lectura y con una sola foto")
+    r = dc("run", "--rm", "-T", "--entrypoint", "python", "gestion", "-c", GESTION_DENTRO, EMPRESAS["A"][1])
+    try:
+        res = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Parada(f"no se pudo ejecutar la prueba de gestion: {r.err.strip()[-400:]!r}") from None
+    # Control: las transacciones de escritura de las mismas órdenes dan otro
+    # modo, así que la consulta distingue uno de otro. Y las dos órdenes
+    # llegaron hasta su final esperado sin escribir nada.
+    control = (res.get("emision") == [MODO_ESCRITURA] and res.get("clave") == [MODO_ESCRITURA]
+               and res.get("fin_invitacion") == "espia" and res.get("fin_clave") == "la empresa no existe")
+    pasa(control, f"l) control: las transacciones de escritura de gestion estan en {MODO_ESCRITURA} "
+                  f"(invitacion: {res.get('emision')}, nueva-clave: {res.get('clave')})")
+    negativo("l) la verificacion de la base de datos de gestion (en las dos ordenes) es solo lectura en REPEATABLE READ",
+             res.get("verificacion") == [MODO_SOLO_LECTURA, MODO_SOLO_LECTURA], control, f"{res.get('verificacion')}")
+    negativo("l) la resolucion del identificador de alta-admin y reinvitar-admin es solo lectura en REPEATABLE READ",
+             res.get("resolver") == [MODO_SOLO_LECTURA], control, f"{res.get('resolver')}")
+
+
 def seccion_h():
     p("=== h) regla acceso del limitador (limites de produccion)")
     r = dc_produccion("up", "-d", "--wait", "api")
@@ -2024,7 +2100,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
-                        seccion_k, seccion_i, seccion_h):
+                        seccion_k, seccion_l, seccion_i, seccion_h):
             seccion()
     except Parada as e:
         parada = str(e)

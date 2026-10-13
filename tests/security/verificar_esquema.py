@@ -19,7 +19,10 @@ que la supresión legal (arts. 32.4 y 26.2 de la Ley 2/2023) borra solo lo
 caducado, con sus bordes (también la denuncia inadmitida, a la que no se dio
 curso), salta lo que está en uso sin esperar, respeta una
 denuncia que pasa a instrucción en carrera y deja su evidencia en la
-auditoría.
+auditoría. También la autenticación: el pg_hba.conf que manda es el del
+repositorio, sin trust; el superusuario solo entra por el socket con peer;
+las contraseñas se guardan en SCRAM-SHA-256 y un cliente que exige md5 no
+entra; y los roles de Canario solo llegan a la base canario.
 Cada prueba negativa lleva su
 control positivo: si el control falla, el resultado es SIN CONCLUSION, nunca
 PASA.
@@ -377,6 +380,26 @@ ADMIN_DE = {EMPRESA_A: ADMIN_A, EMPRESA_B: ADMIN_B}
 DISP_DE = {EMPRESA_A: DISP_A, EMPRESA_B: DISP_B}
 TEXTO_CREDENCIALES = "usuario_personal_credenciales_check"
 TEXTO_PENDIENTE = "invitacion_personal_pendiente_check"
+
+# Autenticación (db/pg_hba.conf y docker-compose.yml), seccion au. Literales
+# comprobados contra postgres:18.6-alpine con el pg_hba.conf del repositorio.
+HBA_FILE = "/etc/postgresql/pg_hba.conf"
+# rule_number|type|database|user_name|address|netmask|auth_method|options
+REGLAS_HBA = [
+    "1|local|{all}|{postgres}|||peer|",
+    "2|host|{canario}|{migrador,aplicacion,plataforma}|samenet||scram-sha-256|",
+    "3|local|{all}|{all}|||reject|",
+    "4|host|{all}|{all}|all||reject|",
+]
+ROLES_CON_CONTRASENA = ["aplicacion", "migrador", "plataforma", "postgres"]
+PREFIJO_SCRAM = "SCRAM-SHA-256$4096:"
+TEXTO_RECHAZO_TCP_SUPERUSUARIO = 'pg_hba.conf rejects connection for host "127.0.0.1", user "postgres"'
+TEXTO_RECHAZO_SOCKET = 'pg_hba.conf rejects connection for host "[local]", user "aplicacion"'
+TEXTO_RECHAZO_OTRA_BASE = 'user "aplicacion", database "postgres"'
+TEXTO_RECHAZO_HBA = "pg_hba.conf rejects connection for host"
+TEXTO_REQUIERE_MD5 = 'authentication method requirement "md5" failed: server requested SASL authentication'
+# Una regla activa (no comentario) cuyo método es trust.
+PATRON_TRUST = re.compile(r"^\s*(local|host\w*)\s.*\strust\s*$")
 
 
 # ---------------------------------------------------------------------------
@@ -1076,16 +1099,20 @@ def seccion_l():
              "violates foreign key constraint", sin_error(ctl))
 
 
-def cliente_red(sql, rol="aplicacion"):
-    """psql como un rol de login por la red data, con su secreto real montado sin leerlo."""
+def cliente_red(sql, rol="aplicacion", base="canario", requerir=None):
+    """psql como un rol de login por la red data, con su secreto real montado sin leerlo.
+
+    requerir: método que el cliente exige al servidor (require_auth de libpq,
+    variable PGREQUIREAUTH). El psql de la imagen de postgres 18 lo soporta.
+    """
     ruta = (RAIZ / "secrets" / f"contrasena_{rol}.txt").resolve()
+    entorno = ["-e", "PGCONNECT_TIMEOUT=5"] + (["-e", f"PGREQUIREAUTH={requerir}"] if requerir else [])
     return ejecutar([
-        "docker", "run", "--rm", "-i", "--network", f"{PROYECTO}_data",
-        "-e", "PGCONNECT_TIMEOUT=5",
+        "docker", "run", "--rm", "-i", "--network", f"{PROYECTO}_data", *entorno,
         "--mount", f"type=bind,source={ruta},target=/s,readonly",
         "--entrypoint", "sh", IMAGEN,
-        "-c", 'PGPASSWORD=$(cat /s) exec psql -h postgres -U "$1" -d canario -X -q -A -t -v ON_ERROR_STOP=0 -f -',
-        "sh", rol,
+        "-c", 'PGPASSWORD=$(cat /s) exec psql -h postgres -U "$1" -d "$2" -X -q -A -t -v ON_ERROR_STOP=0 -f -',
+        "sh", rol, base,
     ], entrada=sql.encode("utf-8"))
 
 
@@ -1112,6 +1139,73 @@ def seccion_m():
         pasa(r.lineas()[2:3] == ["0"], "m) select count(*) from denuncia (sin cualificar, sin contexto) = 0")
     pasa(r.err.count("permission denied") >= 2 and 'SET ROLE' not in r.out and len(r.lineas()) == 3,
          "m) SET ROLE migrador y SET ROLE postgres fallan con 'permission denied'")
+
+
+def psql_en_postgres(usuario, *conexion):
+    """psql dentro del contenedor de postgres, sin contraseña (-w: nunca la pide)."""
+    return dc("exec", "-T", "-e", "PGCONNECT_TIMEOUT=5", "postgres", "psql", *conexion, "-U", usuario,
+              "-d", "canario", "-w", "-X", "-q", "-A", "-t", "-c", "select 1")
+
+
+def seccion_au():
+    p("=== au) autenticacion de PostgreSQL")
+    # El fichero que manda es el del repositorio, no el de PGDATA.
+    pasa(valor(sup("show hba_file;")) == HBA_FILE, f"au) hba_file = {HBA_FILE}")
+    pasa(valor(sup("show password_encryption;")) == "scram-sha-256", "au) password_encryption = scram-sha-256")
+
+    # Las reglas leídas por el servidor, contra el oráculo. OJO: la vista
+    # refleja el fichero en disco, no lo que el servidor cargó (docs de
+    # PostgreSQL 18, pg_hba_file_rules); las pruebas de comportamiento de
+    # abajo son las que demuestran lo cargado.
+    r = sup("select rule_number, type, database, user_name, address, netmask, auth_method, options "
+            "from pg_hba_file_rules order by rule_number;\n"
+            "select count(*) from pg_hba_file_rules where error is not null;")
+    lineas = r.lineas()
+    comparar("au) pg_hba_file_rules coincide exactamente con las 4 reglas esperadas", lineas[:-1], REGLAS_HBA)
+    pasa(lineas[-1:] == ["0"], f"au) ninguna regla de pg_hba.conf con error ({lineas[-1:]})")
+    # Control: el pg_hba.conf que la imagen deja en PGDATA (inerte) sí tiene
+    # trust; así se ve que el patrón lo detecta.
+    inerte = sup("select pg_read_file('pg_hba.conf');").out.splitlines()
+    control_trust = sum(1 for l in inerte if PATRON_TRUST.match(l)) >= 1
+    if not control_trust:
+        sinc("au) ninguna regla trust: el control (pg_hba.conf inerte de PGDATA con trust) fallo")
+    else:
+        activo = [l for l in sup(f"select pg_read_file('{HBA_FILE}');").out.splitlines() if PATRON_TRUST.match(l)]
+        pasa(not activo, f"au) ninguna regla trust en el pg_hba.conf activo {activo or ''}")
+
+    # Comportamiento: el superusuario solo entra por el socket con peer.
+    control_peer = valor(sup("select 1;")) == "1"
+    negativo("au) el superusuario por TCP a 127.0.0.1 se rechaza",
+             psql_en_postgres("postgres", "-h", "127.0.0.1"), TEXTO_RECHAZO_TCP_SUPERUSUARIO, control_peer)
+    negativo("au) otro rol por el socket se rechaza",
+             psql_en_postgres("aplicacion"), TEXTO_RECHAZO_SOCKET, control_peer)
+
+    # Las contraseñas guardadas son SCRAM-SHA-256 con 4096 iteraciones. Solo
+    # se imprime el prefijo, nunca el resto del verificador.
+    r = sup("select rolname || '|' || coalesce(left(rolpassword, 19), 'NULL') from pg_authid "
+            f"where rolname in ({', '.join(repr(x) for x in ROLES_CON_CONTRASENA)}) order by rolname;")
+    # Control: un rol temporal con password_encryption = md5 sí deja otro
+    # prefijo, así que la consulta distingue uno de otro. Se borra al acabar.
+    ctl = sup("SET password_encryption = 'md5';\nCREATE ROLE prueba_md5_au PASSWORD 'no-es-secreta';\n"
+              "select left(rolpassword, 3) from pg_authid where rolname = 'prueba_md5_au';\n"
+              "DROP ROLE prueba_md5_au;")
+    borrado = valor(sup("select count(*) from pg_roles where rolname = 'prueba_md5_au';")) == "0"
+    if not (valor(ctl) == "md5" and borrado):
+        sinc(f"au) contrasenas SCRAM: el control (rol md5 temporal) fallo ({ctl.lineas()}, borrado: {borrado})")
+    else:
+        comparar("au) migrador, aplicacion, plataforma y postgres guardan SCRAM-SHA-256$4096:",
+                 r.lineas(), [f"{x}|{PREFIJO_SCRAM}" for x in ROLES_CON_CONTRASENA])
+
+    # Desde la red data: un cliente que exige md5 no entra (el servidor pide
+    # SASL, es decir SCRAM); el mismo cliente exigiendo scram-sha-256 sí.
+    ctl = cliente_red("select 1;", requerir="scram-sha-256")
+    negativo("au) un cliente que exige md5 se rechaza",
+             cliente_red("select 1;", requerir="md5"), TEXTO_REQUIERE_MD5, ctl.lineas() == ["1"])
+    # aplicacion solo entra a la base canario.
+    ctl = cliente_red("select 1;")
+    otra = cliente_red("select 1;", base="postgres")
+    negativo("au) aplicacion a la base postgres por red se rechaza", otra, TEXTO_RECHAZO_OTRA_BASE,
+             ctl.lineas() == ["1"] and TEXTO_RECHAZO_HBA in otra.err)
 
 
 def seccion_n():
@@ -2099,7 +2193,7 @@ def main():
         if not IMAGEN:
             raise Parada("no se pudo leer la imagen del contenedor postgres")
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_z, seccion_p,
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_au, seccion_n, seccion_o, seccion_z, seccion_p,
                         seccion_q,
                         seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_r):
             seccion()
