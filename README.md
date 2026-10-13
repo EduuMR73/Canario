@@ -12,7 +12,9 @@ Las amenazas consideradas, las decisiones de diseño y sus límites están en el
 | `db/` | Imagen de PostgreSQL, `pg_hba.conf` y el esquema, que se aplica al crear la base de datos (`db/init/`) |
 | `proxy/` | Imagen y `Caddyfile` del proxy, el único punto de entrada |
 | `scripts/generar_secretos.py` | Crea los secretos que faltan y comprueba el conjunto |
-| `tests/security/` | Las siete baterías de pruebas de seguridad |
+| `tests/security/` | Las ocho baterías de pruebas de seguridad |
+| `tests/unit/` | Las pruebas unitarias de la lógica pura de `app/` |
+| `ruff.toml` | Configuración del análisis estático (ruff) |
 | `docs/threat-model.md` | El modelo de amenazas |
 
 ## Requisitos
@@ -195,7 +197,7 @@ Si se restaura una copia de la base de datos, todo lo declarado no veraz o tacha
 
 ## Pruebas de seguridad
 
-Siete baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
+Ocho baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
 
 | Batería | Qué prueba |
 |---|---|
@@ -206,15 +208,43 @@ Siete baterías, una por área. Cada prueba negativa lleva su control positivo: 
 | `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción y no veraz (art. 32.3) |
 | `verificar_inyeccion.py` | Inyección SQL y validación de la frontera de entrada |
 | `verificar_escaneos.py` | Secretos en Git, dependencias, análisis estático, imágenes y SBOM |
+| `verificar_unitarios.py` | Las pruebas unitarias (`tests/unit/`) en la imagen de la API, y mutantes que demuestran que fallan cuando deben |
 
 Para ejecutarlas:
 
 - Docker en marcha y los secretos generados.
 - **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, personal e inyección arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
 - `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades.
+- `verificar_unitarios.py` no necesita los secretos ni la pila parada: solo construye la imagen de la API.
 
 ```powershell
 python tests\security\verificar_esquema.py
 ```
 
 Cada batería usa un proyecto de Docker propio (`canario_<nombre>`), lo borra entero al terminar (contenedores, redes, volúmenes e imágenes locales) y comprueba que no ha modificado el repositorio. Termina con `RESULTADO GLOBAL: OK` o `NO OK`, y su código de salida es 0 solo si es OK.
+
+### Pruebas unitarias
+
+`tests/unit/` (12 ficheros, 138 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado y el login uniforme. Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
+
+```powershell
+python tests\security\verificar_unitarios.py
+```
+
+La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 11 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
+
+Para ejecutar solo las pruebas, sin controles ni mutantes (la imagen se borra al final; si se queda, la batería se detiene con `PARADA` al encontrarla):
+
+```powershell
+docker build -q -t canario_unitarios-api:rapido .
+docker run --rm --network none --read-only --tmpfs /tmp --cap-drop ALL --mount "type=bind,src=$PWD\tests\unit,dst=/pruebas,readonly" --entrypoint python canario_unitarios-api:rapido -m unittest discover -s /pruebas -t /pruebas -v
+docker image rm canario_unitarios-api:rapido
+```
+
+### Análisis estático: ruff
+
+`ruff.toml` fija la versión de Python y el ancho de línea del proyecto, y explica la única regla desactivada. ruff no se instala en el equipo: se ejecuta con su imagen oficial fijada por versión y digest, sin red, de solo lectura y montando solo el código (nunca `secrets/`). Debe terminar con `All checks passed!`:
+
+```powershell
+docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 10001:10001 --mount "type=bind,src=$PWD\app,dst=/io/app,readonly" --mount "type=bind,src=$PWD\tests,dst=/io/tests,readonly" --mount "type=bind,src=$PWD\ruff.toml,dst=/io/ruff.toml,readonly" -w /io ghcr.io/astral-sh/ruff:0.16.9@sha256:fd4a00e8f586c07495822a1c93702737b9a98d826b76d460caa514df7794f259 check --no-cache app tests/unit tests/security/verificar_unitarios.py
+```
