@@ -184,6 +184,7 @@ CAMPOS_TEXTO = {
     "Login.empresa", "Login.email", "Login.contrasena", "Login.codigo_totp", "Login.token_dispositivo",
     "CambioContrasena.contrasena_actual", "CambioContrasena.contrasena_nueva", "CambioContrasena.codigo_totp",
     "NuevoUsuario.email", "MensajePersonal.texto", "CambioEstado.mensaje", "Asignacion.usuario_id",
+    "Tramo.texto",
 }
 CONTROL_MODELOS = {"Control.sin_tipo": False, "Control.con_tipo": True, "Control.opcional_sin_tipo": False}
 
@@ -1046,6 +1047,10 @@ def campos():
                                         {"estado": "resuelta", "mensaje": v}, token=token), "texto benigno", {409}),
         ("asignacion.usuario_id", lambda v: pt("PUT", f"/v1/personal/denuncias/{denuncia}/asignacion",
                                                {"usuario_id": v}, token=token), "x", {404}),
+        # El benigno no esta en la posicion 0 del texto: 409 sin escribir nada.
+        ("redaccion.texto", lambda v: pt("POST", f"/v1/personal/denuncias/{denuncia}/redaccion",
+                                         {"tramos": [{"desde": 0, "texto": v}]}, token=token),
+         "texto benigno", {409}),
     ], (lambda: f"benigno{next(contador)}@inyeccion.test")
 
 

@@ -57,6 +57,13 @@ y 6.9). Qué prueba:
   para el personal y el denunciante, fuera del listado), deja su fila de
   auditoría y un EVENTO por declaración, y gestion suprimir-caducadas la
   destruye con sus mensajes y su código (art32_3) sin tocar el control.
+* Redacción (art. 32.2): solo la hace un admin con la denuncia asignada (403
+  instructor, 404 sin asignación, de otra empresa, no veraz o mensaje
+  inexistente); cada tramo exige el texto exacto en su posición, y la
+  posición contada en UTF-16 da 409 sin tachar nada desplazado; un tramo
+  malo anula los demás; la forma inválida da 422. El personal y el
+  denunciante leen el texto tachado exacto, queda una fila por redacción y un
+  EVENTO con posiciones y longitudes, y tachar lo ya tachado no escribe nada.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
   misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
@@ -187,6 +194,19 @@ TRANSICIONES_NO_VERAZ = {("nueva", "no_veraz"), ("en_instruccion", "no_veraz"), 
 CUERPO_422_NO_VERAZ = '{"detalle": "declarar una denuncia no veraz no admite mensaje"}'.encode("utf-8")
 CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode("utf-8")
 TEXTO_EVENTO_NO_VERAZ = "EVENTO declaracion_no_veraz: "
+# Redaccion (k11). Posiciones contadas a mano (en caracteres, es decir, code
+# points): "diabetes" empieza en el 32; en UTF-16, como contaria un navegador,
+# en el 33, porque el emoji ocupa dos unidades. "Pepe" empieza en el 27.
+REDACCION_TEXTO = "Mi jefe \U0001F600 me acosa porque tengo diabetes; lo vio Ana."
+REDACCION_TEXTO_TACHADO = "Mi jefe \U0001F600 me acosa porque tengo ████████; lo vio Ana."
+REDACCION_FRAGMENTO = "diabetes"
+REDACCION_DESDE = 32
+REDACCION_DESDE_UTF16 = 33
+REDACCION_MENSAJE = "Soy de Valencia y me llamo Pepe"
+REDACCION_MENSAJE_TACHADO = "Soy de Valencia y me llamo ████"
+REDACCION_DESDE_MENSAJE = 27
+TEXTO_EVENTO_REDACCION = "EVENTO redaccion: "
+CUERPO_409_FRAGMENTO = '{"detalle": "el texto indicado no está en esa posición"}'.encode("utf-8")
 CLAVES_LISTADO = ["denuncias", "siguiente"]
 CLAVES_FILA_DENUNCIA = ["asignada_a", "asignada_activa", "denuncia_id", "estado", "fecha"]
 CLAVES_EXPEDIENTE = ["categoria", "denuncia_id", "estado", "fecha", "mensajes", "texto"]
@@ -1499,10 +1519,10 @@ def ids_denuncias(empresa):
     return set(valor(f"select id from canal.denuncia where empresa_id = '{EMPRESAS[empresa][0]}';").split())
 
 
-def crear_denuncia(empresa):
+def crear_denuncia(empresa, texto=None):
     """Crea una denuncia por la API pública. Devuelve (id, código, texto). El
     id sale de la base de datos: la API nunca se lo da al denunciante."""
-    texto = f"texto de denuncia k {secrets.token_hex(12)}"
+    texto = texto or f"texto de denuncia k {secrets.token_hex(12)}"
     antes = ids_denuncias(empresa)
     r = una(pt("POST", f"/v1/empresas/{EMPRESAS[empresa][1]}/denuncias", {"categoria": "fraude", "texto": texto}))
     codigo = (json_de(r) or {}).get("codigo_seguimiento")
@@ -1555,6 +1575,20 @@ def preparar(peticion, nombre):
 
 def total_auditoria(empresa):
     return valor(f"select count(*) from canal.registro_auditoria where empresa_id = '{EMPRESAS[empresa][0]}';")
+
+
+def ultima_secuencia(empresa):
+    """Marca para acciones_desde: la última secuencia de la cadena de la
+    empresa (la clave es empresa_id y secuencia, y crece de uno en uno)."""
+    return int(valor(f"select coalesce(max(secuencia), 0) from canal.registro_auditoria "
+                     f"where empresa_id = '{EMPRESAS[empresa][0]}';"))
+
+
+def acciones_desde(empresa, marca):
+    """Acciones auditadas después de la marca, en orden. Una lista dice qué
+    entró; un recuento no."""
+    return valor(f"select accion from canal.registro_auditoria where empresa_id = '{EMPRESAS[empresa][0]}' "
+                 f"and secuencia > {marca} order by secuencia;").split()
 
 
 def auditoria_de(empresa, accion, objeto_id):
@@ -2024,6 +2058,155 @@ def seccion_k_no_veraz():
              tras.get("estado") == 404 and tras.get("cuerpo") == CUERPO_404_CODIGO, control_sup, f"{tras}")
 
 
+def redaccion_peticion(token, denuncia_id, tramos, secuencia=None):
+    ruta = rd(denuncia_id) + ("" if secuencia is None else f"/mensajes/{secuencia}") + "/redaccion"
+    return pt("POST", ruta, {"tramos": tramos}, token=token)
+
+
+def texto_personal(token, denuncia_id):
+    """Texto de la denuncia y de sus mensajes tal como los lee el personal."""
+    datos = json_de(una(pt("GET", rd(denuncia_id), token=token))) or {}
+    return datos.get("texto"), [m.get("texto") for m in datos.get("mensajes", [])]
+
+
+def texto_seguimiento(codigo):
+    """Lo mismo, tal como lo ve el denunciante."""
+    datos = json_de(una(seguimiento(codigo))) or {}
+    return datos.get("texto"), [m.get("texto") for m in datos.get("mensajes", [])]
+
+
+def seccion_k_redaccion():
+    p("=== k11) redaccion (art. 32.2): solo admin asignado, texto exacto, tachado para todos y auditada")
+    admin2, instr, admin_b = CUENTAS["admin2"], CUENTAS["instructor"], CUENTAS["admin_b"]
+    token_admin, token_instr, token_b = sesion_de(admin2), sesion_de(instr), sesion_de(admin_b)
+    den, cod, _ = crear_denuncia("A", REDACCION_TEXTO)
+    preparar(asignar_peticion(token_admin, den, admin2.usuario_id), "asignar la denuncia al admin")
+    preparar(mensaje_denunciante(cod, REDACCION_MENSAJE), "mensaje del denunciante")
+    TEXTOS_SENSIBLES["mensaje que se redacta"] = REDACCION_MENSAJE
+    den_instr, _, _ = crear_denuncia("A")
+    preparar(asignar_peticion(token_admin, den_instr, instr.usuario_id), "asignar al instructor")
+    den_nv, _, _ = crear_denuncia("A")
+    preparar(asignar_peticion(token_admin, den_nv, admin2.usuario_id), "asignar la no veraz")
+    preparar(estado_peticion(token_admin, den_nv, "no_veraz"), "declarar no veraz")
+    eventos_antes = sum(TEXTO_EVENTO_REDACCION in l for l in lineas_log("api"))
+
+    # k11a) Antes de redactar, el personal y el denunciante leen el original
+    #       (control de lo que cambia despues).
+    original = (REDACCION_TEXTO, [REDACCION_MENSAJE])
+    control_original = texto_personal(token_admin, den) == original and texto_seguimiento(cod) == original
+    pasa(control_original, "k11a) control: antes de redactar, el admin y el denunciante leen el texto original")
+
+    # k11b) Rechazos: nada cambia ni deja fila ni evento. Leer una denuncia
+    #       desde el personal deja su fila de lectura (instruccion.leer_denuncia),
+    #       así que entre la marca y la lista de acciones solo van los rechazos:
+    #       ninguna lectura.
+    marca_rechazos = ultima_secuencia("A")
+    tramo = [{"desde": REDACCION_DESDE, "texto": REDACCION_FRAGMENTO}]
+    por_ruta = {
+        "instructor (403)": (una(redaccion_peticion(token_instr, den_instr, tramo)), 403, CUERPO_403),
+        "admin sin la denuncia asignada (404)": (una(redaccion_peticion(token_admin, den_instr, tramo)), 404,
+                                                 CUERPO_404),
+        "admin de otra empresa (404)": (una(redaccion_peticion(token_b, den, tramo)), 404, CUERPO_404),
+        "denuncia no veraz (404)": (una(redaccion_peticion(token_admin, den_nv, tramo)), 404, CUERPO_404),
+        "mensaje inexistente (404)": (una(redaccion_peticion(token_admin, den, tramo, secuencia=5)), 404, CUERPO_404),
+        # La posicion en UTF-16 (la de un navegador): el emoji ocupa dos
+        # unidades y el tramo cae una despues. No se tacha nada desplazado.
+        "posicion contada en UTF-16 (409)": (
+            una(redaccion_peticion(token_admin, den, [{"desde": REDACCION_DESDE_UTF16, "texto": REDACCION_FRAGMENTO}])),
+            409, CUERPO_409_FRAGMENTO),
+        "texto que no esta en esa posicion (409)": (
+            una(redaccion_peticion(token_admin, den, [{"desde": REDACCION_DESDE, "texto": "diabetis"}])),
+            409, CUERPO_409_FRAGMENTO),
+        "tramo que se sale del texto (409)": (
+            una(redaccion_peticion(token_admin, den, [{"desde": 9990, "texto": "diabetes"}])), 409,
+            CUERPO_409_FRAGMENTO),
+        # Un tramo bueno y otro malo: no se aplica ninguno.
+        "un tramo bueno y otro malo (409)": (
+            una(redaccion_peticion(token_admin, den, tramo + [{"desde": 0, "texto": "Tu"}])), 409,
+            CUERPO_409_FRAGMENTO),
+    }
+    forma = {
+        "sin tramos": {"tramos": []},
+        "51 tramos": {"tramos": tramo * 51},
+        "desde negativo": {"tramos": [{"desde": -1, "texto": "M"}]},
+        "desde como texto": {"tramos": [{"desde": str(REDACCION_DESDE), "texto": REDACCION_FRAGMENTO}]},
+        "desde como booleano": {"tramos": [{"desde": True, "texto": "i"}]},
+        "texto vacio": {"tramos": [{"desde": 0, "texto": ""}]},
+        "campo de mas": {"tramos": [{"desde": REDACCION_DESDE, "texto": REDACCION_FRAGMENTO, "hasta": 40}]},
+        "texto con NUL": {"tramos": [{"desde": 0, "texto": "M\u0000"}]},
+    }
+    rechazos_forma = {n: una(pt("POST", rd(den) + "/redaccion", c, token=token_admin)) for n, c in forma.items()}
+    secuencia_0 = una(redaccion_peticion(token_admin, den, tramo, secuencia=0))
+    acciones_rechazos = acciones_desde("A", marca_rechazos)
+    sin_cambios = texto_personal(token_admin, den) == original and texto_seguimiento(cod) == original
+
+    # k11c) Controles positivos: el admin con la denuncia asignada tacha un
+    #       dato de salud del texto de la denuncia y un nombre del mensaje del
+    #       denunciante. Lo ven tachado el personal y el denunciante.
+    marca_redacciones = ultima_secuencia("A")
+    r_den = una(redaccion_peticion(token_admin, den, tramo))
+    r_men = una(redaccion_peticion(token_admin, den, [{"desde": REDACCION_DESDE_MENSAJE, "texto": "Pepe"}],
+                                   secuencia=1))
+    # Control de la medida de filas: las dos redacciones, y nada más, antes
+    # de cualquier lectura (que dejaria su propia fila).
+    acciones_redacciones = acciones_desde("A", marca_redacciones)
+    control_filas = acciones_redacciones == ["redaccion_denuncia", "redaccion_mensaje"]
+    pasa(control_filas, f"k11c) control: las dos redacciones dejan exactamente sus dos filas ({acciones_redacciones})")
+    tachado = (REDACCION_TEXTO_TACHADO, [REDACCION_MENSAJE_TACHADO])
+    # El detalle lleva solo estados y coincidencias, nunca el texto: es
+    # contenido de una denuncia, y con el emoji tampoco se podria imprimir en
+    # una consola cp1252.
+    personal_ok = texto_personal(token_admin, den) == tachado
+    seguimiento_ok = texto_seguimiento(cod) == tachado
+    control = (control_original and r_den.get("estado") == 204 and r_men.get("estado") == 204
+               and personal_ok and seguimiento_ok)
+    pasa(control, f"k11c) control: 204 y el texto tachado exacto para el personal y para el denunciante "
+                  f"(estados {r_den.get('estado')} y {r_men.get('estado')}, personal {personal_ok}, "
+                  f"denunciante {seguimiento_ok})")
+    for nombre, (r, codigo, cuerpo) in por_ruta.items():
+        negativo(f"k11b) {nombre}", r.get("estado") == codigo and r.get("cuerpo") == cuerpo, control,
+                 f"{r.get('estado')} {r.get('cuerpo', b'')[:120]!r}")
+    for nombre, r in rechazos_forma.items():
+        negativo(f"k11b) {nombre}: 422 generico", r.get("estado") == 422 and r.get("cuerpo") == CUERPO_422, control,
+                 f"{r.get('estado')}")
+    negativo("k11b) mensaje con secuencia 0: 422 generico",
+             secuencia_0.get("estado") == 422 and secuencia_0.get("cuerpo") == CUERPO_422, control,
+             f"{secuencia_0.get('estado')}")
+    negativo("k11b) tras los rechazos el texto y los mensajes no habian cambiado", sin_cambios, control)
+    negativo("k11b) los rechazos no dejan ninguna fila de auditoria", acciones_rechazos == [], control_filas,
+             f"{acciones_rechazos}")
+
+    # k11d) Cada redaccion deja su fila con el admin; la del mensaje, con el
+    #       id del mensaje como destino. La cadena sigue intacta.
+    mensaje_id = valor(f"select id from canal.mensaje where denuncia_id = '{den}' and secuencia = 1;")
+    negativo("k11d) una fila redaccion_denuncia y una redaccion_mensaje (con el mensaje), con el admin",
+             auditoria_de("A", "redaccion_denuncia", den) == [f"personal:{admin2.usuario_id}|"]
+             and auditoria_de("A", "redaccion_mensaje", den) == [f"personal:{admin2.usuario_id}|{mensaje_id}"],
+             control, f"{auditoria_de('A', 'redaccion_denuncia', den)} {auditoria_de('A', 'redaccion_mensaje', den)}")
+    verificacion = json_de(una(pt("GET", "/v1/personal/auditoria/verificacion", token=token_admin))) or {}
+    negativo("k11d) la cadena de auditoria sigue intacta", verificacion.get("cadena_intacta") is True, control,
+             f"{verificacion}")
+
+    # k11e) Idempotente: pedir que se tache lo que ya esta tachado responde
+    #       204 sin escribir, sin fila y sin evento.
+    marca = ultima_secuencia("A")
+    cifrado = valor(f"select encode(contenido_cifrado, 'hex') from canal.denuncia where id = '{den}';")
+    r = una(redaccion_peticion(token_admin, den, [{"desde": REDACCION_DESDE, "texto": "█" * 8}]))
+    acciones = acciones_desde("A", marca)
+    negativo("k11e) tachar lo ya tachado: 204 sin reescribir el contenido ni dejar fila",
+             r.get("estado") == 204 and acciones == []
+             and valor(f"select encode(contenido_cifrado, 'hex') from canal.denuncia where id = '{den}';") == cifrado,
+             control and control_filas, f"{r.get('estado')} {acciones}")
+
+    # k11f) Un evento por redaccion, con posiciones y longitudes y sin el
+    #       texto tachado; los rechazos y la idempotente no dejan ninguno.
+    nuevos = [l for l in lineas_log("api") if TEXTO_EVENTO_REDACCION in l][eventos_antes:]
+    base = f"{TEXTO_EVENTO_REDACCION}empresa={EMPRESAS['A'][0]} cuenta={admin2.usuario_id} denuncia={den}"
+    esperados = [f"{base} mensaje=- tramos={REDACCION_DESDE}+8", f"{base} mensaje=1 tramos={REDACCION_DESDE_MENSAJE}+4"]
+    negativo("k11f) el log tiene exactamente un EVENTO redaccion por redaccion, sin el texto tachado",
+             [l[l.index(TEXTO_EVENTO_REDACCION):] for l in nuevos] == esperados, control, f"{nuevos}")
+
+
 def seccion_l():
     p("=== l) gestion lee en solo lectura y con una sola foto")
     r = dc("run", "--rm", "-T", "--entrypoint", "python", "gestion", "-c", GESTION_DENTRO, EMPRESAS["A"][1])
@@ -2244,7 +2427,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
-                        seccion_k, seccion_k_no_veraz, seccion_l, seccion_i, seccion_h):
+                        seccion_k, seccion_k_no_veraz, seccion_k_redaccion, seccion_l, seccion_i, seccion_h):
             seccion()
     except Parada as e:
         parada = str(e)

@@ -106,6 +106,8 @@ DESVIACIONES = [
      "ALTER ROLE propietario_funciones NOBYPASSRLS;"),
     ("propietario_supresion", "ALTER ROLE propietario_supresion BYPASSRLS;",
      "ALTER ROLE propietario_supresion NOBYPASSRLS;"),
+    ("propietario_redaccion", "ALTER ROLE propietario_redaccion BYPASSRLS;",
+     "ALTER ROLE propietario_redaccion NOBYPASSRLS;"),
     ("politicas", "CREATE POLICY prueba_permisiva ON canal.denuncia FOR SELECT TO aplicacion USING (true);",
      "DROP POLICY prueba_permisiva ON canal.denuncia;"),
     ("search_path", "ALTER ROLE aplicacion IN DATABASE canario SET search_path = canal, pg_catalog;",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Batería de pruebas de seguridad del esquema "canal" (db/init/02_esquema.sql,
-db/init/03_funciones.sql y db/init/04_supresion.sql).
+db/init/03_funciones.sql, db/init/04_supresion.sql y db/init/05_redaccion.sql).
 
 Qué prueba: que el esquema y las funciones de definidor se aplican enteros al
 arrancar, que la estructura, las políticas RLS y los permisos coinciden con
@@ -21,7 +21,11 @@ caducado, con sus bordes (también la denuncia inadmitida, a la que no se dio
 curso), borra sin plazo la declarada no veraz (art. 32.3, con prioridad sobre
 los otros dos artículos), salta lo que está en uso sin esperar, respeta una
 denuncia que pasa a instrucción en carrera y deja su evidencia en la
-auditoría. También la autenticación: el pg_hba.conf que manda es el del
+auditoría. Que la redacción (art. 32.2) solo reescribe el contenido de una
+denuncia o de un mensaje asignado a un admin activo de la empresa del
+contexto, solo si sigue siendo el que se leyó, con su fila de auditoría en la
+misma sentencia, y que aplicacion sigue sin poder cambiar ningún contenido
+cifrado por su cuenta. También la autenticación: el pg_hba.conf que manda es el del
 repositorio, sin trust; el superusuario solo entra por el socket con peer;
 las contraseñas se guardan en SCRAM-SHA-256 y un cliente que exige md5 no
 entra; y los roles de Canario solo llegan a la base canario.
@@ -128,6 +132,23 @@ HMAC_SU_NO_VERAZ = "a4" * 32
 # Comprobado en postgres:18.6-alpine con pg_get_constraintdef (13 oct).
 CHECK_ESTADO = ("CHECK ((estado = ANY (ARRAY['nueva'::text, 'en_instruccion'::text, 'resuelta'::text, "
                 "'archivada'::text, 'inadmitida'::text, 'no_veraz'::text])))")
+# Redaccion (seccion re): una empresa propia, como la supresion.
+EMPRESA_D = "d0000000-0000-4000-8000-000000000004"
+ADMIN_D = "d0000000-0000-4000-8000-0000000000a1"
+ADMIN2_D = "d0000000-0000-4000-8000-0000000000a2"
+INSTR_D = "d0000000-0000-4000-8000-0000000000a3"
+BAJA_D = "d0000000-0000-4000-8000-0000000000a4"  # admin activado y dado de baja
+RE_D1 = "d0000000-0000-4000-8000-0000000000d1"  # asignada a ADMIN_D
+RE_D2 = "d0000000-0000-4000-8000-0000000000d2"  # asignada a INSTR_D
+RE_D3 = "d0000000-0000-4000-8000-0000000000d3"  # asignada a ADMIN_D, no veraz
+RE_D4 = "d0000000-0000-4000-8000-0000000000d4"  # asignada a BAJA_D
+RE_M1 = "d0000000-0000-4000-8000-0000000000e1"  # mensaje 1 de RE_D1
+# Errores de 05_redaccion.sql con VERBOSITY verbose.
+TEXTO_REDACCION_ACTOR = "42501: la redaccion exige un admin activo de la empresa"
+TEXTO_REDACCION_DENUNCIA = ("CN003: la denuncia no se puede redactar: no esta asignada al actor "
+                            "o su contenido ha cambiado")
+TEXTO_REDACCION_MENSAJE_DENUNCIA = "CN003: el mensaje no se puede redactar: la denuncia no esta asignada al actor"
+TEXTO_REDACCION_MENSAJE = "CN003: el mensaje no se puede redactar: no existe o su contenido ha cambiado"
 TEXTO_LOTE = "el lote debe estar entre 1 y 500"
 TEXTO_AISLAMIENTO = "la supresion exige el nivel de aislamiento READ COMMITTED"
 
@@ -195,7 +216,8 @@ CLAVES_FORANEAS = [
     # La sesión exige que su dispositivo sea de su mismo usuario.
     "sesion_personal|empresa_id,usuario_id,dispositivo_id|dispositivo_personal|empresa_id,usuario_id,id|a",
 ]
-# tabla|politica|comando (22 de aplicacion + 2 de propietario_funciones + 8 de propietario_supresion)
+# tabla|politica|comando (22 de aplicacion + 2 de propietario_funciones + 8 de propietario_supresion
+# + 8 de propietario_redaccion)
 POLITICAS_APLICACION = [
     "empresa|empresa_select|SELECT",
     "clave_empresa|clave_empresa_select|SELECT",
@@ -238,9 +260,25 @@ POLITICAS_SUPRESION_COMPLETAS = [
     "registro_auditoria|registro_auditoria_insert_supresion|INSERT||true",
 ]
 POLITICAS_SUPRESION = ["|".join(l.split("|")[:3]) for l in POLITICAS_SUPRESION_COMPLETAS]
-POLITICAS = POLITICAS_APLICACION + POLITICAS_DEFINIDOR + POLITICAS_SUPRESION
+# Las del dueno de la redaccion: todas dentro del contexto de la empresa (a
+# diferencia de las de supresion, que recorren todas). Sin DELETE.
+POLITICAS_REDACCION_COMPLETAS = [
+    "empresa|empresa_select_redaccion|SELECT|(id = canal.empresa_actual())|",
+    "usuario_personal|usuario_personal_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
+    "denuncia|denuncia_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
+    "denuncia|denuncia_update_redaccion|UPDATE|(empresa_id = canal.empresa_actual())"
+    "|(empresa_id = canal.empresa_actual())",
+    "mensaje|mensaje_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
+    "mensaje|mensaje_update_redaccion|UPDATE|(empresa_id = canal.empresa_actual())"
+    "|(empresa_id = canal.empresa_actual())",
+    "registro_auditoria|registro_auditoria_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
+    "registro_auditoria|registro_auditoria_insert_redaccion|INSERT||(empresa_id = canal.empresa_actual())",
+]
+POLITICAS_REDACCION = ["|".join(l.split("|")[:3]) for l in POLITICAS_REDACCION_COMPLETAS]
+POLITICAS = POLITICAS_APLICACION + POLITICAS_DEFINIDOR + POLITICAS_SUPRESION + POLITICAS_REDACCION
 NOMBRES_POLITICAS_DEFINIDOR = {"empresa_select_definidor", "empresa_insert_definidor"}
 NOMBRES_POLITICAS_SUPRESION = {l.split("|")[1] for l in POLITICAS_SUPRESION_COMPLETAS}
+NOMBRES_POLITICAS_REDACCION = {l.split("|")[1] for l in POLITICAS_REDACCION_COMPLETAS}
 
 # Privilegios de tabla por rol (UPDATE solo por columna, nunca a nivel de tabla)
 PRIVILEGIOS_TABLA = {
@@ -275,6 +313,8 @@ PRIVILEGIOS_TABLA = {
         "denuncia": {"DELETE"}, "mensaje": {"DELETE"}, "busqueda_seguimiento": {"DELETE"},
         "registro_auditoria": set(), "directorio_empresas": set(),
     },
+    # Nada a nivel de tabla: todo por columna.
+    "propietario_redaccion": {t: set() for t in TABLAS},
 }
 # Privilegios concedidos solo en algunas columnas: rol -> (tabla, privilegio) -> columnas
 PRIVILEGIOS_COLUMNA = {
@@ -308,6 +348,18 @@ PRIVILEGIOS_COLUMNA = {
         ("registro_auditoria", "SELECT"): {"empresa_id", "secuencia", "hash"},
         ("registro_auditoria", "INSERT"): {"empresa_id", "actor", "accion", "objeto_id"},
     },
+    # El unico rol que puede reescribir contenido cifrado, y solo eso (con su
+    # version de clave). Lee lo que comprueba antes de escribir.
+    "propietario_redaccion": {
+        ("empresa", "SELECT"): {"id", "zona_horaria"},
+        ("usuario_personal", "SELECT"): {"empresa_id", "id", "rol", "activo", "totp_activo"},
+        ("denuncia", "SELECT"): {"empresa_id", "id", "estado", "asignada_a", "contenido_cifrado"},
+        ("denuncia", "UPDATE"): {"contenido_cifrado", "version_clave"},
+        ("mensaje", "SELECT"): {"empresa_id", "denuncia_id", "secuencia", "id", "contenido_cifrado"},
+        ("mensaje", "UPDATE"): {"contenido_cifrado", "version_clave"},
+        ("registro_auditoria", "SELECT"): {"empresa_id", "secuencia", "hash"},
+        ("registro_auditoria", "INSERT"): {"empresa_id", "actor", "accion", "objeto_id", "destino_id"},
+    },
 }
 COLUMNAS_UPDATE = {
     "usuario_personal": {"hash_contrasena", "secreto_totp_cifrado", "version_clave_totp", "totp_activo",
@@ -319,7 +371,7 @@ COLUMNAS_UPDATE = {
 }
 PRIVILEGIOS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
 PRIVILEGIOS_COLUMNA_COMPROBADOS = ["SELECT", "INSERT", "UPDATE", "REFERENCES"]
-ROLES = ["aplicacion", "plataforma", "propietario_funciones", "propietario_supresion"]
+ROLES = ["aplicacion", "plataforma", "propietario_funciones", "propietario_supresion", "propietario_redaccion"]
 
 # funcion -> (dueno, SECURITY DEFINER, volatilidad, firma)
 FUNCIONES_CATALOGO = {
@@ -336,15 +388,19 @@ FUNCIONES_CATALOGO = {
     "articulo_supresion": ("propietario_supresion", "f", "s", "canal.articulo_supresion(text,date,text)"),
     "suprimir_denuncias_caducadas": ("propietario_supresion", "t", "v", "canal.suprimir_denuncias_caducadas(integer)"),
     "contar_denuncias_caducadas": ("propietario_supresion", "t", "s", "canal.contar_denuncias_caducadas()"),
+    "redactar_denuncia": ("propietario_redaccion", "t", "v", "canal.redactar_denuncia(uuid,uuid,bytea,bytea,integer)"),
+    "redactar_mensaje": ("propietario_redaccion", "t", "v",
+                         "canal.redactar_mensaje(uuid,integer,uuid,bytea,bytea,integer)"),
 }
 FUNCIONES_DEFINIDOR = ["resolver_empresa", "buscar_codigo", "registrar_codigo", "alta_empresa",
-                       "suprimir_denuncias_caducadas", "contar_denuncias_caducadas"]
+                       "suprimir_denuncias_caducadas", "contar_denuncias_caducadas",
+                       "redactar_denuncia", "redactar_mensaje"]
 CONFIG_DEFINIDOR = "search_path=pg_catalog, canal, pg_temp"
 # funcion -> roles con EXECUTE. propietario_funciones tiene EXECUTE sobre las suyas por ser su dueno
 # (es el privilegio implicito del dueno; no se le revoca).
 EXECUTE_ESPERADO = {
     "preparar_mensaje": set(),
-    "empresa_actual": {"aplicacion", "propietario_funciones"},
+    "empresa_actual": {"aplicacion", "propietario_funciones", "propietario_redaccion"},
     "encadenar_auditoria": set(),
     "fijar_fecha_denuncia": set(),
     "rechazar_modificacion_auditoria": set(),
@@ -357,6 +413,9 @@ EXECUTE_ESPERADO = {
     "articulo_supresion": {"propietario_supresion"},
     "suprimir_denuncias_caducadas": {"plataforma", "propietario_supresion"},
     "contar_denuncias_caducadas": {"plataforma", "propietario_supresion"},
+    # La API las ejecuta; su dueno, por serlo.
+    "redactar_denuncia": {"aplicacion", "propietario_redaccion"},
+    "redactar_mensaje": {"aplicacion", "propietario_redaccion"},
 }
 TRIGGERS = [
     "denuncia|denuncia_fecha|O",
@@ -543,7 +602,7 @@ def seccion_a():
         p("--- log completo de postgres ---")
         p(registro)
         raise Parada("el SQL no se aplico o el servicio no llego a healthy")
-    for fichero in ("02_esquema.sql", "03_funciones.sql", "04_supresion.sql"):
+    for fichero in ("02_esquema.sql", "03_funciones.sql", "04_supresion.sql", "05_redaccion.sql"):
         pasa(f"running /docker-entrypoint-initdb.d/{fichero}" in registro,
              f"a) el log contiene 'running /docker-entrypoint-initdb.d/{fichero}'")
     malas = [l for l in registro.splitlines() if "ERROR" in l or "FATAL" in l]
@@ -594,6 +653,22 @@ def seccion_b():
     for texto, veces in (("SECURITY DEFINER", 2), ("SET search_path = pg_catalog, canal, pg_temp", 2),
                          ("REVOKE EXECUTE ON FUNCTION", 3), ("OWNER TO propietario_supresion", 3)):
         pasa(unido.count(texto) == veces, f"b) 04: contiene exactamente {veces} veces {texto!r} ({unido.count(texto)})")
+    p("=== b) estaticas de db/init/05_redaccion.sql")
+    datos = (RAIZ / "db" / "init" / "05_redaccion.sql").read_bytes()
+    pasa(not datos.startswith(b"\xef\xbb\xbf"), "b) 05: sin BOM")
+    pasa(b"\r" not in datos, "b) 05: sin CR")
+    codigo = lineas_de_codigo(datos)
+    pasa(codigo[:2] == ["\\set ON_ERROR_STOP on", "BEGIN;"], f"b) 05: empieza por \\set ON_ERROR_STOP on y BEGIN; ({codigo[:2]})")
+    pasa(codigo[-1] == "COMMIT;", f"b) 05: termina en COMMIT; ({codigo[-1]!r})")
+    unido = "\n".join(codigo)
+    # Sin DELETE ni TRUNCATE: la redaccion reescribe, no borra (el unico
+    # borrado es 04_supresion.sql).
+    for prohibido in ("TO PUBLIC", "BYPASSRLS", "PASSWORD", "SET ROLE", "DELETE", "TRUNCATE"):
+        pasa(prohibido not in unido.upper(), f"b) 05: no contiene {prohibido!r}")
+    for texto, veces in (("SECURITY DEFINER", 2), ("SET search_path = pg_catalog, canal, pg_temp", 2),
+                         ("REVOKE EXECUTE ON FUNCTION", 2), ("OWNER TO propietario_redaccion", 2),
+                         ("TO aplicacion", 2)):
+        pasa(unido.count(texto) == veces, f"b) 05: contiene exactamente {veces} veces {texto!r} ({unido.count(texto)})")
 
 
 def seccion_c():
@@ -672,7 +747,7 @@ def seccion_d():
     r = sup("select tablename, policyname, cmd, roles, coalesce(qual, ''), coalesce(with_check, '') "
             "from pg_policies where schemaname = 'canal' order by 1, 2;")
     filas = [l.split("|") for l in r.lineas()]
-    comparar("d) conjunto exacto de las 32 politicas (tabla, nombre, comando)",
+    comparar("d) conjunto exacto de las 40 politicas (tabla, nombre, comando)",
              ["|".join(f[:3]) for f in filas], POLITICAS)
 
     def rol_esperado(nombre):
@@ -680,10 +755,12 @@ def seccion_d():
             return "{propietario_funciones}"
         if nombre in NOMBRES_POLITICAS_SUPRESION:
             return "{propietario_supresion}"
+        if nombre in NOMBRES_POLITICAS_REDACCION:
+            return "{propietario_redaccion}"
         return "{aplicacion}"
     pasa(all(f[3] == rol_esperado(f[1]) for f in filas),
-         "d) las 22 de aplicacion son TO aplicacion, las 2 del definidor solo TO propietario_funciones "
-         "y las 8 de supresion solo TO propietario_supresion")
+         "d) las 22 de aplicacion son TO aplicacion, las 2 del definidor solo TO propietario_funciones, "
+         "las 8 de supresion solo TO propietario_supresion y las 8 de redaccion solo TO propietario_redaccion")
     pasa(all(f[2] != "ALL" for f in filas), "d) ninguna con comando ALL")
     con_delete = sorted(f[1] for f in filas if f[2] == "DELETE")
     comparar("d) las unicas politicas de DELETE son las 2 de supresion (denuncia y mensaje)", con_delete,
@@ -691,10 +768,13 @@ def seccion_d():
     comparar("d) las 8 de supresion: comando, USING y WITH CHECK exactos (la de UPDATE con WITH CHECK false)",
              ["|".join(f[:3] + f[4:]) for f in filas if f[1] in NOMBRES_POLITICAS_SUPRESION],
              POLITICAS_SUPRESION_COMPLETAS)
+    comparar("d) las 8 de redaccion: comando, USING y WITH CHECK exactos (todas con el contexto de la empresa)",
+             ["|".join(f[:3] + f[4:]) for f in filas if f[1] in NOMBRES_POLITICAS_REDACCION],
+             POLITICAS_REDACCION_COMPLETAS)
     ok = True
     for f in filas:
         tabla, nombre, cmd, _roles, qual, check = f
-        if nombre in NOMBRES_POLITICAS_SUPRESION:
+        if nombre in NOMBRES_POLITICAS_SUPRESION or nombre in NOMBRES_POLITICAS_REDACCION:
             continue
         esperado_qual = cmd in ("SELECT", "UPDATE")
         esperado_check = cmd in ("INSERT", "UPDATE")
@@ -785,10 +865,10 @@ def seccion_f():
     r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef, p.provolatile, p.oid::regprocedure::text "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
     esperado = [f"{f}|{d}|{s}|{v}|{firma}" for f, (d, s, v, firma) in FUNCIONES_CATALOGO.items()]
-    comparar("f) exactamente las 13 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
+    comparar("f) exactamente las 15 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
     r = sup("select p.proname, c from pg_proc p join pg_namespace n on n.oid = p.pronamespace, unnest(p.proconfig) c "
             "where n.nspname = 'canal' and p.prosecdef;")
-    comparar("f) las 6 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
+    comparar("f) las 8 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
              r.lineas(), [f"{f}|{CONFIG_DEFINIDOR}" for f in FUNCIONES_DEFINIDOR])
     r = sup("select array_to_string(proconfig, ',') from pg_proc "
             "where proname = 'articulo_supresion' and pronamespace = 'canal'::regnamespace;")
@@ -803,7 +883,7 @@ def seccion_f():
     for rol in ROLES:
         for f in FUNCIONES_CATALOGO:
             esperado.append(f"{rol}|{f}|{'true' if rol in EXECUTE_ESPERADO[f] else 'false'}")
-    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 13 funciones", r.lineas(), esperado)
+    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 15 funciones", r.lineas(), esperado)
     r = sup("select c.relname, t.tgname, t.tgenabled from pg_trigger t join pg_class c on c.oid = t.tgrelid "
             "join pg_namespace n on n.oid = c.relnamespace where not t.tgisinternal and n.nspname = 'canal';")
     comparar("f) los 5 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
@@ -1682,21 +1762,23 @@ def seccion_q():
     p(f"Test: {json.dumps(test)}")
     texto = " ".join(test)
     pasa("$$" not in texto, "q) el Test no contiene '$$'")
-    pasa("*|5|true" in texto and not re.search(r"\*\|5(?!\|true)", texto), "q) el Test acepta solo '*|5|true'")
+    pasa("*|6|true" in texto and not re.search(r"\*\|6(?!\|true)", texto), "q) el Test acepta solo '*|6|true'")
     orden = test[-1]
     control = dc("exec", "-T", "postgres", "sh", "-c", orden)
     if control.rc != 0:
         sinc(f"q) el control del Test no da 0 (codigo {control.rc})")
         return
     pasa(True, "q) control: el Test da 0")
-    # El centinela es la funcion del ultimo script (04_supresion.sql): si no
-    # existe, la inicializacion no llego al final.
+    # El centinela es la ultima funcion del ultimo script (05_redaccion.sql):
+    # si no existe, la inicializacion no llego al final.
     try:
-        sup("ALTER FUNCTION canal.suprimir_denuncias_caducadas(integer) RENAME TO suprimir_centinela_x;")
+        sup("ALTER FUNCTION canal.redactar_mensaje(uuid,integer,uuid,bytea,bytea,integer) "
+            "RENAME TO redactar_centinela_x;")
         r = dc("exec", "-T", "postgres", "sh", "-c", orden)
         pasa(r.rc == 1, f"q) con la funcion centinela renombrada el Test da {r.rc} (esperado 1)")
     finally:
-        sup("ALTER FUNCTION canal.suprimir_centinela_x(integer) RENAME TO suprimir_denuncias_caducadas;")
+        sup("ALTER FUNCTION canal.redactar_centinela_x(uuid,integer,uuid,bytea,bytea,integer) "
+            "RENAME TO redactar_mensaje;")
     r = dc("exec", "-T", "postgres", "sh", "-c", orden)
     pasa(r.rc == 0, f"q) tras renombrar de vuelta el Test da {r.rc} (esperado 0)")
     # Sin el rol de supresion (renombrado), tampoco es sano.
@@ -1708,6 +1790,15 @@ def seccion_q():
         sup("ALTER ROLE propietario_supresion_x RENAME TO propietario_supresion;")
     r = dc("exec", "-T", "postgres", "sh", "-c", orden)
     pasa(r.rc == 0, f"q) tras devolver el nombre al rol el Test da {r.rc} (esperado 0)")
+    # Ni sin el de redaccion, el sexto.
+    try:
+        sup("ALTER ROLE propietario_redaccion RENAME TO propietario_redaccion_x;")
+        r = dc("exec", "-T", "postgres", "sh", "-c", orden)
+        pasa(r.rc == 1, f"q) con propietario_redaccion renombrado el Test da {r.rc} (esperado 1)")
+    finally:
+        sup("ALTER ROLE propietario_redaccion_x RENAME TO propietario_redaccion;")
+    r = dc("exec", "-T", "postgres", "sh", "-c", orden)
+    pasa(r.rc == 0, f"q) tras devolver el nombre al rol de redaccion el Test da {r.rc} (esperado 0)")
     r = dc("exec", "-T", "postgres", "sh", "-c", orden.replace("-U postgres", "-U nadie"))
     pasa(r.rc == 1, f"q) con -U nadie el Test da {r.rc} (esperado 1)")
 
@@ -2109,6 +2200,135 @@ COMMIT;
         pasa(real == foto[nombre], f"su5) las 6 tablas de la empresa {nombre} no han cambiado: {real}")
 
 
+def seccion_re():
+    # Va despues de su) y antes de r): usa su propia empresa D y comprueba al
+    # final que A y B no han cambiado.
+    p("=== re) redaccion (art. 32.2)")
+    usuarios = ",\n    ".join(
+        f"('{EMPRESA_D}', '{u}', '{correo}@ejemplo.test', '{rol}', 'x', '\\x01', 1, true, {activo})"
+        for u, correo, rol, activo in ((ADMIN_D, "ana", "admin", "true"), (ADMIN2_D, "eva", "admin", "true"),
+                                       (INSTR_D, "luis", "instructor", "true"), (BAJA_D, "baja", "admin", "false")))
+    sql = f"""BEGIN;
+INSERT INTO canal.empresa (id, nombre, zona_horaria) VALUES ('{EMPRESA_D}', 'Empresa D', 'Europe/Madrid');
+INSERT INTO canal.clave_empresa (empresa_id, version, clave_envuelta) VALUES
+    ('{EMPRESA_D}', 1, '\\x04'), ('{EMPRESA_D}', 2, '\\x05');
+INSERT INTO canal.usuario_personal (empresa_id, id, email, rol, hash_contrasena, secreto_totp_cifrado,
+                                    version_clave_totp, totp_activo, activo) VALUES
+    {usuarios};
+INSERT INTO canal.denuncia (empresa_id, id, contenido_cifrado, version_clave, asignada_a, estado) VALUES
+    ('{EMPRESA_D}', '{RE_D1}', '\\x0d01', 1, '{ADMIN_D}', 'nueva'),
+    ('{EMPRESA_D}', '{RE_D2}', '\\x0d02', 1, '{INSTR_D}', 'nueva'),
+    ('{EMPRESA_D}', '{RE_D3}', '\\x0d03', 1, '{ADMIN_D}', 'no_veraz'),
+    ('{EMPRESA_D}', '{RE_D4}', '\\x0d04', 1, '{BAJA_D}', 'nueva');
+INSERT INTO canal.mensaje (empresa_id, denuncia_id, id, autor, contenido_cifrado, version_clave) VALUES
+    ('{EMPRESA_D}', '{RE_D1}', '{RE_M1}', 'denunciante', '\\x0d0a', 1);
+COMMIT;
+"""
+    r = dc(*PSQL[:-4], "-v", "ON_ERROR_STOP=1", "-f", "-", entrada=sql.encode())
+    if not sin_error(r):
+        sinc(f"re) no se pudieron preparar los datos de prueba: {r.err.strip()[:300]!r}")
+        return
+    foto = {"A": conteos_contexto(EMPRESA_A), "B": conteos_contexto(EMPRESA_B)}
+
+    def como_app(cuerpo, ctx=EMPRESA_D):
+        return app("\\set VERBOSITY verbose\n" + cuerpo, ctx=ctx)
+
+    def redactar_denuncia(denuncia, actor, anterior, nuevo, version=2, ctx=EMPRESA_D):
+        return como_app(f"select canal.redactar_denuncia('{denuncia}', '{actor}', '\\x{anterior}', "
+                        f"'\\x{nuevo}', {version});", ctx)
+
+    def redactar_mensaje(secuencia, actor, anterior, nuevo, denuncia=RE_D1):
+        return como_app(f"select canal.redactar_mensaje('{denuncia}', {secuencia}, '{actor}', '\\x{anterior}', "
+                        f"'\\x{nuevo}', 2);")
+
+    def contenido(tabla, condicion):
+        return valor(sup(f"select encode(contenido_cifrado, 'hex') || '|' || version_clave "
+                         f"from canal.{tabla} where {condicion};"))
+
+    def auditoria():
+        return sup(f"select secuencia || '|' || actor || '|' || accion || '|' || objeto_id || '|' "
+                   f"|| coalesce(destino_id::text, '') from canal.registro_auditoria "
+                   f"where empresa_id = '{EMPRESA_D}' order by secuencia;").lineas()
+
+    # re1) Controles: el admin con la denuncia asignada reescribe el texto de
+    #      la denuncia y el de un mensaje, con la version de clave nueva, y
+    #      cada redaccion deja su fila con el actor y, en el mensaje, su id.
+    r = redactar_denuncia(RE_D1, ADMIN_D, "0d01", "0d11")
+    actual = contenido("denuncia", f"id = '{RE_D1}'")
+    control = sin_error(r) and actual == "0d11|2"
+    pasa(control, f"re1) control: redactar_denuncia reescribe la denuncia asignada ({actual}) {r.err.strip()[:200]}")
+    r = redactar_mensaje(1, ADMIN_D, "0d0a", "0d1a")
+    actual = contenido("mensaje", f"id = '{RE_M1}'")
+    control_mensaje = sin_error(r) and actual == "0d1a|2"
+    pasa(control_mensaje, f"re1) control: redactar_mensaje reescribe el mensaje 1 ({actual}) {r.err.strip()[:200]}")
+    filas_esperadas = [f"1|personal:{ADMIN_D}|redaccion_denuncia|{RE_D1}|",
+                       f"2|personal:{ADMIN_D}|redaccion_mensaje|{RE_D1}|{RE_M1}"]
+    comparar("re1) una fila de auditoria por redaccion, con actor, denuncia y mensaje", auditoria(), filas_esperadas)
+
+    # re2) Rechazos de la funcion. Ninguno escribe nada ni deja fila.
+    negativo("re2) contenido anterior distinto (compare-and-swap)",
+             redactar_denuncia(RE_D1, ADMIN_D, "0d01", "0dff"), TEXTO_REDACCION_DENUNCIA, control)
+    negativo("re2) un instructor, aunque tenga la denuncia asignada",
+             redactar_denuncia(RE_D2, INSTR_D, "0d02", "0dff"), TEXTO_REDACCION_ACTOR, control)
+    negativo("re2) un admin sin la denuncia asignada",
+             redactar_denuncia(RE_D1, ADMIN2_D, "0d11", "0dff"), TEXTO_REDACCION_DENUNCIA, control)
+    negativo("re2) una denuncia no veraz",
+             redactar_denuncia(RE_D3, ADMIN_D, "0d03", "0dff"), TEXTO_REDACCION_DENUNCIA, control)
+    negativo("re2) un admin dado de baja con la denuncia asignada",
+             redactar_denuncia(RE_D4, BAJA_D, "0d04", "0dff"), TEXTO_REDACCION_ACTOR, control)
+    negativo("re2) con el contexto de otra empresa",
+             redactar_denuncia(RE_D1, ADMIN_D, "0d11", "0dff", ctx=EMPRESA_A), TEXTO_REDACCION_ACTOR, control)
+    negativo("re2) sin contexto de empresa",
+             redactar_denuncia(RE_D1, ADMIN_D, "0d11", "0dff", ctx=SIN), TEXTO_REDACCION_ACTOR, control)
+    negativo("re2) mensaje con contenido anterior distinto",
+             redactar_mensaje(1, ADMIN_D, "0d0a", "0dff"), TEXTO_REDACCION_MENSAJE, control_mensaje)
+    negativo("re2) mensaje inexistente",
+             redactar_mensaje(2, ADMIN_D, "0d1a", "0dff"), TEXTO_REDACCION_MENSAJE, control_mensaje)
+    negativo("re2) mensaje de una denuncia no asignada a quien redacta",
+             redactar_mensaje(1, ADMIN2_D, "0d1a", "0dff"), TEXTO_REDACCION_MENSAJE_DENUNCIA, control_mensaje)
+    pasa(contenido("denuncia", f"id = '{RE_D1}'") == "0d11|2" and contenido("mensaje", f"id = '{RE_M1}'") == "0d1a|2"
+         and contenido("denuncia", f"id = '{RE_D2}'") == "0d02|1"
+         and contenido("denuncia", f"id = '{RE_D3}'") == "0d03|1"
+         and contenido("denuncia", f"id = '{RE_D4}'") == "0d04|1",
+         "re2) los rechazos no han cambiado ningun contenido")
+    comparar("re2) los rechazos no han dejado filas de auditoria", auditoria(), filas_esperadas)
+
+    # re3) Sin la funcion no hay camino: aplicacion no reescribe contenido,
+    #      plataforma no ejecuta la funcion y propietario_redaccion no borra,
+    #      no cambia el estado ni entra por la red. Control: re1.
+    negativo("re3) aplicacion no puede hacer UPDATE del contenido de una denuncia",
+             como_app(f"update canal.denuncia set contenido_cifrado = '\\x00' where id = '{RE_D1}';"),
+             "permission denied for table denuncia", control)
+    negativo("re3) aplicacion no puede hacer UPDATE del contenido de un mensaje",
+             como_app(f"update canal.mensaje set contenido_cifrado = '\\x00' where id = '{RE_M1}';"),
+             "permission denied for table mensaje", control_mensaje)
+    negativo("re3) plataforma no puede ejecutar redactar_denuncia",
+             cliente_red(f"select canal.redactar_denuncia('{RE_D1}', '{ADMIN_D}', '\\x0d11', '\\x00', 2);",
+                         "plataforma"),
+             "permission denied for function redactar_denuncia", control)
+
+    def como_redaccion(sentencia):
+        return sup(f"SET ROLE propietario_redaccion;\nBEGIN;\n"
+                   f"SELECT set_config('app.empresa_id', '{EMPRESA_D}', true) \\gset\n{sentencia}\nROLLBACK;\n")
+    ctl = como_redaccion(f"select count(*) from canal.denuncia where id = '{RE_D1}';")
+    ctl_ok = sin_error(ctl) and valor(ctl) == "1"
+    pasa(ctl_ok, f"re3) control: propietario_redaccion ve la denuncia con el contexto de D ({valor(ctl)!r})")
+    negativo("re3) propietario_redaccion no cambia el estado",
+             como_redaccion(f"update canal.denuncia set estado = 'archivada' where id = '{RE_D1}';"),
+             "permission denied for table denuncia", ctl_ok)
+    for t in ("denuncia", "mensaje", "registro_auditoria", "usuario_personal"):
+        negativo(f"re3) propietario_redaccion no borra en {t}", como_redaccion(f"delete from canal.{t};"),
+                 "permission denied", ctl_ok)
+    negativo("re3) login de red como propietario_redaccion", cliente_literal("propietario_redaccion", "select 1;"),
+             "rejects connection", ctl_ok)
+
+    pasa(verificar_cadena(EMPRESA_D) == "NULL", "re4) la cadena de auditoria de D sigue intacta")
+    comprobar_python(EMPRESA_D, "empresa D tras la redaccion")
+    for nombre, ctx in (("A", EMPRESA_A), ("B", EMPRESA_B)):
+        real = conteos_contexto(ctx)
+        pasa(real == foto[nombre], f"re4) las tablas de la empresa {nombre} no han cambiado: {real}")
+
+
 def esperar_healthy(cid, maximo=60):
     estado_salud = ""
     for _ in range(maximo):
@@ -2132,11 +2352,11 @@ def seccion_r():
                                          "where n.nspname = 'canal' and c.relkind = 'r';").lineas(), TABLAS)
     politicas = sup("select tablename, policyname, cmd from pg_policies where schemaname = 'canal';").lineas()
     tablas_con_politicas = {l.split("|")[0] for l in politicas}
-    comparar("r) siguen las 32 politicas definidas en d)", politicas, POLITICAS)
-    pasa(len(politicas) == 32 and len(tablas_con_politicas) == 9,
-         f"r) exactamente 32 politicas repartidas en exactamente 9 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
+    comparar("r) siguen las 40 politicas definidas en d)", politicas, POLITICAS)
+    pasa(len(politicas) == 40 and len(tablas_con_politicas) == 9,
+         f"r) exactamente 40 politicas repartidas en exactamente 9 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
     funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
-    comparar("r) siguen las 13 funciones", funciones, list(FUNCIONES_CATALOGO))
+    comparar("r) siguen las 15 funciones", funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
 
 
@@ -2228,7 +2448,8 @@ def main():
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
                         seccion_j, seccion_k, seccion_l, seccion_m, seccion_au, seccion_n, seccion_o, seccion_z, seccion_p,
                         seccion_q,
-                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_r):
+                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_re,
+                        seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)
