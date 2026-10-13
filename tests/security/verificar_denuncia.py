@@ -68,7 +68,7 @@ suprimir-caducadas y la frontera HTTP):
   escribir tras resolver el código de una denuncia ya suprimida da
   CodigoNoEncontrado, no un error interno.
 * gestion suprime por lotes, informa solo de recuentos por empresa y
-  artículo, salta una denuncia en uso y lo avisa con código de salida 1, y la
+  artículo, salta una denuncia en uso y lo avisa con código de salida 75, y la
   suprime en la ejecución siguiente; no imprime códigos ni textos.
 
 Limitador de peticiones (app/limitador.py, sección r, con los límites de
@@ -2041,8 +2041,10 @@ def seccion_n():
                 "total suprimidas: 2"]
     aviso = "AVISO: quedan 1 denuncias caducadas que estaban en uso; vuelva a ejecutar suprimir-caducadas"
     p(f"   gestion (1): codigo {primera.rc}; salida {primera.out.strip().splitlines()}")
-    negativo("n3) gestion suprime art32 y art26, solo con recuentos, salta la denuncia en uso, lo avisa y sale con 1",
-             primera.rc == 1 and primera.out.strip().splitlines() == esperado and aviso in primera.err,
+    # 75 literal (EX_TEMPFAIL), no app.gestion.SALIDA_EN_USO: el oráculo no
+    # se deriva del código que se prueba.
+    negativo("n3) gestion suprime art32 y art26, solo con recuentos, salta la denuncia en uso, lo avisa y sale con 75",
+             primera.rc == 75 and primera.out.strip().splitlines() == esperado and aviso in primera.err,
              seguia, f"stderr: {primera.err.strip()[-300:]!r}")
     quedan = sup(f"select count(*) from canal.denuncia where id in ('{ids['art32']}', '{ids['art26']}', "
                  f"'{ids['en_uso']}');").out.strip()
