@@ -384,8 +384,8 @@ IP_CLIENTE_B = "10.88.1.4"
 # HMAC de 128 bits) y las de la comprobación de arranque.
 PATRON_CLAVE_LIMITE = re.compile(
     r"limite:(denuncia|seguimiento|mensajes|acceso|otras|cuenta):[0-9]+:[0-9a-f]{32}|limite:arranque:[0-9a-f]{16}")
-# Rutas de la API y la regla que las limita ({identificador}, {usuario_id} y
-# {denuncia_id} sustituidos por "x"). Una ruta nueva hace fallar r) hasta que
+# Rutas de la API y la regla que las limita (cada parámetro de ruta,
+# sustituido por "x"). Una ruta nueva hace fallar r) hasta que
 # alguien decida su regla. Las de la instrucción (bloque 4b) van a otras, como
 # la administración de cuentas: por IP, otras es la primera capa de toda ruta
 # con sesión, y la segunda es la regla cuenta, por identidad
@@ -399,7 +399,11 @@ RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguim
              "/v1/personal/denuncias": "otras", "/v1/personal/denuncias/x": "otras",
              "/v1/personal/denuncias/x/mensajes": "otras", "/v1/personal/denuncias/x/estado": "otras",
              "/v1/personal/denuncias/x/asignacion": "otras", "/v1/personal/auditoria": "otras",
-             "/v1/personal/auditoria/verificacion": "otras"}
+             "/v1/personal/auditoria/verificacion": "otras",
+             # Redacción (art. 32.2): instrucción de un admin, con sesión,
+             # como el resto de la instrucción.
+             "/v1/personal/denuncias/x/redaccion": "otras",
+             "/v1/personal/denuncias/x/mensajes/x/redaccion": "otras"}
 # Procesos de un contenedor: "<pid> <línea de comandos>" por línea, leídos de
 # /proc con sh (sin ps, que la imagen no trae). Las propias líneas de sh y tr
 # no contienen "python" ni "uvicorn".
@@ -602,10 +606,12 @@ print(json.dumps(res, sort_keys=True))
 # pero igual quedaría limitada por la regla otras.
 LIMITADOR_DENTRO = """
 import json
+import re
 from app import limitador
 from app.principal import aplicacion
-rutas = sorted(r.replace("{identificador}", "x").replace("{usuario_id}", "x").replace("{denuncia_id}", "x")
-               for r in aplicacion.openapi()["paths"])
+# Cualquier parámetro de ruta ({identificador}, {secuencia}...) pasa a "x",
+# también los que se añadan: la ruta nueva sigue fallando por RUTAS_API.
+rutas = sorted(re.sub("[{][^}]*[}]", "x", r) for r in aplicacion.openapi()["paths"])
 res = {"rutas": {r: limitador.regla_de(r) for r in rutas},
        "otras": {r: limitador.regla_de(r) for r in ("/v1/nueva", "/otra", "/salud/", "/v1/empresas/a/b/denuncias")}}
 s1, s2 = b"1" * 32, b"2" * 32
