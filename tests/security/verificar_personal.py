@@ -64,6 +64,10 @@ y 6.9). Qué prueba:
   malo anula los demás; la forma inválida da 422. El personal y el
   denunciante leen el texto tachado exacto, queda una fila por redacción y un
   EVENTO con posiciones y longitudes, y tachar lo ya tachado no escribe nada.
+  Cada 403 y 404 deja exactamente un EVENTO acceso_denegado (ASVS 5.0.0,
+  16.3.2) con la plantilla de la ruta y el id solo si es un uuid; los 409,
+  los 422 y las redacciones aceptadas no dejan ninguno, y un %0A en el id no
+  inyecta ninguna línea.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
   misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
@@ -206,6 +210,10 @@ REDACCION_MENSAJE = "Soy de Valencia y me llamo Pepe"
 REDACCION_MENSAJE_TACHADO = "Soy de Valencia y me llamo ████"
 REDACCION_DESDE_MENSAJE = 27
 TEXTO_EVENTO_REDACCION = "EVENTO redaccion: "
+TEXTO_EVENTO_ACCESO = "EVENTO acceso_denegado: "
+# Un id de denuncia con un salto de linea codificado: si llegara tal cual al
+# log, escribiria una linea "EVENTO redaccion" falsa.
+ID_CON_SALTO = "x%0AEVENTO%20redaccion:%20falso"
 CUERPO_409_FRAGMENTO = '{"detalle": "el texto indicado no está en esa posición"}'.encode("utf-8")
 CLAVES_LISTADO = ["denuncias", "siguiente"]
 CLAVES_FILA_DENUNCIA = ["asignada_a", "asignada_activa", "denuncia_id", "estado", "fecha"]
@@ -2101,6 +2109,7 @@ def seccion_k_redaccion():
     #       así que entre la marca y la lista de acciones solo van los rechazos:
     #       ninguna lectura.
     marca_rechazos = ultima_secuencia("A")
+    lineas_antes = len(lineas_log("api"))
     tramo = [{"desde": REDACCION_DESDE, "texto": REDACCION_FRAGMENTO}]
     por_ruta = {
         "instructor (403)": (una(redaccion_peticion(token_instr, den_instr, tramo)), 403, CUERPO_403),
@@ -2109,6 +2118,8 @@ def seccion_k_redaccion():
         "admin de otra empresa (404)": (una(redaccion_peticion(token_b, den, tramo)), 404, CUERPO_404),
         "denuncia no veraz (404)": (una(redaccion_peticion(token_admin, den_nv, tramo)), 404, CUERPO_404),
         "mensaje inexistente (404)": (una(redaccion_peticion(token_admin, den, tramo, secuencia=5)), 404, CUERPO_404),
+        "id con un salto de linea codificado (404)": (una(redaccion_peticion(token_admin, ID_CON_SALTO, tramo)), 404,
+                                                      CUERPO_404),
         # La posicion en UTF-16 (la de un navegador): el emoji ocupa dos
         # unidades y el tramo cae una despues. No se tacha nada desplazado.
         "posicion contada en UTF-16 (409)": (
@@ -2205,6 +2216,32 @@ def seccion_k_redaccion():
     esperados = [f"{base} mensaje=- tramos={REDACCION_DESDE}+8", f"{base} mensaje=1 tramos={REDACCION_DESDE_MENSAJE}+4"]
     negativo("k11f) el log tiene exactamente un EVENTO redaccion por redaccion, sin el texto tachado",
              [l[l.index(TEXTO_EVENTO_REDACCION):] for l in nuevos] == esperados, control, f"{nuevos}")
+
+    # k11g) Accesos denegados (ASVS 5.0.0, 16.3.2): desde la marca de k11b,
+    #       una linea por cada 403 y 404, en el orden de las peticiones, y
+    #       ninguna por los 409, los 422, las lecturas ni las redacciones
+    #       aceptadas. El id solo aparece si es un uuid; el del salto de linea,
+    #       como "invalido".
+    lineas_nuevas = lineas_log("api")[lineas_antes:]
+    denegados = [l[l.index(TEXTO_EVENTO_ACCESO):] for l in lineas_nuevas if TEXTO_EVENTO_ACCESO in l]
+    ruta_den = "ruta=/v1/personal/denuncias/{denuncia_id}/redaccion"
+    ruta_men = "ruta=/v1/personal/denuncias/{denuncia_id}/mensajes/{secuencia}/redaccion"
+    en_a = f"{TEXTO_EVENTO_ACCESO}empresa={EMPRESAS['A'][0]}"
+    esperados_acceso = [
+        f"{en_a} cuenta={instr.usuario_id} codigo=403 metodo=POST {ruta_den} ids=denuncia_id={den_instr}",
+        f"{en_a} cuenta={admin2.usuario_id} codigo=404 metodo=POST {ruta_den} ids=denuncia_id={den_instr}",
+        (f"{TEXTO_EVENTO_ACCESO}empresa={EMPRESAS[admin_b.empresa][0]} cuenta={admin_b.usuario_id} codigo=404 "
+         f"metodo=POST {ruta_den} ids=denuncia_id={den}"),
+        f"{en_a} cuenta={admin2.usuario_id} codigo=404 metodo=POST {ruta_den} ids=denuncia_id={den_nv}",
+        f"{en_a} cuenta={admin2.usuario_id} codigo=404 metodo=POST {ruta_men} ids=denuncia_id={den}",
+        f"{en_a} cuenta={admin2.usuario_id} codigo=404 metodo=POST {ruta_den} ids=denuncia_id=invalido",
+    ]
+    negativo("k11g) cada 403 y 404 deja exactamente su EVENTO acceso_denegado, y los 409, 422 y aceptadas ninguno",
+             denegados == esperados_acceso, control, f"{denegados}")
+    salto = por_ruta["id con un salto de linea codificado (404)"][0]
+    negativo("k11g) el salto de linea del id no inyecta ninguna linea en el log",
+             not any("falso" in l for l in lineas_nuevas), salto.get("estado") == 404,
+             f"estado {salto.get('estado')}")
 
 
 def seccion_l():

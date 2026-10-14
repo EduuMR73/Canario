@@ -45,6 +45,18 @@ Comprobado en la versión fijada de FastAPI: la dependencia se ejecuta aunque
 el cuerpo no valide (un 422 autenticado también cuenta), salvo con un JSON
 que ni siquiera se puede analizar, que se rechaza antes de autenticar.
 
+Accesos denegados (docs/threat-model.md, 6.7): cada 403 y cada 404 de una
+petición con sesión deja EVENTO acceso_denegado en el log, con empresa,
+cuenta, código, método, la plantilla de la ruta y los ids de la ruta. Es lo
+que pide OWASP ASVS 5.0.0, 16.3.2 ("failed authorization attempts are
+logged"): sin esto, una cuenta que prueba ids de denuncias ajenas no deja
+rastro. El 404 entra porque aquí es la forma de denegar sin revelar si el
+recurso existe. Lo escriben los manejadores de las dos excepciones, no cada
+ruta, así que una ruta nueva queda cubierta sin hacer nada. La sesión la
+deja _sesion en peticion.state: en las versiones fijadas (FastAPI 0.143.0 y
+Starlette 1.7.0, fastapi/routing.py) la dependencia y el manejador reciben
+el mismo objeto Request.
+
 Las rutas son síncronas (def): FastAPI las ejecuta en su pool de hilos, y
 tanto la base de datos como Argon2 son síncronos. La dependencia _sesion es
 asíncrona porque el limitador lo es; la autenticación, que es síncrona, la
@@ -234,6 +246,9 @@ async def _sesion(peticion: Request):
         if primer_exceso:
             registro.warning("EVENTO limite_cuenta: empresa=%s cuenta=%s", sesion.empresa_id, sesion.usuario_id)
         raise LimiteCuentaSuperado(segundos)
+    # Para el evento de acceso denegado (ver la cabecera): solo una sesión que
+    # la ruta llega a recibir.
+    peticion.state.sesion_personal = sesion
     return sesion
 
 
@@ -459,6 +474,45 @@ def _manejador(codigo, mensaje=None, cabeceras=None):
     return manejar
 
 
+# Parámetros de ruta que identifican el recurso denegado. La secuencia de un
+# mensaje no hace falta: el recurso es la denuncia.
+IDS_EN_RUTA = ("denuncia_id", "usuario_id")
+
+
+def _id_para_registro(texto):
+    # Nunca el texto de la ruta: llega decodificado (la especificación ASGI
+    # convierte %0A en un salto de línea), y escribirlo permitiría inyectar
+    # líneas falsas en el log. Solo un uuid válido, en su forma canónica.
+    try:
+        return str(uuid.UUID(texto))
+    except ValueError:
+        return "invalido"
+
+
+def _registrar_acceso_denegado(peticion, codigo):
+    # Sin sesión no se registra nada: el camino anónimo no deja ninguna línea
+    # (docs/threat-model.md, 6.5), y estas excepciones solo se lanzan tras
+    # autenticar, así que una sin sesión no es una denegación del personal.
+    sesion = getattr(peticion.state, "sesion_personal", None)
+    if sesion is None:
+        return
+    # La plantilla de la ruta es un texto fijo del código, no lo que envió el
+    # cliente.
+    ruta = peticion.scope.get("route")
+    ids = ",".join(f"{nombre}={_id_para_registro(valor)}" for nombre, valor in sorted(peticion.path_params.items())
+                   if nombre in IDS_EN_RUTA)
+    registro.warning("EVENTO acceso_denegado: empresa=%s cuenta=%s codigo=%d metodo=%s ruta=%s ids=%s",
+                     sesion.empresa_id, sesion.usuario_id, codigo, peticion.method,
+                     "-" if ruta is None else ruta.path, ids or "-")
+
+
+def _denegado(codigo, mensaje=None):
+    async def manejar(peticion, _error_capturado):
+        _registrar_acceso_denegado(peticion, codigo)
+        return _error(codigo, mensaje)
+    return manejar
+
+
 async def _contrasena_no_valida(_peticion, error):
     # El motivo es un texto fijo de app/personal.py: nunca la contraseña.
     return _error(422, str(error))
@@ -493,8 +547,8 @@ def instalar_errores(aplicacion):
     aplicacion.add_exception_handler(personal.CodigoNoValido, _manejador(422, MENSAJE_CODIGO))
     aplicacion.add_exception_handler(personal.ContrasenaNoValida, _contrasena_no_valida)
     aplicacion.add_exception_handler(personal.Saturado, _manejador(503, None, {"Retry-After": REINTENTAR_TRAS}))
-    aplicacion.add_exception_handler(personal.Prohibido, _manejador(403, MENSAJE_PROHIBIDO))
-    aplicacion.add_exception_handler(personal.NoEncontrado, _manejador(404))
+    aplicacion.add_exception_handler(personal.Prohibido, _denegado(403, MENSAJE_PROHIBIDO))
+    aplicacion.add_exception_handler(personal.NoEncontrado, _denegado(404))
     aplicacion.add_exception_handler(personal.EmailDuplicado, _manejador(409, MENSAJE_DUPLICADO))
     aplicacion.add_exception_handler(personal.UltimoAdmin, _manejador(409, MENSAJE_ULTIMO_ADMIN))
     aplicacion.add_exception_handler(personal.EmpresaSinClave, _sin_clave)

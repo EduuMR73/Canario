@@ -1,16 +1,22 @@
 """Pruebas unitarias de la traducción de excepciones a respuestas HTTP del
-personal (app/rutas_personal.py, instalar_errores) y del evento de redacción.
+personal (app/rutas_personal.py, instalar_errores), del evento de redacción
+y del evento de acceso denegado.
 
 Se instala sobre una aplicación FastAPI real, sin servidor, y se llama a cada
 manejador registrado. Un cambio en esta tabla cambia un código HTTP de
 seguridad (401, 403, 409, 429, 503...): los valores esperados son literales.
+El acceso denegado se prueba además de punta a punta por la aplicación ASGI,
+con el router real y la dependencia de sesión real (solo se sustituye
+personal.autenticar, que necesita la base de datos): así se comprueba que la
+sesión que deja la dependencia llega al manejador.
 """
 import asyncio
 import types
 import unittest
 import uuid
+from unittest import mock
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app import cripto, denuncias, instruccion, limitador, personal, rutas_personal
 
@@ -44,8 +50,13 @@ def aplicacion():
     return app
 
 
-def responder(app, error):
-    return asyncio.run(app.exception_handlers[type(error)](None, error))
+def peticion(scope=None):
+    # Sin sesión en el estado, salvo que el scope la traiga.
+    return Request({"type": "http", **(scope or {})})
+
+
+def responder(app, error, scope=None):
+    return asyncio.run(app.exception_handlers[type(error)](peticion(scope), error))
 
 
 def detalle(texto):
@@ -56,7 +67,8 @@ class TablaDeErrores(unittest.TestCase):
     def test_cada_excepcion_su_respuesta(self):
         app = aplicacion()
         # Estos tres dejan un evento (su texto se prueba en test_eventos_sin_datos);
-        # el resto no registra nada.
+        # el resto no registra nada. 403 y 404 tampoco, porque la petición no
+        # trae sesión (con sesión, AccesoDenegado).
         con_evento = (personal.EmpresaSinClave, denuncias.EmpresaSinClave, cripto.ErrorIntegridad)
         for clase, (codigo, cuerpo, cabeceras) in ESPERADO.items():
             with self.subTest(excepcion=f"{clase.__module__}.{clase.__name__}"):
@@ -115,3 +127,107 @@ class EventoDeRedaccion(unittest.TestCase):
              "mensaje=7 tramos=3+13"),
         ])
         self.assertNotIn("NombreSecreto", "\n".join(registro.output))
+
+
+SESION = personal.Sesion(empresa_id=uuid.UUID(int=1), identificador="alfa", sesion_id=uuid.UUID(int=9),
+                         usuario_id=uuid.UUID(int=2), dispositivo_id=uuid.UUID(int=8), rol="instructor",
+                         email="instructor@alfa.test", nombre_empresa="Alfa")
+INICIO_EVENTO = ("WARNING:canario.personal:EVENTO acceso_denegado: empresa=00000000-0000-0000-0000-000000000001 "
+                 "cuenta=00000000-0000-0000-0000-000000000002 ")
+
+
+class AccesoDenegado(unittest.TestCase):
+    """El manejador, llamado con una petición construida a mano."""
+
+    def test_con_sesion_una_linea_por_denegacion(self):
+        app = aplicacion()
+        scope = {"method": "POST", "state": {"sesion_personal": SESION},
+                 "route": types.SimpleNamespace(path="/v1/personal/denuncias/{denuncia_id}/redaccion"),
+                 "path_params": {"denuncia_id": "00000000-0000-0000-0000-000000000003"}}
+        with self.assertLogs("canario.personal", "WARNING") as registro:
+            prohibido = responder(app, personal.Prohibido(), scope)
+            no_encontrado = responder(app, personal.NoEncontrado(), scope)
+        self.assertEqual((prohibido.status_code, prohibido.body), (403, detalle("permiso denegado")))
+        self.assertEqual((no_encontrado.status_code, no_encontrado.body), (404, detalle("recurso no encontrado")))
+        self.assertEqual(registro.output, [
+            (INICIO_EVENTO + "codigo=403 metodo=POST ruta=/v1/personal/denuncias/{denuncia_id}/redaccion "
+             "ids=denuncia_id=00000000-0000-0000-0000-000000000003"),
+            (INICIO_EVENTO + "codigo=404 metodo=POST ruta=/v1/personal/denuncias/{denuncia_id}/redaccion "
+             "ids=denuncia_id=00000000-0000-0000-0000-000000000003"),
+        ])
+
+    def test_sin_sesion_ninguna_linea(self):
+        # El camino anónimo no deja líneas (docs/threat-model.md, 6.5). El
+        # control es la prueba anterior: con sesión, sí.
+        app = aplicacion()
+        scope = {"method": "GET", "path_params": {"denuncia_id": "00000000-0000-0000-0000-000000000003"}}
+        with self.assertNoLogs("canario.personal", "DEBUG"):
+            self.assertEqual(responder(app, personal.Prohibido(), scope).status_code, 403)
+            self.assertEqual(responder(app, personal.NoEncontrado(), scope).status_code, 404)
+
+
+class LimitadorQueAdmite:
+    async def consumir_cuenta(self, _empresa_id, _usuario_id):
+        return True, 0, False
+
+
+def aplicacion_completa():
+    app = aplicacion()
+    app.include_router(rutas_personal.router)
+    # Las rutas leen pool y claves antes de validar el id; ninguna prueba
+    # llega a usarlos, porque la denegación ocurre antes.
+    app.state.pool = None
+    app.state.claves = None
+    app.state.limitador = LimitadorQueAdmite()
+    return app
+
+
+def llamar(app, metodo, ruta):
+    """Una petición por la aplicación ASGI, como la entregaría uvicorn: con la
+    ruta ya decodificada (un %0A llega como salto de línea)."""
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": metodo,
+             "scheme": "http", "path": ruta, "raw_path": ruta.encode("utf-8"), "root_path": "",
+             "query_string": b"", "headers": [(b"authorization", b"Bearer token")], "client": None,
+             "server": ("api", 8000)}
+    mensajes = []
+
+    async def recibir():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def enviar(mensaje):
+        mensajes.append(mensaje)
+
+    asyncio.run(app(scope, recibir, enviar))
+    estado = next(m["status"] for m in mensajes if m["type"] == "http.response.start")
+    return estado, b"".join(m.get("body", b"") for m in mensajes if m["type"] == "http.response.body")
+
+
+class AccesoDenegadoPorLaAplicacion(unittest.TestCase):
+    """De la dependencia de sesión al manejador, con el router real."""
+
+    def test_instructor_en_ruta_de_admin(self):
+        with mock.patch.object(personal, "autenticar", return_value=SESION), \
+                self.assertLogs("canario.personal", "WARNING") as registro:
+            respuesta = llamar(aplicacion_completa(), "POST",
+                               "/v1/personal/usuarios/00000000-0000-0000-0000-000000000003/baja")
+        self.assertEqual(respuesta, (403, detalle("permiso denegado")))
+        self.assertEqual(registro.output, [
+            INICIO_EVENTO + ("codigo=403 metodo=POST ruta=/v1/personal/usuarios/{usuario_id}/baja "
+                             "ids=usuario_id=00000000-0000-0000-0000-000000000003")])
+
+    def test_salto_de_linea_en_la_ruta_no_llega_al_log(self):
+        with mock.patch.object(personal, "autenticar", return_value=SESION), \
+                self.assertLogs("canario.personal", "WARNING") as registro:
+            respuesta = llamar(aplicacion_completa(), "GET",
+                               "/v1/personal/denuncias/x\nEVENTO redaccion: falso")
+        self.assertEqual(respuesta, (404, detalle("recurso no encontrado")))
+        self.assertEqual(registro.output, [
+            INICIO_EVENTO + "codigo=404 metodo=GET ruta=/v1/personal/denuncias/{denuncia_id} ids=denuncia_id=invalido"])
+
+    def test_token_no_valido_no_registra(self):
+        # Sin sesión no hay cuenta a la que atribuir nada: 401 y ninguna línea.
+        with mock.patch.object(personal, "autenticar", side_effect=personal.SesionNoValida), \
+                self.assertNoLogs("canario.personal", "DEBUG"):
+            respuesta = llamar(aplicacion_completa(), "POST",
+                               "/v1/personal/usuarios/00000000-0000-0000-0000-000000000003/baja")
+        self.assertEqual(respuesta, (401, detalle("sesión no válida")))

@@ -63,7 +63,7 @@ PRUEBAS_POR_FICHERO = {
     "test_claves": 7,
     "test_cripto": 38,
     "test_denuncias": 10,
-    "test_errores": 6,
+    "test_errores": 11,
     "test_frontera": 10,
     "test_instruccion": 18,
     "test_limitador": 12,
@@ -71,7 +71,7 @@ PRUEBAS_POR_FICHERO = {
     "test_personal": 8,
     "test_validacion": 8,
 }
-TOTAL_PRUEBAS = 138
+TOTAL_PRUEBAS = 143
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -107,6 +107,12 @@ MUTANTES = [
       "    if reservada is None"),
      "test_login.ComprobarFactores.test_mismo_trabajo_en_todos_los_caminos",
      "sin cuenta no se calcula el TOTP (el tiempo delata si la cuenta existe)"),
+    ("rutas_personal.py", "    peticion.state.sesion_personal = sesion\n", "",
+     "test_errores.AccesoDenegadoPorLaAplicacion.test_instructor_en_ruta_de_admin",
+     "la sesion no llega al manejador: un 403 del personal no deja evento"),
+    ("rutas_personal.py", 'f"{nombre}={_id_para_registro(valor)}"', 'f"{nombre}={valor}"',
+     "test_errores.AccesoDenegadoPorLaAplicacion.test_salto_de_linea_en_la_ruta_no_llega_al_log",
+     "el id de la ruta llega tal cual al log (un %0A inyecta una linea)"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest
