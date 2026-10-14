@@ -359,8 +359,9 @@ def generar_token():
 def leer_token(texto):
     """Bytes del token, o None si no tiene la forma exacta.
 
-    Solo la forma canónica: el último carácter de 43 lleva 4 bits sobrantes,
-    y sin esta comprobación varios textos distintos darían el mismo token.
+    Solo la forma canónica: 43 caracteres son 258 bits para 256, así que el
+    último lleva 2 bits sobrantes, y sin esta comprobación cuatro textos
+    distintos darían el mismo token.
     """
     if not isinstance(texto, str) or not PATRON_TOKEN.fullmatch(texto):
         return None

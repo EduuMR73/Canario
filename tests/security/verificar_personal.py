@@ -302,7 +302,7 @@ from app import cripto
 s = {RFC6238_SECRETO!r}
 res = {{"rfc6238": {{str(t): cripto.codigo_totp(s, t // 30, 8) for t in {sorted(RFC6238_VECTORES)}}}}}
 texto, crudo = cripto.generar_token()
-# El último de 43 caracteres lleva 2 bits de datos y 4 de relleno: invertir su
+# El último de 43 caracteres lleva 4 bits de datos y 2 de relleno: invertir su
 # bit más bajo solo toca relleno y da otra forma del MISMO token.
 alfabeto = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 otro = texto[:-1] + alfabeto[alfabeto.index(texto[-1]) ^ 1]
