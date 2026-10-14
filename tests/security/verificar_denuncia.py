@@ -102,7 +102,7 @@ parado (las subredes de app y edge son fijas). Al terminar lo borra todo
 
 Claves de cifrado FALSAS en toda la batería: se generan en cada ejecución y
 un fichero compose adicional, en el directorio temporal, sustituye con ellas
-los secretos clave_maestra y clave_hmac_codigos. Así la prueba sabe qué
+los secretos clave_maestra, clave_hmac_codigos y clave_firma_tokens. Así la prueba sabe qué
 buscar en los logs sin leer nunca las reales, y la sección a) comprueba
 (por su sha256, dentro del contenedor) que la API usa las falsas. De
 secrets/ solo se usan las contraseñas de los roles, sin leerlas aquí: compose
@@ -394,7 +394,7 @@ RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguim
              "/v1/seguimiento/mensajes": "mensajes",
              "/v1/personal/activacion": "acceso", "/v1/personal/activacion/confirmar": "acceso",
              "/v1/personal/sesiones": "acceso", "/v1/personal/contrasena": "acceso",
-             "/v1/personal/sesiones/actual": "otras", "/v1/personal/yo": "otras", "/v1/personal/usuarios": "otras",
+             "/v1/personal/sesiones/renovacion": "otras", "/v1/personal/sesiones/actual": "otras", "/v1/personal/yo": "otras", "/v1/personal/usuarios": "otras",
              "/v1/personal/usuarios/x/invitacion": "otras", "/v1/personal/usuarios/x/baja": "otras",
              "/v1/personal/denuncias": "otras", "/v1/personal/denuncias/x": "otras",
              "/v1/personal/denuncias/x/mensajes": "otras", "/v1/personal/denuncias/x/estado": "otras",
@@ -751,7 +751,7 @@ def preparar_claves_falsas():
     directorio = TEMPORAL / "claves_compose"
     directorio.mkdir()
     lineas = ["secrets:"]
-    for nombre in ("clave_maestra", "clave_hmac_codigos"):
+    for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens"):
         CLAVES_FALSAS[nombre] = secrets.token_hex(32)
         (directorio / nombre).write_text(CLAVES_FALSAS[nombre], encoding="ascii", newline="")
         lineas += fichero_secreto(nombre, directorio / nombre)
@@ -948,7 +948,7 @@ def seccion_c():
     d = TEMPORAL / "falsos"
     d.mkdir()
     valores = {"contrasena": secrets.token_urlsafe(48), "maestra": secrets.token_hex(32),
-               "hmac": secrets.token_hex(32)}
+               "hmac": secrets.token_hex(32), "firma": secrets.token_hex(32)}
     ficheros = {
         "contrasena": valores["contrasena"],
         # Bien formada: la comprobación del secreto de Redis va después de la
@@ -960,16 +960,20 @@ def seccion_c():
         "maestra_mayusculas": valores["maestra"].upper(),
         "maestra_corta": valores["maestra"][:-2],
         "hmac_igual": valores["maestra"],
+        "firma": valores["firma"],
+        "firma_igual": valores["hmac"],
     }
     for nombre, contenido in ficheros.items():
         (d / nombre).write_text(contenido, encoding="ascii", newline="")
 
-    def montar(maestra="maestra", hmac="hmac"):
+    def montar(maestra="maestra", hmac="hmac", firma="firma"):
         lista = [(d / "contrasena", "contrasena_aplicacion"), (d / "redis", "contrasena_redis")]
         if maestra:
             lista.append((d / maestra, "clave_maestra"))
         if hmac:
             lista.append((d / hmac, "clave_hmac_codigos"))
+        if firma:
+            lista.append((d / firma, "clave_firma_tokens"))
         return lista
 
     # Control: con claves falsas bien formadas, la comprobación de claves pasa
@@ -985,6 +989,8 @@ def seccion_c():
         ("maestra_mayusculas", montar(maestra="maestra_mayusculas"), "clave_maestra no tiene el formato esperado"),
         ("maestra_corta", montar(maestra="maestra_corta"), "clave_maestra no tiene el formato esperado"),
         ("hmac_igual", montar(hmac="hmac_igual"), "clave_maestra y clave_hmac_codigos son iguales"),
+        ("sin_firma", montar(firma=None), "no se puede leer clave_firma_tokens"),
+        ("firma_igual", montar(firma="firma_igual"), "clave_hmac_codigos y clave_firma_tokens son iguales"),
     ]
     for etiqueta, montajes, motivo in casos:
         registro = arrancar_api_temporal(etiqueta, montajes)
@@ -993,7 +999,7 @@ def seccion_c():
                  esperado in registro and TEXTO_VERIFICADO not in registro
                  and f"{TEXTO_BLOQUEADO}conexion" not in registro,
                  control, f"log: {registro.strip()[-300:]!r}")
-        fugas = [n for n in ("maestra", "hmac") if valores[n] in registro or valores[n].upper() in registro]
+        fugas = [n for n in ("maestra", "hmac", "firma") if valores[n] in registro or valores[n].upper() in registro]
         negativo(f"c) {etiqueta.replace('_', ' ')}: ninguna clave aparece en el log {fugas if fugas else ''}".strip(),
                  not fugas, control)
 
@@ -2516,11 +2522,12 @@ def seccion_r():
     d.mkdir()
     redis_falsa = secrets.token_urlsafe(48)
     for nombre, contenido_fichero in (("pg", secrets.token_urlsafe(48)), ("maestra", secrets.token_hex(32)),
-                                      ("hmac", secrets.token_hex(32)), ("redis", redis_falsa),
+                                      ("hmac", secrets.token_hex(32)), ("firma", secrets.token_hex(32)),
+                                      ("redis", redis_falsa),
                                       ("redis_salto", redis_falsa + "\n")):
         (d / nombre).write_text(contenido_fichero, encoding="ascii", newline="")
     base_montajes = [(d / "pg", "contrasena_aplicacion"), (d / "maestra", "clave_maestra"),
-                     (d / "hmac", "clave_hmac_codigos")]
+                     (d / "hmac", "clave_hmac_codigos"), (d / "firma", "clave_firma_tokens")]
     validos = "denuncia=5/3600,seguimiento=6/60,mensajes=7/3600,acceso=9/300,otras=8/60,cuenta=4/60"
     control_log = arrancar_api_temporal("r_control", base_montajes + [(d / "redis", "contrasena_redis")],
                                         {"CANARIO_LIMITES": validos})
@@ -2648,7 +2655,7 @@ def main():
     # Solo se comprueba que existen (is_file), nunca se leen. Las claves de
     # cifrado de secrets/ no hacen falta: la batería usa falsas. compose
     # valida igualmente que existan todos los ficheros de secretos que
-    # declara, y el fichero adicional solo sustituye los dos de cifrado.
+    # declara, y el fichero adicional solo sustituye las tres claves.
     for fichero in ("contrasena_redis.txt", "redis_acl.conf", "contrasena_postgres_superusuario.txt",
                     "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():

@@ -371,10 +371,10 @@ def claves_falsas():
     directorio = TEMPORAL / "claves_falsas"
     if not directorio.is_dir():
         directorio.mkdir()
-        for nombre in ("clave_maestra", "clave_hmac_codigos"):
+        for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens"):
             (directorio / nombre).write_text(secrets.token_hex(32), encoding="ascii", newline="")
         (directorio / "contrasena_redis").write_text(secrets.token_urlsafe(48), encoding="ascii", newline="")
-    return [arg for nombre in ("clave_maestra", "clave_hmac_codigos", "contrasena_redis")
+    return [arg for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens", "contrasena_redis")
             for arg in ("--mount", f"type=bind,src={directorio / nombre},dst=/run/secrets/{nombre},readonly")]
 
 
@@ -580,7 +580,7 @@ def main():
     # Solo se comprueba que existen (is_file), nunca se leen. Los de Redis
     # hacen falta porque la API depende de Redis para arrancar.
     for fichero in ("contrasena_aplicacion.txt", "clave_maestra.txt", "clave_hmac_codigos.txt",
-                    "contrasena_redis.txt", "redis_acl.conf"):
+                    "clave_firma_tokens.txt", "contrasena_redis.txt", "redis_acl.conf"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
             terminar_con_parada()

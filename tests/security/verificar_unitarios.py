@@ -69,9 +69,10 @@ PRUEBAS_POR_FICHERO = {
     "test_limitador": 12,
     "test_login": 8,
     "test_personal": 8,
+    "test_tokens": 10,
     "test_validacion": 8,
 }
-TOTAL_PRUEBAS = 143
+TOTAL_PRUEBAS = 153
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -85,8 +86,16 @@ MUTANTES = [
      "test_validacion.TextoLinea.test_bordes_rechazados", "texto_linea admite los controles C1"),
     ("limitador.py", "LIMITE_MAXIMO = 1_000_000", "LIMITE_MAXIMO = 10_000_000",
      "test_limitador.CargarLimites.test_errores", "CANARIO_LIMITES admite mas de un millon de peticiones"),
-    ("claves.py", "if maestra == hmac_codigos:", "if False:",
-     "test_claves.Carga.test_iguales", "clave maestra y clave HMAC iguales"),
+    ("claves.py", "if leidas[primero] == leidas[segundo]:", "if False:",
+     "test_claves.Carga.test_iguales", "dos claves del servidor iguales"),
+    ("tokens.py", 'if completo["header"] != CABECERA or set(claims)', 'if set(claims)',
+     "test_tokens.Verificar.test_cabecera_exacta", "el JWT se acepta con cualquier typ y con kid o jku"),
+    ("tokens.py", ' or set(claims) != set(CLAIMS):', ':',
+     "test_tokens.Verificar.test_claims_exactos", "el JWT se acepta con claims de mas (un rol)"),
+    ("tokens.py", " or exp != iat + DURACION_ACCESO:", ":",
+     "test_tokens.Verificar.test_caducidad_y_duracion", "el JWT se acepta aunque dure una hora"),
+    ("tokens.py", '"strict_aud": True', '"strict_aud": False',
+     "test_tokens.Verificar.test_audiencia_y_emisor", "el JWT se acepta con aud en una lista"),
     ("cripto.py", "BLOQUE_RELLENO = 256", "BLOQUE_RELLENO = 128",
      "test_cripto.Relleno.test_literales", "relleno en tramos de 128 bytes"),
     ("denuncias.py", '            or type(contenido["v"]) is not int\n', "",

@@ -171,8 +171,8 @@ COLUMNAS = {
                             "secreto_totp_cifrado", "version_clave_totp"],
     "dispositivo_personal": ["empresa_id", "id", "usuario_id", "token_sha256", "caduca", "intentos_fallidos",
                              "bloqueado_hasta", "revocado"],
-    "sesion_personal": ["empresa_id", "id", "usuario_id", "dispositivo_id", "token_sha256", "ultimo_uso", "caduca",
-                        "revocada"],
+    "sesion_personal": ["empresa_id", "id", "usuario_id", "dispositivo_id", "token_sha256", "tokens_usados",
+                        "ultimo_uso", "caduca", "revocada"],
     # Sin categoria: va dentro de contenido_cifrado.
     "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "contenido_cifrado", "version_clave"],
     "mensaje": ["empresa_id", "denuncia_id", "secuencia", "fecha", "id", "autor", "autor_id", "contenido_cifrado",
@@ -329,7 +329,7 @@ PRIVILEGIOS_COLUMNA = {
         ("dispositivo_personal", "INSERT"): {"empresa_id", "usuario_id", "token_sha256"},
         ("dispositivo_personal", "UPDATE"): {"intentos_fallidos", "bloqueado_hasta", "revocado"},
         ("sesion_personal", "INSERT"): {"empresa_id", "usuario_id", "dispositivo_id", "token_sha256"},
-        ("sesion_personal", "UPDATE"): {"ultimo_uso", "revocada"},
+        ("sesion_personal", "UPDATE"): {"token_sha256", "tokens_usados", "ultimo_uso", "revocada"},
         ("denuncia", "UPDATE"): {"estado", "asignada_a"},
     },
     "plataforma": {},
@@ -366,7 +366,7 @@ COLUMNAS_UPDATE = {
                          "ultimo_paso_totp", "intentos_fallidos", "bloqueado_hasta", "activo"},
     "invitacion_personal": {"cerrada", "hash_contrasena", "secreto_totp_cifrado", "version_clave_totp"},
     "dispositivo_personal": {"intentos_fallidos", "bloqueado_hasta", "revocado"},
-    "sesion_personal": {"ultimo_uso", "revocada"},
+    "sesion_personal": {"token_sha256", "tokens_usados", "ultimo_uso", "revocada"},
     "denuncia": {"estado", "asignada_a"},
 }
 PRIVILEGIOS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -741,6 +741,20 @@ select c.relname,
         "invitacion_personal.caduca|(now() + '72:00:00'::interval)",
         "dispositivo_personal.caduca|(now() + '90 days'::interval)",
         "sesion_personal.caduca|(now() + '08:00:00'::interval)"])
+    # Renovacion rotatoria (RFC 9700, 4.14.2): los tokens usados de una sesion
+    # empiezan vacios, tienen tope y un indice GIN para encontrar la sesion de
+    # uno reutilizado.
+    r = sup("select pg_get_constraintdef(oid) from pg_constraint "
+            "where conname = 'sesion_personal_tokens_usados_check' and conrelid = 'canal.sesion_personal'::regclass;")
+    comparar("c) tope de 256 tokens de renovacion usados por sesion", r.lineas(),
+             ["CHECK ((cardinality(tokens_usados) <= 256))"])
+    r = sup("select pg_get_expr(d.adbin, d.adrelid) from pg_attrdef d "
+            "join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum "
+            "where d.adrelid = 'canal.sesion_personal'::regclass and a.attname = 'tokens_usados';")
+    comparar("c) tokens_usados empieza vacio", r.lineas(), ["'{}'::bytea[]"])
+    r = sup("select pg_get_indexdef('canal.sesion_personal_tokens_usados'::regclass);")
+    comparar("c) indice GIN sobre los tokens de renovacion usados", r.lineas(), [
+        "CREATE INDEX sesion_personal_tokens_usados ON canal.sesion_personal USING gin (tokens_usados)"])
 
 
 def seccion_d():
@@ -1154,12 +1168,14 @@ def seccion_l():
              en_a(f"insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256, caduca) values ('{EMPRESA_A}', '{ADMIN_A}', '\\x{'52' * 32}', now() + interval '10 years');"),
              "permission denied", sin_error(ctl))
     ctl = en_a(f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) values ('{EMPRESA_A}', '{ADMIN_A}', '{DISP_A}', '\\x{'53' * 32}');")
-    for columna, v in (("caduca", "now() + interval '10 years'"), ("ultimo_uso", "now()")):
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("ultimo_uso", "now()"),
+                       ("tokens_usados", "'{}'::bytea[]"), ("revocada", "false")):
         negativo(f"l) INSERT de sesion_personal con {columna}",
                  en_a(f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256, {columna}) values ('{EMPRESA_A}', '{ADMIN_A}', '{DISP_A}', '\\x{'53' * 32}', {v});"),
                  "permission denied", sin_error(ctl))
     ctl = en_a("update canal.sesion_personal set revocada = true;")
-    for columna, v in (("caduca", "now() + interval '10 years'"), ("token_sha256", f"'\\x{'54' * 32}'"), ("usuario_id", f"'{INSTR_A}'")):
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("dispositivo_id", f"'{DISP_A}'"),
+                       ("usuario_id", f"'{INSTR_A}'")):
         negativo(f"l) UPDATE de sesion_personal.{columna}", en_a(f"update canal.sesion_personal set {columna} = {v};"),
                  "permission denied", sin_error(ctl))
     ctl = en_a("update canal.dispositivo_personal set revocado = true;")

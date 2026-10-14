@@ -295,12 +295,12 @@ class TokensDelPersonal(unittest.TestCase):
                 self.assertIsNone(cripto.leer_token(malo))
 
     def test_huella_literal_y_por_tipo(self):
-        self.assertEqual(cripto.huella_token(cripto.ETIQUETA_SESION, bytes(32)).hex(),
-                         "b385375f261a88a3fb24c15a404122a0d098242901c8aa0621d5922de94a4805")
-        self.assertEqual(cripto.huella_token(b"canario/sesion/v1", bytes(32)),
-                         hashlib.sha256(b"canario/sesion/v1" + bytes(32)).digest())
+        self.assertEqual(cripto.huella_token(cripto.ETIQUETA_RENOVACION, bytes(32)).hex(),
+                         "5e49a25083b928ae40fe8932fd22212170ed414ab73d87cf4129ae57671f5ede")
+        self.assertEqual(cripto.huella_token(b"canario/renovacion/v1", bytes(32)),
+                         hashlib.sha256(b"canario/renovacion/v1" + bytes(32)).digest())
         huellas = {cripto.huella_token(e, bytes(32)) for e in
-                   (cripto.ETIQUETA_INVITACION, cripto.ETIQUETA_DISPOSITIVO, cripto.ETIQUETA_SESION)}
+                   (cripto.ETIQUETA_INVITACION, cripto.ETIQUETA_DISPOSITIVO, cripto.ETIQUETA_RENOVACION)}
         self.assertEqual(len(huellas), 3)
 
     def test_huella_rechazos(self):
@@ -308,5 +308,5 @@ class TokensDelPersonal(unittest.TestCase):
             cripto.huella_token(b"canario/otro/v1", bytes(32))
         self.assertEqual(str(error.exception), "etiqueta de token desconocida")
         with self.assertRaises(ValueError) as error:
-            cripto.huella_token(cripto.ETIQUETA_SESION, bytes(31))
+            cripto.huella_token(cripto.ETIQUETA_RENOVACION, bytes(31))
         self.assertEqual(str(error.exception), "el token debe tener 32 bytes")

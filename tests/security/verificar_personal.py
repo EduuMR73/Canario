@@ -15,19 +15,27 @@ y 6.9). Qué prueba:
 * Login: el mismo 401, byte a byte, para empresa inexistente o mal formada,
   email inexistente, contraseña o código erróneos, cuenta sin activar o dada
   de baja; tiempos comparables (con control de sensibilidad); un código TOTP
-  solo vale una vez.
+  solo vale una vez; cada login fallido deja un EVENTO login_fallido sin el
+  email (ASVS 5.0.0, 16.3.1).
 * Bloqueo sin denegación de servicio: los fallos sin dispositivo de confianza
   bloquean ese camino con esperas crecientes, y el titular sigue entrando con
   su dispositivo; los fallos con el dispositivo bloquean solo el dispositivo;
   20 lo retiran; 100 cierran el camino sin confianza hasta una reinvitación;
   un acierto con el dispositivo no reinicia el contador del otro camino;
   peticiones simultáneas no consiguen intentos extra.
-* Sesiones: Bearer obligatorio, revocación al cerrar, 15 minutos sin uso, 8
-  horas en total, baja de la cuenta, empresa inactiva y token de otra empresa.
+* Sesiones: JWT de acceso Bearer obligatorio, con su forma exacta. Forjados
+  con la clave falsa de la ejecución (control: uno bien formado se acepta),
+  dan 401 los de alg none, typ JWT, kid, otra clave, caducados, de una hora,
+  con aud o iss ajenos, con un rol, con un sid inexistente o de otra cuenta y
+  con la empresa B. La renovación rota, y reutilizar una gastada revoca la
+  sesión entera y deja un EVENTO; 15 minutos sin renovar, 8 horas en total y
+  el tope de renovaciones dan 401; cerrar la sesión corta su JWT vivo al
+  momento; empresa inactiva y renovación con el identificador de B.
 * Administración: un instructor recibe 403; una cuenta de otra empresa da el
   mismo 404 que una inexistente; email duplicado 409; la baja del último
-  admin 409; el cambio de contraseña revoca las demás sesiones y
-  dispositivos; la auditoría registra cada acción y su cadena es válida.
+  admin 409; el cambio de contraseña revoca todas las sesiones, también la
+  actual, y los demás dispositivos, y devuelve tokens nuevos (ASVS 7.2.4);
+  la auditoría registra cada acción y su cadena es válida.
 * Recuperación: una reinvitación se ve (invitacion_pendiente en /yo y en la
   lista) y un admin puede anularla; reinvitar-admin solo actúa sobre un admin
   activado de esa empresa, revoca en el acto su acceso (la sesión anterior ya
@@ -121,6 +129,10 @@ SALIDA = pathlib.Path(tempfile.gettempdir()) / "verificacion_personal.txt"
 BASE = ["docker", "compose", "-p", PROYECTO, "-f", "docker-compose.yml"]
 BASE_PRODUCCION = []
 CONTRASENAS_REDIS = {}
+# Claves falsas de esta ejecución: con la de firma, la batería forja JWT.
+CLAVES_FALSAS = {}
+# JWT y renovaciones emitidos: la sección i) comprueba que no salen en los logs.
+TOKENS_EMITIDOS = []
 
 lineas_salida = []
 estado = {"falla": False, "sin_conclusion": False}
@@ -171,7 +183,19 @@ CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde
 CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode()
 REINTENTAR_TRAS = "5"
 CLAVES_ACTIVACION = ["secreto_totp", "uri_totp"]
-CLAVES_LOGIN = ["token_dispositivo", "token_sesion"]
+CLAVES_LOGIN = ["expira_en", "token_acceso", "token_dispositivo", "token_renovacion"]
+CLAVES_TOKENS = ["expira_en", "token_acceso", "token_renovacion"]
+# JWT de acceso (app/tokens.py), literales.
+CABECERA_JWT = {"alg": "HS256", "typ": "canario-acceso+jwt"}
+CLAIMS_JWT = ["aud", "emp", "exp", "iat", "iss", "sid", "sub"]
+DURACION_ACCESO = 300
+LONGITUD_JWT = 377
+TOPE_RENOVACIONES = 256
+TEXTO_EVENTO_REUTILIZACION = "EVENTO reutilizacion_renovacion: "
+TEXTO_EVENTO_LOGIN_FALLIDO = "EVENTO login_fallido: "
+# Una sesión de la batería renueva su acceso al construir una petición si
+# tiene más de 4 minutos: el acceso dura 5 y algunas secciones tardan más.
+RENOVAR_TRAS = 240
 CLAVES_YO = ["email", "invitacion_pendiente", "rol", "usuario_id"]
 CLAVES_USUARIO = ["activado", "activo", "camino_sin_confianza_cerrado", "email", "en_espera", "invitacion_pendiente",
                   "rol", "usuario_id"]
@@ -233,7 +257,7 @@ PREFIJO_ARGON2 = "$argon2id$v=19$m=19456,t=2,p=1$"
 TAMANO_SECRETO_CIFRADO = 49
 # Huellas de los tokens: SHA-256(etiqueta || 32 bytes) (docs/threat-model.md, 6.3).
 ETIQUETAS = {"invitacion": b"canario/invitacion/v1", "dispositivo": b"canario/dispositivo/v1",
-             "sesion": b"canario/sesion/v1"}
+             "renovacion": b"canario/renovacion/v1"}
 # Bloqueo (app/personal.py): esperas tras el fallo n (n >= 5) de 2^(n-5)
 # minutos con tope de 60; tope de 20 fallos por dispositivo y 100 sin confianza.
 ESPERA_TRAS = {5: 1, 6: 2, 8: 8, 10: 32, 11: 60, 30: 60}
@@ -319,7 +343,7 @@ res["token_no_canonico"] = cripto.leer_token(otro)
 res["token_corto"] = cripto.leer_token(texto[:-1])
 res["token_no_ascii"] = cripto.leer_token("\\u00e1" + texto[1:])
 res["etiquetas_distintas"] = len({{cripto.huella_token(e, crudo) for e in
-                                   (cripto.ETIQUETA_INVITACION, cripto.ETIQUETA_DISPOSITIVO, cripto.ETIQUETA_SESION)}})
+                                   (cripto.ETIQUETA_INVITACION, cripto.ETIQUETA_DISPOSITIVO, cripto.ETIQUETA_RENOVACION)}})
 print(json.dumps(res, sort_keys=True))
 """
 
@@ -589,8 +613,9 @@ def preparar_secretos_falsos():
     directorio = TEMPORAL / "secretos_compose"
     directorio.mkdir()
     lineas = ["secrets:"]
-    for nombre in ("clave_maestra", "clave_hmac_codigos"):
-        (directorio / nombre).write_text(secrets.token_hex(32), encoding="ascii", newline="")
+    for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens"):
+        CLAVES_FALSAS[nombre] = secrets.token_hex(32)
+        (directorio / nombre).write_text(CLAVES_FALSAS[nombre], encoding="ascii", newline="")
         lineas += fichero_secreto(nombre, directorio / nombre)
     for usuario in ("aplicacion", "inspector"):
         CONTRASENAS_REDIS[usuario] = secrets.token_urlsafe(48)
@@ -641,6 +666,8 @@ def http(peticiones, red="app", ip=None):
 
 def pt(metodo, ruta, datos=None, token=None, crudo=None, **extra):
     cabeceras = {"Content-Type": "application/json"}
+    if isinstance(token, Sesion):
+        token = token.vigente()
     if token is not None:
         cabeceras["Authorization"] = f"Bearer {token}"
     if crudo is None and datos is not None:
@@ -747,12 +774,60 @@ def fallo(cuenta, dispositivo="propio", veces=1):
     return http([login(cuenta, contrasena="equivocada-" + secrets.token_hex(6), dispositivo=dispositivo)] * veces)
 
 
+class Sesion:
+    """Los dos tokens de una sesión de la batería. pt() pide el acceso con
+    vigente(): si tiene más de RENOVAR_TRAS segundos, lo renueva antes. Si la
+    renovación falla (una sesión revocada a propósito por la prueba), sigue
+    con el que tenía y lo anota: la petición dará 401 y lo juzgará la prueba,
+    nunca se oculta."""
+
+    def __init__(self, cuenta, datos):
+        self.cuenta = cuenta
+        self.jwt, self.renovacion = datos["token_acceso"], datos["token_renovacion"]
+        self.desde = time.monotonic()
+        TOKENS_EMITIDOS.extend((self.jwt, self.renovacion))
+
+    def vigente(self):
+        if time.monotonic() - self.desde > RENOVAR_TRAS:
+            r = una(renovacion(self.renovacion))
+            datos = json_de(r) or {}
+            if r.get("estado") == 200 and sorted(datos) == CLAVES_TOKENS:
+                self.jwt, self.renovacion = datos["token_acceso"], datos["token_renovacion"]
+                self.desde = time.monotonic()
+                TOKENS_EMITIDOS.extend((self.jwt, self.renovacion))
+            else:
+                p(f"  [sesion] no se pudo renovar la de {self.cuenta.etiqueta} ({r.get('estado')}): "
+                  "se usa el acceso que habia")
+        return self.jwt
+
+
+def renovacion(token):
+    return pt("POST", "/v1/personal/sesiones/renovacion", {"token_renovacion": token})
+
+
 def sesion_de(cuenta, dispositivo="propio"):
     respuesta = login_correcto(cuenta, dispositivo)
     datos = json_de(respuesta)
     if respuesta.get("estado") != 201 or not datos:
         raise Parada(f"no se pudo iniciar sesion con {cuenta.etiqueta}: {respuesta}")
-    return datos["token_sesion"]
+    return Sesion(cuenta, datos)
+
+
+def parte_jwt(objeto):
+    return base64.urlsafe_b64encode(json.dumps(objeto, separators=(",", ":")).encode()).rstrip(b"=").decode()
+
+
+def leer_parte(parte):
+    return json.loads(base64.urlsafe_b64decode(parte + "=" * (-len(parte) % 4)))
+
+
+def forjar_jwt(claims, cabecera=None, clave=None):
+    """JWT firmado con HMAC-SHA256 de la biblioteca estándar, con la clave de
+    firma falsa de esta ejecución salvo que se pase otra."""
+    clave = clave if clave is not None else bytes.fromhex(CLAVES_FALSAS["clave_firma_tokens"])
+    entrada = parte_jwt(cabecera or CABECERA_JWT) + "." + parte_jwt(claims)
+    firma = hmac.new(clave, entrada.encode("ascii"), hashlib.sha256).digest()
+    return entrada + "." + base64.urlsafe_b64encode(firma).rstrip(b"=").decode()
 
 
 def yo(token):
@@ -828,11 +903,19 @@ def es_201_login(respuesta, con_dispositivo_nuevo):
     datos = json_de(respuesta)
     if respuesta.get("estado") != 201 or not isinstance(datos, dict) or sorted(datos) != CLAVES_LOGIN:
         return False
-    sesion_ok = isinstance(datos["token_sesion"], str) and re.fullmatch(PATRON_TOKEN_COMPUESTO, datos["token_sesion"])
+    TOKENS_EMITIDOS.extend(v for v in (datos["token_acceso"], datos["token_renovacion"]) if isinstance(v, str))
+    sesion_ok = (isinstance(datos["token_acceso"], str) and len(datos["token_acceso"]) == LONGITUD_JWT
+                 and isinstance(datos["token_renovacion"], str)
+                 and re.fullmatch(PATRON_TOKEN_COMPUESTO, datos["token_renovacion"])
+                 and datos["expira_en"] == DURACION_ACCESO)
     nuevo = datos["token_dispositivo"]
     dispositivo_ok = (isinstance(nuevo, str) and re.fullmatch(PATRON_TOKEN, nuevo)) if con_dispositivo_nuevo \
         else nuevo is None
     return bool(sesion_ok and dispositivo_ok)
+
+
+def eventos_login_fallido():
+    return [linea for linea in lineas_log("api") if TEXTO_EVENTO_LOGIN_FALLIDO in linea]
 
 
 def es_401(respuesta, cuerpo=CUERPO_401_CREDENCIALES):
@@ -1029,12 +1112,14 @@ def seccion_d():
     p("=== d) login: respuesta uniforme, tiempos y un solo uso del codigo")
     token_admin = CUENTAS["token_admin_a"]
     instr = CUENTAS["instructor"]
+    eventos_inicio = len(eventos_login_fallido())
     control = login_correcto(instr)
     pasa(es_201_login(control, con_dispositivo_nuevo=False),
-         "d) control: con su dispositivo, 201 con el token de sesion y sin dispositivo nuevo")
+         "d) control: con su dispositivo, 201 con el JWT, la renovacion y sin dispositivo nuevo")
     sin = login_correcto(instr, dispositivo=None)
     pasa(es_201_login(sin, con_dispositivo_nuevo=True),
          "d) sin dispositivo de confianza, 201 con un dispositivo nuevo")
+    pasa(len(eventos_login_fallido()) == eventos_inicio, "d) un login correcto no deja EVENTO login_fallido")
     pendiente, _ = invitar(token_admin, "pendiente", "pendiente@alfa.test")
     baja, _ = invitar(token_admin, "de_baja", "debaja@alfa.test")
     preparar_cuenta(baja)
@@ -1054,6 +1139,17 @@ def seccion_d():
     respuestas = dict(zip(casos, http(list(casos.values()))))
     distintos = {k: (v.get("estado"), v.get("cuerpo")) for k, v in respuestas.items() if not es_401(v)}
     pasa(not distintos, f"d) los 9 fallos responden el mismo 401 'credenciales no válidas' byte a byte {distintos or ''}")
+    # OWASP ASVS 5.0.0, 16.3.1: cada fallo deja su EVENTO, con la cuenta si
+    # existe y sin el email ni nada de lo enviado. La cuenta del instructor
+    # aparece en los 3 fallos que la encuentran (contrasena y codigos); las
+    # 2 empresas que no existen salen como "-".
+    eventos = eventos_login_fallido()[eventos_inicio:]
+    del_instructor = [e for e in eventos if f"usuario={instr.usuario_id}" in e]
+    sin_empresa = [e for e in eventos if "empresa=- " in e]
+    pasa(len(eventos) == 9 and len(del_instructor) == 3 and len(sin_empresa) == 2
+         and not any("@" in e or instr.contrasena in e for e in eventos),
+         f"d) los 9 fallos dejan 9 EVENTO login_fallido: 3 con la cuenta del instructor, 2 sin empresa, ninguno con "
+         f"el email ni la contrasena ({len(eventos)}, {len(del_instructor)}, {len(sin_empresa)})")
     # El instructor solo ha fallado por el camino de su dispositivo: los
     # fallos cuentan ahí.
     poner_dispositivo(instr, 0)
@@ -1216,56 +1312,147 @@ def seccion_e():
 
 
 def seccion_f():
-    p("=== f) sesiones")
+    p("=== f) sesiones: JWT de acceso, renovacion y cierre")
     instr = CUENTAS["instructor"]
-    token = sesion_de(instr)
-    control = una(yo(token))
+    sesion = sesion_de(instr)
+    control = una(yo(sesion.jwt))
     datos = json_de(control) or {}
     pasa(control.get("estado") == 200 and sorted(datos) == CLAVES_YO and datos.get("email") == instr.email
-         and datos.get("rol") == "instructor", "f) control: /yo con el token Bearer responde la cuenta")
-    identificador, secreto_token = token.split(".")
+         and datos.get("rol") == "instructor", "f) control: /yo con el JWT Bearer responde la cuenta")
+    cabecera, cuerpo, _ = sesion.jwt.split(".")
+    claims = leer_parte(cuerpo)
+    pasa(len(sesion.jwt) == LONGITUD_JWT and leer_parte(cabecera) == CABECERA_JWT and sorted(claims) == CLAIMS_JWT
+         and claims["iss"] == "canario" and claims["aud"] == "canario-personal"
+         and claims["sub"] == str(instr.usuario_id) and claims["emp"] == EMPRESAS["A"][1]
+         and claims["exp"] - claims["iat"] == DURACION_ACCESO,
+         f"f) el JWT tiene la cabecera, los claims y la duracion exactos ({leer_parte(cabecera)}, {sorted(claims)})")
+    sid = claims["sid"]
+    pasa(valor(f"select count(*) from canal.sesion_personal where id = '{sid}' and usuario_id = '{instr.usuario_id}' "
+               f"and not revocada;") == "1", "f) el sid del JWT es la fila de su sesion")
+
+    # Forjados con la clave falsa de esta ejecucion. Control: uno bien formado,
+    # con el sid y la cuenta reales, se acepta; asi los rechazos son por lo
+    # que cambia cada uno y no por la forma de forjar.
+    base = dict(claims)
+    ahora = int(time.time())
+    base.update(iat=ahora, exp=ahora + DURACION_ACCESO)
+    forjado_ok = una(yo(forjar_jwt(base))).get("estado") == 200
+    pasa(forjado_ok, "f) control: un JWT forjado con la clave de firma y los claims correctos se acepta")
+    otra = CUENTAS["admin_a"]
     malos = {
         "sin cabecera": pt("GET", "/v1/personal/yo"),
-        "esquema Basic": {**yo(token), "cabeceras": {"Authorization": f"Basic {token}"}},
-        "token mal formado": yo(token[:-1]),
-        "token aleatorio": yo(f"{identificador}.{'A' * 43}"),
-        "token con el identificador de B": yo(f"{EMPRESAS['B'][1]}.{secreto_token}"),
-        "token de dispositivo como sesion": yo(f"{identificador}.{instr.dispositivo}"),
+        "esquema Basic": {**yo(sesion.jwt), "cabeceras": {"Authorization": f"Basic {sesion.jwt}"}},
+        "JWT truncado": yo(sesion.jwt[:-1]),
+        "token de renovacion como acceso": yo(sesion.renovacion),
+        "token de dispositivo como acceso": yo(f"{EMPRESAS['A'][1]}.{instr.dispositivo}"),
+        "alg none": yo(parte_jwt({"alg": "none", "typ": CABECERA_JWT["typ"]}) + "." + parte_jwt(base) + "."),
+        "typ JWT": yo(forjar_jwt(base, {"alg": "HS256", "typ": "JWT"})),
+        "con kid": yo(forjar_jwt(base, {**CABECERA_JWT, "kid": "1"})),
+        "otra clave": yo(forjar_jwt(base, clave=secrets.token_bytes(32))),
+        "caducado": yo(forjar_jwt({**base, "iat": ahora - 400, "exp": ahora - 100})),
+        "dura una hora": yo(forjar_jwt({**base, "exp": ahora + 3600})),
+        "aud ajena": yo(forjar_jwt({**base, "aud": "otra"})),
+        "iss ajeno": yo(forjar_jwt({**base, "iss": "otro"})),
+        "con un rol": yo(forjar_jwt({**base, "rol": "admin"})),
+        "sid inexistente": yo(forjar_jwt({**base, "sid": str(uuid.uuid4())})),
+        "sid propio con la cuenta de otro": yo(forjar_jwt({**base, "sub": str(otra.usuario_id)})),
+        "emp de B con la sesion de A": yo(forjar_jwt({**base, "emp": EMPRESAS["B"][1]})),
     }
     respuestas = dict(zip(malos, http(list(malos.values()))))
     distintos = {k: v.get("estado") for k, v in respuestas.items()
                  if not (es_401(v, CUERPO_401_SESION) and v.get("cabeceras", {}).get("www-authenticate") == "Bearer")}
-    negativo(f"f) sin sesion valida: 401 'sesión no válida' con WWW-Authenticate: Bearer {distintos or ''}".strip(),
-             not distintos, control.get("estado") == 200)
-    huella = hashlib.sha256(ETIQUETAS["sesion"] + leer_token(secreto_token)).hexdigest()
-    pasa(valor(f"select count(*) from canal.sesion_personal where token_sha256 = '\\x{huella}';") == "1",
-         "f) la sesion se guarda como SHA-256(etiqueta || token)")
+    negativo(f"f) {len(malos)} accesos no validos: 401 'sesión no válida' con WWW-Authenticate: Bearer "
+             f"{distintos or ''}".strip(), not distintos, control.get("estado") == 200 and forjado_ok)
 
-    def sesion_sql(cambio):
-        valor(f"update canal.sesion_personal set {cambio} where token_sha256 = '\\x{huella}'; select 1;")
-    sesion_sql("ultimo_uso = now() - interval '14 minutes'")
-    casi = una(yo(token)).get("estado")
-    sesion_sql("ultimo_uso = now() - interval '16 minutes'")
-    inactiva = una(yo(token))
-    negativo("f) 16 minutos sin uso: 401 (control: con 14 minutos responde 200 y renueva)",
-             es_401(inactiva, CUERPO_401_SESION), casi == 200)
-    sesion_sql("ultimo_uso = now()")
-    sesion_sql("caduca = now() - interval '1 second'")
-    caducada = una(yo(token))
-    negativo("f) pasadas las 8 horas: 401 aunque se haya usado", es_401(caducada, CUERPO_401_SESION), casi == 200)
-    token = sesion_de(instr)
-    antes = una(yo(token)).get("estado")
-    cierre = una(pt("DELETE", "/v1/personal/sesiones/actual", token=token))
-    despues = una(yo(token))
-    negativo("f) tras cerrar la sesion (204), el token da 401", cierre.get("estado") == 204
-             and es_401(despues, CUERPO_401_SESION), antes == 200)
-    token = sesion_de(instr)
+    # Renovacion (RFC 9700, 4.14.2).
+    huella = hashlib.sha256(ETIQUETAS["renovacion"] + leer_token(sesion.renovacion.split(".")[1])).hexdigest()
+    pasa(valor(f"select count(*) from canal.sesion_personal where id = '{sid}' and token_sha256 = '\\x{huella}';")
+         == "1", "f) la renovacion se guarda como SHA-256(etiqueta || token)")
+    vieja = sesion.renovacion
+    r = una(renovacion(vieja))
+    nueva = json_de(r) or {}
+    nueva_ok = (r.get("estado") == 200 and sorted(nueva) == CLAVES_TOKENS and nueva.get("expira_en") == DURACION_ACCESO
+                and nueva.get("token_renovacion") not in (None, vieja)
+                and una(yo(nueva.get("token_acceso"))).get("estado") == 200)
+    pasa(nueva_ok, "f) control: la renovacion devuelve un acceso que responde y otra renovacion distinta")
+    TOKENS_EMITIDOS.extend(v for v in (nueva.get("token_acceso"), nueva.get("token_renovacion")) if v)
+    eventos_antes = sum(TEXTO_EVENTO_REUTILIZACION in linea for linea in lineas_log("api"))
+    reusada = una(renovacion(vieja))
+    tras = http([yo(nueva.get("token_acceso", "")), renovacion(nueva.get("token_renovacion", ""))])
+    eventos = [linea for linea in lineas_log("api") if TEXTO_EVENTO_REUTILIZACION in linea][eventos_antes:]
+    estado_fila = valor(f"select revocada || '|' || cardinality(tokens_usados) from canal.sesion_personal "
+                        f"where id = '{sid}';")
+    negativo("f) reutilizar una renovacion ya gastada da 401 y revoca la sesion entera: su acceso nuevo y su "
+             "renovacion nueva tambien dan 401",
+             es_401(reusada, CUERPO_401_SESION) and all(es_401(x, CUERPO_401_SESION) for x in tras)
+             and estado_fila == "true|1", nueva_ok,
+             f"reusada {reusada.get('estado')}, tras {[x.get('estado') for x in tras]}, fila {estado_fila}")
+    negativo("f) la reutilizacion deja un EVENTO con empresa, cuenta y sesion, sin el token",
+             len(eventos) == 1 and f"usuario={instr.usuario_id}" in eventos[0] and f"sesion={sid}" in eventos[0]
+             and vieja.split(".")[1] not in eventos[0], nueva_ok, f"eventos: {eventos}")
+
+    # Inactividad (15 minutos sin renovar), maximo de 8 horas y tope de
+    # renovaciones. Cada caso con su control en la misma sesion.
+    sesion = sesion_de(instr)
+    sid = leer_parte(sesion.jwt.split(".")[1])["sid"]
+
+    def fila(cambio):
+        valor(f"update canal.sesion_personal set {cambio} where id = '{sid}'; select 1;")
+
+    def renovar_aqui():
+        r = una(renovacion(sesion.renovacion))
+        if r.get("estado") == 200:
+            sesion.renovacion = json_de(r)["token_renovacion"]
+            sesion.jwt = json_de(r)["token_acceso"]
+            TOKENS_EMITIDOS.extend((sesion.jwt, sesion.renovacion))
+        return r
+
+    fila("ultimo_uso = now() - interval '14 minutes'")
+    casi = renovar_aqui().get("estado")
+    fila("ultimo_uso = now() - interval '16 minutes'")
+    inactiva = renovar_aqui()
+    negativo("f) 16 minutos sin renovar: la renovacion da 401 (control: con 14 minutos, 200)",
+             es_401(inactiva, CUERPO_401_SESION), casi == 200, f"14 min: {casi}, 16 min: {inactiva.get('estado')}")
+    sesion = sesion_de(instr)
+    sid = leer_parte(sesion.jwt.split(".")[1])["sid"]
+    antes = una(yo(sesion.jwt)).get("estado")
+    fila("caduca = now() - interval '1 second'")
+    caducada = http([yo(sesion.jwt), renovacion(sesion.renovacion)])
+    negativo("f) pasadas las 8 horas, el acceso vivo y la renovacion dan 401",
+             all(es_401(x, CUERPO_401_SESION) for x in caducada), antes == 200,
+             f"estados: {[x.get('estado') for x in caducada]}")
+    sesion = sesion_de(instr)
+    sid = leer_parte(sesion.jwt.split(".")[1])["sid"]
+    relleno = ", ".join(f"'\\x{i:064x}'::bytea" for i in range(TOPE_RENOVACIONES - 1))
+    fila(f"tokens_usados = array[{relleno}]")
+    ultima = renovar_aqui().get("estado")
+    tope = renovar_aqui()
+    negativo(f"f) con {TOPE_RENOVACIONES} renovaciones gastadas la siguiente da 401 (control: la numero "
+             f"{TOPE_RENOVACIONES}, 200)", es_401(tope, CUERPO_401_SESION), ultima == 200,
+             f"ultima {ultima}, tope {tope.get('estado')}")
+    sesion = sesion_de(instr)
+    de_b = f"{EMPRESAS['B'][1]}.{sesion.renovacion.split('.')[1]}"
+    ajena = una(renovacion(de_b))
+    propia = renovar_aqui().get("estado")
+    negativo("f) la renovacion con el identificador de B da 401 (control: con el suyo, 200)",
+             es_401(ajena, CUERPO_401_SESION), propia == 200, f"ajena {ajena.get('estado')}")
+
+    # Cierre: el JWT vivo deja de valer al momento (OWASP ASVS 5.0.0, 7.4.1).
+    sesion = sesion_de(instr)
+    antes = una(yo(sesion.jwt)).get("estado")
+    cierre = una(pt("DELETE", "/v1/personal/sesiones/actual", token=sesion.jwt))
+    despues = http([yo(sesion.jwt), renovacion(sesion.renovacion)])
+    negativo("f) tras cerrar la sesion (204), su JWT vivo y su renovacion dan 401 al momento",
+             cierre.get("estado") == 204 and all(es_401(x, CUERPO_401_SESION) for x in despues), antes == 200,
+             f"cierre {cierre.get('estado')}, despues {[x.get('estado') for x in despues]}")
+    sesion = sesion_de(instr)
     valor(f"update canal.empresa set activa = false where id = '{EMPRESAS['A'][0]}'; select 1;")
-    inactiva = una(yo(token))
+    inactiva = http([yo(sesion.jwt), renovacion(sesion.renovacion)])
     valor(f"update canal.empresa set activa = true where id = '{EMPRESAS['A'][0]}'; select 1;")
-    vuelta = una(yo(token)).get("estado")
-    negativo("f) con la empresa inactiva, sus sesiones dan 401 (control: al reactivarla, 200)",
-             es_401(inactiva, CUERPO_401_SESION), vuelta == 200)
+    vuelta = una(yo(sesion.jwt)).get("estado")
+    negativo("f) con la empresa inactiva, sus JWT y sus renovaciones dan 401 (control: al reactivarla, 200)",
+             all(es_401(x, CUERPO_401_SESION) for x in inactiva), vuelta == 200,
+             f"estados: {[x.get('estado') for x in inactiva]}")
 
 
 def seccion_g():
@@ -1351,17 +1538,23 @@ def seccion_g():
     pasa(es_401(mala) and contadores_dispositivo(instr)[0] == 1,
          "g) con la contrasena actual equivocada: 401 y el fallo cuenta en el dispositivo de la sesion")
     codigo, paso = codigo_libre(instr.secreto)
+    jwt_anterior, renovacion_anterior = token_instr.jwt, token_instr.renovacion
     cambio = una(pt("POST", ruta, {"contrasena_actual": instr.contrasena, "contrasena_nueva": nueva,
                                    "codigo_totp": codigo}, token=token_instr))
-    if cambio.get("estado") == 204:
+    tokens_nuevos = json_de(cambio) or {}
+    cambio_ok = cambio.get("estado") == 200 and sorted(tokens_nuevos) == CLAVES_TOKENS
+    if cambio_ok:
         ULTIMO_PASO[instr.secreto] = paso
+        TOKENS_EMITIDOS.extend((tokens_nuevos["token_acceso"], tokens_nuevos["token_renovacion"]))
     vieja = instr.contrasena
     instr.contrasena = nueva
-    tras = http([yo(token_instr), yo(otra_sesion),
-                 login(instr, contrasena=vieja, codigo=codigo_libre(instr.secreto)[0])])
-    negativo("g) cambio de contrasena (204): la sesion actual sigue, la otra se revoca y la contrasena vieja da 401",
-             tras[0].get("estado") == 200 and es_401(tras[1], CUERPO_401_SESION) and es_401(tras[2]),
-             cambio.get("estado") == 204, f"cambio: {cambio.get('estado')}, tras: {[x.get('estado') for x in tras]}")
+    tras = http([yo(tokens_nuevos.get("token_acceso", "")), yo(jwt_anterior), renovacion(renovacion_anterior),
+                 yo(otra_sesion.jwt), login(instr, contrasena=vieja, codigo=codigo_libre(instr.secreto)[0])])
+    negativo("g) cambio de contrasena (200 con tokens nuevos, ASVS 7.2.4): los tokens nuevos responden; el JWT y la "
+             "renovacion de la sesion que lo pidio, la otra sesion y la contrasena vieja dan 401",
+             tras[0].get("estado") == 200 and all(es_401(x, CUERPO_401_SESION) for x in tras[1:4])
+             and es_401(tras[4]), cambio_ok,
+             f"cambio: {cambio.get('estado')}, tras: {[x.get('estado') for x in tras]}")
     dispositivo_viejo = otro_dispositivo.get("token_dispositivo")
     if dispositivo_viejo:
         huella = hashlib.sha256(ETIQUETAS["dispositivo"] + leer_token(dispositivo_viejo)).hexdigest()
@@ -1499,7 +1692,7 @@ def seccion_j():
     admin_b.contrasena = secrets.token_urlsafe(18)
     _, r_conf = activar(admin_b)
     entra = login_correcto(admin_b)
-    token_nuevo = (json_de(entra) or {}).get("token_sesion")
+    token_nuevo = (json_de(entra) or {}).get("token_acceso")
     fila = fila_lista(token_nuevo, usuario_b) if token_nuevo else {}
     pasa(r_conf is not None and r_conf.get("estado") == 200 and es_201_login(entra, False)
          and fila.get("activo") is True and fila.get("activado") is True and fila.get("invitacion_pendiente") is False,
@@ -2318,7 +2511,15 @@ def seccion_h_cuenta():
         time.sleep(resto + 1)
     lineas_antes = sum(TEXTO_EVENTO_CUENTA in l for l in lineas_log("api"))
     mitad = maximo // 2
-    falso = token[:-1] + ("A" if token[-1] != "A" else "B")
+    # El token que no vale lleva los claims reales de la cuenta (su sub, su sid
+    # y su emp, vigentes) firmados con otra clave: es quien intenta agotar el
+    # cupo de una víctima con su sub, y el limitador no debe contar por un sub
+    # sin verificar. No se cambia el último carácter del JWT: en la firma (32
+    # bytes, 43 caracteres) sus 2 bits más bajos son de relleno, y "A" y "B"
+    # solo difieren en uno de ellos.
+    claims = leer_parte(token.jwt.split(".")[1])
+    ahora = int(time.time())
+    falso = forjar_jwt({**claims, "iat": ahora, "exp": ahora + DURACION_ACCESO}, clave=secrets.token_bytes(32))
     invalidos = http([por_caddy(yo(falso))] * 10, red="edge", ip=IP_CLIENTE_A)
     desde_a = http([por_caddy(yo(token))] * mitad, red="edge", ip=IP_CLIENTE_A)
     desde_b = http([por_caddy(yo(token))] * (maximo - mitad + 2), red="edge", ip=IP_CLIENTE_B)
@@ -2357,6 +2558,9 @@ def seccion_i():
         if cuenta.secreto:
             sensibles[f"secreto_hex de {cuenta.etiqueta}"] = base64.b32decode(cuenta.secreto).hex()
     sensibles.update(TEXTOS_SENSIBLES)
+    for n, token in enumerate(TOKENS_EMITIDOS):
+        sensibles[f"token emitido {n}"] = token
+    sensibles["clave de firma"] = CLAVES_FALSAS["clave_firma_tokens"]
     textos = {s: dc("logs", "--no-color", "--no-log-prefix", s).todo for s in ("api", "postgres", "caddy", "redis")}
     volcado = dc("exec", "-T", "postgres", "pg_dump", "-U", "postgres", "-d", "canario", "--data-only",
                  "-n", "canal").out
@@ -2371,6 +2575,24 @@ def seccion_i():
     salida = "\n".join(salidas_gestion)
     pasa(all(c.contrasena not in salida for c in CUENTAS.values() if isinstance(c, Cuenta)),
          "i) gestion nunca imprime contrasenas")
+
+
+# Líneas del log de la API que explican un 503 o un 500. Solo llevan la clase
+# del error y su SQLSTATE (app/frontera_http.py y app/limitador.py), nunca
+# valores, y la sección i) comprueba que el log no tiene nada sensible.
+MARCAS_DIAGNOSTICO = ("EVENTO limitador_no_disponible", "EVENTO limitador_cliente_invalido", "SATURACION:",
+                      "ERROR INTERNO:")
+
+
+def diagnostico_api():
+    """Si algo falló, imprime esas líneas antes de la limpieza: down -v se
+    lleva el log, y sin él un 503 no dice si fue Redis (el limitador falla
+    cerrado si no responde en 0,2 s) o un bloqueo de PostgreSQL."""
+    lineas = [l for l in lineas_log("api") if any(m in l for m in MARCAS_DIAGNOSTICO)]
+    p("=== diagnostico: lineas de error del log de la API (las de limitador_no_disponible de h) son esperadas: "
+      "para Redis a proposito)")
+    for linea in lineas or ["(ninguna)"]:
+        p(f"   {linea}")
 
 
 def seccion_s():
@@ -2452,7 +2674,7 @@ def main():
     # Solo se comprueba que existen (is_file), nunca se leen.
     for fichero in ("contrasena_redis.txt", "redis_acl.conf", "contrasena_postgres_superusuario.txt",
                     "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt",
-                    "clave_maestra.txt", "clave_hmac_codigos.txt"):
+                    "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
             terminar_con_parada()
@@ -2471,6 +2693,8 @@ def main():
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
         dc("start", "redis")
+        if estado["falla"] or parada is not None:
+            diagnostico_api()
         if parada is not None:
             dc_con_gestion("down", "-v", "--rmi", "local")
         else:

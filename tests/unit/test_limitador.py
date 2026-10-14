@@ -34,6 +34,8 @@ class ReglaDeCadaRuta(unittest.TestCase):
             "/v1/personal/activacion": "acceso",
             "/v1/personal/activacion/confirmar": "acceso",
             "/v1/personal/contrasena": "acceso",
+            # Sin Argon2 ni nada que adivinar: "otras" (ver app/limitador.py).
+            "/v1/personal/sesiones/renovacion": "otras",
             "/v1/empresas/abc/denuncias": "denuncia",
             "/v1/empresas//denuncias": "otras",
             "/v1/empresas/a/b/denuncias": "otras",

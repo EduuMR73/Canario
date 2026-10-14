@@ -93,11 +93,12 @@ PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}]}
 # Redis, el del limitador), nunca en edge.
 REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache"},
          "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
-# Únicos montajes de la API: sus cuatro Docker secrets (contraseña de la base
-# de datos, clave maestra, clave del HMAC de los códigos y contraseña de
-# Redis), ordenados por destino porque docker inspect no garantiza el orden.
-# Nunca contrasena_plataforma.
-MONTAJES_API = [("bind", "", "/run/secrets/clave_hmac_codigos"),
+# Únicos montajes de la API: sus cinco Docker secrets (contraseña de la base
+# de datos, clave maestra, clave del HMAC de los códigos, clave de firma de
+# los JWT y contraseña de Redis), ordenados por destino porque docker inspect
+# no garantiza el orden. Nunca contrasena_plataforma.
+MONTAJES_API = [("bind", "", "/run/secrets/clave_firma_tokens"),
+                ("bind", "", "/run/secrets/clave_hmac_codigos"),
                 ("bind", "", "/run/secrets/clave_maestra"),
                 ("bind", "", "/run/secrets/contrasena_aplicacion"),
                 ("bind", "", "/run/secrets/contrasena_redis")]

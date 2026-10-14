@@ -182,6 +182,7 @@ CAMPOS_TEXTO = {
     "NuevaDenuncia.texto", "ConsultaSeguimiento.codigo", "NuevoMensaje.codigo", "NuevoMensaje.texto",
     "Activacion.token", "Activacion.contrasena", "Confirmacion.token", "Confirmacion.codigo_totp",
     "Login.empresa", "Login.email", "Login.contrasena", "Login.codigo_totp", "Login.token_dispositivo",
+    "Renovacion.token_renovacion",
     "CambioContrasena.contrasena_actual", "CambioContrasena.contrasena_nueva", "CambioContrasena.codigo_totp",
     "NuevoUsuario.email", "MensajePersonal.texto", "CambioEstado.mensaje", "Asignacion.usuario_id",
     "Tramo.texto",
@@ -463,7 +464,7 @@ def preparar_secretos_falsos():
     directorio = TEMPORAL / "secretos_compose"
     directorio.mkdir()
     lineas = ["secrets:"]
-    for nombre in ("clave_maestra", "clave_hmac_codigos"):
+    for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens"):
         (directorio / nombre).write_text(secrets.token_hex(32), encoding="ascii", newline="")
         lineas += fichero_secreto(nombre, directorio / nombre)
     for usuario in ("aplicacion", "inspector"):
@@ -568,6 +569,7 @@ class Cuenta:
         self.dispositivo = None
         self.invitacion = None
         self.usuario_id = None
+        self.renovacion = None
 
 
 def activar(cuenta):
@@ -596,7 +598,19 @@ def sesion_de(cuenta):
     if r.get("estado") != 201:
         raise Parada(f"no se pudo iniciar sesion con {cuenta.etiqueta}: {r.get('estado')}")
     ULTIMO_PASO[cuenta.secreto] = paso
-    return json_de(r)["token_sesion"]
+    cuenta.renovacion = json_de(r)["token_renovacion"]
+    return json_de(r)["token_acceso"]
+
+
+def acceso_nuevo(cuenta):
+    """JWT de acceso recién renovado. El acceso dura 5 minutos y la batería
+    tarda más: cada sección pide el suyo con el token de renovación, que rota
+    en cada uso (app/personal.py, renovar)."""
+    r = una(pt("POST", "/v1/personal/sesiones/renovacion", {"token_renovacion": cuenta.renovacion}))
+    if r.get("estado") != 200:
+        raise Parada(f"no se pudo renovar la sesion de {cuenta.etiqueta}: {r.get('estado')}")
+    cuenta.renovacion = json_de(r)["token_renovacion"]
+    return json_de(r)["token_acceso"]
 
 
 def alta_empresa(nombre):
@@ -811,8 +825,8 @@ def seccion_b():
     r = una(pt("POST", f"/v1/empresas/{identificador}/denuncias", {"categoria": CATEGORIA, "texto": "denuncia"}))
     if r.get("estado") != 201:
         raise Parada(f"no se pudo crear la denuncia de control: {r.get('estado')}")
-    ESTADO.update(empresa_id=empresa_id, identificador=identificador, admin=admin, token=token,
-                  instructor=instructor, token_instructor=sesion_de(instructor),
+    sesion_de(instructor)
+    ESTADO.update(empresa_id=empresa_id, identificador=identificador, admin=admin, instructor=instructor,
                   codigo=json_de(r)["codigo_seguimiento"], fecha=json_de(r)["fecha"],
                   denuncia_id=valor("select id from canal.denuncia;"))
     admin.usuario_id = valor("select id from canal.usuario_personal where email = 'admin@inyeccion.test';")
@@ -855,7 +869,8 @@ def entradas():
     mal formada), login.email y seguimiento.codigo (como HMAC). Se rechazan
     antes del SQL: el identificador de la ruta (32 hex), estado (lista
     cerrada), cursor (fecha.uuid), desde (entero) y los ids (uuid)."""
-    admin, token = ESTADO["admin"], ESTADO["token"]
+    admin = ESTADO["admin"]
+    token = acceso_nuevo(admin)
     denuncia = ESTADO["denuncia_id"]
     contrasena_mala = "equivocada-" + secrets.token_hex(6)
 
@@ -916,7 +931,8 @@ def contadores_admin():
 
 def seccion_d():
     p("=== d) payloads de inyeccion en cada entrada")
-    admin, token = ESTADO["admin"], ESTADO["token"]
+    admin = ESTADO["admin"]
+    token = acceso_nuevo(admin)
     # El admin se asigna la denuncia: así su lectura es el control de la
     # entrada lectura.denuncia_id (sin asignación, el contenido no se lee).
     r = una(pt("PUT", f"/v1/personal/denuncias/{ESTADO['denuncia_id']}/asignacion",
@@ -996,8 +1012,8 @@ def campos():
     """Cada campo de texto de cada modelo de entrada: (nombre, constructor de
     la petición con el valor, valor benigno, estados del benigno). El benigno
     es el control: con él, el campo no da 422."""
-    token = ESTADO["token"]
-    token_instructor = ESTADO["token_instructor"]
+    token = acceso_nuevo(ESTADO["admin"])
+    token_instructor = acceso_nuevo(ESTADO["instructor"])
     identificador, codigo, denuncia = ESTADO["identificador"], ESTADO["codigo"], ESTADO["denuncia_id"]
     sin_cuenta = secrets.token_hex(16)
     contador = iter(range(10_000))
@@ -1035,6 +1051,8 @@ def campos():
         ("login.contrasena", lambda v: login(contrasena=v), "equivocada", {401}),
         ("login.codigo_totp", lambda v: login(codigo_totp=v), "000000", {401}),
         ("login.token_dispositivo", lambda v: login(token_dispositivo=v), "x", {401}),
+        ("renovacion.token", lambda v: pt("POST", "/v1/personal/sesiones/renovacion", {"token_renovacion": v}),
+         "x", {401}),
         ("contrasena.actual", lambda v: contrasena(contrasena_actual=v), "equivocada", {401}),
         ("contrasena.nueva", lambda v: contrasena(contrasena_nueva=v), "otra-contrasena-larga", {401}),
         ("contrasena.codigo_totp", lambda v: contrasena(codigo_totp=v), "000000", {401}),
@@ -1302,7 +1320,7 @@ def main():
     # Solo se comprueba que existen (is_file), nunca se leen.
     for fichero in ("contrasena_redis.txt", "redis_acl.conf", "contrasena_postgres_superusuario.txt",
                     "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt",
-                    "clave_maestra.txt", "clave_hmac_codigos.txt"):
+                    "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
             terminar(parada=True)
