@@ -5,12 +5,16 @@
 * POST /v1/personal/activacion/confirmar: con el token y un código, activa la
   cuenta y devuelve el primer token de dispositivo de confianza.
 * POST /v1/personal/sesiones: login (empresa, email, contraseña, código y,
-  si lo tiene, el token de dispositivo). Devuelve el token de sesión y, si
-  el login fue sin dispositivo de confianza, uno nuevo.
+  si lo tiene, el token de dispositivo). Devuelve el JWT de acceso, el token
+  de renovación, los segundos que dura el acceso y, si el login fue sin
+  dispositivo de confianza, un token de dispositivo nuevo.
+* POST /v1/personal/sesiones/renovacion: con el token de renovación,
+  devuelve un acceso y una renovación nuevos (app/personal.py, renovar).
 * DELETE /v1/personal/sesiones/actual: cierra la sesión.
 * GET /v1/personal/yo: cuenta de la sesión, con invitacion_pendiente (el
   aviso de una reinvitación de esa cuenta).
-* POST /v1/personal/contrasena: cambia la contraseña (actual, nueva y código).
+* POST /v1/personal/contrasena: cambia la contraseña (actual, nueva y código)
+  y devuelve los tokens de una sesión nueva: la anterior queda revocada.
 * GET y POST /v1/personal/usuarios, POST y DELETE .../{usuario_id}/invitacion
   (reinvitar y anular la invitación abierta) y POST .../{usuario_id}/baja:
   administración de cuentas, solo admin.
@@ -23,15 +27,19 @@
   GET /v1/personal/auditoria y GET /v1/personal/auditoria/verificacion (solo
   admin).
 
-Este módulo es el único que sabe cómo viajan los tokens: el de sesión en la
-cabecera Authorization (Bearer) y el de dispositivo en el cuerpo del login.
-Sin cookies no hay CSRF: el navegador nunca envía estas credenciales por su
-cuenta. Un frontend web cambiaría solo esta capa (cookies __Host- HttpOnly,
-Secure y SameSite=Strict, más defensa CSRF), no app/personal.py.
+Este módulo es el único que sabe cómo viajan los tokens: el JWT de acceso en
+la cabecera Authorization (Bearer), y los de renovación y dispositivo en el
+cuerpo de sus peticiones. Sin cookies no hay CSRF: el navegador nunca envía
+estas credenciales por su cuenta (OWASP, Cross-Site Request Forgery
+Prevention Cheat Sheet: el ataque funciona porque el navegador añade las
+cookies solo). Un frontend web cambiaría solo esta capa (cookies __Host-
+HttpOnly, Secure y SameSite=Strict, más defensa CSRF), no app/personal.py.
 
 Respuestas: cualquier fallo del login da el mismo 401, con el mismo cuerpo
-(app/personal.py explica por qué el tiempo también es el mismo). Un token
-de sesión que no vale da otro 401 con WWW-Authenticate: Bearer. Una cuenta de
+(app/personal.py explica por qué el tiempo también es el mismo). Un JWT de
+acceso o un token de renovación que no vale da otro 401 con
+WWW-Authenticate: Bearer, sin decir por qué (firma, caducidad, sesión
+revocada o reutilización dan la misma respuesta). Una cuenta de
 otra empresa es invisible (RLS) y da el 404 genérico, igual que una
 inexistente. Un rol insuficiente da 403. Una denuncia que no es de quien la
 pide da el mismo 404 que una inexistente o de otra empresa.
@@ -71,7 +79,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app import cripto, denuncias, instruccion, limitador, personal
+from app import cripto, denuncias, instruccion, limitador, personal, tokens
 from app.frontera_http import REINTENTAR_TRAS, cuerpo_error
 from app.rutas_denuncias import LONGITUD_MAXIMA_TEXTO
 from app.validacion import TextoLibre, TextoLinea, validar_email
@@ -137,6 +145,12 @@ class Login(BaseModel):
     contrasena: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CONTRASENA)
     codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
     token_dispositivo: TextoLinea | None = Field(default=None, max_length=LONGITUD_MAXIMA_TOKEN)
+
+
+class Renovacion(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    token_renovacion: TextoLinea = Field(max_length=LONGITUD_MAXIMA_TOKEN)
 
 
 class CambioContrasena(BaseModel):
@@ -227,7 +241,7 @@ class LimiteCuentaSuperado(Exception):
 
 
 async def _sesion(peticion: Request):
-    """Dependencia: sesión del token Bearer, o SesionNoValida; después, la
+    """Dependencia: sesión del JWT Bearer, o SesionNoValida; después, la
     segunda capa del limitador, por cuenta. Un token que no vale no consume
     el contador de ninguna cuenta (no se sabe de quién es); lo frena la capa
     por IP del middleware.
@@ -239,8 +253,9 @@ async def _sesion(peticion: Request):
     esquema, _, token = peticion.headers.get("authorization", "").partition(" ")
     if esquema != "Bearer" or not token:
         raise personal.SesionNoValida
-    sesion = await run_in_threadpool(personal.autenticar, peticion.app.state.pool, token)
-    permitida, segundos, primer_exceso = await peticion.app.state.limitador.consumir_cuenta(
+    estado = peticion.app.state
+    sesion = await run_in_threadpool(personal.autenticar, estado.pool, estado.claves, token)
+    permitida, segundos, primer_exceso = await estado.limitador.consumir_cuenta(
         sesion.empresa_id, sesion.usuario_id)
     if not permitida:
         if primer_exceso:
@@ -282,13 +297,28 @@ def confirmar_activacion(datos: Confirmacion, peticion: Request):
     return JSONResponse(content={"token_dispositivo": token})
 
 
+def _tokens(acceso, codigo=200):
+    """Respuesta con los tokens de una sesión. expira_en: segundos que dura
+    el acceso, para que el cliente renueve antes de que caduque."""
+    contenido = {"token_acceso": acceso.token_acceso, "token_renovacion": acceso.token_renovacion,
+                 "expira_en": tokens.DURACION_ACCESO}
+    if codigo == 201:
+        contenido["token_dispositivo"] = acceso.token_dispositivo
+    return JSONResponse(status_code=codigo, content=contenido)
+
+
 @router.post("/sesiones", status_code=201)
 def iniciar_sesion(datos: Login, peticion: Request):
     estado = peticion.app.state
     acceso = personal.iniciar_sesion(estado.pool, estado.claves, datos.empresa, datos.email, datos.contrasena,
                                      datos.codigo_totp, datos.token_dispositivo)
-    return JSONResponse(status_code=201, content={"token_sesion": acceso.token_sesion,
-                                                  "token_dispositivo": acceso.token_dispositivo})
+    return _tokens(acceso, 201)
+
+
+@router.post("/sesiones/renovacion")
+def renovar_sesion(datos: Renovacion, peticion: Request):
+    estado = peticion.app.state
+    return _tokens(personal.renovar(estado.pool, estado.claves, datos.token_renovacion))
 
 
 @router.delete("/sesiones/actual", status_code=204)
@@ -304,12 +334,11 @@ def yo(peticion: Request, sesion: SesionPersonal):
                                  "invitacion_pendiente": pendiente})
 
 
-@router.post("/contrasena", status_code=204)
+@router.post("/contrasena")
 def cambiar_contrasena(datos: CambioContrasena, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
-    personal.cambiar_contrasena(estado.pool, estado.claves, sesion, datos.contrasena_actual,
-                                datos.contrasena_nueva, datos.codigo_totp)
-    return Response(status_code=204)
+    return _tokens(personal.cambiar_contrasena(estado.pool, estado.claves, sesion, datos.contrasena_actual,
+                                               datos.contrasena_nueva, datos.codigo_totp))
 
 
 @router.get("/usuarios")

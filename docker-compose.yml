@@ -266,15 +266,17 @@ services:
     # Secretos como ficheros en /run/secrets, nunca como variables de entorno:
     # la contraseña del rol aplicacion (se lee en cada conexión nueva), la
     # clave maestra (desenvuelve las claves de cada empresa), la clave del
-    # HMAC de los códigos de seguimiento y la contraseña del usuario
-    # aplicacion de Redis (también se lee en cada conexión nueva). Sin
-    # contrasena_plataforma: la API no puede dar de alta empresas.
+    # HMAC de los códigos de seguimiento, la que firma los JWT de acceso del
+    # personal y la contraseña del usuario aplicacion de Redis (también se
+    # lee en cada conexión nueva). Sin contrasena_plataforma: la API no puede
+    # dar de alta empresas.
     # Sin variable CANARIO_LIMITES: la API usa los límites de producción de
     # app/limitador.py y los registra al arrancar.
     secrets:
       - contrasena_aplicacion
       - clave_maestra
       - clave_hmac_codigos
+      - clave_firma_tokens
       - contrasena_redis
     healthcheck:
       # Sin curl: un script de la propia imagen que solo da sano con 200 y el
@@ -424,6 +426,8 @@ secrets:
     file: ./secrets/clave_maestra.txt
   clave_hmac_codigos:
     file: ./secrets/clave_hmac_codigos.txt
+  clave_firma_tokens:
+    file: ./secrets/clave_firma_tokens.txt
 
 volumes:
   # Persiste entre reinicios, a diferencia de redis. Los scripts de

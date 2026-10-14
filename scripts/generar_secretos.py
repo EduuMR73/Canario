@@ -67,6 +67,7 @@ SECRETOS = {
     "contrasena_plataforma.txt": (lambda: secrets.token_urlsafe(48), PATRON_URLSAFE),
     "clave_hmac_codigos.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
     "clave_maestra.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
+    "clave_firma_tokens.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
 }
 FICHERO_REDIS = "contrasena_redis.txt"
 FICHERO_ACL = "redis_acl.conf"

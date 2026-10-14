@@ -120,6 +120,11 @@ class Limite:
 # primera capa contra el relleno de credenciales y protege la capacidad de
 # Argon2. No es la única: el bloqueo por cuenta y por dispositivo vive en
 # PostgreSQL (app/personal.py) y sigue frenando a quien cambia de IP.
+# La renovación de la sesión (/v1/personal/sesiones/renovacion) va a
+# propósito en "otras": no calcula Argon2 y su token tiene 256 bits, así que
+# no hay nada que adivinar. En "acceso", el personal de una oficina que sale
+# por la misma IP (una renovación cada 5 minutos por persona) agotaría el
+# límite entre todos.
 # "cuenta" no es una regla de ruta: es la segunda capa de las rutas con
 # sesión, por identidad. Una persona no sostiene más de una petición por
 # segundo; un frontend que haga varias llamadas por pantalla sigue holgado.

@@ -87,6 +87,8 @@ PRIVILEGIOS_COLUMNA = {
     "sesion_personal|usuario_id|INSERT",
     "sesion_personal|dispositivo_id|INSERT",
     "sesion_personal|token_sha256|INSERT",
+    "sesion_personal|token_sha256|UPDATE",
+    "sesion_personal|tokens_usados|UPDATE",
     "sesion_personal|ultimo_uso|UPDATE",
     "sesion_personal|revocada|UPDATE",
     "denuncia|estado|UPDATE",

@@ -7,7 +7,15 @@
 # python:3.12-slim (no en Windows: los marcadores de plataforma darían otro
 # resultado). Peticiones directas: fastapi, uvicorn (sin [standard], para no
 # arrastrar uvloop ni httptools), psycopg[binary], psycopg-pool, cryptography,
-# redis y argon2-cffi. El resto son dependencias transitivas.
+# redis, argon2-cffi y pyjwt. El resto son dependencias transitivas.
+#
+# pyjwt firma y verifica los JWT de acceso del personal (app/tokens.py). Solo
+# se usa HS256, que en CPython 3.12 no necesita dependencias (el extra
+# "crypto" es para RSA, EC y EdDSA; typing_extensions solo se exige por
+# debajo de 3.11). Comprobado en la versión fijada: decode() exige la lista
+# de algoritmos y rechaza "none", pero solo valida exp si el token lo trae
+# (hay que pedirlo con options.require) y no comprueba el typ de la cabecera
+# (lo comprueba app/tokens.py).
 #
 # argon2-cffi calcula los hashes Argon2id de las contraseñas del personal
 # (app/personal.py). argon2-cffi-bindings trae la implementación de
@@ -482,6 +490,9 @@ pydantic_core==2.50.0 \
     --hash=sha256:f517a417cd02aa8fb05b603a0ac6d87b7b004c3ba4fcd279cad25cab7229043b \
     --hash=sha256:f8cc61ad94215ab98e5cbcdea2cfde45e11bb0136ee980e1240b721635e55790 \
     --hash=sha256:f8df36f964c21168e345f914855e3b428e2cb6e1f739c8ef5963b77d86dd84ae
+pyjwt==2.15.1 \
+    --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193 \
+    --hash=sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8
 redis==8.1.0 \
     --hash=sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25 \
     --hash=sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb

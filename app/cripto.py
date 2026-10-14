@@ -59,7 +59,7 @@ ETIQUETA_TOTP = b"canario/totp/v1"
 # otro tipo de token aunque alguien lo presente en otro sitio.
 ETIQUETA_INVITACION = b"canario/invitacion/v1"
 ETIQUETA_DISPOSITIVO = b"canario/dispositivo/v1"
-ETIQUETA_SESION = b"canario/sesion/v1"
+ETIQUETA_RENOVACION = b"canario/renovacion/v1"
 
 # Mismos valores que el CHECK de canal.mensaje.autor.
 AUTORES = {"denunciante": b"D", "personal": b"P"}
@@ -372,7 +372,7 @@ def leer_token(texto):
 
 
 def huella_token(etiqueta, crudo):
-    if etiqueta not in (ETIQUETA_INVITACION, ETIQUETA_DISPOSITIVO, ETIQUETA_SESION):
+    if etiqueta not in (ETIQUETA_INVITACION, ETIQUETA_DISPOSITIVO, ETIQUETA_RENOVACION):
         raise ValueError("etiqueta de token desconocida")
     if not isinstance(crudo, bytes) or len(crudo) != LONGITUD_TOKEN:
         raise ValueError("el token debe tener 32 bytes")

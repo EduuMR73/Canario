@@ -234,17 +234,25 @@ CREATE TABLE canal.dispositivo_personal (
     FOREIGN KEY (empresa_id, usuario_id) REFERENCES canal.usuario_personal (empresa_id, id)
 );
 
--- Sesión del personal: token opaco, revocable (a diferencia de un JWT), del
--- que solo se guarda su SHA-256. Caduca a las 8 horas aunque se use, y antes
--- si pasan 15 minutos sin uso (app/personal.py). caduca la fija la base de
--- datos. La clave foránea de tres columnas exige que el dispositivo sea del
--- mismo usuario.
+-- Sesión del personal (6.3). El acceso es un JWT de 5 minutos que lleva el id
+-- de esta fila (claim sid): cada petición comprueba aquí que la sesión no
+-- está revocada, así que cerrarla corta también el JWT al momento (OWASP
+-- ASVS 5.0.0, 7.4.1). token_sha256 es la huella del token de renovación
+-- vigente, opaco y rotatorio (RFC 9700, 4.14.2): cada renovación lo cambia y
+-- guarda el anterior en tokens_usados. Presentar uno usado es la señal de un
+-- robo y revoca la sesión. El tope de tokens_usados acota la fila: con una
+-- renovación cada 5 minutos, 8 horas son 96; el resto es holgura. El índice
+-- GIN encuentra la sesión de un token usado sin recorrer todas.
+-- Caduca a las 8 horas aunque se use, y antes si pasan 15 minutos sin
+-- renovar (app/personal.py). caduca la fija la base de datos. La clave
+-- foránea de tres columnas exige que el dispositivo sea del mismo usuario.
 CREATE TABLE canal.sesion_personal (
     empresa_id uuid NOT NULL,
     id uuid NOT NULL DEFAULT gen_random_uuid(),
     usuario_id uuid NOT NULL,
     dispositivo_id uuid NOT NULL,
     token_sha256 bytea NOT NULL CHECK (octet_length(token_sha256) = 32),
+    tokens_usados bytea[] NOT NULL DEFAULT '{}' CHECK (cardinality(tokens_usados) <= 256),
     ultimo_uso timestamptz NOT NULL DEFAULT now(),
     caduca timestamptz NOT NULL DEFAULT now() + interval '8 hours',
     revocada boolean NOT NULL DEFAULT false,
@@ -254,6 +262,7 @@ CREATE TABLE canal.sesion_personal (
     FOREIGN KEY (empresa_id, usuario_id, dispositivo_id)
         REFERENCES canal.dispositivo_personal (empresa_id, usuario_id, id)
 );
+CREATE INDEX sesion_personal_tokens_usados ON canal.sesion_personal USING gin (tokens_usados);
 
 -- El id lo genera la API: lo necesita antes de cifrar, porque forma parte del
 -- AAD (app/cripto.py). fecha la fija siempre el trigger denuncia_fecha, sin
@@ -491,7 +500,7 @@ GRANT INSERT (empresa_id, usuario_id, token_sha256) ON canal.dispositivo_persona
 GRANT UPDATE (intentos_fallidos, bloqueado_hasta, revocado) ON canal.dispositivo_personal TO aplicacion;
 GRANT SELECT ON canal.sesion_personal TO aplicacion;
 GRANT INSERT (empresa_id, usuario_id, dispositivo_id, token_sha256) ON canal.sesion_personal TO aplicacion;
-GRANT UPDATE (ultimo_uso, revocada) ON canal.sesion_personal TO aplicacion;
+GRANT UPDATE (token_sha256, tokens_usados, ultimo_uso, revocada) ON canal.sesion_personal TO aplicacion;
 GRANT SELECT, INSERT ON canal.denuncia TO aplicacion;
 GRANT UPDATE (estado, asignada_a) ON canal.denuncia TO aplicacion;
 GRANT SELECT, INSERT ON canal.mensaje TO aplicacion;

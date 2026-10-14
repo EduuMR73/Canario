@@ -6,6 +6,22 @@ llegaron en una cabecera o en una cookie. El transporte vive solo en
 app/rutas_personal.py, así que un frontend web (cookies HttpOnly y defensa
 CSRF) cambiaría esa capa y no esta.
 
+Sesiones (docs/threat-model.md, 6.3): el login entrega dos tokens.
+* Acceso: un JWT de 5 minutos (app/tokens.py) que dice quién es el portador
+  y cuál es su sesión (sid). Cada petición comprueba la firma y hace UNA
+  lectura: la sesión sin revocar ni caducar, la cuenta activa y con TOTP y el
+  dispositivo sin revocar. El rol sale de esa lectura, nunca del token. Así
+  una baja, un cambio de contraseña o un cierre de sesión cortan el JWT al
+  momento (OWASP ASVS 5.0.0, 7.4.1 y 7.4.2) sin escribir nada por petición.
+* Renovación: opaco, de 256 bits, del que solo se guarda la huella. Cambia
+  en cada uso (RFC 9700, 4.14.2) y el usado queda en tokens_usados:
+  presentarlo otra vez es la señal de un robo (el ladrón o el titular ya lo
+  gastó) y revoca la sesión entera, con un EVENTO en el log. Sin ventana de
+  gracia: una ventana es justo el hueco que aprovecharía el ladrón. El coste
+  es que dos renovaciones simultáneas del mismo cliente cierran su sesión;
+  el cliente debe renovar de una en una. La inactividad de 15 minutos se mide
+  entre renovaciones, y el máximo de 8 horas lo fija la base de datos.
+
 Cuentas:
 * Una cuenta nace por invitación, sin credenciales. Su titular fija la
   contraseña (Argon2id) y recibe un secreto TOTP; la cuenta solo se activa
@@ -63,9 +79,12 @@ Orden de bloqueos en las escrituras: cuenta, invitación, dispositivos,
 sesiones y auditoría. La autenticación de una sesión es su propia
 transacción y solo bloquea la fila de la sesión.
 
-Registro: los eventos de seguridad (bloqueos, cierre del camino, retirada de
-un dispositivo, saturación) llevan la empresa y la cuenta, nunca IPs,
-contraseñas, códigos ni tokens. Un fallo normal no se registra.
+Registro: los eventos de seguridad (logins fallidos, bloqueos, cierre del
+camino, retirada de un dispositivo, reutilización de una renovación,
+saturación) llevan la empresa y la cuenta, nunca IPs, emails, contraseñas,
+códigos ni tokens. Cada login fallido deja EVENTO login_fallido (OWASP ASVS
+5.0.0, 16.3.1), con la misma llamada en todos los caminos de fallo; los
+correctos quedan en la auditoría (ACCION_ACCESO).
 """
 import logging
 import secrets
@@ -80,7 +99,7 @@ import psycopg
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError
 
-from app import bd, cripto, denuncias
+from app import bd, cripto, denuncias, tokens
 
 registro = logging.getLogger("canario.personal")
 
@@ -100,9 +119,14 @@ FALLOS_ANTES_DE_ESPERAR = 5
 ESPERA_MAXIMA_MINUTOS = 60
 TOPE_SIN_CONFIANZA = 100
 TOPE_DISPOSITIVO = 20
-# Sesión: 15 minutos sin uso o 8 horas en total (la caducidad total la fija
-# la base de datos al crearla).
+# Sesión: 15 minutos sin renovar o 8 horas en total (la caducidad total la
+# fija la base de datos al crearla).
 INACTIVIDAD_SESION_MINUTOS = 15
+# Tokens de renovación usados que caben en una sesión. Mismo valor que el
+# CHECK de canal.sesion_personal.tokens_usados: si se llega, la renovación
+# falla y hay que volver a entrar (con una renovación cada 5 minutos, 8 horas
+# son 96).
+TOPE_RENOVACIONES = 256
 
 # Política de contraseñas (NIST SP 800-63B-4): con un segundo factor
 # obligatorio, 12 como mínimo; 128 como máximo, para acotar lo que se
@@ -226,26 +250,46 @@ SQL_NUEVO_DISPOSITIVO = (
 )
 SQL_NUEVA_SESION = (
     "insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) "
-    "values (%s, %s, %s, %s)"
+    "values (%s, %s, %s, %s) returning id"
 )
 SQL_AUDITAR = (
     "insert into canal.registro_auditoria (empresa_id, actor, accion, objeto_id) values (%s, %s, %s, %s)"
 )
 
-# Autenticación de una sesión: válida, sin caducar, usada en los últimos 15
-# minutos, de una cuenta activa y con su dispositivo sin revocar. Se renueva
-# el último uso en la misma sentencia.
+# Autenticación de un JWT de acceso ya verificado: su sesión sigue viva, es
+# de la cuenta del token, la cuenta está activa y con TOTP y el dispositivo
+# no está revocado. Solo lectura: la inactividad se mide al renovar.
 SQL_AUTENTICAR = """
+    select s.dispositivo_id, u.rol, u.email, e.nombre
+      from canal.sesion_personal s
+      join canal.usuario_personal u on u.empresa_id = s.empresa_id and u.id = s.usuario_id
+      join canal.dispositivo_personal d on d.empresa_id = s.empresa_id and d.id = s.dispositivo_id
+      join canal.empresa e on e.id = s.empresa_id
+     where s.id = %(sesion)s and s.usuario_id = %(usuario)s and not s.revocada and s.caduca > now()
+       and u.activo and u.totp_activo and not d.revocado
+"""
+# Renovación: cambia la huella vigente por la nueva y guarda la usada, en una
+# sola sentencia (la fila queda bloqueada: dos renovaciones simultáneas con
+# el mismo token no pasan las dos). Mismas condiciones que SQL_AUTENTICAR más
+# la inactividad y el tope de renovaciones.
+SQL_RENOVAR = """
     update canal.sesion_personal s
-       set ultimo_uso = now()
-      from canal.usuario_personal u, canal.dispositivo_personal d, canal.empresa e
-     where s.token_sha256 = %(huella)s and not s.revocada and s.caduca > now()
+       set token_sha256 = %(nueva)s, tokens_usados = array_append(s.tokens_usados, %(usada)s::bytea),
+           ultimo_uso = now()
+      from canal.usuario_personal u, canal.dispositivo_personal d
+     where s.token_sha256 = %(usada)s and not s.revocada and s.caduca > now()
        and s.ultimo_uso > now() - make_interval(mins => %(inactividad)s)
+       and cardinality(s.tokens_usados) < %(tope)s
        and u.empresa_id = s.empresa_id and u.id = s.usuario_id and u.activo and u.totp_activo
        and d.empresa_id = s.empresa_id and d.id = s.dispositivo_id and not d.revocado
-       and e.id = s.empresa_id
-    returning s.id, s.usuario_id, s.dispositivo_id, u.rol, u.email, e.nombre
+    returning s.id, s.usuario_id
 """
+# Reutilización: un token de renovación que ya se gastó revoca su sesión. El
+# operador @> usa el índice GIN de tokens_usados.
+SQL_REUTILIZACION = (
+    "update canal.sesion_personal set revocada = true "
+    "where tokens_usados @> array[%s::bytea] and not revocada returning id, usuario_id"
+)
 SQL_CERRAR_SESION = "update canal.sesion_personal set revocada = true where id = %s"
 
 SQL_INVITACION_ABIERTA = """
@@ -399,9 +443,10 @@ class Sesion:
 
 @dataclass(frozen=True)
 class Acceso:
-    token_sesion: str
+    token_acceso: str
+    token_renovacion: str
     # Solo si el login fue por el camino sin confianza: el dispositivo nuevo.
-    token_dispositivo: str | None
+    token_dispositivo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -523,6 +568,25 @@ def _avisar_fallo(empresa_id, reservada, camino):
                          empresa_id, usuario_id, intentos)
 
 
+def _registrar_login_fallido(empresa_id, reservada, camino):
+    """EVENTO login_fallido (OWASP ASVS 5.0.0, 16.3.1). La misma llamada en
+    todos los caminos de fallo, haya cuenta o no. empresa_id es None si el
+    identificador no es de ninguna empresa activa: el contexto aleatorio no se
+    registra."""
+    registro.warning("EVENTO login_fallido: empresa=%s usuario=%s camino=%s",
+                     empresa_id or "-", reservada[1] if reservada else "-", camino)
+
+
+def _nueva_sesion(conexion, claves, empresa_id, identificador, usuario_id, dispositivo_id, token_dispositivo=None):
+    """Crea una sesión en la transacción abierta y devuelve sus dos tokens."""
+    token_renovacion, crudo = cripto.generar_token()
+    sesion_id = conexion.execute(SQL_NUEVA_SESION, [
+        empresa_id, usuario_id, dispositivo_id, cripto.huella_token(cripto.ETIQUETA_RENOVACION, crudo)]).fetchone()[0]
+    return Acceso(token_acceso=tokens.emitir(claves.firma_tokens, identificador, usuario_id, sesion_id),
+                  token_renovacion=_token_compuesto(identificador, token_renovacion),
+                  token_dispositivo=token_dispositivo)
+
+
 def _comprobar_factores(claves, empresa_id, reservada, envuelta, contrasena, codigo, instante):
     """Contraseña y TOTP, con el mismo trabajo haya cuenta o no. Devuelve el
     paso TOTP aceptado si los dos valen, o None."""
@@ -547,7 +611,8 @@ def iniciar_sesion(pool, claves, identificador, email, contrasena, codigo, token
     instante = time.time() if instante is None else instante
     email = email.lower()
     # Sin empresa, un contexto aleatorio: las mismas sentencias con cero filas.
-    empresa_id = _resolver(pool, identificador) or uuid.uuid4()
+    resuelta = _resolver(pool, identificador)
+    empresa_id = resuelta or uuid.uuid4()
     crudo = cripto.leer_token(token_dispositivo) if token_dispositivo is not None else None
     huella = cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo or secrets.token_bytes(cripto.LONGITUD_TOKEN))
 
@@ -563,52 +628,90 @@ def iniciar_sesion(pool, claves, identificador, email, contrasena, codigo, token
 
     paso = _comprobar_factores(claves, empresa_id, reservada, envuelta, contrasena, codigo, instante)
     if paso is None:
+        _registrar_login_fallido(resuelta, reservada, camino)
         _avisar_fallo(empresa_id, reservada, camino)
         raise CredencialesNoValidas
 
     usuario_id = reservada[1]
-    token_sesion, crudo_sesion = cripto.generar_token()
-    token_nuevo = None
-    with bd.transaccion_empresa(pool, empresa_id) as conexion:
-        confirmado = conexion.execute(SQL_CONFIRMAR_ACCESO, {
-            "paso": paso, "sin_confianza": camino == "sin_confianza", "usuario": usuario_id,
-            "hash": reservada[3]}).fetchone()
-        # Código ya usado (reutilización) o cuenta cambiada entre la reserva
-        # y ahora: el intento ya está contado.
-        if confirmado is None:
-            raise CredencialesNoValidas
-        if camino == "dispositivo":
-            dispositivo_id = reservada[0]
-            if conexion.execute(SQL_LIBERAR_DISPOSITIVO, [dispositivo_id]).fetchone() is None:
+    try:
+        with bd.transaccion_empresa(pool, empresa_id) as conexion:
+            confirmado = conexion.execute(SQL_CONFIRMAR_ACCESO, {
+                "paso": paso, "sin_confianza": camino == "sin_confianza", "usuario": usuario_id,
+                "hash": reservada[3]}).fetchone()
+            # Código ya usado (reutilización) o cuenta cambiada entre la
+            # reserva y ahora: el intento ya está contado.
+            if confirmado is None:
                 raise CredencialesNoValidas
-        else:
-            token_nuevo, crudo_nuevo = cripto.generar_token()
-            dispositivo_id = conexion.execute(SQL_NUEVO_DISPOSITIVO, [
-                empresa_id, usuario_id, cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo_nuevo)]).fetchone()[0]
-        conexion.execute(SQL_NUEVA_SESION, [empresa_id, usuario_id, dispositivo_id,
-                                            cripto.huella_token(cripto.ETIQUETA_SESION, crudo_sesion)])
-        conexion.execute(SQL_AUDITAR, [empresa_id, _actor(usuario_id), ACCION_ACCESO, usuario_id])
-    return Acceso(token_sesion=_token_compuesto(identificador, token_sesion), token_dispositivo=token_nuevo)
+            token_nuevo = None
+            if camino == "dispositivo":
+                dispositivo_id = reservada[0]
+                if conexion.execute(SQL_LIBERAR_DISPOSITIVO, [dispositivo_id]).fetchone() is None:
+                    raise CredencialesNoValidas
+            else:
+                token_nuevo, crudo_nuevo = cripto.generar_token()
+                dispositivo_id = conexion.execute(SQL_NUEVO_DISPOSITIVO, [
+                    empresa_id, usuario_id, cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo_nuevo)]).fetchone()[0]
+            acceso = _nueva_sesion(conexion, claves, empresa_id, identificador, usuario_id, dispositivo_id,
+                                   token_nuevo)
+            conexion.execute(SQL_AUDITAR, [empresa_id, _actor(usuario_id), ACCION_ACCESO, usuario_id])
+    except CredencialesNoValidas:
+        _registrar_login_fallido(resuelta, reservada, camino)
+        raise
+    return acceso
 
 
-def autenticar(pool, token):
-    """Sesión de un token, o SesionNoValida. Transacción propia y corta: solo
-    bloquea la fila de la sesión (ver el orden de bloqueos en la cabecera)."""
-    leido = _leer_compuesto(token)
+def autenticar(pool, claves, token):
+    """Sesión de un JWT de acceso, o SesionNoValida. Primero la firma y los
+    claims (app/tokens.py), sin tocar la base de datos; después una sola
+    lectura (SQL_AUTENTICAR), en una transacción de solo lectura."""
+    try:
+        portador = tokens.verificar(claves.firma_tokens, token)
+    except tokens.TokenNoValido:
+        raise SesionNoValida from None
+    # El identificador se resuelve en cada petición, como antes: una empresa
+    # desactivada deja de resolverse y sus JWT dejan de valer al momento.
+    empresa_id = _resolver(pool, portador.identificador)
+    if empresa_id is None:
+        raise SesionNoValida
+    with bd.transaccion_empresa(pool, empresa_id, solo_lectura=True) as conexion:
+        fila = conexion.execute(SQL_AUTENTICAR, {"sesion": portador.sesion_id,
+                                                 "usuario": portador.usuario_id}).fetchone()
+    if fila is None:
+        raise SesionNoValida
+    dispositivo_id, rol, email, nombre = fila
+    return Sesion(empresa_id=empresa_id, identificador=portador.identificador, sesion_id=portador.sesion_id,
+                  usuario_id=portador.usuario_id, dispositivo_id=dispositivo_id, rol=rol, email=email,
+                  nombre_empresa=nombre)
+
+
+def renovar(pool, claves, token_renovacion):
+    """Tokens nuevos a cambio de un token de renovación vigente, o
+    SesionNoValida. Si el token ya se había usado, revoca su sesión antes
+    de rechazarlo (RFC 9700, 4.14.2)."""
+    leido = _leer_compuesto(token_renovacion)
     if leido is None:
         raise SesionNoValida
     identificador, crudo = leido
     empresa_id = _resolver(pool, identificador)
     if empresa_id is None:
         raise SesionNoValida
+    usada = cripto.huella_token(cripto.ETIQUETA_RENOVACION, crudo)
+    nuevo, crudo_nuevo = cripto.generar_token()
     with bd.transaccion_empresa(pool, empresa_id) as conexion:
-        fila = conexion.execute(SQL_AUTENTICAR, {"huella": cripto.huella_token(cripto.ETIQUETA_SESION, crudo),
-                                                 "inactividad": INACTIVIDAD_SESION_MINUTOS}).fetchone()
+        fila = conexion.execute(SQL_RENOVAR, {
+            "nueva": cripto.huella_token(cripto.ETIQUETA_RENOVACION, crudo_nuevo), "usada": usada,
+            "inactividad": INACTIVIDAD_SESION_MINUTOS, "tope": TOPE_RENOVACIONES}).fetchone()
+        # La revocación por reutilización se confirma con esta transacción:
+        # SesionNoValida se lanza después, fuera del with, para no deshacerla.
+        revocada = None if fila else conexion.execute(SQL_REUTILIZACION, [usada]).fetchone()
+    if revocada is not None:
+        registro.warning("EVENTO reutilizacion_renovacion: empresa=%s usuario=%s sesion=%s",
+                         empresa_id, revocada[1], revocada[0])
     if fila is None:
         raise SesionNoValida
-    sesion_id, usuario_id, dispositivo_id, rol, email, nombre = fila
-    return Sesion(empresa_id=empresa_id, identificador=identificador, sesion_id=sesion_id, usuario_id=usuario_id,
-                  dispositivo_id=dispositivo_id, rol=rol, email=email, nombre_empresa=nombre)
+    sesion_id, usuario_id = fila
+    return Acceso(token_acceso=tokens.emitir(claves.firma_tokens, identificador, usuario_id, sesion_id),
+                  token_renovacion=_token_compuesto(identificador, nuevo))
 
 
 def cerrar_sesion(pool, sesion):
@@ -619,7 +722,11 @@ def cerrar_sesion(pool, sesion):
 def cambiar_contrasena(pool, claves, sesion, actual, nueva, codigo, instante=None):
     """Cambia la contraseña de la cuenta de la sesión. Pide la actual y un
     código TOTP; los fallos cuentan en el dispositivo de la sesión. Revoca
-    las demás sesiones y dispositivos de la cuenta."""
+    TODAS las sesiones de la cuenta, también la actual, y los demás
+    dispositivos, y devuelve tokens de una sesión nueva en el mismo
+    dispositivo: cambiar la contraseña es reautenticarse, y una
+    reautenticación termina el token anterior y emite otro (OWASP ASVS
+    5.0.0, 7.2.4)."""
     instante = time.time() if instante is None else instante
     # La política va antes de reservar: un error al escribir la nueva no
     # gasta un intento.
@@ -642,9 +749,12 @@ def cambiar_contrasena(pool, claves, sesion, actual, nueva, codigo, instante=Non
             raise CredencialesNoValidas
         conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])
         conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [sesion.usuario_id, sesion.dispositivo_id])
-        conexion.execute(SQL_REVOCAR_SESIONES, [sesion.usuario_id, sesion.sesion_id])
+        conexion.execute(SQL_REVOCAR_SESIONES, [sesion.usuario_id, uuid.UUID(int=0)])
+        acceso = _nueva_sesion(conexion, claves, sesion.empresa_id, sesion.identificador, sesion.usuario_id,
+                               sesion.dispositivo_id)
         conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_CAMBIO_CONTRASENA,
                                        sesion.usuario_id])
+    return acceso
 
 
 # ---------------------------------------------------------------------------
