@@ -244,7 +244,8 @@ def p(texto=""):
 
 
 def ejecutar(args, entrada=None, timeout=900):
-    r = subprocess.run(args, input=entrada, capture_output=True, timeout=timeout)
+    # check=False explícito: el código de salida se comprueba en cada llamada.
+    r = subprocess.run(args, input=entrada, capture_output=True, timeout=timeout, check=False)
     return R(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
 
 
@@ -459,11 +460,13 @@ def seccion_d():
             sinc(f"d) {identificador}: no se pudo provocar la desviacion: {r.err.strip()[:200]}")
             continue
         dc("restart", "api")
-        bloqueado = esperar(lambda: logs_api().count(mensaje) > previas, 60)
+        # Valores de esta vuelta, enlazados de forma explícita (esperar los usa
+        # dentro de la misma vuelta, pero así no depende de cuándo se llame).
+        bloqueado = esperar(lambda mensaje=mensaje, previas=previas: logs_api().count(mensaje) > previas, 60)
         no_sana = salud(cid) != "healthy"
         r = sup(revertir)
         dc("restart", "api")
-        control_despues = r.rc == 0 and esperar(lambda: salud(cid) == "healthy", 90)
+        control_despues = r.rc == 0 and esperar(lambda cid=cid: salud(cid) == "healthy", 90)
         negativo(f"d) {identificador}: la API no arranca y registra {mensaje!r}", bloqueado and no_sana,
                  control_antes and control_despues,
                  f"healthy antes {control_antes}, healthy tras revertir {control_despues}")
@@ -589,7 +592,7 @@ def main():
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
-    except Exception:  # error inesperado del propio test: se informa y se limpia
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:

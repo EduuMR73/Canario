@@ -308,13 +308,13 @@ print(json.dumps(res, sort_keys=True))
 # app/rutas_denuncias.py).
 # Una empresa que no existe responde exactamente igual que una ruta que no
 # existe: no se puede distinguir una cosa de la otra.
-CUERPO_404_RUTA = '{"detalle": "recurso no encontrado"}'.encode("utf-8")
+CUERPO_404_RUTA = b'{"detalle": "recurso no encontrado"}'
 CUERPO_404_EMPRESA = CUERPO_404_RUTA
-CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode("utf-8")
+CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode()
 # Errores que genera Caddy (proxy/Caddyfile, handle_errors).
-CUERPO_413_CADDY = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode("utf-8")
-CUERPO_502_CADDY = '{"detalle": "servicio no disponible"}'.encode("utf-8")
-CUERPO_421_CADDY = '{"detalle": "host no válido"}'.encode("utf-8")
+CUERPO_413_CADDY = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode()
+CUERPO_502_CADDY = b'{"detalle": "servicio no disponible"}'
+CUERPO_421_CADDY = '{"detalle": "host no válido"}'.encode()
 # Cabeceras de seguridad que deben llevar todas las respuestas a través de
 # Caddy, también las de error que genera él.
 CABECERAS_SEGURIDAD = {
@@ -325,14 +325,14 @@ CABECERAS_SEGURIDAD = {
     "cache-control": "no-store",
 }
 PLAZO_CUERPO_CADDY = 30  # read_body del Caddyfile, en segundos
-CUERPO_405 = '{"detalle": "método no permitido"}'.encode("utf-8")
-CUERPO_413 = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode("utf-8")
-CUERPO_422 = '{"detalle": "petición no válida"}'.encode("utf-8")
-CUERPO_500 = '{"detalle": "error interno"}'.encode("utf-8")
-CUERPO_503 = '{"detalle": "el canal de esta empresa no está disponible; inténtelo más tarde"}'.encode("utf-8")
-CUERPO_409_CERRADA = '{"detalle": "la denuncia está cerrada y no admite mensajes"}'.encode("utf-8")
-CUERPO_409_LIMITE = '{"detalle": "la denuncia ha alcanzado el máximo de mensajes"}'.encode("utf-8")
-CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode("utf-8")
+CUERPO_405 = '{"detalle": "método no permitido"}'.encode()
+CUERPO_413 = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode()
+CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
+CUERPO_500 = b'{"detalle": "error interno"}'
+CUERPO_503 = '{"detalle": "el canal de esta empresa no está disponible; inténtelo más tarde"}'.encode()
+CUERPO_409_CERRADA = '{"detalle": "la denuncia está cerrada y no admite mensajes"}'.encode()
+CUERPO_409_LIMITE = '{"detalle": "la denuncia ha alcanzado el máximo de mensajes"}'.encode()
+CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode()
 REINTENTAR_TRAS = "5"
 TEXTO_SATURACION = "SATURACION: LockNotAvailable 55P03"
 CLAVES_RESPUESTA_CREAR = ["codigo_seguimiento", "fecha"]
@@ -374,7 +374,7 @@ TEXTO_LIMITADOR_VERIFICADO = "LIMITADOR VERIFICADO"
 # ventana de sus claves.
 LIMITES_PRODUCCION = {"denuncia": (10, 3600), "seguimiento": (60, 60), "mensajes": (30, 3600), "acceso": (10, 300),
                       "otras": (60, 60), "cuenta": (60, 60)}
-CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode("utf-8")
+CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode()
 TEXTO_EVENTO_LIMITADOR = "EVENTO limitador_no_disponible: "
 # Clientes de prueba con IP fija en la red edge (fuera del rango automático):
 # llegan a la API a través de Caddy, como un cliente real.
@@ -2537,8 +2537,8 @@ def seccion_r():
          "secreto_redis: el secreto de Redis tiene un formato inesperado"),
         ("r_limites_incompletos", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=10/3600"},
-         "limites: CANARIO_LIMITES: reglas ['denuncia'], se esperan "
-         "['acceso', 'cuenta', 'denuncia', 'mensajes', 'otras', 'seguimiento']"),
+         ("limites: CANARIO_LIMITES: reglas ['denuncia'], se esperan "
+          "['acceso', 'cuenta', 'denuncia', 'mensajes', 'otras', 'seguimiento']")),
         ("r_limites_ventana", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=10/7,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,"
                             "cuenta=60/60"},
@@ -2667,7 +2667,7 @@ def main():
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
-    except Exception:  # error inesperado del propio test: se informa y se limpia
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:

@@ -118,10 +118,10 @@ PATRON_INVITACION_GESTION = re.compile(r"invitacion creada: empresa_id=([0-9a-f-
                                        r"token_invitacion=([0-9a-f]{32}\.[A-Za-z0-9_-]{43})\n")
 
 # Respuestas, literales (app/frontera_http.py, app/rutas_denuncias.py y app/rutas_personal.py).
-CUERPO_401_CREDENCIALES = '{"detalle": "credenciales no válidas"}'.encode("utf-8")
-CUERPO_404 = '{"detalle": "recurso no encontrado"}'.encode("utf-8")
-CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode("utf-8")
-CUERPO_422 = '{"detalle": "petición no válida"}'.encode("utf-8")
+CUERPO_401_CREDENCIALES = '{"detalle": "credenciales no válidas"}'.encode()
+CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
+CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode()
+CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
 CATEGORIA = "fraude"
 
 # Topes de forma de app/rutas_personal.py: lo que pase de aquí es 422 sin
@@ -174,7 +174,7 @@ NOMBRE_EMPRESA_SQL = "Empresa '); DROP TABLE canal.denuncia; -- S.L."
 EMAIL_GESTION_SQL = "admin'--@inyeccion.test"
 EMAILS_GESTION_INVALIDOS = ["con espacio@inyeccion.test", "ñandu@inyeccion.test"]
 
-NOMBRE_EMPRESA_CONTROL = "Empresa[2J S.L."
+NOMBRE_EMPRESA_CONTROL = "Empresa\x1b[2J S.L."
 
 # Campos de texto de los modelos de entrada, literales: si aparece uno nuevo,
 # la prueba lo señala hasta que se añada aquí con su tipo.
@@ -727,9 +727,9 @@ class Analisis:
         """La función más interna que contiene el nodo, o None."""
         mejor = None
         for funcion in self._funciones(self.modulos[modulo]).values():
-            if any(n is objetivo for n in ast.walk(funcion)):
-                if mejor is None or any(n is funcion for n in ast.walk(mejor)):
-                    mejor = funcion
+            if any(n is objetivo for n in ast.walk(funcion)) and (
+                    mejor is None or any(n is funcion for n in ast.walk(mejor))):
+                mejor = funcion
         return mejor
 
     def ejecutar(self):
@@ -1095,7 +1095,8 @@ def seccion_e():
     for nombre, construir, benigno, esperados in lista:
         # benigno None: un email nuevo en cada uso (invitar dos veces el
         # mismo daría 409 y no probaría nada).
-        def benigno_de():
+        # benigno enlazado de forma explícita: el de esta vuelta.
+        def benigno_de(benigno=benigno):
             return benigno if benigno is not None else email_benigno()
 
         control = una(construir(benigno_de()))
@@ -1315,7 +1316,7 @@ def main():
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
-    except Exception:  # error inesperado del propio test: se informa y se limpia
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:

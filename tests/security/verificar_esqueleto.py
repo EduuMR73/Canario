@@ -319,7 +319,8 @@ def p(texto=""):
 
 
 def ejecutar(args, timeout=900):
-    r = subprocess.run(args, capture_output=True, timeout=timeout)
+    # check=False explícito: el código de salida se comprueba en cada llamada.
+    r = subprocess.run(args, capture_output=True, timeout=timeout, check=False)
     return R(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
 
 
@@ -547,7 +548,7 @@ def seccion_g():
     def montajes(cid):
         i = inspeccionar(cid)
         lista = [(m["Type"], m.get("Name", ""), m["Destination"]) for m in i["Mounts"]]
-        return lista, i["HostConfig"].get("Tmpfs"), i["HostConfig"].get("Mounts")
+        return lista, i["HostConfig"].get("Tmpfs")
 
     control_cid = ejecutar(["docker", "run", "-d", "--name", f"{PROYECTO}_control_volumen",
                             "--mount", "type=volume,dst=/config", "--entrypoint", "sleep",
@@ -557,11 +558,11 @@ def seccion_g():
     finally:
         ejecutar(["docker", "rm", "-f", "-v", f"{PROYECTO}_control_volumen"])
     control = any(t == "volume" and d == "/config" and len(n) == 64 for t, n, d in lista_control)
-    lista, tmpfs, mounts = montajes(contenedor("caddy"))
+    lista, tmpfs = montajes(contenedor("caddy"))
     negativo(f"g) caddy: Mounts = {lista}, Tmpfs = {tmpfs}",
              lista == [("volume", f"{PROYECTO}_caddy_datos", "/data")] and not tmpfs,
              control, f"control con volumen anonimo: {lista_control}")
-    lista, tmpfs, mounts = montajes(contenedor("api"))
+    lista, tmpfs = montajes(contenedor("api"))
     pasa(sorted(lista) == MONTAJES_API and not tmpfs,
          f"g) api: solo sus secretos montados ({sorted(lista)}, Tmpfs = {tmpfs})")
 
@@ -1009,7 +1010,7 @@ def main():
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
-    except Exception:  # error inesperado del propio test: se informa y se limpia
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:

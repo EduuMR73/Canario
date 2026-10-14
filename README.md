@@ -246,5 +246,5 @@ docker image rm canario_unitarios-api:rapido
 `ruff.toml` fija la versión de Python y el ancho de línea del proyecto, y explica la única regla desactivada. ruff no se instala en el equipo: se ejecuta con su imagen oficial fijada por versión y digest, sin red, de solo lectura y montando solo el código (nunca `secrets/`). Debe terminar con `All checks passed!`:
 
 ```powershell
-docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 10001:10001 --mount "type=bind,src=$PWD\app,dst=/io/app,readonly" --mount "type=bind,src=$PWD\tests,dst=/io/tests,readonly" --mount "type=bind,src=$PWD\ruff.toml,dst=/io/ruff.toml,readonly" -w /io ghcr.io/astral-sh/ruff:0.16.9@sha256:fd4a00e8f586c07495822a1c93702737b9a98d826b76d460caa514df7794f259 check --no-cache app tests/unit tests/security/verificar_unitarios.py
+docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 10001:10001 --mount "type=bind,src=$PWD\app,dst=/io/app,readonly" --mount "type=bind,src=$PWD\tests,dst=/io/tests,readonly" --mount "type=bind,src=$PWD\scripts,dst=/io/scripts,readonly" --mount "type=bind,src=$PWD\ruff.toml,dst=/io/ruff.toml,readonly" -w /io ghcr.io/astral-sh/ruff:0.16.9@sha256:fd4a00e8f586c07495822a1c93702737b9a98d826b76d460caa514df7794f259 check --no-cache app tests scripts
 ```

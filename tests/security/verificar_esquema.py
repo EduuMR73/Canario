@@ -266,11 +266,11 @@ POLITICAS_REDACCION_COMPLETAS = [
     "empresa|empresa_select_redaccion|SELECT|(id = canal.empresa_actual())|",
     "usuario_personal|usuario_personal_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
     "denuncia|denuncia_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
-    "denuncia|denuncia_update_redaccion|UPDATE|(empresa_id = canal.empresa_actual())"
-    "|(empresa_id = canal.empresa_actual())",
+    ("denuncia|denuncia_update_redaccion|UPDATE|(empresa_id = canal.empresa_actual())"
+     "|(empresa_id = canal.empresa_actual())"),
     "mensaje|mensaje_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
-    "mensaje|mensaje_update_redaccion|UPDATE|(empresa_id = canal.empresa_actual())"
-    "|(empresa_id = canal.empresa_actual())",
+    ("mensaje|mensaje_update_redaccion|UPDATE|(empresa_id = canal.empresa_actual())"
+     "|(empresa_id = canal.empresa_actual())"),
     "registro_auditoria|registro_auditoria_select_redaccion|SELECT|(empresa_id = canal.empresa_actual())|",
     "registro_auditoria|registro_auditoria_insert_redaccion|INSERT||(empresa_id = canal.empresa_actual())",
 ]
@@ -501,7 +501,8 @@ def p(texto=""):
 
 
 def ejecutar(args, entrada=None, timeout=900):
-    r = subprocess.run(args, input=entrada, capture_output=True, timeout=timeout)
+    # check=False explícito: el código de salida se comprueba en cada llamada.
+    r = subprocess.run(args, input=entrada, capture_output=True, timeout=timeout, check=False)
     return R(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
 
 
@@ -725,13 +726,13 @@ select c.relname,
         "sesion_personal|UNIQUE (empresa_id, token_sha256)"])
     r = sup("select pg_get_indexdef('canal.invitacion_personal_una_abierta'::regclass);")
     comparar("c) una sola invitacion abierta por cuenta (indice unico parcial)", r.lineas(), [
-        "CREATE UNIQUE INDEX invitacion_personal_una_abierta ON canal.invitacion_personal "
-        "USING btree (empresa_id, usuario_id) WHERE (NOT cerrada)"])
+        ("CREATE UNIQUE INDEX invitacion_personal_una_abierta ON canal.invitacion_personal "
+         "USING btree (empresa_id, usuario_id) WHERE (NOT cerrada)")])
     r = sup("select pg_get_constraintdef(oid) from pg_constraint "
             f"where conname = '{TEXTO_CREDENCIALES}' and conrelid = 'canal.usuario_personal'::regclass;")
     comparar("c) una cuenta esta activada si y solo si tiene hash, secreto TOTP y version de clave", r.lineas(), [
-        "CHECK ((totp_activo = ((hash_contrasena IS NOT NULL) AND (secreto_totp_cifrado IS NOT NULL) "
-        "AND (version_clave_totp IS NOT NULL))))"])
+        ("CHECK ((totp_activo = ((hash_contrasena IS NOT NULL) AND (secreto_totp_cifrado IS NOT NULL) "
+         "AND (version_clave_totp IS NOT NULL))))")])
     r = sup("select c.relname || '.' || a.attname || '|' || pg_get_expr(d.adbin, d.adrelid) from pg_attrdef d "
             "join pg_class c on c.oid = d.adrelid join pg_namespace n on n.oid = c.relnamespace "
             "join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum "
@@ -773,7 +774,7 @@ def seccion_d():
              POLITICAS_REDACCION_COMPLETAS)
     ok = True
     for f in filas:
-        tabla, nombre, cmd, _roles, qual, check = f
+        _tabla, nombre, cmd, _roles, qual, check = f
         if nombre in NOMBRES_POLITICAS_SUPRESION or nombre in NOMBRES_POLITICAS_REDACCION:
             continue
         esperado_qual = cmd in ("SELECT", "UPDATE")
@@ -1438,8 +1439,8 @@ def seccion_o():
         negativo(f"o) aplicacion: {orden.split()[0].upper()}", app(orden, ctx=EMPRESA_A), "permission denied", sin_error(ctl))
     # Inmutabilidad como superusuario (el caso de manipulacion hace de control)
     inmut = {}
-    for orden in ("update canal.registro_auditoria set accion = 'x' where empresa_id = '{}' and secuencia = 2;".format(EMPRESA_A),
-                  "delete from canal.registro_auditoria where empresa_id = '{}' and secuencia = 1;".format(EMPRESA_A),
+    for orden in (f"update canal.registro_auditoria set accion = 'x' where empresa_id = '{EMPRESA_A}' and secuencia = 2;",
+                  f"delete from canal.registro_auditoria where empresa_id = '{EMPRESA_A}' and secuencia = 1;",
                   "truncate canal.registro_auditoria;"):
         inmut[orden.split()[0].upper()] = sup(orden)
     # Manipulacion con el trigger desactivado
@@ -1971,7 +1972,7 @@ def seccion_w():
     p("=== w) search_path hostil")
     sql = f"""BEGIN;
 CREATE TEMP TABLE directorio_empresas (identificador_publico text, empresa_id uuid);
-INSERT INTO pg_temp.directorio_empresas VALUES ('{IDENT_FALSO}', '{str(uuid.uuid4())}');
+INSERT INTO pg_temp.directorio_empresas VALUES ('{IDENT_FALSO}', '{uuid.uuid4()!s}');
 GRANT ALL ON pg_temp.directorio_empresas TO PUBLIC;
 CREATE FUNCTION canal.control_inseguro(p text) RETURNS uuid LANGUAGE sql SECURITY DEFINER
 AS $$ select empresa_id from directorio_empresas where identificador_publico = p $$;
@@ -2454,7 +2455,7 @@ def main():
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
-    except Exception:  # error inesperado del propio test: se informa y se limpia
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:

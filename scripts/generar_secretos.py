@@ -177,7 +177,7 @@ def contenido_acl(contrasena_en_disco):
     return (
         "user default off\n"
         f"user aplicacion on #{hash_contrasena} {PERMISOS_ACL_APLICACION}\n"
-    ).encode("utf-8")
+    ).encode()
 
 
 def crear_secretos(directorio):

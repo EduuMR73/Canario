@@ -391,7 +391,7 @@ exit 0
 def requirements_alterado():
     """requirements.txt con TODOS los hashes de un paquete alterados en un dígito."""
     texto = (RAIZ / "requirements.txt").read_text(encoding="utf-8")
-    bloque = re.search(rf"^{PAQUETE_ALTERADO}==\S+ \\\n(?:\s+--hash=sha256:[0-9a-f]{{64}}(?: \\)?\n)+", texto, re.M)
+    bloque = re.search(rf"^{PAQUETE_ALTERADO}==\S+ \\\n(?:\s+--hash=sha256:[0-9a-f]{{64}}(?: \\)?\n)+", texto, re.MULTILINE)
     if not bloque:
         raise Parada(f"no se encuentra {PAQUETE_ALTERADO} con hashes en requirements.txt")
     nuevo = bloque.group(0)
@@ -498,8 +498,7 @@ def hallazgos(informe):
             vulns.append((res["Target"], v))
         for s in res.get("Secrets") or []:
             secretos_img.append((res["Target"], s["RuleID"]))
-        for m in res.get("ExperimentalModifiedFindings") or []:
-            suprimidas.append(m)
+        suprimidas.extend(res.get("ExperimentalModifiedFindings") or [])
     return vulns, suprimidas, secretos_img
 
 
@@ -584,7 +583,7 @@ def seccion_e():
     documento = json_de(VEX)
     if documento is None:
         raise Parada(f"{VEX} no es JSON valido")
-    ahora = datetime.datetime.now(datetime.timezone.utc)
+    ahora = datetime.datetime.now(datetime.UTC)
     for d in documento.get("statements", []):
         cve = d["vulnerability"]["name"]
         momento = datetime.datetime.fromisoformat(d.get("timestamp") or documento["timestamp"])
@@ -881,7 +880,7 @@ def main():
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
-    except Exception:  # error inesperado del propio test: se informa y se limpia
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:

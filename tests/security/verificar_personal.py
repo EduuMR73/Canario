@@ -156,20 +156,19 @@ PATRON_TOKEN = r"[A-Za-z0-9_-]{43}"
 PATRON_SECRETO_TOTP = r"[A-Z2-7]{32}"
 
 # Respuestas, literales (app/rutas_personal.py y app/frontera_http.py).
-CUERPO_401_CREDENCIALES = '{"detalle": "credenciales no válidas"}'.encode("utf-8")
-CUERPO_401_SESION = '{"detalle": "sesión no válida"}'.encode("utf-8")
-CUERPO_401_INVITACION = '{"detalle": "invitación no válida"}'.encode("utf-8")
-CUERPO_422_CODIGO = '{"detalle": "código no válido"}'.encode("utf-8")
-CUERPO_422_CORTA = '{"detalle": "la contraseña debe tener entre 12 y 128 caracteres"}'.encode("utf-8")
-CUERPO_422_CONTIENE = '{"detalle": "la contraseña no puede contener el email ni el nombre de la empresa"}'.encode(
-    "utf-8")
-CUERPO_422 = '{"detalle": "petición no válida"}'.encode("utf-8")
-CUERPO_403 = '{"detalle": "permiso denegado"}'.encode("utf-8")
-CUERPO_404 = '{"detalle": "recurso no encontrado"}'.encode("utf-8")
-CUERPO_409_DUPLICADO = '{"detalle": "ya existe una cuenta con ese email"}'.encode("utf-8")
-CUERPO_409_ULTIMO = '{"detalle": "la empresa se quedaría sin ningún admin activo"}'.encode("utf-8")
-CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode("utf-8")
-CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode("utf-8")
+CUERPO_401_CREDENCIALES = '{"detalle": "credenciales no válidas"}'.encode()
+CUERPO_401_SESION = '{"detalle": "sesión no válida"}'.encode()
+CUERPO_401_INVITACION = '{"detalle": "invitación no válida"}'.encode()
+CUERPO_422_CODIGO = '{"detalle": "código no válido"}'.encode()
+CUERPO_422_CORTA = '{"detalle": "la contraseña debe tener entre 12 y 128 caracteres"}'.encode()
+CUERPO_422_CONTIENE = '{"detalle": "la contraseña no puede contener el email ni el nombre de la empresa"}'.encode()
+CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
+CUERPO_403 = b'{"detalle": "permiso denegado"}'
+CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
+CUERPO_409_DUPLICADO = b'{"detalle": "ya existe una cuenta con ese email"}'
+CUERPO_409_ULTIMO = '{"detalle": "la empresa se quedaría sin ningún admin activo"}'.encode()
+CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode()
+CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode()
 REINTENTAR_TRAS = "5"
 CLAVES_ACTIVACION = ["secreto_totp", "uri_totp"]
 CLAVES_LOGIN = ["token_dispositivo", "token_sesion"]
@@ -182,11 +181,11 @@ TEXTO_NO_ES_ADMIN = ("ERROR: no hay ningun admin activado con ese email en la em
                      "(primer admin: alta-admin; instructores: los reinvita su admin)")
 
 # Instrucción (app/instruccion.py y app/rutas_personal.py), literales.
-CUERPO_409_TRANSICION = '{"detalle": "la denuncia no puede pasar a ese estado desde el actual"}'.encode("utf-8")
-CUERPO_409_CERRADA = '{"detalle": "la denuncia está cerrada"}'.encode("utf-8")
-CUERPO_409_CERRADA_DENUNCIANTE = '{"detalle": "la denuncia está cerrada y no admite mensajes"}'.encode("utf-8")
-CUERPO_409_DESTINO = '{"detalle": "la cuenta de destino no está activa"}'.encode("utf-8")
-CUERPO_422_FINAL = '{"detalle": "cerrar una denuncia exige un mensaje final para el denunciante"}'.encode("utf-8")
+CUERPO_409_TRANSICION = b'{"detalle": "la denuncia no puede pasar a ese estado desde el actual"}'
+CUERPO_409_CERRADA = '{"detalle": "la denuncia está cerrada"}'.encode()
+CUERPO_409_CERRADA_DENUNCIANTE = '{"detalle": "la denuncia está cerrada y no admite mensajes"}'.encode()
+CUERPO_409_DESTINO = '{"detalle": "la cuenta de destino no está activa"}'.encode()
+CUERPO_422_FINAL = b'{"detalle": "cerrar una denuncia exige un mensaje final para el denunciante"}'
 ESTADOS = ["nueva", "en_instruccion", "resuelta", "archivada", "inadmitida"]
 # Los destinos de un instructor (k5). 'no_veraz' es solo de admin y va en k10.
 ESTADOS_DESTINO = ["en_instruccion", "resuelta", "archivada", "inadmitida"]
@@ -195,8 +194,8 @@ TRANSICIONES_ESPERADAS = {("nueva", "en_instruccion"), ("nueva", "inadmitida"),
 # Art. 32.3: desde cualquier estado visible, incluidos los cerrados.
 TRANSICIONES_NO_VERAZ = {("nueva", "no_veraz"), ("en_instruccion", "no_veraz"), ("resuelta", "no_veraz"),
                          ("archivada", "no_veraz"), ("inadmitida", "no_veraz")}
-CUERPO_422_NO_VERAZ = '{"detalle": "declarar una denuncia no veraz no admite mensaje"}'.encode("utf-8")
-CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode("utf-8")
+CUERPO_422_NO_VERAZ = b'{"detalle": "declarar una denuncia no veraz no admite mensaje"}'
+CUERPO_404_CODIGO = '{"detalle": "código de seguimiento no válido"}'.encode()
 TEXTO_EVENTO_NO_VERAZ = "EVENTO declaracion_no_veraz: "
 # Redaccion (k11). Posiciones contadas a mano (en caracteres, es decir, code
 # points): "diabetes" empieza en el 32; en UTF-16, como contaria un navegador,
@@ -214,7 +213,7 @@ TEXTO_EVENTO_ACCESO = "EVENTO acceso_denegado: "
 # Un id de denuncia con un salto de linea codificado: si llegara tal cual al
 # log, escribiria una linea "EVENTO redaccion" falsa.
 ID_CON_SALTO = "x%0AEVENTO%20redaccion:%20falso"
-CUERPO_409_FRAGMENTO = '{"detalle": "el texto indicado no está en esa posición"}'.encode("utf-8")
+CUERPO_409_FRAGMENTO = '{"detalle": "el texto indicado no está en esa posición"}'.encode()
 CLAVES_LISTADO = ["denuncias", "siguiente"]
 CLAVES_FILA_DENUNCIA = ["asignada_a", "asignada_activa", "denuncia_id", "estado", "fecha"]
 CLAVES_EXPEDIENTE = ["categoria", "denuncia_id", "estado", "fecha", "mensajes", "texto"]
@@ -966,7 +965,6 @@ def seccion_c():
          "c) contrasena de menos de 12 o mas de 128 caracteres: 422 con el motivo")
     pasa(con_email.get("cuerpo") == CUERPO_422_CONTIENE and con_empresa.get("cuerpo") == CUERPO_422_CONTIENE,
          "c) contrasena con el email o el nombre de la empresa (sin distinguir mayusculas): 422 con el motivo")
-    r_act, r_conf_malo = None, None
     r_act = una(pt("POST", ruta, {"token": instr.invitacion, "contrasena": instr.contrasena}))
     datos = json_de(r_act) or {}
     instr.secreto = datos.get("secreto_totp")
@@ -1029,7 +1027,6 @@ def seccion_c():
 
 def seccion_d():
     p("=== d) login: respuesta uniforme, tiempos y un solo uso del codigo")
-    admin = CUENTAS["admin_a"]
     token_admin = CUENTAS["token_admin_a"]
     instr = CUENTAS["instructor"]
     control = login_correcto(instr)
@@ -2469,7 +2466,7 @@ def main():
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
-    except Exception:  # error inesperado del propio test: se informa y se limpia
+    except Exception:  # noqa: BLE001 - error inesperado del propio test: se informa y se limpia
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
