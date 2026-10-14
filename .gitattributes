@@ -1,14 +1,9 @@
-* text=auto
-*.sh text eol=lf
-*.sql text eol=lf
-*.conf text eol=lf
-*.py text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-*.md text eol=lf
-Caddyfile text eol=lf
-.gitattributes text eol=lf
-.gitignore text eol=lf
-.dockerignore text eol=lf
-.editorconfig text eol=lf
-.env.example text eol=lf
+# Todo el texto con saltos LF en el índice y en la copia de trabajo, sea cual
+# sea core.autocrlf. Git for Windows trae core.autocrlf=true: sin eol, un clon
+# en Windows sacaba con CRLF los Dockerfile, requirements.txt, ruff.toml y los
+# .json (comprobado), y lo mismo pasaría con cada tipo de fichero nuevo. Una
+# sola regla para todo, en vez de una lista de extensiones que se queda corta.
+# Lo binario (detección de text=auto) no se toca: un PNG con bytes CR y LF sale
+# idéntico (comprobado). Requiere Git 2.10 o posterior: antes, text=auto con
+# eol trataba todos los ficheros como texto (notas de la versión 2.10.0).
+* text=auto eol=lf

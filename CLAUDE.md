@@ -1,7 +1,7 @@
 # Reglas de trabajo para Claude Code (proyecto Canario)
 
 ## Proyecto
-Canal de denuncias anónimo multi-empresa. Backend con API REST: FastAPI, PostgreSQL, Redis y Docker Compose, con Caddy como proxy. Sin frontend. Entrega el miércoles 14 de octubre, antes de las 14:29. Objetivo: seguro, limpio y profesional, sin parches. Las decisiones de diseño y las amenazas están en `docs/threat-model.md`. No repitas lo que ya se probó: lee el código y las baterías existentes antes de proponer nada.
+Canal de denuncias anónimo multi-empresa. Backend con API REST: FastAPI, PostgreSQL, Redis y Docker Compose, con Caddy como proxy. Sin frontend. Entrega el miércoles 21 de octubre (pendiente de confirmar). Objetivo: seguro, limpio y profesional, sin parches. Las decisiones de diseño y las amenazas están en `docs/threat-model.md`. No repitas lo que ya se probó: lee el código y las baterías existentes antes de proponer nada.
 
 ## Cómo trabajar
 - Antes de un bloque grande: lee los ficheros afectados y propón un plan corto (qué ficheros tocas, qué pruebas añades). Espera el visto bueno de Eduardo.
