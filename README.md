@@ -34,7 +34,7 @@ Las órdenes se ejecutan en PowerShell desde la raíz del repositorio. Como la r
    python scripts\generar_secretos.py
    ```
 
-   Crea en `secrets/` solo los que faltan y nunca sobrescribe uno existente: una clave maestra regenerada dejaría ilegibles los datos ya cifrados. No imprime ningún valor. `secrets/` está fuera de Git; haz copia de seguridad de la clave maestra por un canal seguro, porque sin ella los datos no se pueden descifrar. Guárdala **separada** de las copias de la base de datos: una copia de la base de datos junto con la clave maestra descifra todo lo que contenga, también lo ya suprimido o tachado (modelo de amenazas, 8).
+   Crea en `secrets/` solo los que faltan y nunca sobrescribe uno existente (si actualizas desde una versión anterior, vuelve a ejecutarlo: crea solo `clave_firma_tokens.txt`, la clave que firma los JWT del personal): una clave maestra regenerada dejaría ilegibles los datos ya cifrados. No imprime ningún valor. `secrets/` está fuera de Git; haz copia de seguridad de la clave maestra por un canal seguro, porque sin ella los datos no se pueden descifrar. Guárdala **separada** de las copias de la base de datos: una copia de la base de datos junto con la clave maestra descifra todo lo que contenga, también lo ya suprimido o tachado (modelo de amenazas, 8).
 
 2. Arrancar:
 
@@ -74,8 +74,8 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `POST /v1/seguimiento` | denunciante | Consultar el estado y la conversación con el código |
 | `POST /v1/seguimiento/mensajes` | denunciante | Enviar un mensaje con el código |
 | `POST /v1/personal/activacion` y `/activacion/confirmar` | personal | Activar la cuenta con la invitación: contraseña y TOTP |
-| `POST /v1/personal/sesiones`, `DELETE /v1/personal/sesiones/actual` | personal | Entrar y salir |
-| `GET /v1/personal/yo`, `POST /v1/personal/contrasena` | personal | Datos de la propia cuenta y cambio de contraseña |
+| `POST /v1/personal/sesiones`, `POST /v1/personal/sesiones/renovacion`, `DELETE /v1/personal/sesiones/actual` | personal | Entrar (JWT de acceso de 5 minutos y token de renovación), renovar y salir |
+| `GET /v1/personal/yo`, `POST /v1/personal/contrasena` | personal | Datos de la propia cuenta y cambio de contraseña (devuelve tokens nuevos) |
 | `/v1/personal/usuarios...` | admin | Invitar, reinvitar, anular invitaciones y dar de baja |
 | `/v1/personal/denuncias...` | personal | Listar, leer, asignar, cambiar de estado y escribir mensajes |
 | `POST /v1/personal/denuncias/{id}/redaccion` y `.../mensajes/{secuencia}/redaccion` | admin con la denuncia asignada | Tachar datos que no deben conservarse (art. 32.2) |
@@ -231,7 +231,7 @@ Cada batería usa un proyecto de Docker propio (`canario_<nombre>`), lo borra en
 python tests\security\verificar_unitarios.py
 ```
 
-La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 11 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
+La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 17 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
 
 Para ejecutar solo las pruebas, sin controles ni mutantes (la imagen se borra al final; si se queda, la batería se detiene con `PARADA` al encontrarla):
 
