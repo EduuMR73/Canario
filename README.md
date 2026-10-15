@@ -1,6 +1,6 @@
 # Canario
 
-Canario es un canal de denuncias anónimo multiempresa, pensado para cumplir la Ley 2/2023, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción. Este repositorio contiene el backend: una API REST con FastAPI, PostgreSQL y Redis, detrás de un proxy Caddy, todo con Docker Compose. No tiene frontend.
+Canario es un canal de denuncias anónimo multiempresa, pensado para cumplir la Ley 2/2023, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción. Este repositorio contiene el backend: una API REST con FastAPI, PostgreSQL y Redis, detrás de un proxy Caddy, todo con Docker Compose. El denunciante tiene sus páginas, en HTML generado por la propia API y sin JavaScript; el frontend del personal no está hecho (usa la API).
 
 Las amenazas consideradas, las decisiones de diseño y sus límites están en el [modelo de amenazas](docs/threat-model.md). Este README explica cómo ponerlo en marcha, operarlo y verificarlo.
 
@@ -8,11 +8,11 @@ Las amenazas consideradas, las decisiones de diseño y sus límites están en el
 
 | Ruta | Contenido |
 |---|---|
-| `app/` | La API (`principal.py` y las rutas) y la herramienta de administración `gestion.py` |
+| `app/` | La API (`principal.py` y las rutas), las páginas del denunciante (`rutas_web.py` y `plantillas/`) y la herramienta de administración `gestion.py` |
 | `db/` | Imagen de PostgreSQL, `pg_hba.conf` y el esquema, que se aplica al crear la base de datos (`db/init/`) |
 | `proxy/` | Imagen y `Caddyfile` del proxy, el único punto de entrada, y los estáticos del sitio del denunciante (`proxy/estatico/`) |
 | `scripts/generar_secretos.py` | Crea los secretos que faltan y comprueba el conjunto |
-| `tests/security/` | Las ocho baterías de pruebas de seguridad |
+| `tests/security/` | Las nueve baterías de pruebas de seguridad |
 | `tests/unit/` | Las pruebas unitarias de la lógica pura de `app/` |
 | `ruff.toml` | Configuración del análisis estático (ruff) |
 | `docs/threat-model.md` | El modelo de amenazas |
@@ -56,7 +56,7 @@ Las órdenes se ejecutan en PowerShell desde la raíz del repositorio. Como la r
 Hay dos puertos publicados, los dos solo en `127.0.0.1` y solo con el nombre `localhost` (cualquier otro `Host` recibe 421):
 
 - `8443`: la API.
-- `8444`: el sitio del denunciante, en otro origen. Por ahora solo sirve la hoja de estilos base (`https://localhost:8444/estatico/canario.css`); las páginas llegan en el bloque siguiente.
+- `8444`: el sitio del denunciante, en otro origen: `https://localhost:8444/` (las páginas, más abajo) y su hoja de estilos.
  Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
 
 Para parar sin perder datos:
@@ -86,6 +86,19 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `GET /v1/personal/auditoria` y `/auditoria/verificacion` | admin | Leer la auditoría y verificar su cadena |
 
 El código de seguimiento es lo único que identifica al denunciante: va en el cuerpo, nunca en la URL, para que no quede en ningún log.
+
+### Las páginas del denunciante (8444)
+
+Formularios HTML sin JavaScript. Las genera la API bajo `/web` (`app/rutas_web.py`) con las mismas funciones que `/v1`, y Caddy las sirve en el 8444 sin el prefijo; desde el 8443, `/web` da 404.
+
+| Página | Para qué |
+|---|---|
+| `GET /` | Inicio |
+| `GET /empresas/{identificador}` y `POST .../denuncias` | Formulario de denuncia de una empresa; al enviarlo, el código de seguimiento |
+| `GET /seguimiento` y `POST /seguimiento/consulta` | Consultar una denuncia con su código |
+| `POST /seguimiento/mensajes` | Enviar un mensaje desde la consulta |
+
+Cada formulario solo se acepta desde el propio sitio (cabecera `Origin`). Si el sitio se publica con otro nombre, la variable `CANARIO_ORIGEN_WEB` de la API debe llevar su origen exacto (por ejemplo `https://canal.ejemplo.org`); la API lo registra al arrancar (`ORIGEN WEB (configurado): ...`) y no arranca con un valor que un navegador nunca enviaría (modelo de amenazas, 6.11).
 
 ## Operación: `gestion`
 
@@ -201,11 +214,12 @@ Si se restaura una copia de la base de datos, todo lo declarado no veraz o tacha
 
 ## Pruebas de seguridad
 
-Ocho baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
+Nueve baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
 
 | Batería | Qué prueba |
 |---|---|
-| `verificar_esqueleto.py` | Proxy y API: sin salida a internet, solo los dos puertos del proxy, cabeceras, 421, sitio estático del denunciante (sin rangos y sin llegar a la API), logs sin IP, endurecimiento de los contenedores |
+| `verificar_esqueleto.py` | Proxy y API: sin salida a internet, solo los dos puertos del proxy, cabeceras, 421, estáticos del denunciante (sin rangos ni salir de `/srv`), logs sin IP, endurecimiento de los contenedores |
+| `verificar_web.py` | Sitio del denunciante: lo que el 8444 reenvía a la API (con una aplicación de eco) y las páginas con la API real: escapado, formularios de otro origen, cuerpo estricto, NUL y logs sin rastro |
 | `verificar_arranque.py` | Conexión a PostgreSQL con secretos y el arranque verificado de la API |
 | `verificar_esquema.py` | Esquema, RLS entre empresas, permisos, auditoría encadenada y supresión legal en la base de datos |
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
@@ -217,7 +231,7 @@ Ocho baterías, una por área. Cada prueba negativa lleva su control positivo: s
 Para ejecutarlas:
 
 - Docker en marcha y los secretos generados.
-- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, personal e inyección arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
+- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal e inyección arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
 - `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades.
 - `verificar_unitarios.py` no necesita los secretos ni la pila parada: solo construye la imagen de la API.
 
@@ -229,13 +243,13 @@ Cada batería usa un proyecto de Docker propio (`canario_<nombre>`), lo borra en
 
 ### Pruebas unitarias
 
-`tests/unit/` (12 ficheros, 138 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado y el login uniforme. Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
+`tests/unit/` (14 ficheros, 170 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado, el login uniforme, el JWT y las páginas del denunciante (origen, formulario y plantillas). Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
 
 ```powershell
 python tests\security\verificar_unitarios.py
 ```
 
-La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 17 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
+La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 26 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
 
 Para ejecutar solo las pruebas, sin controles ni mutantes (la imagen se borra al final; si se queda, la batería se detiene con `PARADA` al encontrarla):
 
