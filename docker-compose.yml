@@ -346,7 +346,8 @@ services:
     # volumen de /data. /config no se monta: con persist_config off Caddy no
     # escribe ahí.
     read_only: true
-    # Sin ninguna capability: escucha en 8443, que no es un puerto privilegiado.
+    # Sin ninguna capability: escucha en 8443 y 8444, que no son puertos
+    # privilegiados.
     cap_drop:
       - ALL
     # Impide ganar privilegios nuevos (por ejemplo con binarios setuid).
@@ -355,10 +356,12 @@ services:
     # Límites de recursos: contienen el daño de un fallo o de un abuso.
     mem_limit: 128m
     pids_limit: 64
-    # Único puerto publicado del proyecto, y solo en 127.0.0.1 del host (nunca
-    # en 0.0.0.0). Sin puerto 80.
+    # Únicos puertos publicados del proyecto, y solo en 127.0.0.1 del host
+    # (nunca en 0.0.0.0). 8443: la API. 8444: el sitio del denunciante, en otro
+    # origen. Sin puerto 80.
     ports:
       - "127.0.0.1:8443:8443/tcp"
+      - "127.0.0.1:8444:8444/tcp"
     volumes:
       # Estado que debe sobrevivir a reinicios: el CA local y los certificados.
       # Si se perdiera, el CA se regeneraría y los clientes dejarían de confiar.

@@ -1,0 +1,68 @@
+/*
+ * Hoja de estilos base del sitio del denunciante (puerto 8444).
+ *
+ * Solo maquetación y tipografía del sistema. Sin fuentes externas, sin imágenes
+ * y sin url(): la CSP del sitio ("default-src 'none'; style-src 'self'") los
+ * bloquearía, y cada recurso externo sería una petición más que deja rastro de
+ * la visita. El aspecto definitivo llega con la web de referencia.
+ */
+
+:root {
+  color-scheme: light dark;
+  --texto: #1b1b1b;
+  --fondo: #ffffff;
+  --borde: #b1b4b6;
+  --enlace: #1d4f91;
+  --foco: #ffbf47;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --texto: #f3f2f1;
+    --fondo: #161616;
+    --borde: #6f777b;
+    --enlace: #8fb8ff;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 100%;
+  line-height: 1.5;
+  color: var(--texto);
+  background: var(--fondo);
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+h1 {
+  font-size: 2rem;
+  line-height: 1.2;
+  margin: 0 0 1.5rem;
+}
+
+a {
+  color: var(--enlace);
+}
+
+/* Foco siempre visible al navegar con teclado (WCAG 2.2, 2.4.7). */
+:focus-visible {
+  outline: 3px solid var(--foco);
+  outline-offset: 2px;
+}

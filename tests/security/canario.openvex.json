@@ -4,11 +4,12 @@
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "version": 1,
+  "last_updated": "2026-10-15T06:20:00Z",
+  "version": 2,
   "statements": [
     {
       "vulnerability": {"name": "CVE-2026-78669"},
-      "timestamp": "2026-10-12T22:00:00Z",
+      "timestamp": "2026-10-15T06:20:00Z",
       "products": [
         {
           "@id": "pkg:golang/caddy",
@@ -20,11 +21,11 @@
       ],
       "status": "not_affected",
       "justification": "inline_mitigations_already_exist",
-      "impact_statement": "Denegación de servicio con tramas SETTINGS de HTTP/2. El Caddyfile fija 'protocols h1' (la configuración adaptada solo lleva h1) y el servidor elige http/1.1 aunque el cliente ofrezca h2 por ALPN (comprobado en verificar_escaneos.py, con un Caddy 'h1 h2' que elige h2 como control). El puerto solo acepta TLS, así que tampoco hay h2c: el código de HTTP/2 no es alcanzable. El reenvío a la API es HTTP/1.1. Se revisa al publicarse una imagen de Caddy con Go 1.26.9 o posterior."
+      "impact_statement": "Denegación de servicio con tramas SETTINGS de HTTP/2. El Caddyfile fija 'protocols h1' (la configuración adaptada solo lleva h1) y el servidor elige http/1.1 aunque el cliente ofrezca h2 por ALPN, en los dos puertos (8443 y 8444) (comprobado en verificar_escaneos.py, con un Caddy 'h1 h2' que elige h2 como control). Los dos puertos solo aceptan TLS, así que tampoco hay h2c: el código de HTTP/2 no es alcanzable. El reenvío a la API es HTTP/1.1. Se revisa al publicarse una imagen de Caddy con Go 1.26.9 o posterior."
     },
     {
       "vulnerability": {"name": "CVE-2026-78667"},
-      "timestamp": "2026-10-12T22:00:00Z",
+      "timestamp": "2026-10-15T06:20:00Z",
       "products": [
         {
           "@id": "pkg:golang/caddy",
@@ -34,8 +35,8 @@
         }
       ],
       "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Denegación de servicio con cabeceras Range en FileServer, ServeContent y ServeFile de net/http. El Caddyfile solo usa reverse_proxy y respond, sin file_server (la configuración adaptada no contiene el manejador file_server, comprobado en verificar_escaneos.py), así que Caddy no llama a esas funciones."
+      "justification": "inline_mitigations_already_exist",
+      "impact_statement": "Denegación de servicio con cabeceras Range en FileServer, ServeContent y ServeFile de net/http. El sitio del denunciante (8444) usa file_server, que llama a ServeContent, pero el Caddyfile quita la cabecera Range de la petición (request_header -Range) antes de llegar a él, y sin Range ServeContent no la analiza y responde el fichero entero. Comprobado en verificar_escaneos.py (en la configuración adaptada, cada file_server va detrás de la quita; control: sin ella, falla) y en verificar_esqueleto.py (dos rangos dan 200; control: el mismo Caddy sin la quita da 206). Se revisa al publicarse una imagen de Caddy con Go 1.26.9 o posterior."
     },
     {
       "vulnerability": {"name": "CVE-2026-97031"},

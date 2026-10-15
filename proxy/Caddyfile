@@ -1,4 +1,5 @@
-# Proxy inverso de Canario: única puerta desde el exterior hacia la API.
+# Proxy inverso de Canario: única puerta desde el exterior. En 8443, la API; en
+# 8444, el sitio del denunciante.
 #
 # Sin directiva "log" en ningún sitio: no hay logs de acceso. Si se declarase,
 # cada petición quedaría registrada con la IP del cliente (ver
@@ -84,28 +85,77 @@
 	}
 }
 
-# Cabeceras de seguridad para una API sin frontend, en un único sitio: las usan
-# las respuestas normales y las de error que genera el propio Caddy. Sin esto,
-# un 413 o un 502 de Caddy saldrían con "Server: Caddy" y sin ninguna de ellas
-# (comprobado), como hace nginx sin "add_header ... always".
-(cabeceras_seguridad) {
-	# defer las aplica al final de la respuesta, sobre lo que haya puesto la API.
+# Cabeceras de seguridad en snippets: las usan las respuestas normales y las de
+# error que genera el propio Caddy. Sin esto, un 413 o un 502 de Caddy saldrían
+# con "Server: Caddy" y sin ninguna de ellas (comprobado), como hace nginx sin
+# "add_header ... always". Hay tres porque los dos sitios necesitan una CSP y
+# una Referrer-Policy distintas: con un único snippet, el defer del de la API
+# pisaría las del sitio del denunciante y bloquearía su hoja de estilos.
+#
+# defer aplica las cabeceras al final de la respuesta, sobre lo que haya puesto
+# la API o file_server.
+(cabeceras_comunes) {
 	header {
 		defer
 		# Solo HTTPS en los próximos dos años. Sin includeSubDomains ni preload: el
-		# nombre es localhost. Se revisará con el dominio real.
+		# nombre es localhost. Se revisará con el dominio real. HSTS se aplica al
+		# host entero, sin distinguir puertos (RFC 6797, 8.3), así que cubre los
+		# dos sitios.
 		Strict-Transport-Security "max-age=63072000"
-		# El navegador no adivina el tipo de contenido.
+		# El navegador no adivina el tipo de contenido: una hoja de estilos solo
+		# se aplica si llega como text/css.
 		X-Content-Type-Options "nosniff"
-		# Nunca se envía la URL de origen a otro sitio.
-		Referrer-Policy "no-referrer"
-		# Nada se carga ni se ejecuta, y la respuesta no se puede incrustar.
-		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
 		# Ni el navegador ni intermediarios guardan copia de las respuestas.
+		# También en el CSS del denunciante: en un equipo compartido, la caché
+		# delataría que alguien ha visitado el canal.
 		Cache-Control "no-store"
 		# No anuncia el servidor.
 		-Server
 	}
+}
+
+# API (8443): solo JSON, nada que cargar ni ejecutar.
+(cabeceras_api) {
+	import cabeceras_comunes
+	header {
+		defer
+		# Nunca se envía la URL de origen a otro sitio.
+		Referrer-Policy "no-referrer"
+		# Nada se carga ni se ejecuta, y la respuesta no se puede incrustar.
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+	}
+}
+
+# Sitio del denunciante (8444): HTML sin JavaScript.
+(cabeceras_html) {
+	import cabeceras_comunes
+	header {
+		defer
+		# same-origin y no no-referrer: con no-referrer, el navegador manda
+		# "Origin: null" en los POST de formulario (especificación Fetch, "append
+		# a request Origin header"), y la API no podría comprobar el origen de
+		# los formularios del bloque siguiente. Con same-origin, a otro sitio no
+		# sale nada, ni siquiera el origen.
+		Referrer-Policy "same-origin"
+		# Solo la hoja de estilos propia: ni scripts, ni imágenes, ni fuentes, ni
+		# marcos. Los formularios solo envían a este mismo origen (protocolo, host
+		# y puerto: el 8443 de la API es otro origen), la página no se puede
+		# incrustar y un <base> inyectado no cambia a dónde apuntan los enlaces.
+		Content-Security-Policy "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	}
+}
+
+# Quita la cabecera Range de la petición. El binario de la imagen fijada (Go
+# 1.26.8) tiene una denegación de servicio con cabeceras Range en ServeContent
+# (CVE-2026-78667), que es lo que usa file_server. Sin Range, ServeContent ni
+# siquiera la analiza: responde el fichero entero con 200 (comprobado con la
+# imagen fijada: con la quita, dos rangos dan 200; sin ella, 206). No se pierde
+# nada: los estáticos son pequeños y no hay descargas que reanudar. Se importa
+# en todos los sitios, pero lo que la prueba exige (verificar_escaneos.py, f)
+# es que vaya delante de cada file_server: un file_server nuevo sin la quita
+# falla de forma visible.
+(sin_range) {
+	request_header -Range
 }
 
 # Certificado del CA interno de Caddy (tls internal): sin ACME y sin necesidad de
@@ -114,7 +164,8 @@
 https://localhost:8443 {
 	tls internal
 
-	import cabeceras_seguridad
+	import sin_range
+	import cabeceras_api
 
 	# Tamaño máximo del cuerpo de una petición: 128 KiB, el mismo límite que
 	# aplica la API (app/frontera_http.py), que es la segunda capa. KiB y no KB:
@@ -137,7 +188,7 @@ https://localhost:8443 {
 	# Errores que genera Caddy (cuerpo demasiado grande, API caída): mismas
 	# cabeceras y mismo formato JSON que los errores de la API.
 	handle_errors {
-		import cabeceras_seguridad
+		import cabeceras_api
 		header Content-Type "application/json"
 
 		@demasiado_grande expression {err.status_code} == 413
@@ -150,12 +201,92 @@ https://localhost:8443 {
 	}
 }
 
-# Sitio por defecto: cualquier petición cuyo Host no sea localhost. Sin él, no
-# casaría con ninguna ruta y Caddy respondería 200 vacío. Responde 421 con las
-# mismas cabeceras y el mismo formato JSON que el resto.
-https://:8443 {
+# Sitio del denunciante, en su propio puerto: es otro origen que la API, así
+# que la CSP, las cookies del personal (bloque siguiente) y form-action se
+# separan por origen sin CORS. No va en un subdominio porque *.localhost no
+# resuelve en Windows. Por ahora solo sirve la hoja de estilos base; las páginas
+# llegan con el adaptador HTML de la API.
+https://localhost:8444 {
 	tls internal
-	import cabeceras_seguridad
+
+	import sin_range
+	import cabeceras_html
+
+	# Estáticos desde /srv/estatico, copiados en la imagen (proxy/Dockerfile),
+	# de root y con el sistema de ficheros de solo lectura. Sin browse, un
+	# directorio sin index da 404 y no un listado. file_server limpia la ruta
+	# antes de unirla a root: "../" y "%2e%2e" no salen de /srv (comprobado con
+	# la imagen fijada). Solo GET y HEAD; el resto da 405 con "Allow: GET, HEAD".
+	handle /estatico/* {
+		root * /srv
+		# ServeContent anuncia "Accept-Ranges: bytes" aunque Range se haya
+		# quitado (comprobado). Se quita para no prometer rangos que no se
+		# sirven (RFC 9110, 14.3).
+		header -Accept-Ranges
+		file_server
+	}
+
+	# Cualquier otra ruta, 404. Con "error" y no con "respond", para que pase
+	# por handle_errors y todos los errores del sitio salgan de un único sitio
+	# con el mismo HTML y las mismas cabeceras.
+	handle {
+		error 404
+	}
+
+	# Errores del sitio (ruta o fichero inexistente, método no permitido): en
+	# HTML, porque los lee una persona en el navegador, y sin detalles internos.
+	handle_errors {
+		import cabeceras_html
+		header Content-Type "text/html; charset=utf-8"
+
+		@no_encontrado expression {err.status_code} == 404
+		respond @no_encontrado `<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Página no encontrada - Canario</title>
+<link rel="stylesheet" href="/estatico/canario.css">
+<main>
+<h1>Página no encontrada</h1>
+</main>
+</html>
+` 404
+
+		@no_disponible expression {err.status_code} >= 500
+		respond @no_disponible `<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Servicio no disponible - Canario</title>
+<link rel="stylesheet" href="/estatico/canario.css">
+<main>
+<h1>Servicio no disponible</h1>
+</main>
+</html>
+` {err.status_code}
+
+		respond `<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Petición no válida - Canario</title>
+<link rel="stylesheet" href="/estatico/canario.css">
+<main>
+<h1>Petición no válida</h1>
+</main>
+</html>
+` {err.status_code}
+	}
+}
+
+# Sitio por defecto de los dos puertos: cualquier petición cuyo Host no sea
+# localhost. Sin él, no casaría con ninguna ruta y Caddy respondería 200 vacío.
+# Responde 421 con las cabeceras y el formato JSON de la API: nadie llega aquí
+# desde un enlace del sitio, solo con un Host manipulado.
+https://:8443, https://:8444 {
+	tls internal
+	import sin_range
+	import cabeceras_api
 	header Content-Type "application/json"
 	respond `{"detalle": "host no válido"}` 421
 }

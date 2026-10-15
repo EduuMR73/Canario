@@ -23,7 +23,14 @@ RUN setcap -r /usr/bin/caddy \
 # no hay montaje que alguien pueda cambiar en caliente.
 COPY Caddyfile /etc/caddy/Caddyfile
 
+# Estáticos del sitio del denunciante, por el mismo motivo: dentro de la imagen,
+# de root (COPY sin --chown) y, con el sistema de ficheros raíz de solo lectura,
+# nadie los puede cambiar en caliente. /srv solo contiene estatico/, que es lo
+# único que file_server puede servir.
+COPY estatico/ /srv/estatico/
+
 # Usuario sin privilegios con uid y gid fijos, distinto del de la API.
 USER 10002:10002
 
-EXPOSE 8443
+# 8443: la API. 8444: el sitio del denunciante.
+EXPOSE 8443 8444
