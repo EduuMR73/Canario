@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "macros.html" import resumen_errores, atributos_error, mensaje_error, area_texto %}
+{% block titulo %}Nueva denuncia{% endblock %}
+{% block contenido %}
+<h1>Nueva denuncia</h1>
+{{ resumen_errores(errores) }}
+<p>Al enviarla recibirá un código de seguimiento. Es la única forma de consultar la denuncia y de escribir a quien la instruya: guárdelo, porque no se puede recuperar.</p>
+<form method="post" action="/empresas/{{ identificador }}/denuncias" autocomplete="off">
+<p>
+<label for="categoria">Categoría</label>
+<select id="categoria" name="categoria" required{{ atributos_error("categoria", errores) }}>
+<option value="">Elija una categoría</option>
+{% for valor, nombre in categorias.items() %}
+<option value="{{ valor }}"{% if valor == categoria %} selected{% endif %}>{{ nombre }}</option>
+{% endfor %}
+</select>
+{{ mensaje_error("categoria", errores) }}
+</p>
+{{ area_texto("texto", "Qué ha ocurrido", texto, errores, longitud_maxima) }}
+<p><button type="submit">Enviar denuncia</button></p>
+</form>
+{% endblock %}

@@ -1,7 +1,8 @@
 """Aplicación FastAPI de Canario.
 
 Expone GET /salud (vivacidad), las rutas del denunciante anónimo
-(app/rutas_denuncias.py) y las del personal (app/rutas_personal.py), detrás
+(app/rutas_denuncias.py), sus páginas HTML (app/rutas_web.py, que Caddy sirve
+en el 8444) y las del personal (app/rutas_personal.py), detrás
 de la frontera HTTP (app/frontera_http.py):
 límite de cuerpo, limitador de peticiones con Redis (app/limitador.py),
 errores internos sin detalles y respuestas de error uniformes. Al arrancar
@@ -23,6 +24,7 @@ from app import (
     limitador,
     rutas_denuncias,
     rutas_personal,
+    rutas_web,
     verificacion_arranque,
 )
 
@@ -73,6 +75,15 @@ async def ciclo_de_vida(app):
         raise verificacion_arranque.ArranqueBloqueado("secreto_redis") from None
     # Visible en cada arranque: un límite relajado no pasa desapercibido.
     registro.info("LIMITES (%s): %s", origen, limitador.describir_limites(limites))
+    # El origen del sitio del denunciante, contra el que se comprueban sus
+    # formularios (app/rutas_web.py). Uno mal escrito haría que se rechazaran
+    # todos: se ve al arrancar, y el valor efectivo queda en el log.
+    try:
+        origen_web, procedencia_origen = rutas_web.cargar_origen()
+    except rutas_web.ErrorConfiguracion as error:
+        registro.error("ARRANQUE BLOQUEADO: origen_web: %s", error)
+        raise verificacion_arranque.ArranqueBloqueado("origen_web") from None
+    registro.info("ORIGEN WEB (%s): %s", procedencia_origen, origen_web)
     pool = bd.crear_pool()
     limitador_api = None
     try:
@@ -97,6 +108,7 @@ async def ciclo_de_vida(app):
         app.state.pool = pool
         app.state.claves = claves_servidor
         app.state.limitador = limitador_api
+        app.state.origen_web = origen_web
         yield
     finally:
         if limitador_api is not None:
@@ -119,6 +131,7 @@ frontera_http.instalar(aplicacion, limitador.FronteraLimitador)
 rutas_personal.instalar_errores(aplicacion)
 aplicacion.include_router(rutas_denuncias.router)
 aplicacion.include_router(rutas_personal.router)
+aplicacion.include_router(rutas_web.router)
 
 
 @aplicacion.get("/salud")

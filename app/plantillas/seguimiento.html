@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% from "macros.html" import resumen_errores, atributos_error, mensaje_error %}
+{% block titulo %}Consultar una denuncia{% endblock %}
+{% block contenido %}
+<h1>Consultar una denuncia</h1>
+{{ resumen_errores(errores) }}
+{#- El código va en el cuerpo de un POST, nunca en la URL: así no queda en el
+    historial ni en ningún registro de rutas. -#}
+<form method="post" action="/seguimiento/consulta" autocomplete="off">
+<p>
+<label for="codigo">Código de seguimiento</label>
+<input id="codigo" name="codigo" type="text" required autocapitalize="off" spellcheck="false"{{ atributos_error("codigo", errores) }}>
+{{ mensaje_error("codigo", errores) }}
+</p>
+<p><button type="submit">Consultar</button></p>
+</form>
+{% endblock %}

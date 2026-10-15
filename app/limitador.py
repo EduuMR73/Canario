@@ -139,11 +139,19 @@ LIMITES_POR_DEFECTO = {
 
 RUTAS_ACCESO = {"/v1/personal/sesiones", "/v1/personal/activacion", "/v1/personal/activacion/confirmar",
                 "/v1/personal/contrasena"}
+# El denunciante tiene dos entradas a las mismas acciones: la API JSON (/v1) y
+# los formularios del sitio (/web, app/rutas_web.py). Cada acción tiene la
+# misma regla por las dos, y la regla es la clave del contador, así que
+# comparten contador: entrar por la otra puerta no da más intentos. Las
+# páginas que solo muestran un formulario (GET) van en "otras": leer el
+# formulario no gasta el cupo de denuncias.
+RUTAS_SEGUIMIENTO = {"/v1/seguimiento", "/web/seguimiento/consulta"}
+RUTAS_MENSAJES = {"/v1/seguimiento/mensajes", "/web/seguimiento/mensajes"}
 
 # Rutas exentas: solo la vivacidad, que usa el healthcheck desde dentro del
 # contenedor y no toca ninguna dependencia.
 EXENTAS = {"/salud"}
-_RUTA_DENUNCIAS = re.compile(r"/v1/empresas/[^/]+/denuncias")
+_RUTA_DENUNCIAS = re.compile(r"/(?:v1|web)/empresas/[^/]+/denuncias")
 _ELEMENTO_LIMITES = re.compile(r"([a-z]+)=([1-9][0-9]{0,6})/([1-9][0-9]{0,5})")
 
 
@@ -167,9 +175,9 @@ def regla_de(ruta):
     """
     if ruta in EXENTAS:
         return None
-    if ruta == "/v1/seguimiento":
+    if ruta in RUTAS_SEGUIMIENTO:
         return "seguimiento"
-    if ruta == "/v1/seguimiento/mensajes":
+    if ruta in RUTAS_MENSAJES:
         return "mensajes"
     if ruta in RUTAS_ACCESO:
         return "acceso"

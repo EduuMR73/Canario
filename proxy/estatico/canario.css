@@ -14,6 +14,7 @@
   --borde: #b1b4b6;
   --enlace: #1d4f91;
   --foco: #ffbf47;
+  --error: #b10e1e;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,6 +23,7 @@
     --fondo: #161616;
     --borde: #6f777b;
     --enlace: #8fb8ff;
+    --error: #ff8a8a;
   }
 }
 
@@ -59,6 +61,60 @@ h1 {
 
 a {
   color: var(--enlace);
+}
+
+/*
+ * Texto de la denuncia y de los mensajes: los saltos de línea se muestran con
+ * CSS y no convirtiéndolos en <br>, que obligaría a marcar HTML como seguro en
+ * la plantilla (app/rutas_web.py). overflow-wrap parte las palabras muy largas
+ * para que no desborden en pantallas estrechas.
+ */
+.texto {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+}
+
+input[type="text"],
+select,
+textarea {
+  display: block;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--fondo);
+  border: 2px solid var(--borde);
+  padding: 0.5rem;
+}
+
+button {
+  font: inherit;
+  padding: 0.5rem 1rem;
+}
+
+.codigo code {
+  font-size: 1.25rem;
+  overflow-wrap: anywhere;
+}
+
+.errores,
+.error {
+  color: var(--error);
+}
+
+.errores {
+  border: 3px solid var(--error);
+  padding: 0 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.error {
+  display: block;
+  font-weight: 600;
 }
 
 /* Foco siempre visible al navegar con teclado (WCAG 2.2, 2.4.7). */

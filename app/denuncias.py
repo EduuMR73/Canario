@@ -247,16 +247,26 @@ def _resolver_codigo(pool, claves, codigo):
     return fila
 
 
-def crear(pool, claves, identificador, categoria, texto):
-    """Crea una denuncia y devuelve su código de seguimiento y su fecha."""
-    if categoria not in CATEGORIAS:
-        raise ValueError("categoria desconocida")
+def resolver_empresa(pool, identificador):
+    """Id interno de la empresa activa de un identificador público, o
+    EmpresaNoEncontrada sin distinguir entre desconocido, mal formado o
+    inactivo. La usan el alta y el formulario del denunciante
+    (app/rutas_web.py), que así no ofrece escribir una denuncia para una
+    empresa que no la aceptaría."""
     if not isinstance(identificador, str) or not PATRON_IDENTIFICADOR.fullmatch(identificador):
         raise EmpresaNoEncontrada
     with bd.transaccion_sin_contexto(pool, solo_lectura=True) as conexion:
         empresa_id = conexion.execute(SQL_RESOLVER, [identificador]).fetchone()[0]
     if empresa_id is None:
         raise EmpresaNoEncontrada
+    return empresa_id
+
+
+def crear(pool, claves, identificador, categoria, texto):
+    """Crea una denuncia y devuelve su código de seguimiento y su fecha."""
+    if categoria not in CATEGORIAS:
+        raise ValueError("categoria desconocida")
+    empresa_id = resolver_empresa(pool, identificador)
 
     denuncia_id = uuid.uuid4()
     codigo, crudo = cripto.generar_codigo()

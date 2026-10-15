@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% from "macros.html" import resumen_errores, area_texto %}
+{% block titulo %}Su denuncia{% endblock %}
+{% block contenido %}
+<h1>Su denuncia</h1>
+{% if aviso %}<p class="aviso" role="status">{{ aviso }}</p>{% endif %}
+<dl>
+<dt>Estado</dt><dd>{{ estado }}</dd>
+<dt>Fecha</dt><dd><time datetime="{{ fecha.isoformat() }}">{{ fecha.strftime("%d/%m/%Y") }}</time></dd>
+<dt>Categoría</dt><dd>{{ categoria }}</dd>
+</dl>
+<h2>Texto de la denuncia</h2>
+<div class="texto">{{ texto_denuncia }}</div>
+<h2>Mensajes</h2>
+{% if mensajes %}
+<ol class="mensajes">
+{% for mensaje in mensajes %}
+<li>
+<p><strong>{{ mensaje.autor }}</strong>, <time datetime="{{ mensaje.fecha.isoformat() }}">{{ mensaje.fecha.strftime("%d/%m/%Y") }}</time></p>
+<div class="texto">{{ mensaje.texto }}</div>
+</li>
+{% endfor %}
+</ol>
+{% else %}
+<p>Todavía no hay mensajes.</p>
+{% endif %}
+<h2>Escribir un mensaje</h2>
+{{ resumen_errores(errores) }}
+{#- El código viaja oculto en el formulario, en el cuerpo del POST, para no
+    tener que volver a escribirlo. La página no se guarda en caché
+    (Cache-Control: no-store en proxy/Caddyfile). -#}
+<form method="post" action="/seguimiento/mensajes" autocomplete="off">
+<input type="hidden" name="codigo" value="{{ codigo }}">
+{{ area_texto("texto", "Mensaje", texto, errores, longitud_maxima) }}
+<p><button type="submit">Enviar mensaje</button></p>
+</form>
+{% endblock %}

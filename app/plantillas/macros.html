@@ -1,0 +1,39 @@
+{#- Piezas comunes de los formularios (WCAG 2.2: 3.3.1 identificación de
+    errores y 3.3.2 etiquetas). El resumen va al principio, con un enlace a
+    cada campo; cada campo con error lo marca aria-invalid y lo describe su
+    mensaje (aria-describedby). -#}
+
+{% macro resumen_errores(errores) -%}
+{% if errores %}
+<div class="errores" role="alert">
+<h2>Revise el formulario</h2>
+<ul>
+{% for campo, mensaje in errores.items() %}
+<li>{% if campo == "general" %}{{ mensaje }}{% else %}<a href="#{{ campo }}">{{ mensaje }}</a>{% endif %}</li>
+{% endfor %}
+</ul>
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro atributos_error(campo, errores) -%}
+{% if campo in errores %} aria-invalid="true" aria-describedby="error-{{ campo }}"{% endif %}
+{%- endmacro %}
+
+{% macro mensaje_error(campo, errores) -%}
+{% if campo in errores %}<span id="error-{{ campo }}" class="error">{{ errores[campo] }}</span>{% endif %}
+{%- endmacro %}
+
+{#- El salto de línea tras <textarea> es necesario: el analizador HTML
+    descarta el primer salto que sigue a la etiqueta, y sin él se perdería
+    el primer salto del texto de la persona. spellcheck="false": el corrector
+    mejorado de algunos navegadores envía lo que se escribe a un servicio
+    externo. -#}
+{% macro area_texto(campo, etiqueta, texto, errores, longitud_maxima) -%}
+<p>
+<label for="{{ campo }}">{{ etiqueta }}</label>
+<textarea id="{{ campo }}" name="{{ campo }}" rows="12" maxlength="{{ longitud_maxima }}" required spellcheck="false"{{ atributos_error(campo, errores) }}>
+{{ texto }}</textarea>
+{{ mensaje_error(campo, errores) }}
+</p>
+{%- endmacro %}

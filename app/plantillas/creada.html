@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block titulo %}Denuncia enviada{% endblock %}
+{% block contenido %}
+<h1>Denuncia enviada</h1>
+<p>Fecha: <time datetime="{{ fecha.isoformat() }}">{{ fecha.strftime("%d/%m/%Y") }}</time></p>
+<p>Su código de seguimiento:</p>
+<p class="codigo"><code>{{ codigo }}</code></p>
+<p><strong>Guárdelo ahora, en un lugar seguro.</strong> Esta página no se puede volver a ver y el código no se puede recuperar: sin él no podrá consultar la denuncia ni escribir a quien la instruya.</p>
+<p>No recargue esta página: enviaría la denuncia otra vez.</p>
+<p><a href="/seguimiento">Consultar una denuncia</a></p>
+{% endblock %}
