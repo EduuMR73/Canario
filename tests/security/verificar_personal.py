@@ -1908,6 +1908,15 @@ def seccion_k():
                  if not (v.get("estado") == 404 and v.get("cuerpo") == CUERPO_404)}
     negativo(f"k2) sin asignacion: el mismo 404 byte a byte en lectura, mensaje y estado {distintas or ''}".strip(),
              not distintas, control_lectura)
+    # Diagnóstico de cada respuesta inesperada: cuerpo, Retry-After y tiempo.
+    # El tiempo orienta la causa de un 503 (unos 2000 ms, lock_timeout de
+    # app/bd.py; unos 200 ms, el plazo de Redis de app/limitador.py). No
+    # cambia ningún oráculo.
+    for nombre in distintas:
+        r = respuestas[nombre]
+        p(f"   {nombre}: {r.get('estado')} {r.get('cuerpo', b'')[:200]!r} "
+          f"retry-after={(r.get('cabeceras') or {}).get('retry-after')!r} ms={round(r.get('ms') or 0)}"
+          + (f" error={r['error']}" if "error" in r else ""))
     negativo("k2) los intentos sin asignacion no cambian la denuncia ni dejan auditoria de lectura",
              fila_denuncia(den1) == f"nueva|{instr.usuario_id}|0"
              and auditoria_de("A", "lectura_denuncia", den1) == [f"personal:{instr.usuario_id}|"], control_lectura)
@@ -2456,6 +2465,8 @@ def seccion_l():
 
 def seccion_h():
     p("=== h) regla acceso del limitador (limites de produccion)")
+    # Antes de recrear la API: después su log anterior ya no existe.
+    guardar_log_api_anterior()
     r = dc_produccion("up", "-d", "--wait", "api")
     if r.rc != 0:
         raise Parada(f"no arranca la API con los limites de produccion: {r.todo.strip()[-500:]}")
@@ -2577,22 +2588,46 @@ def seccion_i():
          "i) gestion nunca imprime contrasenas")
 
 
-# Líneas del log de la API que explican un 503 o un 500. Solo llevan la clase
-# del error y su SQLSTATE (app/frontera_http.py y app/limitador.py), nunca
-# valores, y la sección i) comprueba que el log no tiene nada sensible.
+# Líneas del log de la API que explican un 503 o un 500. Hay una marca por
+# cada camino que responde 503: Redis sin responder o un cliente sin IP en el
+# limitador (app/limitador.py y app/rutas_personal.py), lock_timeout o
+# statement_timeout (app/frontera_http.py), sin hueco para un hash de
+# contraseña (app/personal.py) y una empresa sin clave (app/rutas_personal.py y
+# app/rutas_denuncias.py). Un camino nuevo de 503 necesita aquí su marca. Solo
+# llevan la clase del error y su SQLSTATE, nunca valores, y la sección i)
+# comprueba que el log no tiene nada sensible.
 MARCAS_DIAGNOSTICO = ("EVENTO limitador_no_disponible", "EVENTO limitador_cliente_invalido", "SATURACION:",
-                      "ERROR INTERNO:")
+                      "EVENTO hashes_saturados", "EVENTO empresa_sin_clave", "ERROR INTERNO:")
+
+# Log del contenedor de la API anterior a h). h) lo recrea con los límites de
+# producción, y "docker compose logs" solo devuelve el del contenedor actual:
+# sin esta copia, el diagnóstico no ve nada de lo que pasó antes de h).
+log_api_anterior = []
+
+
+def guardar_log_api_anterior():
+    """Copia el log de la API antes de recrearla. Control: la copia tiene que
+    llevar la línea de arranque con los límites de prueba, que solo escribe el
+    contenedor anterior; si no la lleva, la copia no sirve y se ve."""
+    log_api_anterior.extend(lineas_log("api"))
+    pasa(any(TEXTO_LIMITES_PRUEBA in l for l in log_api_anterior),
+         "h) control del diagnostico: guardado el log de la API anterior a h) (lleva los limites de prueba)")
 
 
 def diagnostico_api():
     """Si algo falló, imprime esas líneas antes de la limpieza: down -v se
     lleva el log, y sin él un 503 no dice si fue Redis (el limitador falla
-    cerrado si no responde en 0,2 s) o un bloqueo de PostgreSQL."""
-    lineas = [l for l in lineas_log("api") if any(m in l for m in MARCAS_DIAGNOSTICO)]
-    p("=== diagnostico: lineas de error del log de la API (las de limitador_no_disponible de h) son esperadas: "
-      "para Redis a proposito)")
-    for linea in lineas or ["(ninguna)"]:
-        p(f"   {linea}")
+    cerrado si no responde en 0,2 s) o un bloqueo de PostgreSQL. Mira el log
+    del contenedor anterior a h) y el del actual."""
+    for etiqueta, origen in (("anterior a h)", log_api_anterior), ("actual", lineas_log("api"))):
+        lineas = [l for l in origen if any(m in l for m in MARCAS_DIAGNOSTICO)]
+        p(f"=== diagnostico: lineas de error del log de la API, contenedor {etiqueta}"
+          + (" (las de limitador_no_disponible de h) son esperadas: para Redis a proposito)" if etiqueta == "actual" else ""))
+        if etiqueta == "anterior a h)" and not origen:
+            p("   (sin copia: la bateria se paro antes de h))")
+            continue
+        for linea in lineas or ["(ninguna)"]:
+            p(f"   {linea}")
 
 
 def seccion_s():
