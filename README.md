@@ -10,7 +10,7 @@ Las amenazas consideradas, las decisiones de diseño y sus límites están en el
 |---|---|
 | `app/` | La API (`principal.py` y las rutas) y la herramienta de administración `gestion.py` |
 | `db/` | Imagen de PostgreSQL, `pg_hba.conf` y el esquema, que se aplica al crear la base de datos (`db/init/`) |
-| `proxy/` | Imagen y `Caddyfile` del proxy, el único punto de entrada |
+| `proxy/` | Imagen y `Caddyfile` del proxy, el único punto de entrada, y los estáticos del sitio del denunciante (`proxy/estatico/`) |
 | `scripts/generar_secretos.py` | Crea los secretos que faltan y comprueba el conjunto |
 | `tests/security/` | Las ocho baterías de pruebas de seguridad |
 | `tests/unit/` | Las pruebas unitarias de la lógica pura de `app/` |
@@ -53,7 +53,11 @@ Las órdenes se ejecutan en PowerShell desde la raíz del repositorio. Como la r
 
    El certificado se copia fuera del repositorio. Dentro del código de Python solo hay comillas simples, porque PowerShell 5 pierde las dobles internas al pasar argumentos a un programa.
 
-El único puerto publicado es `127.0.0.1:8443`, y solo con el nombre `localhost`: cualquier otro `Host` recibe 421. Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
+Hay dos puertos publicados, los dos solo en `127.0.0.1` y solo con el nombre `localhost` (cualquier otro `Host` recibe 421):
+
+- `8443`: la API.
+- `8444`: el sitio del denunciante, en otro origen. Por ahora solo sirve la hoja de estilos base (`https://localhost:8444/estatico/canario.css`); las páginas llegan en el bloque siguiente.
+ Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
 
 Para parar sin perder datos:
 
@@ -201,7 +205,7 @@ Ocho baterías, una por área. Cada prueba negativa lleva su control positivo: s
 
 | Batería | Qué prueba |
 |---|---|
-| `verificar_esqueleto.py` | Proxy y API: sin salida a internet, único puerto, cabeceras, 421, logs sin IP, endurecimiento de los contenedores |
+| `verificar_esqueleto.py` | Proxy y API: sin salida a internet, solo los dos puertos del proxy, cabeceras, 421, sitio estático del denunciante (sin rangos y sin llegar a la API), logs sin IP, endurecimiento de los contenedores |
 | `verificar_arranque.py` | Conexión a PostgreSQL con secretos y el arranque verificado de la API |
 | `verificar_esquema.py` | Esquema, RLS entre empresas, permisos, auditoría encadenada y supresión legal en la base de datos |
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
