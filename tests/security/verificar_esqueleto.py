@@ -7,8 +7,9 @@ Qué prueba: que la API no tiene salida a internet; que los únicos puertos
 publicados son los dos del proxy (8443, la API; 8444, el sitio del
 denunciante) y solo en 127.0.0.1; que solo /salud responde; las cabeceras de
 seguridad con valores literales y sin Server; que un Host que no coincide con
-el SNI recibe 421; que el sitio del denunciante solo sirve sus estáticos, con
-sus cabeceras, sin rangos y sin llegar a la API (n); que la IP del cliente no queda en los logs de
+el SNI recibe 421; que el sitio del denunciante sirve sus estáticos con sus
+cabeceras y sin rangos, y que desde él no se alcanza la API fuera de /web (n;
+el reenvío a /web lo prueba verificar_web.py); que la IP del cliente no queda en los logs de
 Caddy ni de la API ni en el volumen de Caddy tras una ráfaga de peticiones; que
 un X-Forwarded-For falsificado no llega a la API tal cual y que uvicorn solo
 confía en las cabeceras de reenvío del proxy; usuario no root, solo lectura,
@@ -95,6 +96,8 @@ CABECERAS_HTML = {
     "content-security-policy": ("default-src 'none'; style-src 'self'; form-action 'self'; "
                                 "frame-ancestors 'none'; base-uri 'none'"),
     "cache-control": "no-store",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-origin",
 }
 RUTA_CSS = "/estatico/canario.css"
 TIPO_CSS = "text/css; charset=utf-8"
@@ -102,7 +105,8 @@ TIPO_HTML = "text/html; charset=utf-8"
 METODOS_ESTATICOS = "GET, HEAD"
 RANGO_DOBLE = "bytes=0-1,3-4"
 TIPO_RANGOS = "multipart/byteranges"
-# Rutas que no son un estático existente: la API (no debe llegar), un
+# Rutas que no son un estático existente: la API fuera de /web (el 8444 las
+# reenvía como /web/salud, /web/v1/denuncias..., que no existen), un
 # directorio sin index (no debe listarse), un fichero que no existe y cuatro
 # intentos de salir de /srv con "../" literal y codificado.
 RUTAS_404_DENUNCIANTE = ["/", "/salud", "/v1/denuncias", "/docs", "/estatico/", "/estatico/no-existe.css",
@@ -673,8 +677,8 @@ def seccion_n():
              ctl_sin[0] == 200 and ctl_sin[2] == "bytes", f"control: {ctl_sin}")
 
     # Lo que no es un estático existente da 404 en HTML, con las cabeceras del
-    # sitio. /salud además demuestra que el 8444 no llega a la API: en el 8443
-    # la misma ruta responde la API.
+    # sitio. /salud además demuestra que desde el 8444 no se alcanza la API
+    # fuera de /web: en el 8443 la misma ruta responde la API.
     salud_api = peticion("GET", "/salud")
     control_api = control and salud_api[0] == 200 and salud_api[2] == CUERPO_SALUD
     for ruta in RUTAS_404_DENUNCIANTE:
