@@ -142,6 +142,16 @@
 		# y puerto: el 8443 de la API es otro origen), la página no se puede
 		# incrustar y un <base> inyectado no cambia a dónde apuntan los enlaces.
 		Content-Security-Policy "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+		# Una ventana de otro origen que abra estas páginas (window.open) no
+		# conserva referencia a ellas ni comparte grupo de contexto: no puede
+		# navegarlas ni contar sus marcos (OWASP HTTP Headers Cheat Sheet).
+		Cross-Origin-Opener-Policy "same-origin"
+		# Ningún otro origen puede cargar estas respuestas como recurso, ni
+		# siquiera el 8443, que es del mismo sitio: por eso same-origin y no el
+		# same-site que recomienda OWASP. Nada de fuera necesita cargarlas.
+		# Sin COEP: solo hace falta para el aislamiento entre orígenes, y la
+		# CSP ya no deja cargar nada de otro origen.
+		Cross-Origin-Resource-Policy "same-origin"
 	}
 }
 
@@ -174,6 +184,15 @@ https://localhost:8443 {
 		max_size 128KiB
 	}
 
+	# Las páginas del denunciante (/web) solo se sirven en el 8444, con su CSP
+	# y sus cabeceras. Aquí no harían daño (sus formularios exigen el origen del
+	# 8444), pero cada puerto expone solo su parte. El matcher path limpia y
+	# decodifica la ruta, así que también casan //web/x, /./web/x, /WEB/x y
+	# /web%2Fx; /web suelto cubre /web/empresas/.. y similares, que limpios
+	# quedan en /web.
+	@sitio_denunciante path /web /web/*
+	error @sitio_denunciante 404
+
 	reverse_proxy api:8000 {
 		# max_size solo falla al leer el cuerpo, y por defecto el proxy lo
 		# reenvía mientras lo lee: una petición demasiado grande llegaba a la API
@@ -191,6 +210,10 @@ https://localhost:8443 {
 		import cabeceras_api
 		header Content-Type "application/json"
 
+		# El mismo cuerpo que el 404 de la API (app/frontera_http.py, MENSAJES).
+		@no_encontrado expression {err.status_code} == 404
+		respond @no_encontrado `{"detalle": "recurso no encontrado"}` 404
+
 		@demasiado_grande expression {err.status_code} == 413
 		respond @demasiado_grande `{"detalle": "cuerpo de la petición demasiado grande"}` 413
 
@@ -204,13 +227,26 @@ https://localhost:8443 {
 # Sitio del denunciante, en su propio puerto: es otro origen que la API, así
 # que la CSP, las cookies del personal (bloque siguiente) y form-action se
 # separan por origen sin CORS. No va en un subdominio porque *.localhost no
-# resuelve en Windows. Por ahora solo sirve la hoja de estilos base; las páginas
-# llegan con el adaptador HTML de la API.
+# resuelve en Windows. Sirve los estáticos y, para todo lo demás, las páginas
+# del adaptador HTML de la API (app/rutas_web.py, bajo /web).
 https://localhost:8444 {
 	tls internal
 
 	import sin_range
 	import cabeceras_html
+
+	# Las cookies no se aíslan por puerto (RFC 6265, 8.5): las que ponga el
+	# personal en el 8443 (bloque siguiente) también las enviaría el
+	# navegador aquí. Las páginas del denunciante no usan ninguna, así que no
+	# pasa ninguna a la API: el camino anónimo no lleva nada que identifique.
+	request_header -Cookie
+
+	# El mismo límite que en el 8443 y que en la API. El peor caso de un
+	# formulario urlencoded cabe: 10 000 caracteres de 4 bytes en UTF-8 son
+	# 120 000 bytes con el escapado %XX.
+	request_body {
+		max_size 128KiB
+	}
 
 	# Estáticos desde /srv/estatico, copiados en la imagen (proxy/Dockerfile),
 	# de root y con el sistema de ficheros de solo lectura. Sin browse, un
@@ -226,15 +262,63 @@ https://localhost:8444 {
 		file_server
 	}
 
-	# Cualquier otra ruta, 404. Con "error" y no con "respond", para que pase
-	# por handle_errors y todos los errores del sitio salgan de un único sitio
-	# con el mismo HTML y las mismas cabeceras.
+	# Todo lo demás va a la API, bajo /web: el visitante ve /seguimiento y la
+	# API recibe /web/seguimiento. La API solo sirve HTML en /web, así que el
+	# resto de su superficie (/v1, /salud) no es alcanzable desde aquí.
 	handle {
-		error 404
+		rewrite * /web{uri}
+
+		# Garantía de que lo reenviado está bajo /web. El rewrite no normaliza
+		# la ruta (comprobado con la imagen fijada: /web/./v1 llega tal cual),
+		# y la API tampoco (uvicorn y Starlette no resuelven "..": /web/../v1
+		# casa con las rutas de /web, no con /v1). El matcher path sí limpia y
+		# decodifica, así que /../v1, /%2e%2e/v1 o /a/../../v1, que tras el
+		# rewrite quedarían en /v1, se rechazan aquí. Defensa en profundidad:
+		# no depende de que ninguna pieza posterior normalice o deje de hacerlo.
+		@fuera_de_web not path /web/*
+		error @fuera_de_web 404
+
+		reverse_proxy api:8000 {
+			# Como en el 8443: Caddy lee el cuerpo entero antes de contactar con
+			# la API y corta él mismo con 413.
+			request_buffers 129KiB
+
+			# Del backend solo pasa HTML. Lista blanca, no negra: cualquier otra
+			# respuesta (los errores JSON de la API, un text/plain de Starlette,
+			# una sin tipo) se convierte en la página de error del sitio. Así
+			# un camino de error nuevo en la API nunca le enseña JSON a una
+			# persona, sin que nadie tenga que acordarse. Se evalúan en orden y
+			# gana el primero que casa (comprobado con la imagen fijada).
+			@html header Content-Type "text/html*"
+			handle_response @html {
+				# Solo copy_response: las cabeceras del backend ya están puestas,
+				# y copy_response_headers aquí las duplicaba (comprobado).
+				copy_response
+			}
+
+			# Error de la API: su estado, con su página. Solo se conservan las
+			# cabeceras que el navegador necesita: Retry-After (429, 503) y
+			# Allow (405). "error" necesita dos argumentos: con uno solo, el
+			# valor es el mensaje y el estado queda en 500 (comprobado).
+			@error_api status 4xx 5xx
+			handle_response @error_api {
+				copy_response_headers {
+					include Retry-After Allow
+				}
+				error "error de la API" {rp.status_code}
+			}
+
+			# Una respuesta correcta que no es HTML no debe existir en /web: es
+			# un fallo, y se ve como tal.
+			handle_response {
+				error "la API no ha respondido HTML" 500
+			}
+		}
 	}
 
-	# Errores del sitio (ruta o fichero inexistente, método no permitido): en
-	# HTML, porque los lee una persona en el navegador, y sin detalles internos.
+	# Errores del sitio (ruta inexistente, método no permitido, errores de la
+	# API): en HTML, porque los lee una persona en el navegador, y sin detalles
+	# internos.
 	handle_errors {
 		import cabeceras_html
 		header Content-Type "text/html; charset=utf-8"
@@ -251,6 +335,37 @@ https://localhost:8444 {
 </main>
 </html>
 ` 404
+
+		@demasiado_grande expression {err.status_code} == 413
+		respond @demasiado_grande `<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Texto demasiado largo - Canario</title>
+<link rel="stylesheet" href="/estatico/canario.css">
+<main>
+<h1>Texto demasiado largo</h1>
+<p>Lo enviado supera el tamaño máximo. Acorte el texto y vuelva a intentarlo.</p>
+</main>
+</html>
+` 413
+
+		# Muchas personas que usan Tor salen por la misma IP y comparten el
+		# límite (docs/threat-model.md, 8): la página lo explica sin culpar a
+		# quien la lee. Retry-After llega de la API (copy_response_headers).
+		@demasiadas expression {err.status_code} == 429
+		respond @demasiadas `<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demasiadas peticiones - Canario</title>
+<link rel="stylesheet" href="/estatico/canario.css">
+<main>
+<h1>Demasiadas peticiones</h1>
+<p>Se han recibido demasiadas peticiones desde su conexión. Espere un rato y vuelva a intentarlo.</p>
+</main>
+</html>
+` 429
 
 		@no_disponible expression {err.status_code} >= 500
 		respond @no_disponible `<!doctype html>
