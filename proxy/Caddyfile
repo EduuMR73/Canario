@@ -28,8 +28,10 @@
 		# 1.26.8 y golang.org/x/net 0.59.0: CVE-2026-78669 (denegación de servicio
 		# con tramas SETTINGS de HTTP/2) tiene arreglo en Go 1.26.9 pero no hay
 		# imagen oficial de Caddy que lo traiga. Sin h2 el código vulnerable no es
-		# alcanzable; una API sin frontend no pierde nada con HTTP/1.1, y el
-		# reenvío a la API ya era HTTP/1.1. Se vuelve a "h1 h2" con la imagen que
+		# alcanzable. Con HTTP/1.1 no se pierde nada que importe: la API responde
+		# JSON y el sitio del denunciante, páginas pequeñas con una sola hoja de
+		# estilos, sin recursos que multiplexar; el reenvío a la API ya era
+		# HTTP/1.1. Se vuelve a "h1 h2" con la imagen que
 		# traiga el arreglo (tests/security/verificar_escaneos.py y
 		# tests/security/canario.openvex.json lo vigilan).
 		protocols h1
@@ -134,7 +136,7 @@
 		# same-origin y no no-referrer: con no-referrer, el navegador manda
 		# "Origin: null" en los POST de formulario (especificación Fetch, "append
 		# a request Origin header"), y la API no podría comprobar el origen de
-		# los formularios del bloque siguiente. Con same-origin, a otro sitio no
+		# los formularios (app/rutas_web.py). Con same-origin, a otro sitio no
 		# sale nada, ni siquiera el origen.
 		Referrer-Policy "same-origin"
 		# Solo la hoja de estilos propia: ni scripts, ni imágenes, ni fuentes, ni
@@ -225,7 +227,7 @@ https://localhost:8443 {
 }
 
 # Sitio del denunciante, en su propio puerto: es otro origen que la API, así
-# que la CSP, las cookies del personal (bloque siguiente) y form-action se
+# que la CSP, las cookies del personal (cuando su frontend las use) y form-action se
 # separan por origen sin CORS. No va en un subdominio porque *.localhost no
 # resuelve en Windows. Sirve los estáticos y, para todo lo demás, las páginas
 # del adaptador HTML de la API (app/rutas_web.py, bajo /web).
@@ -236,7 +238,7 @@ https://localhost:8444 {
 	import cabeceras_html
 
 	# Las cookies no se aíslan por puerto (RFC 6265, 8.5): las que ponga el
-	# personal en el 8443 (bloque siguiente) también las enviaría el
+	# personal en el 8443 (cuando su frontend las use) también las enviaría el
 	# navegador aquí. Las páginas del denunciante no usan ninguna, así que no
 	# pasa ninguna a la API: el camino anónimo no lleva nada que identifique.
 	request_header -Cookie
