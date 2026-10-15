@@ -3,10 +3,12 @@
 de la API (docker-compose.yml, Dockerfile, proxy/Dockerfile, proxy/Caddyfile y
 app/).
 
-Qué prueba: que la API no tiene salida a internet; que el único puerto
-publicado es el del proxy y solo en 127.0.0.1; que solo /salud responde; las
-cabeceras de seguridad con valores literales y sin Server; que un Host que no
-coincide con el SNI recibe 421; que la IP del cliente no queda en los logs de
+Qué prueba: que la API no tiene salida a internet; que los únicos puertos
+publicados son los dos del proxy (8443, la API; 8444, el sitio del
+denunciante) y solo en 127.0.0.1; que solo /salud responde; las cabeceras de
+seguridad con valores literales y sin Server; que un Host que no coincide con
+el SNI recibe 421; que el sitio del denunciante solo sirve sus estáticos, con
+sus cabeceras, sin rangos y sin llegar a la API (n); que la IP del cliente no queda en los logs de
 Caddy ni de la API ni en el volumen de Caddy tras una ráfaga de peticiones; que
 un X-Forwarded-For falsificado no llega a la API tal cual y que uvicorn solo
 confía en las cabeceras de reenvío del proxy; usuario no root, solo lectura,
@@ -26,8 +28,9 @@ Usa un proyecto de Docker propio (canario_esqueleto) y levanta los servicios
 api y caddy (y postgres y redis, de los que depende la API para su arranque
 verificado).
 Nunca toca el proyecto canario, pero necesita que esté
-parado: las subredes 10.88.0.0/28 y 10.88.1.0/28 y el puerto 127.0.0.1:8443
-son fijos y no pueden estar en uso por otro proyecto (si lo están, PARADA). Al
+parado: las subredes 10.88.0.0/28 y 10.88.1.0/28 y los puertos 127.0.0.1:8443
+y 127.0.0.1:8444 son fijos y no pueden estar en uso por otro proyecto (si lo
+están, PARADA). Al
 terminar lo borra todo (down -v y las imágenes construidas). No lee ningún
 secreto: docker compose solo necesita que los ficheros de secrets/ existan.
 
@@ -64,6 +67,7 @@ estado = {"falla": False, "sin_conclusion": False}
 # Oráculos literales
 # ---------------------------------------------------------------------------
 PUERTO = 8443
+PUERTO_DENUNCIANTE = 8444
 SUBRED_APP = "10.88.0.0/28"
 SUBRED_EDGE = "10.88.1.0/28"
 IP_PROXY = "10.88.0.2"
@@ -83,12 +87,35 @@ CABECERAS = {
 }
 RUTAS_404 = ["/", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect", "/salud/", "/SALUD", "/no-existe"]
 
+# Sitio del denunciante (8444): cabeceras de las páginas HTML y de sus estáticos.
+CABECERAS_HTML = {
+    "strict-transport-security": "max-age=63072000",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "same-origin",
+    "content-security-policy": ("default-src 'none'; style-src 'self'; form-action 'self'; "
+                                "frame-ancestors 'none'; base-uri 'none'"),
+    "cache-control": "no-store",
+}
+RUTA_CSS = "/estatico/canario.css"
+TIPO_CSS = "text/css; charset=utf-8"
+TIPO_HTML = "text/html; charset=utf-8"
+METODOS_ESTATICOS = "GET, HEAD"
+RANGO_DOBLE = "bytes=0-1,3-4"
+TIPO_RANGOS = "multipart/byteranges"
+# Rutas que no son un estático existente: la API (no debe llegar), un
+# directorio sin index (no debe listarse), un fichero que no existe y cuatro
+# intentos de salir de /srv con "../" literal y codificado.
+RUTAS_404_DENUNCIANTE = ["/", "/salud", "/v1/denuncias", "/docs", "/estatico/", "/estatico/no-existe.css",
+                         "/estatico/../etc/caddy/Caddyfile", "/estatico/%2e%2e/%2e%2e/etc/passwd",
+                         "/estatico/..%2f..%2fetc/passwd", "/estatico/%2e%2e%2f%2e%2e%2fetc%2fcaddy%2fCaddyfile"]
+
 USUARIO = {"api": "10001:10001", "caddy": "10002:10002"}
 UID = {"api": "10001", "caddy": "10002"}
 MEMORIA = {"api": 268435456, "caddy": 134217728}  # 256m y 128m
 PIDS = 64
 CAP_CERO = "0000000000000000"
-PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}]}
+PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}],
+                 "8444/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8444"}]}
 # La API está en app (con el proxy), en data (con PostgreSQL) y en cache (con
 # Redis, el del limitador), nunca en edge.
 REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache"},
@@ -383,16 +410,22 @@ IMAGEN_API = ""
 IMAGEN_PROXY = ""
 
 
-def peticion(metodo, ruta, host="localhost:8443"):
-    """Petición al proxy publicado en 127.0.0.1 con SNI localhost y TLS validado."""
+def peticion(metodo, ruta, host=None, puerto=PUERTO, cabeceras=None):
+    """Petición al proxy publicado en 127.0.0.1 con SNI localhost y TLS validado.
+
+    La ruta se envía tal cual (http.client no la normaliza), así que sirve para
+    probar "../" literal.
+    """
     contexto = ssl.create_default_context(cafile=str(CA_LOCAL))
-    s = socket.create_connection(("127.0.0.1", PUERTO), timeout=10)
+    s = socket.create_connection(("127.0.0.1", puerto), timeout=10)
     t = contexto.wrap_socket(s, server_hostname="localhost")
-    c = http.client.HTTPConnection("localhost", PUERTO, timeout=10)
+    c = http.client.HTTPConnection("localhost", puerto, timeout=10)
     c.sock = t
     c.putrequest(metodo, ruta, skip_host=True)
-    c.putheader("Host", host)
+    c.putheader("Host", host or f"localhost:{puerto}")
     c.putheader("Content-Length", "0")
+    for nombre, valor in (cabeceras or {}).items():
+        c.putheader(nombre, valor)
     c.endheaders()
     r = c.getresponse()
     cuerpo = r.read()
@@ -531,6 +564,135 @@ def seccion_f():
         pasa("server" not in nombres, f"f) {etiqueta}: sin cabecera Server")
     codigo = peticion("GET", "/salud", host="otro.ejemplo")[0]
     negativo(f"f) Host distinto del SNI -> 421 ({codigo})", codigo == 421, control)
+
+
+# Cliente para n): pide el CSS sin Range y con dos rangos a cada destino (el
+# Caddy del proyecto y el de control) desde la red edge, y devuelve el código,
+# el Content-Type y el Accept-Ranges. Reintenta mientras el de control arranca.
+CLIENTE_RANGOS = r'''
+import http.client, json, socket, ssl, sys, time
+
+SIN_VERIFICAR = ssl.create_default_context()
+SIN_VERIFICAR.check_hostname = False
+SIN_VERIFICAR.verify_mode = ssl.CERT_NONE
+
+
+def pedir(destino, cabeceras):
+    for _ in range(30):
+        try:
+            s = SIN_VERIFICAR.wrap_socket(socket.create_connection((destino, 8444), timeout=10),
+                                          server_hostname="localhost")
+            break
+        except OSError:
+            time.sleep(1)
+    else:
+        return None
+    c = http.client.HTTPConnection("localhost", 8444, timeout=10)
+    c.sock = s
+    c.request("GET", "/estatico/canario.css", headers={"Host": "localhost:8444", **cabeceras})
+    r = c.getresponse()
+    r.read()
+    c.close()
+    return [r.status, r.getheader("Content-Type"), r.getheader("Accept-Ranges")]
+
+
+res = {}
+for destino in sys.argv[2:]:
+    res[destino] = {"sin_rango": pedir(destino, {}), "dos_rangos": pedir(destino, {"Range": sys.argv[1]})}
+print(json.dumps(res, sort_keys=True))
+'''
+# Cambios que convierten el Caddyfile del proyecto en el de control de n): el
+# sitio del denunciante sin la quita de Range y sin quitar Accept-Ranges. Se
+# construye desde el fichero real para que el control solo difiera en eso.
+CAMBIOS_CONTROL_RANGOS = [("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n"),
+                          ("\t\theader -Accept-Ranges\n", "")]
+
+
+def caddyfile_control_rangos():
+    texto = (RAIZ / "proxy" / "Caddyfile").read_text(encoding="utf-8")
+    for viejo, nuevo in CAMBIOS_CONTROL_RANGOS:
+        if texto.count(viejo) != 1:
+            raise Parada(f"el Caddyfile no contiene una sola vez {viejo.strip()!r}: el control de n) no se puede construir")
+        texto = texto.replace(viejo, nuevo)
+    return texto
+
+
+def cabeceras_exactas(etiqueta, cab, esperadas):
+    nombres = [k.lower() for k, _ in cab]
+    valores = {k.lower(): v for k, v in cab}
+    for nombre, valor in esperadas.items():
+        pasa(nombres.count(nombre) == 1 and valores.get(nombre) == valor,
+             f"{etiqueta}: {nombre}: {valores.get(nombre)!r}")
+    pasa("server" not in nombres, f"{etiqueta}: sin cabecera Server")
+
+
+def seccion_n():
+    p("=== n) sitio del denunciante (8444): estaticos, cabeceras, rangos y errores")
+    # Control de todo n): el CSS se sirve, con su tipo y el contenido del repo.
+    codigo, cab, cuerpo = peticion("GET", RUTA_CSS, puerto=PUERTO_DENUNCIANTE)
+    valores = {k.lower(): v for k, v in cab}
+    esperado = (RAIZ / "proxy" / "estatico" / "canario.css").read_bytes()
+    control = codigo == 200 and cuerpo == esperado
+    pasa(control, f"n) GET {RUTA_CSS} -> {codigo}, {len(cuerpo)} bytes iguales al fichero del repo (control)")
+    pasa(valores.get("content-type") == TIPO_CSS, f"n) {RUTA_CSS}: content-type: {valores.get('content-type')!r}")
+    cabeceras_exactas(f"n) {RUTA_CSS}", cab, CABECERAS_HTML)
+
+    # Rangos y Accept-Ranges: el Caddy del proyecto frente a uno de control con
+    # la misma imagen y el sitio del denunciante sin la quita de Range ni la de
+    # Accept-Ranges. El de control debe responder 206 y anunciar bytes; si no,
+    # la comprobación no distinguiría nada.
+    (TEMPORAL / "control_rangos").mkdir()
+    (TEMPORAL / "control_rangos" / "Caddyfile").write_text(caddyfile_control_rangos(), encoding="utf-8", newline="\n")
+    (TEMPORAL / "rangos.py").write_text(CLIENTE_RANGOS, encoding="utf-8", newline="\n")
+    nombre = f"{PROYECTO}_control_rangos"
+    ejecutar(["docker", "run", "-d", "--name", nombre, "--network", f"{PROYECTO}_edge",
+              "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+              "--mount", "type=volume,dst=/data",
+              "--mount", f"type=bind,src={TEMPORAL / 'control_rangos' / 'Caddyfile'},dst=/etc/caddy/Caddyfile,readonly",
+              IMAGEN_PROXY])
+    try:
+        r = docker_run("--network", f"{PROYECTO}_edge",
+                       "--mount", f"type=bind,src={TEMPORAL},dst=/prueba,readonly",
+                       "--entrypoint", "python", IMAGEN_API, "-I", "/prueba/rangos.py", RANGO_DOBLE, "caddy", nombre,
+                       timeout=120)
+    finally:
+        ejecutar(["docker", "rm", "-f", "-v", nombre])
+    try:
+        res = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        sinc(f"n) no se pudo ejecutar el cliente de rangos: {r.err.strip()[-300:]!r}")
+        return
+    real, ctl = res.get("caddy") or {}, res.get(nombre) or {}
+    p(f"   rangos: proyecto {real}; control {ctl}")
+    ctl_dos, ctl_sin = ctl.get("dos_rangos") or [None] * 3, ctl.get("sin_rango") or [None] * 3
+    real_dos, real_sin = real.get("dos_rangos") or [None] * 3, real.get("sin_rango") or [None] * 3
+    negativo(f"n) dos rangos -> 200 con el CSS entero, no 206 (CVE-2026-78667) ({real_dos[0]})",
+             real_dos[0] == 200 and real_dos[1] == TIPO_CSS,
+             ctl_dos[0] == 206 and str(ctl_dos[1]).startswith(TIPO_RANGOS), f"control: {ctl_dos}")
+    negativo(f"n) sin Accept-Ranges ({real_sin[2]!r})", real_sin[0] == 200 and real_sin[2] is None,
+             ctl_sin[0] == 200 and ctl_sin[2] == "bytes", f"control: {ctl_sin}")
+
+    # Lo que no es un estático existente da 404 en HTML, con las cabeceras del
+    # sitio. /salud además demuestra que el 8444 no llega a la API: en el 8443
+    # la misma ruta responde la API.
+    salud_api = peticion("GET", "/salud")
+    control_api = control and salud_api[0] == 200 and salud_api[2] == CUERPO_SALUD
+    for ruta in RUTAS_404_DENUNCIANTE:
+        codigo, cab, _ = peticion("GET", ruta, puerto=PUERTO_DENUNCIANTE)
+        tipo = {k.lower(): v for k, v in cab}.get("content-type")
+        negativo(f"n) GET {ruta} -> 404 en HTML ({codigo}, {tipo!r})", codigo == 404 and tipo == TIPO_HTML,
+                 control_api if ruta == "/salud" else control,
+                 f"control: CSS {control}, /salud en {PUERTO} -> {salud_api[0]}")
+    codigo, cab, _ = peticion("GET", "/no-existe", puerto=PUERTO_DENUNCIANTE)
+    cabeceras_exactas("n) error 404", cab, CABECERAS_HTML)
+
+    codigo, cab, _ = peticion("POST", RUTA_CSS, puerto=PUERTO_DENUNCIANTE)
+    valores = {k.lower(): v for k, v in cab}
+    negativo(f"n) POST {RUTA_CSS} -> 405 en HTML con Allow {METODOS_ESTATICOS} ({codigo}, {valores.get('allow')!r})",
+             codigo == 405 and valores.get("allow") == METODOS_ESTATICOS and valores.get("content-type") == TIPO_HTML,
+             control)
+    codigo = peticion("GET", RUTA_CSS, host="otro.ejemplo", puerto=PUERTO_DENUNCIANTE)[0]
+    negativo(f"n) Host distinto del SNI en {PUERTO_DENUNCIANTE} -> 421 ({codigo})", codigo == 421, control)
 
 
 def seccion_g():
@@ -743,9 +905,9 @@ def puertos_escuchando(texto):
 
 def seccion_l():
     p("=== l) Caddy: que escucha, cabeceras lentas y plazos")
-    # Sin API de administración (2019) ni servidor de redirección: solo 8443.
-    # Control: un Caddy con los valores por defecto escucha también en 2019 y
-    # en su puerto HTTP.
+    # Sin API de administración (2019) ni servidor de redirección: solo 8443
+    # (la API) y 8444 (el sitio del denunciante). Control: un Caddy con los
+    # valores por defecto escucha también en 2019 y en su puerto HTTP.
     (TEMPORAL / "control_escucha").mkdir()
     (TEMPORAL / "control_escucha" / "Caddyfile").write_text(CADDYFILE_CONTROL_ESCUCHA, encoding="utf-8", newline="\n")
     nombre = f"{PROYECTO}_control_escucha"
@@ -758,8 +920,8 @@ def seccion_l():
     finally:
         ejecutar(["docker", "rm", "-f", nombre])
     real = puertos_escuchando(exec_("caddy", *ORDEN_ESCUCHA).out)
-    negativo(f"l) Caddy solo escucha en 8443: sin API de administracion (2019) ni redireccion HTTP ({sorted(real)})",
-             real == {8443}, {2019, 8080, 8443} <= control, f"control: {sorted(control)}")
+    negativo(f"l) Caddy solo escucha en 8443 y 8444: sin API de administracion (2019) ni redireccion HTTP ({sorted(real)})",
+             real == {8443, 8444}, {2019, 8080, 8443} <= control, f"control: {sorted(control)}")
 
     # read_header: cabeceras a medias más de 10 s se cortan. Control: con 2 s
     # de pausa la petición llega.
@@ -962,13 +1124,17 @@ def subredes_ocupadas():
     return ocupadas
 
 
-def puerto_ocupado():
-    s = socket.socket()
-    s.settimeout(2)
-    try:
-        return s.connect_ex(("127.0.0.1", PUERTO)) == 0
-    finally:
-        s.close()
+def puertos_ocupados():
+    ocupados = []
+    for puerto in (PUERTO, PUERTO_DENUNCIANTE):
+        s = socket.socket()
+        s.settimeout(2)
+        try:
+            if s.connect_ex(("127.0.0.1", puerto)) == 0:
+                ocupados.append(puerto)
+        finally:
+            s.close()
+    return ocupados
 
 
 ESTADO_GIT_ARRANQUE = None
@@ -990,8 +1156,9 @@ def main():
     if ocupadas:
         p(f"PARADA: las subredes {SUBRED_APP} o {SUBRED_EDGE} ya estan en uso por {ocupadas} (pare el proyecto canario)")
         terminar_con_parada()
-    if puerto_ocupado():
-        p(f"PARADA: 127.0.0.1:{PUERTO} ya esta en uso (pare el proyecto canario)")
+    ocupados = puertos_ocupados()
+    if ocupados:
+        p(f"PARADA: 127.0.0.1:{ocupados} ya esta en uso (pare el proyecto canario)")
         terminar_con_parada()
     r = dc("config", "--quiet")
     if r.rc != 0:
@@ -1005,7 +1172,7 @@ def main():
     parada = None
     try:
         seccion_a()
-        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g,
+        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_n, seccion_g,
                         seccion_h, seccion_i, seccion_j, seccion_k, seccion_l, seccion_m):
             seccion()
     except Parada as e:
@@ -1015,7 +1182,7 @@ def main():
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
-        for nombre in ("cliente", "control_volumen", "control_autosave", "control_log"):
+        for nombre in ("cliente", "control_volumen", "control_autosave", "control_log", "control_rangos"):
             ejecutar(["docker", "rm", "-f", "-v", f"{PROYECTO}_{nombre}"])
         limpiar_sin_internet()
         if parada is not None:

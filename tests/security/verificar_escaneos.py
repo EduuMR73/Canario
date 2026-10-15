@@ -20,7 +20,8 @@ Qué prueba:
      las vulnerabilidades sin arreglo se listan (riesgo residual, sección 8 del
      modelo de amenazas);
   f) que lo que el VEX declara no alcanzable no lo es: Caddy solo con HTTP/1.1
-     (configuración adaptada y ALPN real), sin file_server y sin ECH;
+     (configuración adaptada y ALPN real en los dos puertos), cada file_server
+     detrás de la quita de la cabecera Range y sin ECH;
   g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL);
   h) un SBOM CycloneDX por imagen, que se deja en el directorio temporal del
      sistema (canario_sbom);
@@ -651,22 +652,61 @@ import sys
 import time
 
 # Ofrece h2 y http/1.1 por ALPN y escribe el protocolo que elige cada servidor.
+# Cada argumento es host:puerto.
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
 ctx.set_alpn_protocols(["h2", "http/1.1"])
-for host in sys.argv[1:]:
+for destino in sys.argv[1:]:
+    host, puerto = destino.rsplit(":", 1)
     for _ in range(60):
         try:
-            with socket.create_connection((host, 8443), timeout=5) as s:
+            with socket.create_connection((host, int(puerto)), timeout=5) as s:
                 with ctx.wrap_socket(s, server_hostname="localhost") as t:
-                    print(host, t.selected_alpn_protocol())
+                    print(destino, t.selected_alpn_protocol())
                     break
         except OSError:
             time.sleep(0.5)
     else:
-        print(host, "sin-conexion")
+        print(destino, "sin-conexion")
 """
+# Puertos en los que escucha Caddy: la API y el sitio del denunciante.
+PUERTOS_CADDY = ("8443", "8444")
+# Cambio que convierte el Caddyfile real en el de control de la quita de Range:
+# el sitio del denunciante, el que tiene file_server, sin importar sin_range.
+CONTROL_SIN_RANGE = ("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n")
+
+
+def quita_range(manejador):
+    """Un manejador headers que borra Range de la petición."""
+    borradas = ((manejador.get("request") or {}).get("delete") or [])
+    return manejador.get("handler") == "headers" and "range" in [b.lower() for b in borradas]
+
+
+def file_servers(rutas, quitado=False):
+    """Para cada file_server, si alguna ruta anterior quita Range a todas las
+    peticiones que llegan a él.
+
+    Se recorre en el orden en que Caddy ejecuta las rutas. Dentro de una ruta,
+    la quita vale para los manejadores siguientes. Para las rutas siguientes,
+    solo si la ruta que la hace no tiene condición (match): una quita con
+    condición no cubre a todas. Lo que se quite dentro de una subruta no se
+    hereda hacia fuera. Es conservador: ante la duda da "sin quita" y la
+    prueba falla de forma visible.
+    """
+    hallados = []
+    for ruta in rutas:
+        local = quitado
+        for manejador in ruta.get("handle", []):
+            if quita_range(manejador):
+                local = True
+            elif manejador.get("handler") == "file_server":
+                hallados.append(local)
+            elif manejador.get("handler") == "subroute":
+                hallados += file_servers(manejador.get("routes", []), local)
+        if not ruta.get("match"):
+            quitado = local
+    return hallados
 
 
 def caddyfile_control(cambios):
@@ -688,8 +728,16 @@ def adaptar(caddyfile=None):
     if configuracion is None:
         raise Parada(f"caddy adapt falla: {r.err.strip()[-300:]}")
     servidores = configuracion["apps"]["http"]["servers"].values()
+    # Las rutas normales y las de error de cada servidor, cada una desde cero.
+    con_quita = [q for s in servidores
+                 for rutas in (s.get("routes", []), (s.get("errors") or {}).get("routes", []))
+                 for q in file_servers(rutas)]
     return {"protocolos": [s.get("protocols") for s in servidores],
-            "file_server": '"handler": "file_server"' in json.dumps(configuracion),
+            "escucha": sorted(d.rsplit(":", 1)[1] for s in servidores for d in s.get("listen", [])),
+            "file_server": con_quita,
+            # Recuento independiente del recorrido: si file_servers() se saltase
+            # alguno, no coincidiría.
+            "file_server_total": json.dumps(configuracion).count('"handler": "file_server"'),
             "ech": "encrypted_client_hello" in json.dumps(configuracion["apps"].get("tls", {}))}
 
 
@@ -699,11 +747,17 @@ def seccion_f():
     control = adaptar(escribir(TEMPORAL / "caddy_adapt" / "Caddyfile", caddyfile_control([
         ("\tprotocols h1\n", "\tprotocols h1 h2\n"),
         ("\tskip_install_trust\n", "\tskip_install_trust\n\tech ech.canario.invalid\n"),
-        ("\treverse_proxy api:8000 {", "\tfile_server /estatico/*\n\treverse_proxy api:8000 {")])))
+        CONTROL_SIN_RANGE])))
+    pasa(real["escucha"] == list(PUERTOS_CADDY), f"f) configuracion adaptada: servidores en {real['escucha']}")
     negativo(f"f) configuracion adaptada: todos los servidores con protocols {PROTOCOLOS_CADDY} (sin HTTP/2)",
              real["protocolos"] and all(x == PROTOCOLOS_CADDY for x in real["protocolos"]),
-             control["protocolos"] == [["h1", "h2"]], str(real["protocolos"]))
-    negativo("f) configuracion adaptada: sin manejador file_server (CVE-2026-78667)", not real["file_server"], control["file_server"])
+             control["protocolos"] and all(x == ["h1", "h2"] for x in control["protocolos"]), str(real["protocolos"]))
+    # CVE-2026-78667: cada file_server con la quita de Range delante. Control: el
+    # mismo Caddyfile sin importar sin_range en el sitio del file_server.
+    negativo(f"f) configuracion adaptada: cada file_server detras de la quita de Range (CVE-2026-78667) {real['file_server']}",
+             bool(real["file_server"]) and all(real["file_server"])
+             and len(real["file_server"]) == real["file_server_total"],
+             False in control["file_server"], f"control: {control['file_server']}")
     negativo("f) configuracion adaptada: sin encrypted_client_hello (CVE-2026-97031)", not real["ech"], control["ech"])
 
     # ALPN real contra dos Caddy en marcha en una red interna: el de la imagen
@@ -721,10 +775,13 @@ def seccion_f():
     cliente = escribir(TEMPORAL / "alpn" / "alpn.py", CLIENTE_ALPN)
     r = ejecutar(["docker", "run", "--rm", "--network", red, "--read-only", "--cap-drop", "ALL", "--security-opt",
                   "no-new-privileges", "--user", "65534:65534", *montaje(cliente.parent, "/alpn"),
-                  IMG_PYTHON, "python", "-I", "/alpn/alpn.py", "real", "control"], timeout=120)
+                  IMG_PYTHON, "python", "-I", "/alpn/alpn.py", *[f"real:{x}" for x in PUERTOS_CADDY], "control:8443"],
+                 timeout=120)
     elegido = dict(l.split(" ", 1) for l in r.out.splitlines() if " " in l)
-    negativo(f"f) ALPN: ofreciendo h2 y http/1.1, Caddy elige {ALPN_REAL}", elegido.get("real") == ALPN_REAL,
-             elegido.get("control") == ALPN_CONTROL, f"real={elegido.get('real')} control={elegido.get('control')}")
+    for puerto in PUERTOS_CADDY:
+        negativo(f"f) ALPN en {puerto}: ofreciendo h2 y http/1.1, Caddy elige {ALPN_REAL}",
+                 elegido.get(f"real:{puerto}") == ALPN_REAL, elegido.get("control:8443") == ALPN_CONTROL,
+                 f"real={elegido.get(f'real:{puerto}')} control={elegido.get('control:8443')}")
 
 
 # ---------------------------------------------------------------------------
