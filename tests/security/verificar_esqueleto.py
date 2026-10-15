@@ -105,11 +105,12 @@ TIPO_HTML = "text/html; charset=utf-8"
 METODOS_ESTATICOS = "GET, HEAD"
 RANGO_DOBLE = "bytes=0-1,3-4"
 TIPO_RANGOS = "multipart/byteranges"
-# Rutas que no son un estático existente: la API fuera de /web (el 8444 las
-# reenvía como /web/salud, /web/v1/denuncias..., que no existen), un
-# directorio sin index (no debe listarse), un fichero que no existe y cuatro
-# intentos de salir de /srv con "../" literal y codificado.
-RUTAS_404_DENUNCIANTE = ["/", "/salud", "/v1/denuncias", "/docs", "/estatico/", "/estatico/no-existe.css",
+# Rutas que no son un estático existente ni una página: la API fuera de /web
+# (el 8444 las reenvía como /web/salud, /web/v1/denuncias..., que no existen),
+# un directorio sin index (no debe listarse), un fichero que no existe y cuatro
+# intentos de salir de /srv con "../" literal y codificado. "/" es la página de
+# inicio (app/rutas_web.py); las páginas las prueba verificar_web.py.
+RUTAS_404_DENUNCIANTE = ["/salud", "/v1/denuncias", "/docs", "/estatico/", "/estatico/no-existe.css",
                          "/estatico/../etc/caddy/Caddyfile", "/estatico/%2e%2e/%2e%2e/etc/passwd",
                          "/estatico/..%2f..%2fetc/passwd", "/estatico/%2e%2e%2f%2e%2e%2fetc%2fcaddy%2fCaddyfile"]
 

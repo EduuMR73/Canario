@@ -194,7 +194,7 @@ CONTROL_MODELOS = {"Control.sin_tipo": False, "Control.con_tipo": True, "Control
 MODELOS_DENTRO = """
 import json, typing
 from pydantic import AfterValidator, BaseModel
-from app import rutas_denuncias, rutas_personal, validacion
+from app import rutas_denuncias, rutas_personal, rutas_web, validacion
 VALIDADORES = {validacion.texto_linea, validacion.texto_libre}
 
 def textos(tipo):
@@ -221,7 +221,9 @@ class Control(BaseModel):
     con_tipo: validacion.TextoLinea
     opcional_sin_tipo: str | None = None
 
-reales = [c for m in (rutas_denuncias, rutas_personal) for c in vars(m).values()
+# rutas_web no define modelos (valida con los de rutas_denuncias), pero se
+# recorre igual: uno que se añada allí queda revisado sin tocar esta prueba.
+reales = [c for m in (rutas_denuncias, rutas_personal, rutas_web) for c in vars(m).values()
           if isinstance(c, type) and issubclass(c, BaseModel) and c.__module__ == m.__name__]
 print(json.dumps({"reales": campos(reales), "control": campos([Control])}, sort_keys=True))
 """

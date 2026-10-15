@@ -42,6 +42,17 @@ class ReglaDeCadaRuta(unittest.TestCase):
             "/v1/empresas/abc/denuncias/": "otras",
             "/v1/personal/denuncias": "otras",
             "": "otras",
+            # Páginas del denunciante (app/rutas_web.py): cada acción con la
+            # regla de su ruta de /v1; los formularios (GET), en otras.
+            "/web/": "otras",
+            "/web/empresas/abc": "otras",
+            "/web/empresas/abc/denuncias": "denuncia",
+            "/web/empresas/a/b/denuncias": "otras",
+            "/web/seguimiento": "otras",
+            "/web/seguimiento/consulta": "seguimiento",
+            "/web/seguimiento/consulta/": "otras",
+            "/web/seguimiento/mensajes": "mensajes",
+            "/web/v1/seguimiento": "otras",
         }
         for ruta, regla in casos.items():
             with self.subTest(ruta=ruta):

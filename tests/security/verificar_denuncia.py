@@ -403,7 +403,17 @@ RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguim
              # Redacción (art. 32.2): instrucción de un admin, con sesión,
              # como el resto de la instrucción.
              "/v1/personal/denuncias/x/redaccion": "otras",
-             "/v1/personal/denuncias/x/mensajes/x/redaccion": "otras"}
+             "/v1/personal/denuncias/x/mensajes/x/redaccion": "otras",
+             # Páginas del denunciante (app/rutas_web.py): cada acción, con la
+             # misma regla que su ruta de /v1 (mismo contador); las que solo
+             # muestran un formulario, en otras.
+             "/web/": "otras", "/web/empresas/x": "otras", "/web/empresas/x/denuncias": "denuncia",
+             "/web/seguimiento": "otras", "/web/seguimiento/consulta": "seguimiento",
+             "/web/seguimiento/mensajes": "mensajes"}
+# Rutas sin regla propia (no registradas o con un segmento de más): deben caer
+# en otras. Se pasan al script de dentro separadas por comas (ninguna lleva).
+RUTAS_SIN_REGLA = ("/v1/nueva", "/otra", "/salud/", "/v1/empresas/a/b/denuncias", "/web/empresas/a/b/denuncias",
+                   "/web/seguimiento/consulta/")
 # Procesos de un contenedor: "<pid> <línea de comandos>" por línea, leídos de
 # /proc con sh (sin ps, que la imagen no trae). Las propias líneas de sh y tr
 # no contienen "python" ni "uvicorn".
@@ -607,13 +617,14 @@ print(json.dumps(res, sort_keys=True))
 LIMITADOR_DENTRO = """
 import json
 import re
+import sys
 from app import limitador
 from app.principal import aplicacion
 # Cualquier parámetro de ruta ({identificador}, {secuencia}...) pasa a "x",
 # también los que se añadan: la ruta nueva sigue fallando por RUTAS_API.
 rutas = sorted(re.sub("[{][^}]*[}]", "x", r) for r in aplicacion.openapi()["paths"])
 res = {"rutas": {r: limitador.regla_de(r) for r in rutas},
-       "otras": {r: limitador.regla_de(r) for r in ("/v1/nueva", "/otra", "/salud/", "/v1/empresas/a/b/denuncias")}}
+       "otras": {r: limitador.regla_de(r) for r in sys.argv[1].split(",")}}
 s1, s2 = b"1" * 32, b"2" * 32
 h = limitador.huella_cliente
 res["ipv6_mismo_64"] = h(s1, "2001:db8::1") == h(s1, "2001:db8::ffff:ffff:ffff:ffff")
@@ -2413,7 +2424,7 @@ def seccion_r():
     # r7) Código real dentro de la API: regla de cada ruta registrada (una
     # ruta nueva hace fallar esta prueba hasta que se decida su regla) y de
     # rutas inexistentes, y la huella de cliente con IPv4 e IPv6.
-    r = dc("exec", "-T", "api", "python", "-c", LIMITADOR_DENTRO)
+    r = dc("exec", "-T", "api", "python", "-c", LIMITADOR_DENTRO, ",".join(RUTAS_SIN_REGLA))
     try:
         res = json.loads(r.out.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -2421,7 +2432,7 @@ def seccion_r():
         res = None
     if res is not None:
         pasa(res["rutas"] == RUTAS_API, f"r7) reglas de las rutas registradas = {res['rutas']}")
-        pasa(res["otras"] == {r_: "otras" for r_ in ("/v1/nueva", "/otra", "/salud/", "/v1/empresas/a/b/denuncias")},
+        pasa(res["otras"] == {r_: "otras" for r_ in RUTAS_SIN_REGLA},
              f"r7) lo que no tiene regla propia cae en otras (cerrado por construccion): {res['otras']}")
         control = res["ipv4_distintas"] is True and res["longitud"] == 32
         pasa(control, "r7) control: dos IPv4 distintas tienen huellas distintas de 128 bits")

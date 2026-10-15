@@ -71,8 +71,9 @@ PRUEBAS_POR_FICHERO = {
     "test_personal": 8,
     "test_tokens": 10,
     "test_validacion": 8,
+    "test_web": 17,
 }
-TOTAL_PRUEBAS = 153
+TOTAL_PRUEBAS = 170
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -122,6 +123,27 @@ MUTANTES = [
     ("rutas_personal.py", 'f"{nombre}={_id_para_registro(valor)}"', 'f"{nombre}={valor}"',
      "test_errores.AccesoDenegadoPorLaAplicacion.test_salto_de_linea_en_la_ruta_no_llega_al_log",
      "el id de la ruta llega tal cual al log (un %0A inyecta una linea)"),
+    # Páginas del denunciante (app/rutas_web.py).
+    ("rutas_web.py", "    autoescape=True,\n", "    autoescape=False,\n",
+     "test_web.Plantillas.test_autoescape", "las plantillas no escapan lo que escribe el usuario (XSS)"),
+    ("rutas_web.py", '    if cabeceras.get("origin") != origen_web:\n        return False\n', "",
+     "test_web.Origen.test_comprobacion", "un formulario enviado desde otro sitio se acepta (CSRF)"),
+    ("rutas_web.py", 'sitio is None or sitio == "same-origin"', 'sitio is None or sitio != "cross-site"',
+     "test_web.Origen.test_comprobacion", "se acepta un envio same-site, como el del 8443"),
+    ("rutas_web.py", ("        if not origen_aceptado(peticion.headers, peticion.app.state.origen_web):\n"
+                      "            raise HTTPException(403)\n"), "",
+     "test_web.Dependencia.test_origen_antes_del_cuerpo", "el POST no comprueba el origen antes de leer el cuerpo"),
+    ("rutas_web.py", "    if not _CUERPO_URLENCODED.fullmatch(cuerpo):\n        return None\n", "",
+     "test_web.Formulario.test_rechazos", "un cuerpo que no genera un navegador (un % suelto) se acepta"),
+    ("rutas_web.py", 'valor.replace("' + B + 'r' + B + 'n", "' + B + 'n")', "valor",
+     "test_web.Formulario.test_valido", "el CRLF de la codificacion del envio se guarda en la denuncia"),
+    ("rutas_web.py", 'or puerto == "443")', ")",
+     "test_web.Origen.test_cargar_rechazos", "se acepta un origen con :443, que ningun navegador envia"),
+    ("limitador.py", 're.compile(r"/(?:v1|web)/empresas/[^/]+/denuncias")', 're.compile(r"/v1/empresas/[^/]+/denuncias")',
+     "test_limitador.ReglaDeCadaRuta.test_reglas", "una denuncia por formulario no gasta el cupo de denuncias"),
+    ("limitador.py", 'RUTAS_MENSAJES = {"/v1/seguimiento/mensajes", "/web/seguimiento/mensajes"}',
+     'RUTAS_MENSAJES = {"/v1/seguimiento/mensajes"}',
+     "test_limitador.ReglaDeCadaRuta.test_reglas", "un mensaje por formulario no gasta el cupo de mensajes"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

@@ -19,8 +19,32 @@ haga la API. Prueba:
 * g) que /web no es alcanzable desde el 8443, con el mismo 404 que la API;
 * h) el límite de cuerpo en el 8444.
 
-La parte B (la pila entera con las páginas reales) llega con el adaptador HTML
-de la API (app/rutas_web.py).
+Parte B, la pila entera: la API real (app/rutas_web.py) con PostgreSQL y
+Redis, una empresa dada de alta con gestion y peticiones como las de un
+navegador. Prueba:
+
+* i) que la API arranca con el origen del sitio en el log;
+* j) la página de inicio, con las cabeceras del sitio;
+* k) el formulario de una empresa, y el mismo 404 para una empresa que no
+  existe que para una ruta que no existe;
+* l) que una denuncia por formulario se crea, que el código sale una sola vez
+  y que se guarda lo mismo que guardaría la API JSON (CRLF -> LF), leyéndola
+  por /v1 en el 8443;
+* m) la consulta: todo escapado, el código en el cuerpo y el mismo 404 para
+  un código que no existe, sin repetirlo;
+* n) los mensajes, y que un texto vacío vuelve con el formulario;
+* o) que un formulario de otro origen (o sin Origin, o same-site) se rechaza
+  sin crear nada;
+* p) que el cuerpo se lee de forma estricta (tipo, campos repetidos o de más);
+* q) que /v1 no se alcanza desde el 8444 y que ninguna respuesta del 8444 es
+  JSON;
+* r) que un NUL (%00) en un formulario se rechaza en la validación sin
+  guardar nada: 422 con lo escrito en la denuncia y el mensaje, y el mismo
+  404 que un código inexistente en la consulta;
+* t) que el camino anónimo por /web (de j a r: páginas, denuncias, consultas,
+  mensajes, 400, 403, 404, 415 y 422) no deja ninguna línea en el log de la
+  API, y que ni los textos, ni el código, ni el identificador de la empresa
+  aparecen en los logs de la API, PostgreSQL y Caddy.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales. Que una
@@ -37,7 +61,8 @@ Usa un proyecto de Docker propio (canario_web). Necesita que el proyecto
 canario y las demás baterías estén parados: las subredes 10.88.0.0/28 y
 10.88.1.0/28 y los puertos 127.0.0.1:8443 y 127.0.0.1:8444 son fijos (si están
 en uso, PARADA). Al terminar lo borra todo (down -v y las imágenes
-construidas). No lee ningún secreto. Los ficheros auxiliares van a un
+construidas, también la de gestion). No lee ningún secreto: la API y gestion
+los reciben de secrets/ como Docker secrets. Los ficheros auxiliares van a un
 directorio temporal del sistema, nunca al repositorio. La salida completa se
 guarda en verificacion_web.txt dentro del directorio temporal del sistema. El
 código de salida es 0 solo si el resultado global es OK.
@@ -47,12 +72,15 @@ Solo usa la biblioteca estándar.
 import http.client
 import json
 import pathlib
+import re
+import secrets
 import shutil
 import socket
 import ssl
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 
 RAIZ = pathlib.Path.cwd()
@@ -120,6 +148,28 @@ CABECERAS_HTML = {
 CUERPO_404_API = b'{"detalle": "recurso no encontrado"}'
 WEB_EN_API = ["/web", "/web/", "/web/seguimiento", "//web/seguimiento", "/./web/seguimiento", "/WEB/seguimiento",
               "/web%2Fseguimiento", "/web/empresas/%2e%2e"]
+
+# Parte B. Límites altos para que las pruebas funcionales no choquen con los
+# de producción; el 429 y su página los prueba e) y la regla de cada ruta,
+# tests/unit/test_limitador.py y verificar_denuncia.py (r7).
+LIMITES_PRUEBA = "denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,cuenta=1000/60"
+TEXTO_ORIGEN = "ORIGEN WEB (por defecto): https://localhost:8444"
+ORIGEN_WEB = "https://localhost:8444"
+FORMULARIO = "application/x-www-form-urlencoded"
+# Lo que manda un navegador en un POST de formulario del mismo origen.
+CABECERAS_NAVEGADOR = {"Origin": ORIGEN_WEB, "Sec-Fetch-Site": "same-origin", "Content-Type": FORMULARIO}
+PATRON_ALTA = re.compile(r"empresa creada: empresa_id=([0-9a-f-]{36}) identificador_publico=([0-9a-f]{32})")
+PATRON_CODIGO = re.compile(rb'<p class="codigo"><code>([^<]+)</code></p>')
+# Un texto con HTML y un salto de línea, enviado como lo codifica un navegador
+# (el salto, como CRLF: %0D%0A).
+TEXTO_HTML = "<script>alert(1)</script> & \"comillas\""
+CUERPO_DENUNCIA = ("categoria=fraude&texto=%3Cscript%3Ealert%281%29%3C%2Fscript%3E+%26+%22comillas%22"
+                   "%0D%0Asegunda+l%C3%ADnea").encode("ascii")
+TEXTO_GUARDADO = TEXTO_HTML + "\nsegunda línea"
+MENSAJE_CODIGO = "código de seguimiento no válido"
+# r) El mensaje fijo del campo de texto (app/rutas_web.py, ERROR_TEXTO).
+ERROR_TEXTO = "Escriba el texto. No puede estar vacío ni superar los 10000 caracteres."
+EMPRESA_INEXISTENTE = "0" * 32
 
 # ---------------------------------------------------------------------------
 # Aplicación de eco que sustituye a la API (se escribe en el directorio temporal)
@@ -197,15 +247,27 @@ def p(texto=""):
     lineas_salida.append(texto)
 
 
-def ejecutar(args, timeout=900):
+def ejecutar(args, timeout=900, entrada=None):
     # check=False explícito: el código de salida se comprueba en cada llamada.
-    r = subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+    r = subprocess.run(args, capture_output=True, timeout=timeout, check=False, input=entrada)
     return R(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
 
 
-def dc(*args, override=None):
+def dc(*args, override=None, entrada=None):
     base = BASE + (["-f", str(override)] if override else [])
-    return ejecutar(base + list(args))
+    return ejecutar(base + list(args), entrada=entrada)
+
+
+def dc_con_gestion(*args):
+    """compose con el perfil gestion. down solo actúa sobre los servicios de
+    los perfiles activos: sin él, la imagen de gestion quedaría sin borrar."""
+    return ejecutar(BASE + ["--profile", "gestion"] + list(args))
+
+
+def sup(sql):
+    """SQL como superusuario por el socket del contenedor (peer)."""
+    return dc("exec", "-T", "postgres", "psql", "-U", "postgres", "-d", "canario", "-X", "-q",
+              "-A", "-t", "-v", "ON_ERROR_STOP=1", "-f", "-", entrada=sql.encode("utf-8"))
 
 
 def pasa(cond, texto):
@@ -231,6 +293,20 @@ def negativo(nombre, cond, control_ok, detalle=""):
 
 TEMPORAL = None
 CA_LOCAL = None
+
+
+def esperar(condicion, maximo):
+    """Espera hasta que condicion() sea verdadera o pasen maximo segundos."""
+    limite = time.monotonic() + maximo
+    while time.monotonic() < limite:
+        if condicion():
+            return True
+        time.sleep(1)
+    return condicion()
+
+
+def log_de(servicio):
+    return dc("logs", "--no-color", "--no-log-prefix", servicio).todo
 
 
 def peticion(metodo, ruta, puerto=PUERTO_WEB, cabeceras=None, cuerpo=b""):
@@ -429,11 +505,285 @@ def seccion_h():
 
 
 # ---------------------------------------------------------------------------
+# Parte B: la pila entera, con la API real
+# ---------------------------------------------------------------------------
+IDENTIFICADOR = ""
+# Líneas del log de la API al terminar i): t) cuenta las que aparecen después.
+LINEAS_API = None
+
+
+def pagina_api(respuesta, codigo):
+    """Página HTML generada por la API (pasa por ella: Via), con ese estado."""
+    estado_r, cab, _ = respuesta
+    return estado_r == codigo and una(cab, "content-type") == TIPO_HTML and "via" in cab
+
+
+def enviar(ruta, cuerpo, cabeceras=None):
+    """POST de formulario como el de un navegador, salvo lo que se cambie."""
+    return peticion("POST", ruta, cabeceras={**CABECERAS_NAVEGADOR, **(cabeceras or {})}, cuerpo=cuerpo)
+
+
+def sin(cabecera):
+    """Las cabeceras del navegador sin una de ellas."""
+    return {k: v for k, v in CABECERAS_NAVEGADOR.items() if k != cabecera}
+
+
+def contar(tabla):
+    r = sup(f"select count(*) from canal.{tabla};")
+    return int(r.out.strip()) if r.rc == 0 and r.out.strip().isdigit() else None
+
+
+def contar_denuncias():
+    return contar("denuncia")
+
+
+def seccion_i():
+    global IDENTIFICADOR, LINEAS_API
+    p("=== i) arranque de la API real (con PostgreSQL y Redis) y alta de una empresa")
+    limites = TEMPORAL / "limites.yml"
+    limites.write_text(f"services:\n  api:\n    environment:\n      CANARIO_LIMITES: \"{LIMITES_PRUEBA}\"\n",
+                       encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(limites)])
+    r = dc("up", "-d", "--wait", "api", "caddy")
+    p(f"up -d --wait api caddy (API real) -> codigo {r.rc}")
+    if r.rc != 0:
+        p(r.todo.strip()[-1500:])
+        raise Parada("no arranca la API real")
+    registro = dc("logs", "--no-color", "--no-log-prefix", "api").todo
+    pasa(TEXTO_ORIGEN in registro, f"i) la API registra el origen del sitio ({TEXTO_ORIGEN!r})")
+    r = dc("run", "--rm", "-T", "gestion", "alta-empresa", "--nombre", "Empresa Web", "--zona", "Europe/Madrid")
+    alta = PATRON_ALTA.search(r.out)
+    if r.rc != 0 or alta is None:
+        p(f"   gestion: codigo {r.rc} {r.err.strip()[-300:]!r}")
+        raise Parada("no se pudo dar de alta la empresa de prueba")
+    IDENTIFICADOR = alta.group(2)
+    p(f"   empresa de prueba: {IDENTIFICADOR}")
+    LINEAS_API = len(log_de("api").splitlines())
+
+
+def seccion_j():
+    p("=== j) pagina de inicio")
+    respuesta = peticion("GET", "/")
+    pasa(pagina_api(respuesta, 200) and "<h1>Canal de denuncias anónimo</h1>".encode() in respuesta[2],
+         f"j) GET / -> 200, la pagina de inicio de la API ({respuesta[0]})")
+    cabeceras_exactas("j) pagina de inicio", respuesta[1], CABECERAS_HTML)
+
+
+def seccion_k():
+    p("=== k) formulario de una empresa y 404 uniforme")
+    respuesta = peticion("GET", f"/empresas/{IDENTIFICADOR}")
+    accion = f'action="/empresas/{IDENTIFICADOR}/denuncias"'.encode()
+    control = pagina_api(respuesta, 200) and accion in respuesta[2]
+    pasa(control, f"k) GET /empresas/<empresa> -> 200 con el formulario que envia a su ruta ({respuesta[0]})")
+    no_existe = peticion("GET", "/no-existe")
+    for ruta in (f"/empresas/{EMPRESA_INEXISTENTE}", f"/empresas/{IDENTIFICADOR.upper()}", "/empresas/x"):
+        otra = peticion("GET", ruta)
+        negativo(f"k) GET {ruta} -> el mismo 404 que una ruta inexistente ({otra[0]})",
+                 generada_por_caddy(otra, 404, "Página no encontrada") and otra[2] == no_existe[2], control)
+
+
+CODIGO = ""
+
+
+def seccion_l():
+    global CODIGO
+    p("=== l) denuncia por formulario")
+    antes = contar_denuncias()
+    respuesta = enviar(f"/empresas/{IDENTIFICADOR}/denuncias", CUERPO_DENUNCIA)
+    encontrado = PATRON_CODIGO.findall(respuesta[2])
+    pasa(pagina_api(respuesta, 201) and len(encontrado) == 1,
+         f"l) POST de la denuncia -> 201 con el codigo una sola vez ({respuesta[0]}, {len(encontrado)})")
+    pasa(antes is not None and contar_denuncias() == antes + 1, "l) se crea exactamente una denuncia")
+    if len(encontrado) != 1:
+        raise Parada("sin codigo de seguimiento no se puede seguir")
+    CODIGO = encontrado[0].decode("ascii")
+    # Lo guardado, leído por la API JSON: el mismo texto que escribió la
+    # persona, con LF y no con el CRLF del envío.
+    cuerpo = json.dumps({"codigo": CODIGO}).encode()
+    codigo, _, datos = peticion("POST", "/v1/seguimiento", puerto=PUERTO_API,
+                                cabeceras={"Content-Type": "application/json"}, cuerpo=cuerpo)
+    leido = json.loads(datos) if codigo == 200 else {}
+    pasa(leido.get("texto") == TEXTO_GUARDADO and leido.get("categoria") == "fraude",
+         f"l) por /v1 se lee el mismo texto, con LF ({codigo}, {leido.get('texto')!r})")
+
+
+def seccion_m():
+    p("=== m) consulta por formulario")
+    respuesta = enviar("/seguimiento/consulta", f"codigo={CODIGO}".encode("ascii"))
+    html = respuesta[2]
+    control = pagina_api(respuesta, 200) and "segunda línea".encode() in html
+    pasa(control, f"m) POST de la consulta -> 200 con la denuncia ({respuesta[0]})")
+    negativo("m) el texto de la denuncia sale escapado (sin <script>)",
+             b"<script>" not in html and b"&lt;script&gt;alert(1)&lt;/script&gt; &amp; &#34;comillas&#34;" in html, control)
+    pasa(f'<input type="hidden" name="codigo" value="{CODIGO}">'.encode() in html,
+         "m) el codigo va oculto en el formulario de mensajes (cuerpo del POST, nunca en la URL)")
+    for codigo in ("Z" * len(CODIGO), "x"):
+        respuesta = enviar("/seguimiento/consulta", f"codigo={codigo}".encode("ascii"))
+        negativo(f"m) un codigo que no existe ({len(codigo)} caracteres) -> 404 con el formulario, sin repetirlo",
+                 pagina_api(respuesta, 404) and MENSAJE_CODIGO.encode() in respuesta[2]
+                 and f'value="{codigo}"'.encode() not in respuesta[2], control, f"{respuesta[0]}")
+
+
+def seccion_n():
+    p("=== n) mensajes por formulario")
+    respuesta = enviar("/seguimiento/mensajes", f"codigo={CODIGO}&texto=hola+desde+la+web".encode("ascii"))
+    control = pagina_api(respuesta, 201) and b"Mensaje enviado." in respuesta[2] and b"hola desde la web" in respuesta[2]
+    pasa(control, f"n) POST de un mensaje -> 201 con el expediente y el mensaje ({respuesta[0]})")
+    respuesta = enviar("/seguimiento/mensajes", f"codigo={CODIGO}&texto=+++".encode("ascii"))
+    negativo("n) un mensaje solo de espacios -> 422 con el formulario y lo escrito",
+             pagina_api(respuesta, 422) and b'aria-invalid="true"' in respuesta[2]
+             and b">\n   </textarea>" in respuesta[2], control, f"{respuesta[0]}")
+
+
+def seccion_o():
+    p("=== o) formularios de otro origen")
+    cuerpo = b"categoria=acoso&texto=denuncia+enviada+desde+otro+sitio"
+    ruta = f"/empresas/{IDENTIFICADOR}/denuncias"
+    antes = contar_denuncias()
+    casos = {
+        "sin Origin": sin("Origin"),
+        "Origin de otro sitio": {**sin("Sec-Fetch-Site"), "Origin": "https://atacante.ejemplo"},
+        "Origin del 8443 (mismo sitio)": {**sin("Sec-Fetch-Site"), "Origin": "https://localhost:8443"},
+        "Origin null": {**sin("Sec-Fetch-Site"), "Origin": "null"},
+        "Sec-Fetch-Site cross-site": {**CABECERAS_NAVEGADOR, "Sec-Fetch-Site": "cross-site"},
+        "Sec-Fetch-Site same-site": {**CABECERAS_NAVEGADOR, "Sec-Fetch-Site": "same-site"},
+    }
+    resultados = {nombre: peticion("POST", ruta, cabeceras=cab, cuerpo=cuerpo) for nombre, cab in casos.items()}
+    despues = contar_denuncias()
+    # Control: con las cabeceras de un navegador del mismo origen, sí se crea.
+    aceptada = enviar(ruta, cuerpo)
+    control = pagina_api(aceptada, 201) and despues is not None and contar_denuncias() == despues + 1
+    pasa(control, f"o) control: el mismo envio desde el sitio crea la denuncia ({aceptada[0]})")
+    for nombre, respuesta in resultados.items():
+        negativo(f"o) {nombre} -> 403 con la pagina del sitio ({respuesta[0]})",
+                 generada_por_caddy(respuesta, 403, "Petición no válida"), control)
+    negativo(f"o) ninguno de los envios rechazados crea una denuncia ({antes} -> {despues})",
+             antes is not None and despues == antes, control)
+
+
+def seccion_p():
+    p("=== p) lectura estricta del cuerpo")
+    ruta = "/seguimiento/consulta"
+    control = pagina_api(enviar(ruta, f"codigo={CODIGO}".encode("ascii")), 200)
+    pasa(control, "p) control: el cuerpo de un navegador se acepta")
+    casos = {
+        "JSON en vez de formulario": ({"Content-Type": "application/json"}, json.dumps({"codigo": CODIGO}).encode(), 415),
+        "multipart": ({"Content-Type": "multipart/form-data; boundary=x"}, b"--x--", 415),
+        "campo repetido": ({}, f"codigo={CODIGO}&codigo={CODIGO}".encode("ascii"), 400),
+        "campo de mas": ({}, f"codigo={CODIGO}&otro=1".encode("ascii"), 400),
+        "% suelto": ({}, b"codigo=100%", 400),
+        "UTF-8 no valido": ({}, b"codigo=%FF", 400),
+    }
+    for nombre, (cabeceras, cuerpo, codigo) in casos.items():
+        respuesta = enviar(ruta, cuerpo, cabeceras)
+        negativo(f"p) {nombre} -> {codigo} con la pagina del sitio ({respuesta[0]})",
+                 generada_por_caddy(respuesta, codigo, "Petición no válida"), control)
+
+
+def seccion_q():
+    p("=== q) /v1 no se alcanza desde el 8444 y el 8444 nunca responde JSON")
+    control = pagina_api(enviar("/seguimiento/consulta", f"codigo={CODIGO}".encode("ascii")), 200)
+    cuerpo = json.dumps({"codigo": CODIGO}).encode()
+    for ruta in ("/v1/seguimiento", "/v1/empresas/" + IDENTIFICADOR + "/denuncias"):
+        respuesta = peticion("POST", ruta, cabeceras={"Content-Type": "application/json"}, cuerpo=cuerpo)
+        negativo(f"q) POST {ruta} en el 8444 -> 404 del sitio ({respuesta[0]})",
+                 generada_por_caddy(respuesta, 404, "Página no encontrada"), control)
+    # Una muestra de todo lo que puede responder el 8444: páginas, errores de la
+    # API y errores de Caddy. Ninguna puede ser JSON.
+    muestras = [peticion("GET", "/"), peticion("GET", f"/empresas/{IDENTIFICADOR}"), peticion("GET", "/seguimiento"),
+                peticion("GET", "/no-existe"), peticion("DELETE", "/seguimiento"), peticion("GET", "/seguimiento/consulta"),
+                enviar("/seguimiento/consulta", b"codigo=x"), enviar("/seguimiento/consulta", b"codigo=%FF"),
+                peticion("POST", "/seguimiento/consulta", cuerpo=b"codigo=x")]
+    tipos = sorted({str(m[1].get("content-type")) for m in muestras})
+    negativo(f"q) las {len(muestras)} respuestas de muestra son HTML ({tipos})",
+             all(una(m[1], "content-type") == TIPO_HTML for m in muestras), control)
+
+
+def seccion_r():
+    # %00 es UTF-8 válido: pasa la lectura del formulario (p) y lo rechaza la
+    # validación (TextoLibre y TextoLinea, app/validacion.py). Un surrogate o
+    # un UTF-8 mal formado no llegan ahí: los rechaza la lectura con 400
+    # (tests/unit/test_web.py, Formulario.test_rechazos).
+    # Decisión fijada aquí: el 422 devuelve lo escrito, NUL incluido, para que
+    # la persona no pierda su texto en ningún 422. Va escapado y solo a quien lo
+    # envió (el origen se comprueba antes); el navegador muestra el NUL como
+    # U+FFFD. El mensaje es el genérico del campo, aunque no nombre el NUL: un
+    # navegador no lo envía desde el formulario. Si esto cambia, falla aquí.
+    p("=== r) NUL en los formularios: rechazado sin guardar nada")
+    ruta = f"/empresas/{IDENTIFICADOR}/denuncias"
+    antes = contar("denuncia")
+    respuesta = enviar(ruta, b"categoria=acoso&texto=con%00nul")
+    despues = contar("denuncia")
+    control = pagina_api(enviar(ruta, b"categoria=acoso&texto=sin+nul"), 201) and contar("denuncia") == despues + 1
+    pasa(control, "r) control: la misma denuncia sin el NUL se crea (201)")
+    negativo(f"r) denuncia con NUL en el texto -> 422 con el mensaje del campo y lo escrito ({respuesta[0]})",
+             pagina_api(respuesta, 422) and b'aria-invalid="true"' in respuesta[2]
+             and ERROR_TEXTO.encode() in respuesta[2] and b">\ncon\x00nul</textarea>" in respuesta[2], control)
+    negativo(f"r) la denuncia con NUL no se guarda ({antes} -> {despues})", antes is not None and despues == antes, control)
+
+    inexistente = enviar("/seguimiento/consulta", f"codigo={'Z' * len(CODIGO)}".encode("ascii"))
+    control = pagina_api(enviar("/seguimiento/consulta", f"codigo={CODIGO}".encode("ascii")), 200)
+    pasa(control and pagina_api(inexistente, 404), "r) control: el codigo bueno da 200 y uno inexistente 404")
+    respuesta = enviar("/seguimiento/consulta", f"codigo={CODIGO}%00".encode("ascii"))
+    negativo(f"r) consulta con NUL en el codigo -> el mismo 404 que un codigo inexistente ({respuesta[0]})",
+             pagina_api(respuesta, 404) and respuesta[2] == inexistente[2], control)
+
+    antes = contar("mensaje")
+    respuesta = enviar("/seguimiento/mensajes", f"codigo={CODIGO}&texto=con%00nul".encode("ascii"))
+    despues = contar("mensaje")
+    control = (pagina_api(enviar("/seguimiento/mensajes", f"codigo={CODIGO}&texto=sin+nul".encode("ascii")), 201)
+               and contar("mensaje") == despues + 1)
+    pasa(control, "r) control: el mismo mensaje sin el NUL se guarda (201)")
+    negativo(f"r) mensaje con NUL en el texto -> 422 con el expediente, el mensaje del campo y lo escrito ({respuesta[0]})",
+             pagina_api(respuesta, 422) and b'aria-invalid="true"' in respuesta[2]
+             and ERROR_TEXTO.encode() in respuesta[2] and b">\ncon\x00nul</textarea>" in respuesta[2], control)
+    negativo(f"r) el mensaje con NUL no se guarda ({antes} -> {despues})", antes is not None and despues == antes, control)
+
+
+def seccion_t():
+    # El mismo criterio que el camino anónimo de /v1 (docs/threat-model.md, 6.5,
+    # y verificar_denuncia.py, l): cada línea de log lleva la hora, y la hora
+    # junto a una denuncia desharía la fecha redondeada al día. De j) a r) solo
+    # hay uso normal y rechazos sin fallo del servidor: no debe quedar ninguna.
+    p("=== t) logs del camino anonimo por /web")
+    if LINEAS_API is None or not CODIGO:
+        sinc("t) faltan la cuenta de lineas de i) o el codigo de l)")
+        return
+    nuevas = log_de("api").splitlines()[LINEAS_API:]
+    buscadas = {
+        "el texto de la denuncia": TEXTO_HTML,
+        "el texto del mensaje": "hola desde la web",
+        "el texto del envio de otro sitio": "denuncia enviada desde otro sitio",
+        "el codigo": CODIGO,
+        "el codigo sin guiones": CODIGO.replace("-", ""),
+        "el identificador de la empresa": IDENTIFICADOR,
+    }
+
+    def encontradas():
+        logs = {s: log_de(s) for s in ("api", "postgres", "caddy")}
+        return sorted({f"{n} en {s}" for n, v in buscadas.items() for s, t in logs.items() if v in t})
+    halladas = encontradas()
+    # Control: una línea testigo escrita en el log de la API aparece como línea
+    # nueva y se encuentra al buscar. Demuestra que la cuenta y la búsqueda
+    # leen el log de verdad y ven lo que se añade.
+    testigo = f"testigo-{secrets.token_hex(8)}"
+    buscadas["testigo"] = testigo
+    dc("exec", "-T", "api", "sh", "-c", f"echo {testigo} > /proc/1/fd/1")
+    control = esperar(lambda: "testigo en api" in encontradas()
+                      and testigo in log_de("api").splitlines()[LINEAS_API + len(nuevas):], 10)
+    pasa(control, "t) control: una linea testigo en el log de la API se ve como nueva y se encuentra")
+    negativo(f"t) de j) a r) el camino /web no deja ninguna linea en el log de la API ({len(nuevas)} nuevas)",
+             nuevas == [], control, f"lineas nuevas: {nuevas}")
+    negativo(f"t) ni los textos, ni el codigo, ni el identificador aparecen en los logs de la API, PostgreSQL y "
+             f"Caddy {halladas if halladas else ''}".strip(), not halladas, control)
+
+
+# ---------------------------------------------------------------------------
 # Limpieza, precondiciones y arranque
 # ---------------------------------------------------------------------------
 def seccion_s():
     p("=== s) limpieza")
-    r = dc("down", "-v", "--rmi", "local")
+    r = dc_con_gestion("down", "-v", "--rmi", "local")
     p(f"down -v --rmi local -> codigo {r.rc}")
     for etiqueta, orden in [
         ("contenedor", ["docker", "ps", "-a", "--format", "{{.Names}}"]),
@@ -546,7 +896,9 @@ def main():
     parada = None
     try:
         seccion_a()
-        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h):
+        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h,
+                        seccion_i, seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p,
+                        seccion_q, seccion_r, seccion_t):
             seccion()
     except Parada as e:
         parada = str(e)
@@ -556,7 +908,7 @@ def main():
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
         if parada is not None:
-            dc("down", "-v", "--rmi", "local")
+            dc_con_gestion("down", "-v", "--rmi", "local")
         else:
             seccion_s()
         shutil.rmtree(TEMPORAL, ignore_errors=True)
