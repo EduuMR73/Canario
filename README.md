@@ -84,6 +84,8 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `/v1/personal/denuncias...` | personal | Listar, leer, asignar, cambiar de estado y escribir mensajes |
 | `POST /v1/personal/denuncias/{id}/redaccion` y `.../mensajes/{secuencia}/redaccion` | admin con la denuncia asignada | Tachar datos que no deben conservarse (art. 32.2) |
 | `GET /v1/personal/auditoria` y `/auditoria/verificacion` | admin | Leer la auditoría y verificar su cadena |
+| `POST /v1/personal/registro` y `/registro/verificacion` | cualquiera | Pedir una cuenta del personal (empresa y email; siempre el mismo 202) y confirmar el email con el token del enlace |
+| `GET /v1/personal/solicitudes`, `POST .../{id}/aprobacion`, `DELETE .../{id}` | admin | Ver las solicitudes verificadas, aprobarlas con un rol (la invitación va solo al email) o rechazarlas |
 
 El código de seguimiento es lo único que identifica al denunciante: va en el cuerpo, nunca en la URL, para que no quede en ningún log.
 
@@ -97,6 +99,26 @@ Formularios HTML sin JavaScript. Las genera la API bajo `/web` (`app/rutas_web.p
 | `GET /empresas/{identificador}` y `POST .../denuncias` | Formulario de denuncia de una empresa; al enviarlo, el código de seguimiento |
 | `GET /seguimiento` y `POST /seguimiento/consulta` | Consultar una denuncia con su código |
 | `POST /seguimiento/mensajes` | Enviar un mensaje desde la consulta |
+
+### Registro del personal y correo de desarrollo
+
+Quien quiere una cuenta del personal la pide con su email; le llega un enlace para confirmarlo y, cuando un admin la aprueba con un rol, la invitación para activarla (modelo de amenazas, 6.3). Los enlaces apuntan a la SPA del personal, cuyo origen fija `CANARIO_ORIGEN_PERSONAL` en `docker-compose.yml` (obligatoria: sin ella la API no arranca). El token va en el fragmento (`#...`), así que la SPA lo lee y lo envía por `POST`.
+
+En desarrollo los correos van a Mailpit, que no los entrega a nadie. Está en su propio perfil, en una red interna sin salida a internet y sin puertos publicados:
+
+```powershell
+docker compose --profile desarrollo up -d --build --wait
+```
+
+Para leer el buzón, desde un contenedor en esa red (con la imagen de la API, que trae Python):
+
+```powershell
+docker run --rm --network canario_correo --entrypoint python canario-api -c "import urllib.request; print(urllib.request.urlopen('http://mailpit:8025/api/v1/messages').read().decode())"
+```
+
+Sin Mailpit, el registro responde igual y cada correo deja `EVENTO correo_fallido` en el log de la API. La salida SMTP de producción no está decidida (modelo de amenazas, 8).
+
+### Origen del sitio del denunciante
 
 Cada formulario solo se acepta desde el propio sitio (cabecera `Origin`). Si el sitio se publica con otro nombre, la variable `CANARIO_ORIGEN_WEB` de la API debe llevar su origen exacto (por ejemplo `https://canal.ejemplo.org`); la API lo registra al arrancar (`ORIGEN WEB (configurado): ...`) y no arranca con un valor que un navegador nunca enviaría (modelo de amenazas, 6.11).
 
@@ -115,6 +137,7 @@ docker compose run --rm gestion suprimir-caducadas
 - **`alta-empresa`** da de alta la empresa con su clave de cifrado e imprime su identificador público, el que va en la ruta de las denuncias. La zona horaria es obligatoria: fija el calendario de las fechas y de los plazos legales. Si el segundo paso falla, la salida da la orden exacta para completarlo con `nueva-clave`.
 - **`nueva-clave`** crea la versión siguiente de la clave de una empresa: completa un alta a medias o rota la clave.
 - **`alta-admin`** emite la invitación del primer admin de una empresa, solo si no tiene ningún admin activado.
+- **`suprimir-caducadas`** aplica la supresión legal y, en la misma ejecución, poda las solicitudes de registro cerradas o caducadas (más abajo).
 - **`reinvitar-admin`** es la recuperación de emergencia de un admin activado: revoca en el acto sus sesiones y dispositivos y emite una invitación nueva. Solo se ejecuta tras verificar la petición fuera de banda, con el contacto que consta en el contrato y nunca con el que da quien la pide (modelo de amenazas, 6.3).
 
 **El token de invitación es una credencial.** `alta-admin` y `reinvitar-admin` lo imprimen una sola vez, porque no hay correo. Caduca a las 72 horas y sirve una sola vez. Se entrega al titular por un canal seguro y distinto del de la petición, y no se pega en tickets, chats ni correos. Si el titular lo encuentra ya usado, alguien se le adelantó, y la auditoría de su empresa lo muestra.
@@ -214,7 +237,7 @@ Si se restaura una copia de la base de datos, todo lo declarado no veraz o tacha
 
 ## Pruebas de seguridad
 
-Nueve baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
+Diez baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
 
 | Batería | Qué prueba |
 |---|---|
@@ -225,13 +248,14 @@ Nueve baterías, una por área. Cada prueba negativa lleva su control positivo: 
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
 | `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción y no veraz (art. 32.3) |
 | `verificar_inyeccion.py` | Inyección SQL y validación de la frontera de entrada |
+| `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo), verificación, administración de solicitudes, límite por destinatario, logs sin rastro y el origen obligatorio |
 | `verificar_escaneos.py` | Secretos en Git, dependencias, análisis estático, imágenes y SBOM |
 | `verificar_unitarios.py` | Las pruebas unitarias (`tests/unit/`) en la imagen de la API, y mutantes que demuestran que fallan cuando deben |
 
 Para ejecutarlas:
 
 - Docker en marcha y los secretos generados.
-- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal e inyección arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
+- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, inyección y registro arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
 - `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades.
 - `verificar_unitarios.py` no necesita los secretos ni la pila parada: solo construye la imagen de la API.
 
@@ -243,13 +267,13 @@ Cada batería usa un proyecto de Docker propio (`canario_<nombre>`), lo borra en
 
 ### Pruebas unitarias
 
-`tests/unit/` (14 ficheros, 170 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado, el login uniforme, el JWT y las páginas del denunciante (origen, formulario y plantillas). Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
+`tests/unit/` (16 ficheros, 185 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado, el login uniforme, el JWT, las páginas del denunciante (origen, formulario y plantillas) y el registro del personal (mismas sentencias en todos los caminos, origen obligatorio y correo sin inyección de cabeceras ni datos en el log). Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
 
 ```powershell
 python tests\security\verificar_unitarios.py
 ```
 
-La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 26 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
+La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 32 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
 
 Para ejecutar solo las pruebas, sin controles ni mutantes (la imagen se borra al final; si se queda, la batería se detiene con `PARADA` al encontrarla):
 
