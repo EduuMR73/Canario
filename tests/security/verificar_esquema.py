@@ -24,7 +24,9 @@ denuncia que pasa a instrucción en carrera y deja su evidencia en la
 auditoría. Que una solicitud de registro del personal nace con 24 horas, solo
 se verifica abierta y sin caducar (y entonces pasa a 30 días), no se reabre
 ni deja de estar verificada, y que la poda borra solo las cerradas o
-caducadas, saltando las que están en uso. Que la redacción (art. 32.2) solo reescribe el contenido de una
+caducadas, saltando las que están en uso. Que el rol auditor existe y que
+ninguna denuncia se le puede asignar, ni al insertarla ni al reasignarla, ni
+siquiera como superusuario (la asignación es la llave del contenido). Que la redacción (art. 32.2) solo reescribe el contenido de una
 denuncia o de un mensaje asignado a un admin activo de la empresa del
 contexto, solo si sigue siendo el que se leyó, con su fila de auditoría en la
 misma sentencia, y que aplicacion sigue sin poder cambiar ningún contenido
@@ -404,6 +406,7 @@ FUNCIONES_CATALOGO = {
     "encadenar_auditoria": ("migrador", "f", "v", "canal.encadenar_auditoria()"),
     "fijar_fecha_denuncia": ("migrador", "f", "v", "canal.fijar_fecha_denuncia()"),
     "controlar_solicitud_registro": ("migrador", "f", "v", "canal.controlar_solicitud_registro()"),
+    "controlar_asignacion_denuncia": ("migrador", "f", "v", "canal.controlar_asignacion_denuncia()"),
     "rechazar_modificacion_auditoria": ("migrador", "f", "v", "canal.rechazar_modificacion_auditoria()"),
     "verificar_cadena_auditoria": ("migrador", "f", "s", "canal.verificar_cadena_auditoria()"),
     "resolver_empresa": ("propietario_funciones", "t", "s", "canal.resolver_empresa(text)"),
@@ -430,6 +433,7 @@ EXECUTE_ESPERADO = {
     "encadenar_auditoria": set(),
     "fijar_fecha_denuncia": set(),
     "controlar_solicitud_registro": set(),
+    "controlar_asignacion_denuncia": set(),
     "rechazar_modificacion_auditoria": set(),
     "verificar_cadena_auditoria": {"aplicacion"},
     "resolver_empresa": {"aplicacion", "propietario_funciones"},
@@ -446,6 +450,7 @@ EXECUTE_ESPERADO = {
     "redactar_mensaje": {"aplicacion", "propietario_redaccion"},
 }
 TRIGGERS = [
+    "denuncia|denuncia_asignacion|O",
     "denuncia|denuncia_fecha|O",
     "mensaje|mensaje_preparar|O",
     "registro_auditoria|auditoria_encadenar|O",
@@ -488,6 +493,12 @@ TEXTO_PENDIENTE = "invitacion_personal_pendiente_check"
 TEXTO_SOLICITUD_REABRIR = "CN003: una solicitud de registro cerrada no se reabre"
 TEXTO_SOLICITUD_DESVERIFICAR = "CN003: una solicitud de registro verificada no deja de estarlo"
 TEXTO_SOLICITUD_VERIFICAR = "CN003: solo se verifica una solicitud abierta y sin caducar"
+# Error de canal.controlar_asignacion_denuncia() (seccion ra).
+TEXTO_ASIGNACION_NO_INSTRUYE = "CN004: una denuncia solo se asigna a una cuenta que instruye"
+# Comprobado con el mismo formato que CHECK_ESTADO (pg_get_constraintdef).
+CHECK_ROL = "CHECK ((rol = ANY (ARRAY['admin'::text, 'instructor'::text, 'auditor'::text])))"
+# Cuenta de auditor de la seccion ra (solo existe dentro de sus transacciones).
+AUDITOR_A = "a0000000-0000-4000-8000-0000000000e1"
 # Solicitudes de la poda (sr), en la empresa C de su).
 SOL_VIGENTE = "c5000000-0000-4000-8000-000000000001"
 SOL_VERIFICADA = "c5000000-0000-4000-8000-000000000002"
@@ -930,7 +941,7 @@ def seccion_f():
     r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef, p.provolatile, p.oid::regprocedure::text "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
     esperado = [f"{f}|{d}|{s}|{v}|{firma}" for f, (d, s, v, firma) in FUNCIONES_CATALOGO.items()]
-    comparar("f) exactamente las 17 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
+    comparar("f) exactamente las 18 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
     r = sup("select p.proname, c from pg_proc p join pg_namespace n on n.oid = p.pronamespace, unnest(p.proconfig) c "
             "where n.nspname = 'canal' and p.prosecdef;")
     comparar("f) las 9 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
@@ -948,10 +959,10 @@ def seccion_f():
     for rol in ROLES:
         for f in FUNCIONES_CATALOGO:
             esperado.append(f"{rol}|{f}|{'true' if rol in EXECUTE_ESPERADO[f] else 'false'}")
-    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 17 funciones", r.lineas(), esperado)
+    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 18 funciones", r.lineas(), esperado)
     r = sup("select c.relname, t.tgname, t.tgenabled from pg_trigger t join pg_class c on c.oid = t.tgrelid "
             "join pg_namespace n on n.oid = c.relnamespace where not t.tgisinternal and n.nspname = 'canal';")
-    comparar("f) los 6 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
+    comparar("f) los 7 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
     # control de privilegios por defecto: una funcion nueva de migrador no hereda EXECUTE de PUBLIC
     try:
         r = sup("SET ROLE migrador;\n"
@@ -2283,6 +2294,65 @@ COMMIT;
         pasa(real == foto[nombre], f"su5) las 6 tablas de la empresa {nombre} no han cambiado: {real}")
 
 
+def seccion_ra():
+    p("=== ra) rol auditor: el CHECK lo admite y nunca recibe una denuncia")
+    # Todo en transacciones que se deshacen: A queda como estaba.
+
+    def en_a(cuerpo):
+        return app("\\set VERBOSITY verbose\n" + cuerpo, ctx=EMPRESA_A, final="ROLLBACK")
+
+    # ra1) El CHECK, literal: exactamente los tres roles.
+    r = sup("select pg_get_constraintdef(oid) from pg_constraint "
+            "where conname = 'usuario_personal_rol_check' and conrelid = 'canal.usuario_personal'::regclass;")
+    comparar("ra1) CHECK de usuario_personal.rol: exactamente admin, instructor y auditor", r.lineas(), [CHECK_ROL])
+    alta = ("insert into canal.usuario_personal (empresa_id, email, rol) "
+            f"values ('{EMPRESA_A}', 'ra1@ejemplo.test', '{{}}') returning rol;")
+    r = en_a(alta.format("auditor"))
+    control = sin_error(r) and valor(r) == "auditor"
+    pasa(control, f"ra1) aplicacion crea una cuenta con rol auditor ({valor(r)!r}) {r.err.strip()[:200]}")
+    negativo("ra1) un rol que no existe", en_a(alta.format("superadmin")), "violates check constraint", control)
+
+    # ra2) El trigger, con una cuenta de auditor creada como superusuario
+    #      (aplicacion no puede elegir el id) en la misma transaccion.
+    def con_auditor(accion, rol_aplicacion=True):
+        cambio = (f"SET ROLE aplicacion;\nSELECT set_config('app.empresa_id', '{EMPRESA_A}', true) \\gset\n"
+                  if rol_aplicacion else "")
+        return sup("\\set VERBOSITY verbose\nBEGIN;\n"
+                   "INSERT INTO canal.usuario_personal (empresa_id, id, email, hash_contrasena, rol) VALUES "
+                   f"('{EMPRESA_A}', '{AUDITOR_A}', 'auditora@ejemplo.test', 'x', 'auditor');\n"
+                   f"{cambio}{accion}\nRESET ROLE;\nROLLBACK;\n")
+
+    def reasignar(destino):
+        return f"update canal.denuncia set asignada_a = '{destino}' where id = '{DEN_A2}' returning id;"
+
+    r = con_auditor(reasignar(INSTR_A))
+    control = sin_error(r) and valor(r) == DEN_A2
+    pasa(control, f"ra2) control: aplicacion reasigna la denuncia a un instructor ({valor(r)!r}) {r.err.strip()[:200]}")
+    negativo("ra2) reasignarla a un auditor", con_auditor(reasignar(AUDITOR_A)), TEXTO_ASIGNACION_NO_INSTRUYE, control)
+
+    # ra3) Al insertarla: aplicacion puede insertar todas las columnas de
+    #      denuncia, tambien asignada_a.
+    def insertar(destino):
+        return ("insert into canal.denuncia (empresa_id, contenido_cifrado, version_clave, asignada_a) "
+                f"values ('{EMPRESA_A}', {BYTES_FALSOS}, 1, '{destino}') returning asignada_a;")
+
+    r = con_auditor(insertar(INSTR_A))
+    control = sin_error(r) and valor(r) == INSTR_A
+    pasa(control, f"ra3) control: aplicacion inserta una denuncia asignada a un instructor ({valor(r)!r}) "
+                  f"{r.err.strip()[:200]}")
+    negativo("ra3) insertarla asignada a un auditor", con_auditor(insertar(AUDITOR_A)), TEXTO_ASIGNACION_NO_INSTRUYE,
+             control)
+
+    # ra4) Ni el superusuario: se salta los permisos y RLS, no los triggers.
+    r = con_auditor(reasignar(INSTR_A), rol_aplicacion=False)
+    control = sin_error(r) and valor(r) == DEN_A2
+    pasa(control, f"ra4) control: el superusuario reasigna la denuncia a un instructor ({valor(r)!r})")
+    negativo("ra4) el superusuario tampoco la asigna a un auditor",
+             con_auditor(reasignar(AUDITOR_A), rol_aplicacion=False), TEXTO_ASIGNACION_NO_INSTRUYE, control)
+    r = sup(f"select count(*) from canal.usuario_personal where id = '{AUDITOR_A}';")
+    pasa(valor(r) == "0", f"ra) la cuenta de auditor no queda tras las transacciones ({valor(r)!r})")
+
+
 def seccion_sr():
     # Va despues de su) y antes de re): usa la empresa C de su) y comprueba al
     # final que A y B no han cambiado.
@@ -2582,7 +2652,7 @@ def seccion_r():
     pasa(len(politicas) == 46 and len(tablas_con_politicas) == 10,
          f"r) exactamente 46 politicas repartidas en exactamente 10 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
     funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
-    comparar("r) siguen las 17 funciones", funciones, list(FUNCIONES_CATALOGO))
+    comparar("r) siguen las 18 funciones", funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
 
 
@@ -2675,7 +2745,7 @@ def main():
                         seccion_j, seccion_k, seccion_l, seccion_m, seccion_au, seccion_n, seccion_o, seccion_z, seccion_p,
                         seccion_q,
                         seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_sr,
-                        seccion_re, seccion_r):
+                        seccion_ra, seccion_re, seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)

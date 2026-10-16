@@ -76,6 +76,11 @@ y 6.9). Qué prueba:
   16.3.2) con la plantilla de la ruta y el id solo si es un uuid; los 409,
   los 422 y las redacciones aceptadas no dejan ninguno, y un %0A en el id no
   inyecta ninguna línea.
+* Rol auditor: un admin lo invita; lee la auditoría y verifica su cadena sin
+  dejar filas; recibe 403 al listar, leer, escribir, cambiar de estado,
+  asignar o redactar una denuncia, y al administrar cuentas o solicitudes,
+  sin cambiar nada (control: el instructor asignado lee la denuncia); y no se
+  le puede asignar una denuncia (409, sin fila; control: a un instructor sí).
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
   misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
@@ -209,7 +214,7 @@ TEXTO_NO_ES_ADMIN = ("ERROR: no hay ningun admin activado con ese email en la em
 CUERPO_409_TRANSICION = b'{"detalle": "la denuncia no puede pasar a ese estado desde el actual"}'
 CUERPO_409_CERRADA = '{"detalle": "la denuncia está cerrada"}'.encode()
 CUERPO_409_CERRADA_DENUNCIANTE = '{"detalle": "la denuncia está cerrada y no admite mensajes"}'.encode()
-CUERPO_409_DESTINO = '{"detalle": "la cuenta de destino no está activa"}'.encode()
+CUERPO_409_DESTINO = '{"detalle": "la cuenta de destino no está activa o no instruye denuncias"}'.encode()
 CUERPO_422_FINAL = b'{"detalle": "cerrar una denuncia exige un mensaje final para el denunciante"}'
 ESTADOS = ["nueva", "en_instruccion", "resuelta", "archivada", "inadmitida"]
 # Los destinos de un instructor (k5). 'no_veraz' es solo de admin y va en k10.
@@ -2445,6 +2450,75 @@ def seccion_k_redaccion():
              f"estado {salto.get('estado')}")
 
 
+def seccion_k_auditor():
+    p("=== ka) rol auditor: lee la auditoria y la verifica, y nunca toca una denuncia")
+    admin2, instr = CUENTAS["admin2"], CUENTAS["instructor"]
+    token_admin2 = sesion_de(admin2)
+    auditor, alta = invitar(token_admin2, "auditor", "auditor@alfa.test", rol="auditor")
+    preparar_cuenta(auditor)
+    tokens = {"admin2": token_admin2, "instr": sesion_de(instr), "auditor": sesion_de(auditor)}
+    yo = json_de(una(pt("GET", "/v1/personal/yo", token=tokens["auditor"]))) or {}
+    pasa(alta.get("estado") == 201 and yo.get("rol") == "auditor",
+         f"ka1) un admin invita a un auditor y, activado, su sesion tiene ese rol ({yo.get('rol')!r})")
+
+    # ka2) La auditoría: la lee y verifica su cadena, sin dejar filas (como un admin).
+    antes = total_auditoria("A")
+    auditoria = una(pt("GET", "/v1/personal/auditoria", token=tokens["auditor"]))
+    verificacion = una(pt("GET", "/v1/personal/auditoria/verificacion", token=tokens["auditor"]))
+    datos, datos_ver = json_de(auditoria) or {}, json_de(verificacion) or {}
+    control_aud = (auditoria.get("estado") == 200 and sorted(datos) == CLAVES_AUDITORIA
+                   and len(datos.get("filas", [])) > 0)
+    pasa(control_aud and all(sorted(f) == CLAVES_FILA_AUDITORIA for f in datos.get("filas", [])),
+         "ka2) el auditor lee la auditoria de su empresa (200)")
+    pasa(verificacion.get("estado") == 200 and sorted(datos_ver) == CLAVES_VERIFICACION
+         and datos_ver.get("cadena_intacta") is True, f"ka2) y verifica su cadena ({datos_ver})")
+    negativo("ka2) leerla y verificarla no deja filas de auditoria", total_auditoria("A") == antes, control_aud)
+
+    # ka3) Ninguna denuncia, ni nada de administración: 403 antes de tocar la
+    #      base de datos. Control: el instructor asignado sí la lee.
+    den, _, texto = crear_denuncia("A")
+    preparar(asignar_peticion(tokens["admin2"], den, instr.usuario_id), "asignar la denuncia al instructor")
+    fila_antes = fila_denuncia(den)
+    control = una(pt("GET", rd(den), token=tokens["instr"]))
+    control_ok = control.get("estado") == 200 and texto.encode("utf-8") in control.get("cuerpo", b"")
+    pasa(control_ok, f"ka3) control: el instructor asignado lee la denuncia ({control.get('estado')})")
+    tok = tokens["auditor"]
+    prohibidas = {
+        "listar las denuncias": pt("GET", "/v1/personal/denuncias", token=tok),
+        "leer la denuncia": pt("GET", rd(den), token=tok),
+        "escribir un mensaje": mensaje_peticion(tok, den, "mensaje del auditor"),
+        "cambiar el estado": estado_peticion(tok, den, "en_instruccion"),
+        "asignar": asignar_peticion(tok, den, auditor.usuario_id),
+        "redactar": redaccion_peticion(tok, den, [{"desde": 0, "texto": texto[:4]}]),
+        "listar las cuentas": pt("GET", "/v1/personal/usuarios", token=tok),
+        "invitar": pt("POST", "/v1/personal/usuarios", {"email": "ka.invitada@alfa.test", "rol": "auditor"},
+                      token=tok),
+        "listar las solicitudes de registro": pt("GET", "/v1/personal/solicitudes", token=tok),
+    }
+    respuestas = http(list(prohibidas.values()))
+    for nombre, r in zip(prohibidas, respuestas):
+        negativo(f"ka3) el auditor no puede {nombre}: 403",
+                 r.get("estado") == 403 and r.get("cuerpo") == CUERPO_403, control_ok, f"respuesta: {r.get('estado')}")
+    invitadas = valor("select count(*) from canal.usuario_personal where email = 'ka.invitada@alfa.test';")
+    negativo(f"ka3) y nada cambia: la denuncia igual, ninguna cuenta nueva y el texto en ninguna respuesta "
+             f"({fila_denuncia(den)}, {invitadas})",
+             fila_denuncia(den) == fila_antes and invitadas == "0"
+             and all(texto.encode("utf-8") not in r.get("cuerpo", b"") for r in respuestas), control_ok)
+
+    # ka4) A un auditor no se le asigna una denuncia: la asignación es la
+    #      llave del contenido. Control: a un instructor, sí.
+    den2, _, _ = crear_denuncia("A")
+    rechazo = una(asignar_peticion(tokens["admin2"], den2, auditor.usuario_id))
+    sin_cambio = fila_denuncia(den2)
+    asignada = una(asignar_peticion(tokens["admin2"], den2, instr.usuario_id))
+    control_ok = asignada.get("estado") == 204 and fila_denuncia(den2) == f"nueva|{instr.usuario_id}|0"
+    pasa(control_ok, "ka4) control: el admin asigna la denuncia a un instructor (204)")
+    negativo("ka4) asignarla a un auditor da 409, no cambia la denuncia y no deja fila de asignacion",
+             rechazo.get("estado") == 409 and rechazo.get("cuerpo") == CUERPO_409_DESTINO and sin_cambio == "nueva||0"
+             and auditoria_de("A", "asignacion", den2) == [f"personal:{admin2.usuario_id}|{instr.usuario_id}"],
+             control_ok, f"respuesta: {rechazo.get('estado')}, fila: {sin_cambio}")
+
+
 def seccion_l():
     p("=== l) gestion lee en solo lectura y con una sola foto")
     r = dc("run", "--rm", "-T", "--entrypoint", "python", "gestion", "-c", GESTION_DENTRO, EMPRESAS["A"][1])
@@ -2720,7 +2794,8 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
-                        seccion_k, seccion_k_no_veraz, seccion_k_redaccion, seccion_l, seccion_i, seccion_h):
+                        seccion_k, seccion_k_no_veraz, seccion_k_redaccion, seccion_k_auditor, seccion_l, seccion_i,
+                        seccion_h):
             seccion()
     except Parada as e:
         parada = str(e)

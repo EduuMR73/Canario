@@ -26,7 +26,8 @@ Qué prueba:
 * f) el admin: lo no verificado no se ve, un rol en el cuerpo del registro es
   un 422, la aprobación entre empresas es un 404 con su evento, un instructor
   recibe 403, un email que ya tiene cuenta da 409, el rechazo cierra y se
-  audita, y una solicitud verificada no se sustituye (sale un aviso);
+  audita, una solicitud verificada no se sustituye (sale un aviso), y se
+  puede aprobar con el rol auditor;
 * g) CR, LF y NUL en el email: 422 sin crear nada ni enviar correo;
 * h) el límite por destinatario con su valor de producción (3 en 15
   minutos): el cuarto es 429 con Retry-After y otro email sigue pasando; un
@@ -835,6 +836,12 @@ def seccion_f():
     r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", {"rol": "superadmin"},
                token=SESIONES["A"]))
     pasa(es(r, 422, CUERPO_422), f"f) aprobar con un rol que no existe -> 422 ({r.get('estado')})")
+    # El tercer rol, auditor, tambien se aprueba: la cuenta nace con ese rol.
+    r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", {"rol": "auditor"},
+               token=SESIONES["A"]))
+    rol = valor(f"select rol from canal.usuario_personal where email = '{emails[0]}';")
+    pasa(r.get("estado") == 201 and rol == "auditor",
+         f"f) aprobar con el rol auditor -> 201 y la cuenta nace con ese rol ({r.get('estado')}, {rol!r})")
 
 
 def seccion_g():

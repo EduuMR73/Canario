@@ -1,14 +1,19 @@
 """Pruebas unitarias de la lógica pura de app/instruccion.py: la redacción
-(art. 32.2), el cursor del listado y la máquina de estados.
+(art. 32.2), el cursor del listado, la máquina de estados y quién puede qué
+(los roles, antes de tocar la base de datos, y a quién se asigna una denuncia).
 
 La redacción es destructiva e irreversible: un error de posición dejaría a la
 vista un dato que había que suprimir, o taparía otro. Por eso los oráculos
 son los textos de salida completos, escritos a mano.
 """
+import contextlib
 import datetime
 import types
 import unittest
 import uuid
+from unittest import mock
+
+import psycopg
 
 from app import instruccion, personal
 
@@ -120,19 +125,59 @@ class GuardasPreviasALaBaseDeDatos(unittest.TestCase):
 
     INSTRUCTOR = types.SimpleNamespace(rol="instructor", usuario_id=uuid.UUID(int=9), empresa_id=uuid.UUID(int=1))
     ADMIN = types.SimpleNamespace(rol="admin", usuario_id=uuid.UUID(int=8), empresa_id=uuid.UUID(int=1))
+    AUDITOR = types.SimpleNamespace(rol="auditor", usuario_id=uuid.UUID(int=7), empresa_id=uuid.UUID(int=1))
+
+    def pasa_la_puerta(self, llamada, sesion):
+        """Control: con pool=None, quien pasa la puerta por rol falla después,
+        al usar la base de datos, con un error que no es Prohibido."""
+        with self.assertRaises(Exception) as error:
+            llamada(sesion)
+        self.assertNotIsInstance(error.exception, personal.Prohibido)
 
     def test_solo_admin(self):
         llamadas = {
-            "listar_auditoria": lambda s: instruccion.listar_auditoria(None, s, 1),
-            "verificar_auditoria": lambda s: instruccion.verificar_auditoria(None, s),
             "asignar": lambda s: instruccion.asignar(None, s, uuid.UUID(int=3), uuid.UUID(int=9)),
             "redactar_denuncia": lambda s: instruccion.redactar_denuncia(None, None, s, uuid.UUID(int=3), [(0, "a")]),
             "redactar_mensaje": lambda s: instruccion.redactar_mensaje(None, None, s, uuid.UUID(int=3), 1,
                                                                        [(0, "a")]),
         }
         for nombre, llamada in llamadas.items():
-            with self.subTest(funcion=nombre), self.assertRaises(personal.Prohibido):
+            for sesion in (self.INSTRUCTOR, self.AUDITOR):
+                with self.subTest(funcion=nombre, rol=sesion.rol), self.assertRaises(personal.Prohibido):
+                    llamada(sesion)
+
+    def test_auditoria_para_admin_y_auditor(self):
+        llamadas = {
+            "listar_auditoria": lambda s: instruccion.listar_auditoria(None, s, 1),
+            "verificar_auditoria": lambda s: instruccion.verificar_auditoria(None, s),
+        }
+        for nombre, llamada in llamadas.items():
+            with self.subTest(funcion=nombre, rol="instructor"), self.assertRaises(personal.Prohibido):
                 llamada(self.INSTRUCTOR)
+            for sesion in (self.AUDITOR, self.ADMIN):
+                with self.subTest(funcion=nombre, rol=sesion.rol):
+                    self.pasa_la_puerta(llamada, sesion)
+
+    def test_el_auditor_no_toca_ninguna_denuncia(self):
+        denuncia = uuid.UUID(int=3)
+        llamadas = {
+            "listar_denuncias": lambda s: instruccion.listar_denuncias(None, s),
+            "leer_denuncia": lambda s: instruccion.leer_denuncia(None, None, s, denuncia),
+            "enviar_mensaje": lambda s: instruccion.enviar_mensaje(None, None, s, denuncia, "hola"),
+            "cambiar_estado": lambda s: instruccion.cambiar_estado(None, None, s, denuncia, "en_instruccion", None),
+        }
+        for nombre, llamada in llamadas.items():
+            with self.subTest(funcion=nombre, rol="auditor"), self.assertRaises(personal.Prohibido):
+                llamada(self.AUDITOR)
+            with self.subTest(funcion=nombre, rol="instructor"):
+                self.pasa_la_puerta(llamada, self.INSTRUCTOR)
+
+    def test_roles_literales(self):
+        # Oráculo literal: quién instruye y quién lee la auditoría. Añadir un
+        # rol a una de estas listas es una decisión, no un efecto secundario.
+        self.assertEqual(personal.ROLES, ("admin", "instructor", "auditor"))
+        self.assertEqual(personal.ROLES_INSTRUCCION, ("admin", "instructor"))
+        self.assertEqual(personal.ROLES_AUDITORIA, ("admin", "auditor"))
 
     def test_cambiar_estado_orden_de_comprobaciones(self):
         denuncia = uuid.UUID(int=3)
@@ -152,3 +197,64 @@ class GuardasPreviasALaBaseDeDatos(unittest.TestCase):
         self.assertEqual(str(error.exception), "estado desconocido")
         with self.assertRaises(instruccion.CursorNoValido):
             instruccion.listar_denuncias(None, self.ADMIN, cursor="x")
+
+
+class _ErrorAsignacion(psycopg.Error):
+    """El error del trigger canal.controlar_asignacion_denuncia, con su SQLSTATE."""
+    sqlstate = "CN004"
+
+
+class _ConexionAsignar:
+    """Doble de la conexión de asignar: el admin que actúa, el destino con su
+    rol y una denuncia abierta sin asignar. Registra las sentencias."""
+
+    def __init__(self, rol_destino, error_al_asignar=None):
+        self.rol_destino, self.error_al_asignar = rol_destino, error_al_asignar
+        self.sentencias = []
+
+    def execute(self, sql, parametros=None):
+        self.sentencias.append(sql)
+        respuesta = mock.Mock()
+        if sql == instruccion.SQL_BLOQUEAR_ADMINS:
+            respuesta.fetchall.return_value = [(Asignar.ADMIN.usuario_id, True)]
+        elif sql == instruccion.SQL_BLOQUEAR_DESTINO:
+            respuesta.fetchone.return_value = (True, self.rol_destino)
+        elif sql == instruccion.SQL_BLOQUEAR_DENUNCIA:
+            respuesta.fetchone.return_value = ("nueva", None)
+        elif sql == instruccion.SQL_ASIGNAR and self.error_al_asignar is not None:
+            raise self.error_al_asignar
+        return respuesta
+
+
+class Asignar(unittest.TestCase):
+    """Asignar da acceso al contenido: solo a un rol que instruye."""
+    ADMIN = types.SimpleNamespace(rol="admin", usuario_id=uuid.UUID(int=8), empresa_id=uuid.UUID(int=1))
+
+    def asignar(self, conexion):
+        @contextlib.contextmanager
+        def transaccion(_pool, _empresa_id, solo_lectura=False):
+            yield conexion
+
+        with mock.patch.object(instruccion.bd, "transaccion_empresa", transaccion):
+            instruccion.asignar(None, self.ADMIN, uuid.UUID(int=3), uuid.UUID(int=9))
+
+    def test_a_un_auditor_no_y_sin_escribir_nada(self):
+        conexion = _ConexionAsignar("auditor")
+        with self.assertRaises(instruccion.DestinoNoValido):
+            self.asignar(conexion)
+        self.assertNotIn(instruccion.SQL_ASIGNAR, conexion.sentencias)
+        self.assertNotIn(instruccion.SQL_AUDITAR, conexion.sentencias)
+        # Control: a un instructor, sí, con su fila de auditoría.
+        conexion = _ConexionAsignar("instructor")
+        self.asignar(conexion)
+        self.assertIn(instruccion.SQL_ASIGNAR, conexion.sentencias)
+        self.assertIn(instruccion.SQL_AUDITAR, conexion.sentencias)
+
+    def test_el_rechazo_de_la_base_de_datos_es_el_mismo_409(self):
+        # Si la comprobación de la API no lo parase, el trigger lo para: la
+        # respuesta es DestinoNoValido (409), no un 500. Otro error de la base
+        # de datos sigue su camino.
+        with self.assertRaises(instruccion.DestinoNoValido):
+            self.asignar(_ConexionAsignar("instructor", _ErrorAsignacion("trigger")))
+        with self.assertRaises(psycopg.OperationalError):
+            self.asignar(_ConexionAsignar("instructor", psycopg.OperationalError("otro")))

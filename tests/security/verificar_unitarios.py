@@ -66,7 +66,7 @@ PRUEBAS_POR_FICHERO = {
     "test_denuncias": 10,
     "test_errores": 11,
     "test_frontera": 10,
-    "test_instruccion": 18,
+    "test_instruccion": 23,
     "test_limitador": 16,
     "test_login": 8,
     "test_personal": 8,
@@ -75,7 +75,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 190
+TOTAL_PRUEBAS = 195
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -184,6 +184,27 @@ MUTANTES = [
      "un error de la base de datos sale de la tarea sin pasar por el log (traceback de uvicorn)"),
     ("solicitudes.py", "        correo.enviar(mensaje)\n", "        pass\n",
      "test_solicitudes.Procesar.test_envia_el_correo_que_toca", "el registro en segundo plano no envia el correo"),
+    # Rol auditor: lee la auditoria y nunca el contenido (bloque 5b).
+    ("personal.py", 'ROLES_INSTRUCCION = ("admin", "instructor")', 'ROLES_INSTRUCCION = ("admin", "instructor", "auditor")',
+     "test_instruccion.GuardasPreviasALaBaseDeDatos.test_el_auditor_no_toca_ninguna_denuncia",
+     "el auditor entra en las denuncias"),
+    ("personal.py", "    if sesion.rol not in permitidos:", "    if False:",
+     "test_instruccion.GuardasPreviasALaBaseDeDatos.test_el_auditor_no_toca_ninguna_denuncia",
+     "la puerta por rol deja pasar a cualquiera"),
+    ("instruccion.py", 'una fila de auditoría por lectura."""\n    personal.exigir_rol(sesion, personal.ROLES_INSTRUCCION)\n',
+     'una fila de auditoría por lectura."""\n',
+     "test_instruccion.GuardasPreviasALaBaseDeDatos.test_el_auditor_no_toca_ninguna_denuncia",
+     "leer una denuncia no comprueba el rol (solo la asignacion)"),
+    ("instruccion.py", 'una acción explícita aparte del listado."""\n    personal.exigir_rol(sesion, personal.ROLES_AUDITORIA)',
+     'una acción explícita aparte del listado."""\n    _exigir_admin(sesion)',
+     "test_instruccion.GuardasPreviasALaBaseDeDatos.test_auditoria_para_admin_y_auditor",
+     "el auditor no puede verificar la cadena de auditoria"),
+    ("instruccion.py", "if not activo or rol not in personal.ROLES_INSTRUCCION:", "if not activo:",
+     "test_instruccion.Asignar.test_a_un_auditor_no_y_sin_escribir_nada",
+     "una denuncia se puede asignar a un auditor (y leer su contenido)"),
+    ("instruccion.py", "if error.sqlstate == SQLSTATE_DESTINO_NO_ASIGNABLE:", "if False:",
+     "test_instruccion.Asignar.test_el_rechazo_de_la_base_de_datos_es_el_mismo_409",
+     "el rechazo del trigger de asignacion acaba en un 500"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

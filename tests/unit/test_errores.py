@@ -37,7 +37,7 @@ ESPERADO = {
     instruccion.TransicionNoValida: (409, "la denuncia no puede pasar a ese estado desde el actual", {}),
     instruccion.DenunciaCerrada: (409, "la denuncia está cerrada", {}),
     instruccion.LimiteMensajes: (409, "la denuncia ha alcanzado el máximo de mensajes", {}),
-    instruccion.DestinoNoValido: (409, "la cuenta de destino no está activa", {}),
+    instruccion.DestinoNoValido: (409, "la cuenta de destino no está activa o no instruye denuncias", {}),
     instruccion.MensajeFinalObligatorio: (422, "cerrar una denuncia exige un mensaje final para el denunciante", {}),
     instruccion.MensajeNoPermitido: (422, "declarar una denuncia no veraz no admite mensaje", {}),
     instruccion.FragmentoNoCoincide: (409, "el texto indicado no está en esa posición", {}),
