@@ -10,7 +10,8 @@ import uuid
 from app import limitador
 
 # La configuración por defecto escrita entera: cada prueba cambia una sola cosa.
-VALIDA = "denuncia=10/3600,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,cuenta=60/60"
+VALIDA = ("denuncia=10/3600,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,cuenta=60/60,"
+          "registro=10/3600,destinatario=3/900")
 
 
 def con(cambio_viejo, cambio_nuevo):
@@ -34,6 +35,11 @@ class ReglaDeCadaRuta(unittest.TestCase):
             "/v1/personal/activacion": "acceso",
             "/v1/personal/activacion/confirmar": "acceso",
             "/v1/personal/contrasena": "acceso",
+            # Cada solicitud envía un correo: regla propia. La verificación,
+            # sin correo y con un token de 256 bits, en otras.
+            "/v1/personal/registro": "registro",
+            "/v1/personal/registro/": "otras",
+            "/v1/personal/registro/verificacion": "otras",
             # Sin Argon2 ni nada que adivinar: "otras" (ver app/limitador.py).
             "/v1/personal/sesiones/renovacion": "otras",
             "/v1/empresas/abc/denuncias": "denuncia",
@@ -64,7 +70,8 @@ class CargarLimites(unittest.TestCase):
         limites, origen = limitador.cargar_limites({})
         self.assertEqual(origen, "por defecto")
         self.assertEqual(limitador.describir_limites(limites),
-                         "acceso=10/300 cuenta=60/60 denuncia=10/3600 mensajes=30/3600 otras=60/60 seguimiento=60/60")
+                         "acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 mensajes=30/3600 "
+                         "otras=60/60 registro=10/3600 seguimiento=60/60")
 
     def test_configurados_validos(self):
         limites, origen = limitador.cargar_limites(con("denuncia=10/3600", "denuncia=1000000/86400"))
@@ -93,12 +100,13 @@ class CargarLimites(unittest.TestCase):
             "ventana 86401": (con("otras=60/60", "otras=60/86401"),
                               "CANARIO_LIMITES: la ventana de otras no divide el dia"),
             "falta una": ({"CANARIO_LIMITES": VALIDA.replace(",cuenta=60/60", "")},
-                          ("CANARIO_LIMITES: reglas ['acceso', 'denuncia', 'mensajes', 'otras', 'seguimiento'], "
-                           "se esperan ['acceso', 'cuenta', 'denuncia', 'mensajes', 'otras', 'seguimiento']")),
+                          ("CANARIO_LIMITES: reglas ['acceso', 'denuncia', 'destinatario', 'mensajes', 'otras', "
+                           "'registro', 'seguimiento'], se esperan ['acceso', 'cuenta', 'denuncia', 'destinatario', "
+                           "'mensajes', 'otras', 'registro', 'seguimiento']")),
             "sobra una": ({"CANARIO_LIMITES": VALIDA + ",foo=1/60"},
-                          ("CANARIO_LIMITES: reglas ['acceso', 'cuenta', 'denuncia', 'foo', 'mensajes', 'otras', "
-                           "'seguimiento'], se esperan ['acceso', 'cuenta', 'denuncia', 'mensajes', 'otras', "
-                           "'seguimiento']")),
+                          ("CANARIO_LIMITES: reglas ['acceso', 'cuenta', 'denuncia', 'destinatario', 'foo', "
+                           "'mensajes', 'otras', 'registro', 'seguimiento'], se esperan ['acceso', 'cuenta', "
+                           "'denuncia', 'destinatario', 'mensajes', 'otras', 'registro', 'seguimiento']")),
         }
         for motivo, (entorno, mensaje) in casos.items():
             with self.subTest(motivo=motivo):
@@ -139,6 +147,14 @@ class HuellaDelCliente(unittest.TestCase):
         self.assertRegex(cuenta, r"\A[0-9a-f]{32}\Z")
         self.assertNotEqual(cuenta, limitador.huella_cuenta(self.SAL, empresa, uuid.UUID(int=3)))
         self.assertNotEqual(cuenta, limitador.huella_cliente(self.SAL, "192.0.2.1"))
+
+    def test_destinatario_vector_literal(self):
+        # HMAC-SHA256(sal, b"canario/limite/destinatario/v1" + email), 32
+        # primeros hexadecimales, calculado aparte. El email nunca va en claro.
+        self.assertEqual(limitador.huella_destinatario(self.SAL, "persona@empresa.es"),
+                         "1f71e98e27f9c5c77bce307c4e1855ce")
+        self.assertNotEqual(limitador.huella_destinatario(self.SAL, "otra@empresa.es"),
+                            limitador.huella_destinatario(self.SAL, "persona@empresa.es"))
 
 
 class SalDiaria(unittest.TestCase):

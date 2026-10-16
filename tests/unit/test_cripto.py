@@ -299,9 +299,15 @@ class TokensDelPersonal(unittest.TestCase):
                          "5e49a25083b928ae40fe8932fd22212170ed414ab73d87cf4129ae57671f5ede")
         self.assertEqual(cripto.huella_token(b"canario/renovacion/v1", bytes(32)),
                          hashlib.sha256(b"canario/renovacion/v1" + bytes(32)).digest())
+        # La etiqueta del registro, con su literal: un enlace de verificación
+        # no puede valer como invitación ni al revés.
+        self.assertEqual(cripto.ETIQUETA_REGISTRO, b"canario/registro/v1")
+        self.assertEqual(cripto.huella_token(cripto.ETIQUETA_REGISTRO, bytes(32)).hex(),
+                         "ad5a80af45c3fb89a3a1fd0e24749bc85bb4ab6215c4136d6ffbcdb3d3966747")
         huellas = {cripto.huella_token(e, bytes(32)) for e in
-                   (cripto.ETIQUETA_INVITACION, cripto.ETIQUETA_DISPOSITIVO, cripto.ETIQUETA_RENOVACION)}
-        self.assertEqual(len(huellas), 3)
+                   (cripto.ETIQUETA_INVITACION, cripto.ETIQUETA_DISPOSITIVO, cripto.ETIQUETA_RENOVACION,
+                    cripto.ETIQUETA_REGISTRO)}
+        self.assertEqual(len(huellas), 4)
 
     def test_huella_rechazos(self):
         with self.assertRaises(ValueError) as error:

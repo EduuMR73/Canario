@@ -152,7 +152,8 @@ WEB_EN_API = ["/web", "/web/", "/web/seguimiento", "//web/seguimiento", "/./web/
 # Parte B. Límites altos para que las pruebas funcionales no choquen con los
 # de producción; el 429 y su página los prueba e) y la regla de cada ruta,
 # tests/unit/test_limitador.py y verificar_denuncia.py (r7).
-LIMITES_PRUEBA = "denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,cuenta=1000/60"
+LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900")
 TEXTO_ORIGEN = "ORIGEN WEB (por defecto): https://localhost:8444"
 ORIGEN_WEB = "https://localhost:8444"
 FORMULARIO = "application/x-www-form-urlencoded"

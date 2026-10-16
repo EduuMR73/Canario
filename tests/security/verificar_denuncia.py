@@ -165,6 +165,9 @@ estado = {"falla": False, "sin_conclusion": False}
 SUBREDES_FIJAS = {"10.88.0.0/28", "10.88.1.0/28"}
 TEXTO_VERIFICADO = "ARRANQUE VERIFICADO"
 TEXTO_BLOQUEADO = "ARRANQUE BLOQUEADO: "
+# Variable obligatoria de la API (app/solicitudes.py): sin ella no arranca. Las
+# APIs temporales la llevan para que lo que se prueba sea lo que se pretende.
+ENTORNO_API = {"CANARIO_ORIGEN_PERSONAL": "https://localhost:8445"}
 
 # NIST CAVP, gcmEncryptExtIV256.rsp, [Keylen = 256] [IVlen = 96] [PTlen = 128]
 # [AADlen = 128] [Taglen = 128], Count = 0.
@@ -362,18 +365,19 @@ PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +ptt
 # peticiones por minuto desde pocas IPs. r) vuelve a arrancar la API sin
 # ellos y prueba los de producción.
 LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
-                  "cuenta=1000/60")
-TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 mensajes=1000/3600 "
-                        "otras=1000/60 seguimiento=1000/60")
-TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 mensajes=30/3600 "
-                            "otras=60/60 seguimiento=60/60")
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900")
+TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 "
+                        "destinatario=1000/900 mensajes=1000/3600 otras=1000/60 registro=1000/3600 "
+                        "seguimiento=1000/60")
+TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 "
+                            "mensajes=30/3600 otras=60/60 registro=10/3600 seguimiento=60/60")
 TEXTO_LIMITADOR_VERIFICADO = "LIMITADOR VERIFICADO"
 # regla -> (peticiones, ventana en segundos), los de producción. La regla
 # acceso (login del personal) y cuenta (rutas con sesión) las prueba con
 # ráfagas tests/security/verificar_personal.py; aquí solo cuentan para la
 # ventana de sus claves.
 LIMITES_PRODUCCION = {"denuncia": (10, 3600), "seguimiento": (60, 60), "mensajes": (30, 3600), "acceso": (10, 300),
-                      "otras": (60, 60), "cuenta": (60, 60)}
+                      "otras": (60, 60), "cuenta": (60, 60), "registro": (10, 3600), "destinatario": (3, 900)}
 CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode()
 TEXTO_EVENTO_LIMITADOR = "EVENTO limitador_no_disponible: "
 # Clientes de prueba con IP fija en la red edge (fuera del rango automático):
@@ -404,6 +408,12 @@ RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguim
              # como el resto de la instrucción.
              "/v1/personal/denuncias/x/redaccion": "otras",
              "/v1/personal/denuncias/x/mensajes/x/redaccion": "otras",
+             # Registro "primero el email" (app/solicitudes.py): la solicitud,
+             # que envía un correo, con su regla; la verificación y lo del
+             # admin, en otras.
+             "/v1/personal/registro": "registro", "/v1/personal/registro/verificacion": "otras",
+             "/v1/personal/solicitudes": "otras", "/v1/personal/solicitudes/x": "otras",
+             "/v1/personal/solicitudes/x/aprobacion": "otras",
              # Páginas del denunciante (app/rutas_web.py): cada acción, con la
              # misma regla que su ruta de /v1 (mismo contador); las que solo
              # muestran un formulario, en otras.
@@ -941,7 +951,7 @@ def arrancar_api_temporal(etiqueta, montajes, entorno=None):
     argumentos = []
     for origen, destino in montajes:
         argumentos += ["--mount", f"type=bind,src={origen},dst=/run/secrets/{destino},readonly"]
-    for variable, valor in (entorno or {}).items():
+    for variable, valor in {**ENTORNO_API, **(entorno or {})}.items():
         argumentos += ["-e", f"{variable}={valor}"]
     ejecutar(["docker", "run", "-d", "--name", nombre, "--network", f"{PROYECTO}_data",
               "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
@@ -2061,7 +2071,7 @@ def seccion_n():
         return
     esperado = [f"suprimidas: empresa_id={empresa_a} articulo=art26 denuncias=1",
                 f"suprimidas: empresa_id={empresa_a} articulo=art32 denuncias=1",
-                "total suprimidas: 2"]
+                "total suprimidas: 2", "solicitudes de registro podadas: 0"]
     aviso = "AVISO: quedan 1 denuncias caducadas que estaban en uso; vuelva a ejecutar suprimir-caducadas"
     p(f"   gestion (1): codigo {primera.rc}; salida {primera.out.strip().splitlines()}")
     # 75 literal (EX_TEMPFAIL), no app.gestion.SALIDA_EN_USO: el oráculo no
@@ -2074,10 +2084,11 @@ def seccion_n():
     negativo(f"n3) de las tres caducadas solo queda la que estaba en uso ({quedan})", quedan == "1", seguia)
     segunda = gestion("suprimir-caducadas")
     pasa(segunda.rc == 0 and segunda.out.strip().splitlines() == [
-        f"suprimidas: empresa_id={empresa_a} articulo=art32 denuncias=1", "total suprimidas: 1"],
+        f"suprimidas: empresa_id={empresa_a} articulo=art32 denuncias=1", "total suprimidas: 1",
+        "solicitudes de registro podadas: 0"],
          f"n3) liberada, la ejecucion siguiente la suprime y sale con 0 ({segunda.rc}, {segunda.out.strip().splitlines()})")
     tercera = gestion("suprimir-caducadas")
-    pasa(tercera.rc == 0 and tercera.out.strip().splitlines() == ["total suprimidas: 0"],
+    pasa(tercera.rc == 0 and tercera.out.strip().splitlines() == ["total suprimidas: 0", "solicitudes de registro podadas: 0"],
          f"n3) sin nada que suprimir: total 0 y codigo 0 ({tercera.rc}, {tercera.out.strip().splitlines()})")
     lote_malo = gestion("suprimir-caducadas", "--lote", "0")
     negativo("n3) un lote fuera de 1..500 se rechaza antes de conectar",
@@ -2539,11 +2550,13 @@ def seccion_r():
         (d / nombre).write_text(contenido_fichero, encoding="ascii", newline="")
     base_montajes = [(d / "pg", "contrasena_aplicacion"), (d / "maestra", "clave_maestra"),
                      (d / "hmac", "clave_hmac_codigos"), (d / "firma", "clave_firma_tokens")]
-    validos = "denuncia=5/3600,seguimiento=6/60,mensajes=7/3600,acceso=9/300,otras=8/60,cuenta=4/60"
+    validos = ("denuncia=5/3600,seguimiento=6/60,mensajes=7/3600,acceso=9/300,otras=8/60,cuenta=4/60,"
+               "registro=3/3600,destinatario=2/900")
     control_log = arrancar_api_temporal("r_control", base_montajes + [(d / "redis", "contrasena_redis")],
                                         {"CANARIO_LIMITES": validos})
     control = (f"{TEXTO_BLOQUEADO}conexion" in control_log
-               and "LIMITES (configurados): acceso=9/300 cuenta=4/60 denuncia=5/3600 mensajes=7/3600 otras=8/60 "
+               and "LIMITES (configurados): acceso=9/300 cuenta=4/60 denuncia=5/3600 destinatario=2/900 "
+                   "mensajes=7/3600 otras=8/60 registro=3/3600 "
                    "seguimiento=6/60"
                in control_log)
     pasa(control, "r12) control: con el secreto de Redis y CANARIO_LIMITES validos la API los acepta, registra los "
@@ -2556,14 +2569,14 @@ def seccion_r():
         ("r_limites_incompletos", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=10/3600"},
          ("limites: CANARIO_LIMITES: reglas ['denuncia'], se esperan "
-          "['acceso', 'cuenta', 'denuncia', 'mensajes', 'otras', 'seguimiento']")),
+          "['acceso', 'cuenta', 'denuncia', 'destinatario', 'mensajes', 'otras', 'registro', 'seguimiento']")),
         ("r_limites_ventana", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=10/7,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,"
-                            "cuenta=60/60"},
+                            "cuenta=60/60,registro=10/3600,destinatario=3/900"},
          "limites: CANARIO_LIMITES: la ventana de denuncia no divide el dia"),
         ("r_limites_mal_formados", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=0/3600,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,"
-                            "cuenta=60/60"},
+                            "cuenta=60/60,registro=10/3600,destinatario=3/900"},
          "limites: CANARIO_LIMITES: elemento mal formado"),
     ]
     for etiqueta, montajes, entorno_api, motivo in casos:

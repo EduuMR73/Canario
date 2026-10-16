@@ -147,11 +147,12 @@ PERMISOS_ACL_APLICACION = ("resetkeys ~limite:* resetchannels -@all "
                            "+ping +multi +exec +incr +expire +ttl +client|setinfo")
 PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +pttl +dbsize +client|setinfo"
 LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
-                  "cuenta=1000/60")
-TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 mensajes=1000/3600 "
-                        "otras=1000/60 seguimiento=1000/60")
-TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 mensajes=30/3600 "
-                            "otras=60/60 seguimiento=60/60")
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900")
+TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 "
+                        "destinatario=1000/900 mensajes=1000/3600 otras=1000/60 registro=1000/3600 "
+                        "seguimiento=1000/60")
+TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 "
+                            "mensajes=30/3600 otras=60/60 registro=10/3600 seguimiento=60/60")
 LIMITE_ACCESO = (10, 300)
 LIMITE_CUENTA = (60, 60)
 TEXTO_EVENTO_CUENTA = "EVENTO limite_cuenta: "
@@ -2247,7 +2248,8 @@ def seccion_k_no_veraz():
     ids_nv = [den for den, _ in origenes.values()]
     lista_sql = ", ".join(f"'{d}'" for d in ids_nv)
     r = gestion("suprimir-caducadas")
-    esperado = [f"suprimidas: empresa_id={EMPRESAS['A'][0]} articulo=art32_3 denuncias=5", "total suprimidas: 5"]
+    esperado = [f"suprimidas: empresa_id={EMPRESAS['A'][0]} articulo=art32_3 denuncias=5", "total suprimidas: 5",
+                "solicitudes de registro podadas: 0"]
     control_sup = r.rc == 0 and r.out.strip().splitlines() == esperado
     pasa(control_sup, f"k10f) gestion suprimir-caducadas suprime las 5 por art32_3 y sale con 0 ({r.out.strip()!r})")
     restos = valor(f"select (select count(*) from canal.denuncia where id in ({lista_sql})) || '|' || "

@@ -61,19 +61,21 @@ PRUEBAS_POR_FICHERO = {
     "test_arranque": 4,
     "test_bd": 9,
     "test_claves": 7,
+    "test_correo": 7,
     "test_cripto": 38,
     "test_denuncias": 10,
     "test_errores": 11,
     "test_frontera": 10,
     "test_instruccion": 18,
-    "test_limitador": 12,
+    "test_limitador": 13,
     "test_login": 8,
     "test_personal": 8,
+    "test_solicitudes": 7,
     "test_tokens": 10,
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 170
+TOTAL_PRUEBAS = 185
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -144,6 +146,25 @@ MUTANTES = [
     ("limitador.py", 'RUTAS_MENSAJES = {"/v1/seguimiento/mensajes", "/web/seguimiento/mensajes"}',
      'RUTAS_MENSAJES = {"/v1/seguimiento/mensajes"}',
      "test_limitador.ReglaDeCadaRuta.test_reglas", "un mensaje por formulario no gasta el cupo de mensajes"),
+    # Registro "primero el email" (app/solicitudes.py y app/correo.py).
+    ("limitador.py", 'RUTAS_REGISTRO = {"/v1/personal/registro"}', "RUTAS_REGISTRO = set()",
+     "test_limitador.ReglaDeCadaRuta.test_reglas", "una solicitud de registro solo gasta el cupo de otras"),
+    ("solicitudes.py", "            conexion.execute(personal.SQL_RESERVA_ASINCRONA)\n", "",
+     "test_solicitudes.Solicitar.test_mismas_sentencias_en_todos_los_caminos",
+     "el registro espera al disco al crear la solicitud (el tiempo delata si el email tiene cuenta)"),
+    ("solicitudes.py", '"crear": resuelta is not None and not cuenta and not pendiente}', '"crear": not cuenta}',
+     "test_solicitudes.Solicitar.test_mismas_sentencias_en_todos_los_caminos",
+     "un nuevo registro sustituye la solicitud que su dueno ya verifico"),
+    ("solicitudes.py", "    if texto is None:\n        raise rutas_web.ErrorConfiguracion(",
+     ("    if texto is None:\n        texto = \"https://localhost:8445\"\n    if False:\n"
+      "        raise rutas_web.ErrorConfiguracion("),
+     "test_solicitudes.Origen.test_obligatorio", "sin CANARIO_ORIGEN_PERSONAL los enlaces usan un origen por defecto"),
+    ("correo.py", "tipo, type(error).__name__)", "tipo, correo.destinatario)",
+     "test_correo.Enviar.test_fallo_al_log_sin_datos", "un fallo de envio escribe el email en el log"),
+    ("correo.py", "    if not _semaforo.acquire(blocking=False):\n",
+     "    if not _semaforo.acquire(blocking=False) and False:\n",
+     "test_correo.Enviar.test_sin_hueco_se_descarta_sin_esperar",
+     "los envios simultaneos no tienen tope (un SMTP lento agota los hilos de la API)"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

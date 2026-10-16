@@ -73,8 +73,8 @@ class TokenCompuesto(unittest.TestCase):
     TOKEN = "A" * 43  # forma canónica de 32 bytes cero
 
     def test_valido(self):
-        self.assertEqual(personal._leer_compuesto(f"{IDENTIFICADOR}.{self.TOKEN}"), (IDENTIFICADOR, bytes(32)))
-        self.assertEqual(personal._token_compuesto(IDENTIFICADOR, self.TOKEN), f"{IDENTIFICADOR}.{self.TOKEN}")
+        self.assertEqual(personal.leer_compuesto(f"{IDENTIFICADOR}.{self.TOKEN}"), (IDENTIFICADOR, bytes(32)))
+        self.assertEqual(personal.token_compuesto(IDENTIFICADOR, self.TOKEN), f"{IDENTIFICADOR}.{self.TOKEN}")
 
     def test_rechazados(self):
         rechazados = {
@@ -88,4 +88,4 @@ class TokenCompuesto(unittest.TestCase):
         }
         for motivo, texto in rechazados.items():
             with self.subTest(motivo=motivo):
-                self.assertIsNone(personal._leer_compuesto(texto))
+                self.assertIsNone(personal.leer_compuesto(texto))

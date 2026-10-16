@@ -121,9 +121,10 @@ PIDS = 64
 CAP_CERO = "0000000000000000"
 PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}],
                  "8444/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8444"}]}
-# La API está en app (con el proxy), en data (con PostgreSQL) y en cache (con
-# Redis, el del limitador), nunca en edge.
-REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache"},
+# La API está en app (con el proxy), en data (con PostgreSQL), en cache (con
+# Redis, el del limitador) y en correo (con el SMTP de desarrollo), nunca en
+# edge.
+REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache", f"{PROYECTO}_correo"},
          "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
 # Únicos montajes de la API: sus cinco Docker secrets (contraseña de la base
 # de datos, clave maestra, clave del HMAC de los códigos, clave de firma de
@@ -531,6 +532,10 @@ def seccion_d():
         config = [(c["Subnet"], c.get("IPRange")) for c in i["IPAM"]["Config"]]
         pasa(config == [(subred, rango)], f"d) {red}: subred y rango automatico = {config}")
         pasa(i["Internal"] is interna, f"d) {red}: internal = {i['Internal']}")
+    # La red del correo, interna: la API no gana salida a internet por ella
+    # (la e) lo comprueba con una conexión real).
+    interna = inspeccionar(f"{PROYECTO}_correo")["Internal"]
+    pasa(interna is True, f"d) {PROYECTO}_correo: internal = {interna}")
 
 
 PRUEBA_SALIDA = ("import socket\n"

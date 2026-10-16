@@ -21,7 +21,10 @@ caducado, con sus bordes (también la denuncia inadmitida, a la que no se dio
 curso), borra sin plazo la declarada no veraz (art. 32.3, con prioridad sobre
 los otros dos artículos), salta lo que está en uso sin esperar, respeta una
 denuncia que pasa a instrucción en carrera y deja su evidencia en la
-auditoría. Que la redacción (art. 32.2) solo reescribe el contenido de una
+auditoría. Que una solicitud de registro del personal nace con 24 horas, solo
+se verifica abierta y sin caducar (y entonces pasa a 30 días), no se reabre
+ni deja de estar verificada, y que la poda borra solo las cerradas o
+caducadas, saltando las que están en uso. Que la redacción (art. 32.2) solo reescribe el contenido de una
 denuncia o de un mensaje asignado a un admin activo de la empresa del
 contexto, solo si sigue siendo el que se leyó, con su fila de auditoría en la
 misma sentencia, y que aplicacion sigue sin poder cambiar ningún contenido
@@ -156,9 +159,10 @@ TEXTO_AISLAMIENTO = "la supresion exige el nivel de aislamiento READ COMMITTED"
 # Oráculos literales
 # ---------------------------------------------------------------------------
 TABLAS = ["busqueda_seguimiento", "clave_empresa", "denuncia", "directorio_empresas", "dispositivo_personal",
-          "empresa", "invitacion_personal", "mensaje", "registro_auditoria", "sesion_personal", "usuario_personal"]
+          "empresa", "invitacion_personal", "mensaje", "registro_auditoria", "sesion_personal", "solicitud_registro",
+          "usuario_personal"]
 TABLAS_RLS = ["clave_empresa", "denuncia", "dispositivo_personal", "empresa", "invitacion_personal", "mensaje",
-              "registro_auditoria", "sesion_personal", "usuario_personal"]
+              "registro_auditoria", "sesion_personal", "solicitud_registro", "usuario_personal"]
 TABLAS_SIN_RLS = ["busqueda_seguimiento", "directorio_empresas"]
 COLUMNAS = {
     "empresa": ["id", "nombre", "activa", "fecha_alta", "zona_horaria"],
@@ -173,6 +177,7 @@ COLUMNAS = {
                              "bloqueado_hasta", "revocado"],
     "sesion_personal": ["empresa_id", "id", "usuario_id", "dispositivo_id", "token_sha256", "tokens_usados",
                         "ultimo_uso", "caduca", "revocada"],
+    "solicitud_registro": ["empresa_id", "id", "email", "token_sha256", "caduca", "verificada", "cerrada"],
     # Sin categoria: va dentro de contenido_cifrado.
     "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "contenido_cifrado", "version_clave"],
     "mensaje": ["empresa_id", "denuncia_id", "secuencia", "fecha", "id", "autor", "autor_id", "contenido_cifrado",
@@ -194,6 +199,7 @@ CLAVES_PRIMARIAS = [
     "invitacion_personal|PRIMARY KEY (empresa_id, id)",
     "dispositivo_personal|PRIMARY KEY (empresa_id, id)",
     "sesion_personal|PRIMARY KEY (empresa_id, id)",
+    "solicitud_registro|PRIMARY KEY (empresa_id, id)",
 ]
 # tabla|columnas|tabla referenciada|columnas referenciadas|accion al borrar (a = NO ACTION)
 CLAVES_FORANEAS = [
@@ -215,8 +221,9 @@ CLAVES_FORANEAS = [
     "sesion_personal|empresa_id,usuario_id|usuario_personal|empresa_id,id|a",
     # La sesión exige que su dispositivo sea de su mismo usuario.
     "sesion_personal|empresa_id,usuario_id,dispositivo_id|dispositivo_personal|empresa_id,usuario_id,id|a",
+    "solicitud_registro|empresa_id|empresa|id|a",
 ]
-# tabla|politica|comando (22 de aplicacion + 2 de propietario_funciones + 8 de propietario_supresion
+# tabla|politica|comando (25 de aplicacion + 2 de propietario_funciones + 11 de propietario_supresion
 # + 8 de propietario_redaccion)
 POLITICAS_APLICACION = [
     "empresa|empresa_select|SELECT",
@@ -234,6 +241,9 @@ POLITICAS_APLICACION = [
     "sesion_personal|sesion_personal_select|SELECT",
     "sesion_personal|sesion_personal_insert|INSERT",
     "sesion_personal|sesion_personal_update|UPDATE",
+    "solicitud_registro|solicitud_registro_select|SELECT",
+    "solicitud_registro|solicitud_registro_insert|INSERT",
+    "solicitud_registro|solicitud_registro_update|UPDATE",
     "denuncia|denuncia_select|SELECT",
     "denuncia|denuncia_insert|INSERT",
     "denuncia|denuncia_update|UPDATE",
@@ -246,8 +256,9 @@ POLITICAS_DEFINIDOR = [
     "empresa|empresa_select_definidor|SELECT",
     "empresa|empresa_insert_definidor|INSERT",
 ]
-# Las unicas con DELETE del esquema: las del dueno de la supresion. La de UPDATE
-# solo sirve para bloquear (USING true, WITH CHECK false).
+# Las unicas con DELETE del esquema: las del dueno de la supresion (denuncias y
+# poda de solicitudes de registro). Las de UPDATE solo sirven para bloquear
+# (USING true, WITH CHECK false).
 # tabla|politica|comando|USING|WITH CHECK
 POLITICAS_SUPRESION_COMPLETAS = [
     "empresa|empresa_select_supresion|SELECT|true|",
@@ -258,6 +269,9 @@ POLITICAS_SUPRESION_COMPLETAS = [
     "mensaje|mensaje_delete_supresion|DELETE|true|",
     "registro_auditoria|registro_auditoria_select_supresion|SELECT|true|",
     "registro_auditoria|registro_auditoria_insert_supresion|INSERT||true",
+    "solicitud_registro|solicitud_registro_select_supresion|SELECT|true|",
+    "solicitud_registro|solicitud_registro_bloqueo_supresion|UPDATE|true|false",
+    "solicitud_registro|solicitud_registro_delete_supresion|DELETE|true|",
 ]
 POLITICAS_SUPRESION = ["|".join(l.split("|")[:3]) for l in POLITICAS_SUPRESION_COMPLETAS]
 # Las del dueno de la redaccion: todas dentro del contexto de la empresa (a
@@ -291,6 +305,7 @@ PRIVILEGIOS_TABLA = {
         "invitacion_personal": {"SELECT"},
         "dispositivo_personal": {"SELECT"},
         "sesion_personal": {"SELECT"},
+        "solicitud_registro": {"SELECT"},
         "denuncia": {"SELECT", "INSERT"},
         "mensaje": {"SELECT", "INSERT"},
         "registro_auditoria": {"SELECT", "INSERT"},
@@ -302,6 +317,7 @@ PRIVILEGIOS_TABLA = {
         "empresa": set(), "clave_empresa": set(), "usuario_personal": set(), "denuncia": set(),
         "mensaje": set(), "registro_auditoria": set(),
         "invitacion_personal": set(), "dispositivo_personal": set(), "sesion_personal": set(),
+        "solicitud_registro": set(),
         "directorio_empresas": {"SELECT"},
         "busqueda_seguimiento": {"SELECT", "INSERT"},
     },
@@ -311,6 +327,7 @@ PRIVILEGIOS_TABLA = {
         "empresa": set(), "clave_empresa": set(), "usuario_personal": set(),
         "invitacion_personal": set(), "dispositivo_personal": set(), "sesion_personal": set(),
         "denuncia": {"DELETE"}, "mensaje": {"DELETE"}, "busqueda_seguimiento": {"DELETE"},
+        "solicitud_registro": {"DELETE"},
         "registro_auditoria": set(), "directorio_empresas": set(),
     },
     # Nada a nivel de tabla: todo por columna.
@@ -330,6 +347,9 @@ PRIVILEGIOS_COLUMNA = {
         ("dispositivo_personal", "UPDATE"): {"intentos_fallidos", "bloqueado_hasta", "revocado"},
         ("sesion_personal", "INSERT"): {"empresa_id", "usuario_id", "dispositivo_id", "token_sha256"},
         ("sesion_personal", "UPDATE"): {"token_sha256", "tokens_usados", "ultimo_uso", "revocada"},
+        # Ni caduca ni el id: los fija la base de datos.
+        ("solicitud_registro", "INSERT"): {"empresa_id", "email", "token_sha256"},
+        ("solicitud_registro", "UPDATE"): {"verificada", "cerrada"},
         ("denuncia", "UPDATE"): {"estado", "asignada_a"},
     },
     "plataforma": {},
@@ -347,6 +367,9 @@ PRIVILEGIOS_COLUMNA = {
         ("busqueda_seguimiento", "SELECT"): {"empresa_id", "denuncia_id"},
         ("registro_auditoria", "SELECT"): {"empresa_id", "secuencia", "hash"},
         ("registro_auditoria", "INSERT"): {"empresa_id", "actor", "accion", "objeto_id"},
+        # Poda: lee el criterio y bloquea (la politica deja el UPDATE en eso).
+        ("solicitud_registro", "SELECT"): {"empresa_id", "id", "caduca", "cerrada"},
+        ("solicitud_registro", "UPDATE"): {"cerrada"},
     },
     # El unico rol que puede reescribir contenido cifrado, y solo eso (con su
     # version de clave). Lee lo que comprueba antes de escribir.
@@ -367,6 +390,7 @@ COLUMNAS_UPDATE = {
     "invitacion_personal": {"cerrada", "hash_contrasena", "secreto_totp_cifrado", "version_clave_totp"},
     "dispositivo_personal": {"intentos_fallidos", "bloqueado_hasta", "revocado"},
     "sesion_personal": {"token_sha256", "tokens_usados", "ultimo_uso", "revocada"},
+    "solicitud_registro": {"verificada", "cerrada"},
     "denuncia": {"estado", "asignada_a"},
 }
 PRIVILEGIOS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -379,6 +403,7 @@ FUNCIONES_CATALOGO = {
     "empresa_actual": ("migrador", "f", "s", "canal.empresa_actual()"),
     "encadenar_auditoria": ("migrador", "f", "v", "canal.encadenar_auditoria()"),
     "fijar_fecha_denuncia": ("migrador", "f", "v", "canal.fijar_fecha_denuncia()"),
+    "controlar_solicitud_registro": ("migrador", "f", "v", "canal.controlar_solicitud_registro()"),
     "rechazar_modificacion_auditoria": ("migrador", "f", "v", "canal.rechazar_modificacion_auditoria()"),
     "verificar_cadena_auditoria": ("migrador", "f", "s", "canal.verificar_cadena_auditoria()"),
     "resolver_empresa": ("propietario_funciones", "t", "s", "canal.resolver_empresa(text)"),
@@ -388,12 +413,13 @@ FUNCIONES_CATALOGO = {
     "articulo_supresion": ("propietario_supresion", "f", "s", "canal.articulo_supresion(text,date,text)"),
     "suprimir_denuncias_caducadas": ("propietario_supresion", "t", "v", "canal.suprimir_denuncias_caducadas(integer)"),
     "contar_denuncias_caducadas": ("propietario_supresion", "t", "s", "canal.contar_denuncias_caducadas()"),
+    "podar_solicitudes_registro": ("propietario_supresion", "t", "v", "canal.podar_solicitudes_registro(integer)"),
     "redactar_denuncia": ("propietario_redaccion", "t", "v", "canal.redactar_denuncia(uuid,uuid,bytea,bytea,integer)"),
     "redactar_mensaje": ("propietario_redaccion", "t", "v",
                          "canal.redactar_mensaje(uuid,integer,uuid,bytea,bytea,integer)"),
 }
 FUNCIONES_DEFINIDOR = ["resolver_empresa", "buscar_codigo", "registrar_codigo", "alta_empresa",
-                       "suprimir_denuncias_caducadas", "contar_denuncias_caducadas",
+                       "suprimir_denuncias_caducadas", "contar_denuncias_caducadas", "podar_solicitudes_registro",
                        "redactar_denuncia", "redactar_mensaje"]
 CONFIG_DEFINIDOR = "search_path=pg_catalog, canal, pg_temp"
 # funcion -> roles con EXECUTE. propietario_funciones tiene EXECUTE sobre las suyas por ser su dueno
@@ -403,6 +429,7 @@ EXECUTE_ESPERADO = {
     "empresa_actual": {"aplicacion", "propietario_funciones", "propietario_redaccion"},
     "encadenar_auditoria": set(),
     "fijar_fecha_denuncia": set(),
+    "controlar_solicitud_registro": set(),
     "rechazar_modificacion_auditoria": set(),
     "verificar_cadena_auditoria": {"aplicacion"},
     "resolver_empresa": {"aplicacion", "propietario_funciones"},
@@ -413,6 +440,7 @@ EXECUTE_ESPERADO = {
     "articulo_supresion": {"propietario_supresion"},
     "suprimir_denuncias_caducadas": {"plataforma", "propietario_supresion"},
     "contar_denuncias_caducadas": {"plataforma", "propietario_supresion"},
+    "podar_solicitudes_registro": {"plataforma", "propietario_supresion"},
     # La API las ejecuta; su dueno, por serlo.
     "redactar_denuncia": {"aplicacion", "propietario_redaccion"},
     "redactar_mensaje": {"aplicacion", "propietario_redaccion"},
@@ -423,6 +451,7 @@ TRIGGERS = [
     "registro_auditoria|auditoria_encadenar|O",
     "registro_auditoria|auditoria_inmutable_fila|O",
     "registro_auditoria|auditoria_inmutable_truncate|O",
+    "solicitud_registro|solicitud_registro_transicion|O",
 ]
 # Errores de canal.preparar_mensaje(). Los de estado y tope con su SQLSTATE
 # propio, tal como los muestra psql con VERBOSITY verbose.
@@ -436,6 +465,7 @@ CONTEOS = {
     "empresa": (1, 1), "clave_empresa": (1, 1), "usuario_personal": (2, 2),
     "denuncia": (2, 2), "mensaje": (2, 1), "registro_auditoria": (2, 1),
     "invitacion_personal": (1, 1), "dispositivo_personal": (1, 2), "sesion_personal": (1, 1),
+    "solicitud_registro": (1, 1),
 }
 # Fixture del personal (g): huellas de token de 32 bytes y uuid fijos.
 DISP_A = "a0000000-0000-4000-8000-0000000000f1"
@@ -448,10 +478,22 @@ TOKEN_DISP_B = "22" * 32
 TOKEN_DISP_B2 = "23" * 32
 TOKEN_SES_A = "31" * 32
 TOKEN_SES_B = "32" * 32
+TOKEN_SOL_A = "61" * 32
+TOKEN_SOL_B = "62" * 32
 ADMIN_DE = {EMPRESA_A: ADMIN_A, EMPRESA_B: ADMIN_B}
 DISP_DE = {EMPRESA_A: DISP_A, EMPRESA_B: DISP_B}
 TEXTO_CREDENCIALES = "usuario_personal_credenciales_check"
 TEXTO_PENDIENTE = "invitacion_personal_pendiente_check"
+# Errores de canal.controlar_solicitud_registro(), con su SQLSTATE propio.
+TEXTO_SOLICITUD_REABRIR = "CN003: una solicitud de registro cerrada no se reabre"
+TEXTO_SOLICITUD_DESVERIFICAR = "CN003: una solicitud de registro verificada no deja de estarlo"
+TEXTO_SOLICITUD_VERIFICAR = "CN003: solo se verifica una solicitud abierta y sin caducar"
+# Solicitudes de la poda (sr), en la empresa C de su).
+SOL_VIGENTE = "c5000000-0000-4000-8000-000000000001"
+SOL_VERIFICADA = "c5000000-0000-4000-8000-000000000002"
+SOL_CERRADA = "c5000000-0000-4000-8000-000000000003"
+SOL_CADUCADA = "c5000000-0000-4000-8000-000000000004"
+SOL_EN_USO = "c5000000-0000-4000-8000-000000000005"
 
 # Autenticación (db/pg_hba.conf y docker-compose.yml), seccion au. Literales
 # comprobados contra postgres:18.6-alpine con el pg_hba.conf del repositorio.
@@ -651,8 +693,8 @@ def seccion_b():
     unido = "\n".join(codigo)
     for prohibido in ("TO PUBLIC", "BYPASSRLS", "PASSWORD", "SET ROLE", "TO APLICACION"):
         pasa(prohibido not in unido.upper(), f"b) 04: no contiene {prohibido!r}")
-    for texto, veces in (("SECURITY DEFINER", 2), ("SET search_path = pg_catalog, canal, pg_temp", 2),
-                         ("REVOKE EXECUTE ON FUNCTION", 3), ("OWNER TO propietario_supresion", 3)):
+    for texto, veces in (("SECURITY DEFINER", 3), ("SET search_path = pg_catalog, canal, pg_temp", 3),
+                         ("REVOKE EXECUTE ON FUNCTION", 4), ("OWNER TO propietario_supresion", 4)):
         pasa(unido.count(texto) == veces, f"b) 04: contiene exactamente {veces} veces {texto!r} ({unido.count(texto)})")
     p("=== b) estaticas de db/init/05_redaccion.sql")
     datos = (RAIZ / "db" / "init" / "05_redaccion.sql").read_bytes()
@@ -678,7 +720,7 @@ def seccion_c():
     comparar("c) esquema canal de migrador", r.lineas(), ["migrador"])
     r = sup("select c.relname, pg_get_userbyid(c.relowner) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
             "where n.nspname = 'canal' and c.relkind in ('r', 'p');")
-    comparar("c) exactamente las 11 tablas, todas de migrador", r.lineas(), [f"{t}|migrador" for t in TABLAS])
+    comparar("c) exactamente las 12 tablas, todas de migrador", r.lineas(), [f"{t}|migrador" for t in TABLAS])
     r = sup("select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
             "where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S');")
     comparar("c) ninguna tabla ni objeto en public", r.lineas(), ["0"])
@@ -712,15 +754,17 @@ select c.relname,
     r = sup("select c.relname, c.relrowsecurity, c.relforcerowsecurity from pg_class c "
             "join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'canal' and c.relkind = 'r';")
     esperado = [f"{t}|t|t" for t in TABLAS_RLS] + [f"{t}|f|f" for t in TABLAS_SIN_RLS]
-    comparar("c) RLS ENABLE y FORCE en las 9 tablas y ninguna en directorio_empresas ni busqueda_seguimiento", r.lineas(), esperado)
+    comparar("c) RLS ENABLE y FORCE en las 10 tablas y ninguna en directorio_empresas ni busqueda_seguimiento", r.lineas(), esperado)
     # Personal: tokens unicos por empresa y como mucho una invitacion abierta
     # por cuenta (indice parcial).
     r = sup("select c.relname || '|' || pg_get_constraintdef(co.oid) from pg_constraint co "
             "join pg_class c on c.oid = co.conrelid join pg_namespace n on n.oid = c.relnamespace "
             "where co.contype = 'u' and n.nspname = 'canal' "
-            "and c.relname in ('invitacion_personal', 'dispositivo_personal', 'sesion_personal');")
+            "and c.relname in ('invitacion_personal', 'dispositivo_personal', 'sesion_personal', "
+            "'solicitud_registro');")
     comparar("c) UNIQUE de las tablas del personal", r.lineas(), [
         "invitacion_personal|UNIQUE (empresa_id, token_sha256)",
+        "solicitud_registro|UNIQUE (empresa_id, token_sha256)",
         "dispositivo_personal|UNIQUE (empresa_id, token_sha256)",
         "dispositivo_personal|UNIQUE (empresa_id, usuario_id, id)",
         "sesion_personal|UNIQUE (empresa_id, token_sha256)"])
@@ -728,6 +772,10 @@ select c.relname,
     comparar("c) una sola invitacion abierta por cuenta (indice unico parcial)", r.lineas(), [
         ("CREATE UNIQUE INDEX invitacion_personal_una_abierta ON canal.invitacion_personal "
          "USING btree (empresa_id, usuario_id) WHERE (NOT cerrada)")])
+    r = sup("select pg_get_indexdef('canal.solicitud_registro_una_abierta'::regclass);")
+    comparar("c) una sola solicitud de registro abierta por email y empresa (indice unico parcial)", r.lineas(), [
+        ("CREATE UNIQUE INDEX solicitud_registro_una_abierta ON canal.solicitud_registro "
+         "USING btree (empresa_id, email) WHERE (NOT cerrada)")])
     r = sup("select pg_get_constraintdef(oid) from pg_constraint "
             f"where conname = '{TEXTO_CREDENCIALES}' and conrelid = 'canal.usuario_personal'::regclass;")
     comparar("c) una cuenta esta activada si y solo si tiene hash, secreto TOTP y version de clave", r.lineas(), [
@@ -737,8 +785,9 @@ select c.relname,
             "join pg_class c on c.oid = d.adrelid join pg_namespace n on n.oid = c.relnamespace "
             "join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum "
             "where n.nspname = 'canal' and a.attname = 'caduca';")
-    comparar("c) las caducidades las fija la base de datos: 72 horas, 90 dias y 8 horas", r.lineas(), [
+    comparar("c) las caducidades las fija la base de datos: 72 horas, 24 horas, 90 dias y 8 horas", r.lineas(), [
         "invitacion_personal.caduca|(now() + '72:00:00'::interval)",
+        "solicitud_registro.caduca|(now() + '24:00:00'::interval)",
         "dispositivo_personal.caduca|(now() + '90 days'::interval)",
         "sesion_personal.caduca|(now() + '08:00:00'::interval)"])
     # Renovacion rotatoria (RFC 9700, 4.14.2): los tokens usados de una sesion
@@ -762,7 +811,7 @@ def seccion_d():
     r = sup("select tablename, policyname, cmd, roles, coalesce(qual, ''), coalesce(with_check, '') "
             "from pg_policies where schemaname = 'canal' order by 1, 2;")
     filas = [l.split("|") for l in r.lineas()]
-    comparar("d) conjunto exacto de las 40 politicas (tabla, nombre, comando)",
+    comparar("d) conjunto exacto de las 46 politicas (tabla, nombre, comando)",
              ["|".join(f[:3]) for f in filas], POLITICAS)
 
     def rol_esperado(nombre):
@@ -774,13 +823,14 @@ def seccion_d():
             return "{propietario_redaccion}"
         return "{aplicacion}"
     pasa(all(f[3] == rol_esperado(f[1]) for f in filas),
-         "d) las 22 de aplicacion son TO aplicacion, las 2 del definidor solo TO propietario_funciones, "
-         "las 8 de supresion solo TO propietario_supresion y las 8 de redaccion solo TO propietario_redaccion")
+         "d) las 25 de aplicacion son TO aplicacion, las 2 del definidor solo TO propietario_funciones, "
+         "las 11 de supresion solo TO propietario_supresion y las 8 de redaccion solo TO propietario_redaccion")
     pasa(all(f[2] != "ALL" for f in filas), "d) ninguna con comando ALL")
     con_delete = sorted(f[1] for f in filas if f[2] == "DELETE")
-    comparar("d) las unicas politicas de DELETE son las 2 de supresion (denuncia y mensaje)", con_delete,
-             ["denuncia_delete_supresion", "mensaje_delete_supresion"])
-    comparar("d) las 8 de supresion: comando, USING y WITH CHECK exactos (la de UPDATE con WITH CHECK false)",
+    comparar("d) las unicas politicas de DELETE son las 3 de supresion (denuncia, mensaje y solicitud de registro)",
+             con_delete, ["denuncia_delete_supresion", "mensaje_delete_supresion",
+                          "solicitud_registro_delete_supresion"])
+    comparar("d) las 11 de supresion: comando, USING y WITH CHECK exactos (las de UPDATE con WITH CHECK false)",
              ["|".join(f[:3] + f[4:]) for f in filas if f[1] in NOMBRES_POLITICAS_SUPRESION],
              POLITICAS_SUPRESION_COMPLETAS)
     comparar("d) las 8 de redaccion: comando, USING y WITH CHECK exactos (todas con el contexto de la empresa)",
@@ -805,7 +855,7 @@ def seccion_d():
         if esperado_check != ("empresa_actual" in check) or (not esperado_check and check):
             ok = False
             p(f"   {nombre}: with_check inesperado {check!r}")
-    pasa(ok, "d) las 22 de aplicacion usan empresa_actual (SELECT solo qual, INSERT solo with_check, UPDATE ambos) y las 2 del definidor llevan true")
+    pasa(ok, "d) las 25 de aplicacion usan empresa_actual (SELECT solo qual, INSERT solo with_check, UPDATE ambos) y las 2 del definidor llevan true")
 
 
 def seccion_e():
@@ -880,10 +930,10 @@ def seccion_f():
     r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef, p.provolatile, p.oid::regprocedure::text "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
     esperado = [f"{f}|{d}|{s}|{v}|{firma}" for f, (d, s, v, firma) in FUNCIONES_CATALOGO.items()]
-    comparar("f) exactamente las 15 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
+    comparar("f) exactamente las 17 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
     r = sup("select p.proname, c from pg_proc p join pg_namespace n on n.oid = p.pronamespace, unnest(p.proconfig) c "
             "where n.nspname = 'canal' and p.prosecdef;")
-    comparar("f) las 8 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
+    comparar("f) las 9 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
              r.lineas(), [f"{f}|{CONFIG_DEFINIDOR}" for f in FUNCIONES_DEFINIDOR])
     r = sup("select array_to_string(proconfig, ',') from pg_proc "
             "where proname = 'articulo_supresion' and pronamespace = 'canal'::regnamespace;")
@@ -898,10 +948,10 @@ def seccion_f():
     for rol in ROLES:
         for f in FUNCIONES_CATALOGO:
             esperado.append(f"{rol}|{f}|{'true' if rol in EXECUTE_ESPERADO[f] else 'false'}")
-    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 15 funciones", r.lineas(), esperado)
+    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 17 funciones", r.lineas(), esperado)
     r = sup("select c.relname, t.tgname, t.tgenabled from pg_trigger t join pg_class c on c.oid = t.tgrelid "
             "join pg_namespace n on n.oid = c.relnamespace where not t.tgisinternal and n.nspname = 'canal';")
-    comparar("f) los 5 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
+    comparar("f) los 6 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
     # control de privilegios por defecto: una funcion nueva de migrador no hereda EXECUTE de PUBLIC
     try:
         r = sup("SET ROLE migrador;\n"
@@ -936,6 +986,8 @@ INSERT INTO canal.dispositivo_personal (empresa_id, id, usuario_id, token_sha256
 INSERT INTO canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) VALUES
     ('{EMPRESA_A}', '{ADMIN_A}', '{DISP_A}', '\\x{TOKEN_SES_A}'),
     ('{EMPRESA_B}', '{ADMIN_B}', '{DISP_B}', '\\x{TOKEN_SES_B}');
+INSERT INTO canal.solicitud_registro (empresa_id, email, token_sha256) VALUES
+    ('{EMPRESA_A}', 'pide@ejemplo.test', '\\x{TOKEN_SOL_A}'), ('{EMPRESA_B}', 'pide@ejemplo.test', '\\x{TOKEN_SOL_B}');
 INSERT INTO canal.denuncia (empresa_id, id, contenido_cifrado, version_clave, asignada_a) VALUES
     ('{EMPRESA_A}', '{DEN_A1}', {BYTES_FALSOS}, 1, '{INSTR_A}'),
     ('{EMPRESA_A}', '{DEN_A2}', {BYTES_FALSOS}, 1, NULL),
@@ -1007,6 +1059,7 @@ def seccion_i():
         "invitacion_personal": lambda e, d: f"insert into canal.invitacion_personal (empresa_id, usuario_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '\\x{'41' * 32}');",
         "dispositivo_personal": lambda e, d: f"insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '\\x{'42' * 32}');",
         "sesion_personal": lambda e, d: f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '{DISP_DE[e]}', '\\x{'43' * 32}');",
+        "solicitud_registro": lambda e, d: f"insert into canal.solicitud_registro (empresa_id, email, token_sha256) values ('{e}', 'otra@ejemplo.test', '\\x{'44' * 32}');",
         "clave_empresa": lambda e, d: f"insert into canal.clave_empresa (empresa_id, version, clave_envuelta) values ('{e}', 2, {BYTES_FALSOS});",
         "registro_auditoria": lambda e, d: f"insert into canal.registro_auditoria (empresa_id, actor, accion) values ('{e}', 'prueba', 'accion');",
     }
@@ -1185,6 +1238,19 @@ def seccion_l():
     ctl = en_a("update canal.invitacion_personal set cerrada = true;")
     for columna, v in (("caduca", "now() + interval '10 years'"), ("token_sha256", f"'\\x{'56' * 32}'")):
         negativo(f"l) UPDATE de invitacion_personal.{columna}", en_a(f"update canal.invitacion_personal set {columna} = {v};"),
+                 "permission denied", sin_error(ctl))
+    # Solicitudes de registro: la API no elige la caducidad ni crea una ya
+    # verificada o cerrada, y no cambia el email, el token ni la empresa.
+    ctl = en_a(f"insert into canal.solicitud_registro (empresa_id, email, token_sha256) values ('{EMPRESA_A}', 'l@ejemplo.test', '\\x{'59' * 32}');")
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("verificada", "true"), ("cerrada", "false"),
+                       ("id", "gen_random_uuid()")):
+        negativo(f"l) INSERT de solicitud_registro con {columna}",
+                 en_a(f"insert into canal.solicitud_registro (empresa_id, email, token_sha256, {columna}) values ('{EMPRESA_A}', 'l@ejemplo.test', '\\x{'59' * 32}', {v});"),
+                 "permission denied", sin_error(ctl))
+    ctl = en_a("update canal.solicitud_registro set cerrada = true;")
+    for columna, v in (("caduca", "now() + interval '10 years'"), ("email", "'otro@ejemplo.test'"),
+                       ("token_sha256", f"'\\x{'5a' * 32}'"), ("empresa_id", f"'{EMPRESA_A}'")):
+        negativo(f"l) UPDATE de solicitud_registro.{columna}", en_a(f"update canal.solicitud_registro set {columna} = {v};"),
                  "permission denied", sin_error(ctl))
 
     # Invariantes del personal en la propia tabla (como superusuario, que se
@@ -1963,7 +2029,7 @@ def seccion_v():
     ctl_ok = sin_error(ctl) and valor(ctl).isdigit() and int(valor(ctl)) >= 3
     pasa(ctl_ok, f"v) control: propietario_funciones si puede leer empresa(id) ({valor(ctl)} empresas)")
     for t in ("denuncia", "mensaje", "usuario_personal", "clave_empresa", "registro_auditoria",
-              "invitacion_personal", "dispositivo_personal", "sesion_personal"):
+              "invitacion_personal", "dispositivo_personal", "sesion_personal", "solicitud_registro"):
         negativo(f"v) propietario_funciones: select de {t}", como_propietario(f"select count(*) from canal.{t};"),
                  "permission denied", ctl_ok)
     # suposicion 2: INSERT ... RETURNING bajo RLS exige privilegio y politica de SELECT.
@@ -2217,6 +2283,149 @@ COMMIT;
         pasa(real == foto[nombre], f"su5) las 6 tablas de la empresa {nombre} no han cambiado: {real}")
 
 
+def seccion_sr():
+    # Va despues de su) y antes de re): usa la empresa C de su) y comprueba al
+    # final que A y B no han cambiado.
+    p("=== sr) solicitudes de registro: transiciones y poda")
+    foto = {"A": conteos_contexto(EMPRESA_A), "B": conteos_contexto(EMPRESA_B)}
+
+    # VERBOSITY verbose: psql muestra el SQLSTATE (CN003) delante del mensaje.
+    def en_c(cuerpo):
+        return app("\\set VERBOSITY verbose\n" + cuerpo, ctx=EMPRESA_C, final="ROLLBACK")
+
+    def nueva(email, byte):
+        return (f"insert into canal.solicitud_registro (empresa_id, email, token_sha256) "
+                f"values ('{EMPRESA_C}', '{email}', '\\x{byte * 32}')")
+
+    # sr1) Nace con 24 horas, abierta y sin verificar. Es el control de lo
+    #      que sigue.
+    r = en_c(nueva("sr1@ejemplo.test", "71") + " returning (caduca > now() + interval '23 hours 59 minutes' "
+             "and caduca <= now() + interval '24 hours')::text || '|' || verificada || '|' || cerrada;")
+    control = sin_error(r) and valor(r) == "true|false|false"
+    pasa(control, f"sr1) aplicacion crea una solicitud: caduca en 24 horas, sin verificar y abierta ({valor(r)!r}) "
+                  f"{r.err.strip()[:200]}")
+    # sr2) Una abierta por email y empresa; otro email cabe.
+    ctl = en_c(nueva("sr2@ejemplo.test", "72") + ";\n" + nueva("sr2b@ejemplo.test", "73") + ";")
+    negativo("sr2) dos solicitudes abiertas con el mismo email en la empresa (indice parcial)",
+             en_c(nueva("sr2@ejemplo.test", "72") + ";\n" + nueva("sr2@ejemplo.test", "74") + ";"),
+             "solicitud_registro_una_abierta", sin_error(ctl))
+    # sr3) Al verificarla, la caducidad pasa a 30 dias (la fija el trigger).
+    verificar = "update canal.solicitud_registro set verificada = true where email = 'sr3@ejemplo.test'"
+    r = en_c(nueva("sr3@ejemplo.test", "75") + f";\n{verificar} returning "
+             "(caduca > now() + interval '29 days 23 hours' and caduca <= now() + interval '30 days')::text;")
+    ctl_verificar = sin_error(r) and valor(r) == "true"
+    pasa(ctl_verificar, f"sr3) al verificar, la caducidad pasa a 30 dias ({valor(r)!r}) {r.err.strip()[:200]}")
+    negativo("sr3) una verificada no deja de estarlo",
+             en_c(nueva("sr3@ejemplo.test", "75") + f";\n{verificar};\n"
+                  "update canal.solicitud_registro set verificada = false where email = 'sr3@ejemplo.test';"),
+             TEXTO_SOLICITUD_DESVERIFICAR, ctl_verificar)
+    # sr4) Una cerrada no se reabre ni se verifica. Control: cerrarla.
+    cerrar = "update canal.solicitud_registro set cerrada = true where email = 'sr4@ejemplo.test';"
+    ctl = en_c(nueva("sr4@ejemplo.test", "76") + f";\n{cerrar}")
+    negativo("sr4) una cerrada no se reabre",
+             en_c(nueva("sr4@ejemplo.test", "76") + f";\n{cerrar}\n"
+                  "update canal.solicitud_registro set cerrada = false where email = 'sr4@ejemplo.test';"),
+             TEXTO_SOLICITUD_REABRIR, sin_error(ctl))
+    negativo("sr4) una cerrada no se verifica",
+             en_c(nueva("sr4@ejemplo.test", "76") + f";\n{cerrar}\n"
+                  "update canal.solicitud_registro set verificada = true where email = 'sr4@ejemplo.test';"),
+             TEXTO_SOLICITUD_VERIFICAR, sin_error(ctl))
+
+    # sr5) Una caducada no se verifica. La caducidad se adelanta como
+    #      superusuario con el trigger desactivado solo en esta transaccion.
+    def caducada_y(accion):
+        return sup(f"\\set VERBOSITY verbose\nBEGIN;\nINSERT INTO canal.solicitud_registro (empresa_id, email, "
+                   f"token_sha256) VALUES ('{EMPRESA_C}', 'sr5@ejemplo.test', '\\x{'77' * 32}');\n"
+                   "ALTER TABLE canal.solicitud_registro DISABLE TRIGGER solicitud_registro_transicion;\n"
+                   "UPDATE canal.solicitud_registro SET caduca = now() - interval '1 second' "
+                   "WHERE email = 'sr5@ejemplo.test';\n"
+                   "ALTER TABLE canal.solicitud_registro ENABLE TRIGGER solicitud_registro_transicion;\n"
+                   f"SET ROLE aplicacion;\nSELECT set_config('app.empresa_id', '{EMPRESA_C}', true) \\gset\n"
+                   f"{accion}\nRESET ROLE;\nROLLBACK;\n")
+    ctl = caducada_y("update canal.solicitud_registro set cerrada = true where email = 'sr5@ejemplo.test';")
+    negativo("sr5) una caducada no se verifica",
+             caducada_y("update canal.solicitud_registro set verificada = true where email = 'sr5@ejemplo.test';"),
+             TEXTO_SOLICITUD_VERIFICAR, sin_error(ctl))
+    # sr6) Ni el superusuario (que se salta los permisos, no los triggers)
+    #      cambia la caducidad con un UPDATE: el trigger la conserva.
+    r = sup(f"BEGIN;\nINSERT INTO canal.solicitud_registro (empresa_id, email, token_sha256) VALUES "
+            f"('{EMPRESA_C}', 'sr6@ejemplo.test', '\\x{'78' * 32}');\n"
+            "UPDATE canal.solicitud_registro SET caduca = now() + interval '10 years' "
+            "WHERE email = 'sr6@ejemplo.test' RETURNING (caduca <= now() + interval '24 hours')::text;\nROLLBACK;\n")
+    negativo_valor(f"sr6) un UPDATE de caduca se descarta ({valor(r)!r})", sin_error(r) and valor(r) == "true",
+                   control)
+
+    # sr7) Poda: solo plataforma la ejecuta; borra las cerradas y las
+    #      caducadas, salta la que esta en uso y conserva las vigentes.
+    def plataforma(sql_plataforma):
+        return cliente_red(sql_plataforma, "plataforma")
+
+    def podar(lote):
+        return plataforma(f"select canal.podar_solicitudes_registro({lote});")
+    preparar = f"""BEGIN;
+INSERT INTO canal.solicitud_registro (empresa_id, id, email, token_sha256, verificada, cerrada) VALUES
+    ('{EMPRESA_C}', '{SOL_VIGENTE}', 'vigente@ejemplo.test', '\\x{'81' * 32}', false, false),
+    ('{EMPRESA_C}', '{SOL_VERIFICADA}', 'verificada@ejemplo.test', '\\x{'82' * 32}', true, false),
+    ('{EMPRESA_C}', '{SOL_CERRADA}', 'cerrada@ejemplo.test', '\\x{'83' * 32}', false, true),
+    ('{EMPRESA_C}', '{SOL_CADUCADA}', 'caducada@ejemplo.test', '\\x{'84' * 32}', false, false),
+    ('{EMPRESA_C}', '{SOL_EN_USO}', 'en_uso@ejemplo.test', '\\x{'85' * 32}', true, true);
+ALTER TABLE canal.solicitud_registro DISABLE TRIGGER solicitud_registro_transicion;
+UPDATE canal.solicitud_registro SET caduca = now() - interval '1 second' WHERE id = '{SOL_CADUCADA}';
+ALTER TABLE canal.solicitud_registro ENABLE TRIGGER solicitud_registro_transicion;
+COMMIT;
+"""
+    r = dc(*PSQL[:-4], "-v", "ON_ERROR_STOP=1", "-f", "-", entrada=preparar.encode())
+    if not sin_error(r):
+        sinc(f"sr7) no se pudieron preparar las solicitudes: {r.err.strip()[:300]!r}")
+        return
+    r = podar("0")
+    ctl_plataforma = TEXTO_LOTE in r.err
+    pasa(ctl_plataforma, f"sr7) control: plataforma llega a la funcion (su validacion del lote responde) "
+                         f"{r.err.strip()[:200]}")
+    negativo("sr7) aplicacion no puede ejecutar podar_solicitudes_registro",
+             app("select canal.podar_solicitudes_registro(1);"),
+             "permission denied for function podar_solicitudes_registro", ctl_plataforma)
+    for lote in ("501", "NULL"):
+        negativo(f"sr7) lote {lote} rechazado", podar(lote), TEXTO_LOTE, ctl_plataforma)
+    ctl = sup(f"SET ROLE propietario_supresion;\nBEGIN;\nselect count(*) from (select id from canal.solicitud_registro "
+              f"where id = '{SOL_VIGENTE}' for update) s;\nROLLBACK;")
+    negativo("sr7) propietario_supresion puede bloquear pero no cambiar una solicitud (WITH CHECK false)",
+             sup(f"SET ROLE propietario_supresion;\nupdate canal.solicitud_registro set cerrada = true "
+                 f"where id = '{SOL_VIGENTE}';"), "new row violates row-level security policy",
+             sin_error(ctl) and valor(ctl) == "1")
+    # Una sesion de la API bloquea la solicitud en uso mientras se poda.
+    bloquea = (f"SET application_name = 'sr_bloquea';\nSET ROLE aplicacion;\nBEGIN;\n"
+               f"SELECT set_config('app.empresa_id', '{EMPRESA_C}', true) \\gset\n"
+               f"select 1 from canal.solicitud_registro where id = '{SOL_EN_USO}' for update;\n"
+               "\\! sleep 15\nCOMMIT;\n")
+    abiertas = "state = 'idle in transaction'"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as hilos:
+        futuro = hilos.submit(sup, bloquea)
+        lista = esperar_sesion("sr_bloquea", abiertas)
+        if lista:
+            nowait = sup(f"BEGIN;\nselect 1 from canal.solicitud_registro where id = '{SOL_EN_USO}' "
+                         "for update nowait;\nROLLBACK;")
+            lote1, lote2, lote3 = podar(1), podar(100), podar(100)
+            sigue = sesion_en("sr_bloquea", abiertas)
+        r_bloquea = futuro.result()
+    if not lista:
+        sinc(f"sr7) la sesion que bloquea no quedo abierta: {r_bloquea.err.strip()[:200]!r}")
+        return
+    control = "could not obtain lock" in nowait.err and sigue and sin_error(r_bloquea)
+    pasa(control, f"sr7) control: la solicitud en uso estaba bloqueada de verdad durante la poda ({sigue})")
+    negativo_valor(f"sr7) lote de 1 borra una; el de 100, la otra; el siguiente, ninguna mientras la en uso "
+                   f"esta bloqueada ({valor(lote1)}, {valor(lote2)}, {valor(lote3)})",
+                   [valor(lote1), valor(lote2), valor(lote3)] == ["1", "1", "0"], control)
+    despues, vacio = podar(100), podar(100)
+    negativo_valor(f"sr7) liberada, la siguiente poda la borra ({valor(despues)}, luego {valor(vacio)})",
+                   [valor(despues), valor(vacio)] == ["1", "0"], control)
+    r = sup(f"select id from canal.solicitud_registro where empresa_id = '{EMPRESA_C}';")
+    comparar("sr7) quedan exactamente la vigente y la verificada", r.lineas(), [SOL_VIGENTE, SOL_VERIFICADA])
+    for nombre, ctx in (("A", EMPRESA_A), ("B", EMPRESA_B)):
+        real = conteos_contexto(ctx)
+        pasa(real == foto[nombre], f"sr7) las tablas de la empresa {nombre} no han cambiado: {real}")
+
+
 def seccion_re():
     # Va despues de su) y antes de r): usa su propia empresa D y comprueba al
     # final que A y B no han cambiado.
@@ -2369,11 +2578,11 @@ def seccion_r():
                                          "where n.nspname = 'canal' and c.relkind = 'r';").lineas(), TABLAS)
     politicas = sup("select tablename, policyname, cmd from pg_policies where schemaname = 'canal';").lineas()
     tablas_con_politicas = {l.split("|")[0] for l in politicas}
-    comparar("r) siguen las 40 politicas definidas en d)", politicas, POLITICAS)
-    pasa(len(politicas) == 40 and len(tablas_con_politicas) == 9,
-         f"r) exactamente 40 politicas repartidas en exactamente 9 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
+    comparar("r) siguen las 46 politicas definidas en d)", politicas, POLITICAS)
+    pasa(len(politicas) == 46 and len(tablas_con_politicas) == 10,
+         f"r) exactamente 46 politicas repartidas en exactamente 10 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
     funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
-    comparar("r) siguen las 15 funciones", funciones, list(FUNCIONES_CATALOGO))
+    comparar("r) siguen las 17 funciones", funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
 
 
@@ -2465,8 +2674,8 @@ def main():
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
                         seccion_j, seccion_k, seccion_l, seccion_m, seccion_au, seccion_n, seccion_o, seccion_z, seccion_p,
                         seccion_q,
-                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_re,
-                        seccion_r):
+                        seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_sr,
+                        seccion_re, seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)

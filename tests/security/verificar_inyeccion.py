@@ -109,9 +109,10 @@ PERMISOS_ACL_APLICACION = ("resetkeys ~limite:* resetchannels -@all "
                            "+ping +multi +exec +incr +expire +ttl +client|setinfo")
 PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +pttl +dbsize +client|setinfo"
 LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
-                  "cuenta=1000/60")
-TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 mensajes=1000/3600 "
-                        "otras=1000/60 seguimiento=1000/60")
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900")
+TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 "
+                        "destinatario=1000/900 mensajes=1000/3600 otras=1000/60 registro=1000/3600 "
+                        "seguimiento=1000/60")
 
 PATRON_ALTA = re.compile(r"empresa creada: empresa_id=([0-9a-f-]{36}) identificador_publico=([0-9a-f]{32})")
 PATRON_INVITACION_GESTION = re.compile(r"invitacion creada: empresa_id=([0-9a-f-]{36}) usuario_id=([0-9a-f-]{36})\n"
@@ -186,6 +187,7 @@ CAMPOS_TEXTO = {
     "CambioContrasena.contrasena_actual", "CambioContrasena.contrasena_nueva", "CambioContrasena.codigo_totp",
     "NuevoUsuario.email", "MensajePersonal.texto", "CambioEstado.mensaje", "Asignacion.usuario_id",
     "Tramo.texto",
+    "SolicitudRegistro.empresa", "SolicitudRegistro.email", "VerificacionRegistro.token",
 }
 CONTROL_MODELOS = {"Control.sin_tipo": False, "Control.con_tipo": True, "Control.opcional_sin_tipo": False}
 
@@ -1067,6 +1069,14 @@ def campos():
                                         {"estado": "resuelta", "mensaje": v}, token=token), "texto benigno", {409}),
         ("asignacion.usuario_id", lambda v: pt("PUT", f"/v1/personal/denuncias/{denuncia}/asignacion",
                                                {"usuario_id": v}, token=token), "x", {404}),
+        # Registro (app/solicitudes.py): con una empresa que no existe, el 202
+        # de siempre y ningun correo; un token que no vale, 401.
+        ("registro.empresa", lambda v: pt("POST", "/v1/personal/registro",
+                                          {"empresa": v, "email": "nadie@inyeccion.test"}), sin_cuenta, {202}),
+        ("registro.email", lambda v: pt("POST", "/v1/personal/registro", {"empresa": sin_cuenta, "email": v}),
+         "nadie@inyeccion.test", {202}),
+        ("verificacion.token", lambda v: pt("POST", "/v1/personal/registro/verificacion", {"token": v}),
+         "x", {401}),
         # El benigno no esta en la posicion 0 del texto: 409 sin escribir nada.
         ("redaccion.texto", lambda v: pt("POST", f"/v1/personal/denuncias/{denuncia}/redaccion",
                                          {"tramos": [{"desde": 0, "texto": v}]}, token=token),
@@ -1086,7 +1096,7 @@ CONTROLES_C0_ESCAPADOS = [0x0b, 0x1b]
 # Campos donde además se prueban tipos que no son texto (los obligatorios
 # que llegan al SQL o a un id).
 CAMPOS_TIPOS = {"login.empresa", "login.email", "seguimiento.codigo", "usuarios.email", "asignacion.usuario_id",
-                "crear.texto"}
+                "crear.texto", "registro.empresa", "registro.email"}
 
 
 def con_insercion(benigno, caracter):

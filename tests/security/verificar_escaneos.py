@@ -12,7 +12,8 @@ Qué prueba:
   c) pip-audit sobre requirements.txt (sin vulnerabilidades conocidas) y que
      sus hashes coinciden con los ficheros que publica PyPI;
   d) bandit sobre app/ (sin hallazgos de severidad media o alta y sin # nosec);
-  e) Trivy sobre las cuatro imágenes (api, caddy, postgres y redis): ninguna
+  e) Trivy sobre las cinco imágenes (api, caddy, postgres, redis y mailpit, la del
+     correo de desarrollo): ninguna
      vulnerabilidad HIGH o CRITICAL con arreglo publicado que no esté declarada
      como no explotable en tests/security/canario.openvex.json, ningún secreto,
      declaraciones VEX vigentes (30 días como máximo), con efecto y atadas a la
@@ -142,7 +143,7 @@ PROTOCOLOS_CADDY = ["h1"]
 ALPN_REAL = "http/1.1"
 ALPN_CONTROL = "h2"
 
-IMAGENES = ("api", "caddy", "postgres", "redis")
+IMAGENES = ("api", "caddy", "postgres", "redis", "mailpit")
 SEVERIDADES = "HIGH,CRITICAL"
 
 TEMPORAL = None
@@ -504,8 +505,9 @@ def hallazgos(informe):
 
 
 def preparar_imagenes():
-    # gestion está bajo su perfil: sin --profile, config no lo incluye.
-    r = dc("--profile", "gestion", "config", "--format", "json")
+    # gestion y mailpit están bajo su perfil: sin --profile, config no los
+    # incluye.
+    r = dc("--profile", "gestion", "--profile", "desarrollo", "config", "--format", "json")
     try:
         servicios = json.loads(r.out)["services"]
     except (ValueError, KeyError):
@@ -517,10 +519,13 @@ def preparar_imagenes():
     r = dc("build", "postgres", "api", "caddy")
     if r.rc != 0:
         raise SinRed(f"no se pudieron construir las imagenes: {r.err.strip()[-300:]}")
-    NOMBRES["redis"] = servicios["redis"]["image"]
-    r = ejecutar(["docker", "pull", "-q", NOMBRES["redis"]], timeout=600)
-    if r.rc != 0:
-        raise SinRed(f"no se pudo descargar {NOMBRES['redis']}")
+    # Las imágenes que no se construyen se descargan tal como las fija
+    # docker-compose.yml (versión y digest).
+    for servicio in ("redis", "mailpit"):
+        NOMBRES[servicio] = servicios[servicio]["image"]
+        r = ejecutar(["docker", "pull", "-q", NOMBRES[servicio]], timeout=600)
+        if r.rc != 0:
+            raise SinRed(f"no se pudo descargar {NOMBRES[servicio]}")
     for servicio in ("api", "caddy", "postgres"):
         NOMBRES[servicio] = f"{PROYECTO}-{servicio}"
     (TEMPORAL / "imagenes").mkdir()
@@ -612,7 +617,7 @@ def seccion_e():
     negativo("e) VEX atado a la version: con otra version del componente no suprime nada",
              CVES_VEX_CADDY <= cves_movido, control_vex, f"siguen {sorted(cves_movido & CVES_VEX_CADDY)}")
 
-    # Las cuatro imágenes con el VEX real.
+    # Las cinco imágenes con el VEX real.
     suprimidas_total = set()
     for nombre in IMAGENES:
         r, informe = escanear(nombre, vex=VEX)

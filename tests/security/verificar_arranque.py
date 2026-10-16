@@ -76,9 +76,14 @@ TEXTO_INACTIVA = "idle-in-transaction timeout"
 
 # Variables de entorno permitidas en el contenedor de la API: las de la imagen
 # base de Python y las del Dockerfile. Ninguna con credenciales.
+# CANARIO_ORIGEN_PERSONAL: el origen público de la SPA del personal
+# (docker-compose.yml, app/solicitudes.py). Es configuración, no una credencial.
 ENTORNO_PERMITIDO = {"PATH", "LANG", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256",
-                     "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED"}
+                     "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "CANARIO_ORIGEN_PERSONAL"}
 SECRETO_API = "/run/secrets/contrasena_aplicacion"
+# Variable obligatoria de la API (app/solicitudes.py): sin ella no arranca. Las
+# APIs temporales la llevan para que lo que se prueba sea lo que se pretende.
+ENTORNO_API = ["-e", "CANARIO_ORIGEN_PERSONAL=https://localhost:8445"]
 
 # Desviaciones de la base de datos: identificador de la comprobación que debe
 # bloquear el arranque, SQL que la provoca y SQL que la revierte.
@@ -384,7 +389,7 @@ def arrancar_api_temporal(etiqueta, fichero):
     ejecutar(["docker", "run", "-d", "--name", nombre, "--network", f"{PROYECTO}_data",
               "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
               "--mount", f"type=bind,src={fichero},dst={SECRETO_API},readonly", *claves_falsas(),
-              IMAGEN_API])
+              *ENTORNO_API, IMAGEN_API])
     try:
         esperar(lambda: ejecutar(["docker", "inspect", "--format", "{{.State.Running}}", nombre]).out.strip()
                 == "false", 60)
