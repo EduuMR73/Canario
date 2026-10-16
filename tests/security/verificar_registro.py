@@ -15,8 +15,11 @@ Qué prueba:
   activación con TOTP, login con el rol aprobado y la fila de auditoría;
 * d) enumeración: la misma respuesta byte a byte para una empresa que no
   existe, un email con cuenta y uno nuevo; lo que cambia es el correo, que
-  solo lee el dueño del buzón (aviso sin enlace, o nada); y el mismo tiempo
-  (medianas), con un control de sensibilidad;
+  solo lee el dueño del buzón (aviso sin enlace, o nada); y el tiempo
+  (medianas): cada camino tarda como un 422, sin base de datos antes de
+  responder, y los tres lo mismo entre sí, con un control de sensibilidad
+  (una consulta a la base de datos se distingue del 422) mayor que la
+  tolerancia;
 * e) la verificación: un token usado, desconocido, mal formado, caducado o de
   otro tipo (una invitación) da el mismo 401; un token de verificación no
   sirve como invitación;
@@ -27,11 +30,15 @@ Qué prueba:
 * g) CR, LF y NUL en el email: 422 sin crear nada ni enviar correo;
 * h) el límite por destinatario con su valor de producción (3 en 15
   minutos): el cuarto es 429 con Retry-After y otro email sigue pasando; un
-  solo evento, sin el email;
+  solo evento con su regla, sin el email. Y el diario (configurado en 2): el
+  tercero es 429 con el Retry-After hasta las 00:00 UTC, y su propio evento;
 * i) sin Mailpit, la respuesta no cambia y el fallo queda en el log sin el
   email; ni emails, ni tokens, ni enlaces en los logs de la API, PostgreSQL y
   Redis;
-* j) sin CANARIO_ORIGEN_PERSONAL, o mal formado, la API no arranca.
+* j) sin CANARIO_ORIGEN_PERSONAL, o mal formado, la API no arranca;
+* k) con PostgreSQL parado, el registro responde el mismo 202 al momento (la
+  base de datos va después de responder) y el fallo queda en el log, como
+  EVENTO registro_fallido, sin el email.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -86,11 +93,28 @@ ORIGEN_PERSONAL = "https://localhost:8445"
 TEXTO_ORIGEN = "ORIGEN PERSONAL: https://localhost:8445"
 TEXTO_BLOQUEADO = "ARRANQUE BLOQUEADO: "
 LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
-                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900")
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900,destinatario_dia=1000/86400")
 # h) El de producción para destinatario (3 cada 15 minutos); el resto, altos.
 LIMITES_DESTINATARIO = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
-                        "cuenta=1000/60,registro=1000/3600,destinatario=3/900")
+                        "cuenta=1000/60,registro=1000/3600,destinatario=3/900,destinatario_dia=1000/86400")
 VENTANA_DESTINATARIO = 900
+# h) Solo la regla del día, baja (2): con el de producción (10) habría que
+# esperar a que la de 15 minutos se vaciara varias veces.
+LIMITES_DESTINATARIO_DIA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,"
+                            "otras=1000/60,cuenta=1000/60,registro=1000/3600,destinatario=1000/900,"
+                            "destinatario_dia=2/86400")
+SEGUNDOS_DIA = 86400
+
+# d) Tiempos (medianas, en ms). La tolerancia es menor que el efecto que
+# demuestra el control: si no, aceptaría una fuga del tamaño de lo que dice
+# ver. Medidos antes de fijarlos (informe del bloque 5a-bis).
+TOLERANCIA_TIEMPO_MS = 1.0
+CONTROL_TIEMPO_MS = 2.0
+PAUSA_TIEMPOS = 0.2  # segundos antes de cada petición medida
+
+# k) Con PostgreSQL parado, un registro que esperase a la base de datos
+# tardaría lo que el pool tarda en rendirse (10 s, app/bd.py).
+MAXIMO_SIN_BD_MS = 1000
 
 # Mailpit (docker-compose.yml)
 USUARIO_MAILPIT = "10003:10003"
@@ -98,7 +122,8 @@ MEMORIA_MAILPIT = 134217728  # 128m
 PIDS = 64
 
 # Respuestas (app/rutas_personal.py y app/frontera_http.py)
-CUERPO_202 = '{"mensaje":"si los datos son correctos, recibirá un correo en unos minutos"}'.encode()
+CUERPO_202 = ('{"mensaje":"si los datos son correctos, recibirá un correo en unos minutos; '
+              'si no le llega, vuelva a solicitarlo más tarde"}').encode()
 CUERPO_401 = '{"detalle": "solicitud no válida"}'.encode()
 CUERPO_401_INVITACION = '{"detalle": "invitación no válida"}'.encode()
 CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
@@ -117,7 +142,11 @@ PATRON_VERIFICACION = re.compile(r"https://localhost:8445/registro/verificacion#
 PATRON_ACTIVACION = re.compile(r"https://localhost:8445/activacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 ACCION_APROBACION = "aprobacion_registro"
 ACCION_RECHAZO = "rechazo_registro"
-TEXTO_EVENTO_DESTINATARIO = "EVENTO limite_destinatario"
+# Se comparan con el final de la línea: "regla=destinatario" es también el
+# principio de "regla=destinatario_dia".
+EVENTO_DESTINATARIO = "EVENTO limite_destinatario: regla=destinatario"
+EVENTO_DESTINATARIO_DIA = "EVENTO limite_destinatario: regla=destinatario_dia"
+TEXTO_EVENTO_REGISTRO_FALLIDO = "EVENTO registro_fallido: error="
 TEXTO_EVENTO_CORREO = "EVENTO correo_fallido: tipo=verificacion error="
 TEXTO_EVENTO_DENEGADO = "EVENTO acceso_denegado: "
 CLAVES_APROBACION = ["usuario_id"]
@@ -135,6 +164,8 @@ import base64, http.client, json, sys, time
 
 def una(pt):
     conexion = None
+    # La pausa va antes de conectar y fuera de la medida.
+    time.sleep(pt.get("pausa", 0))
     try:
         conexion = http.client.HTTPConnection("api", 8000, timeout=30)
         conexion.connect()
@@ -271,6 +302,11 @@ def inspeccionar(objeto, formato="{{json .}}"):
 
 def log_de(servicio):
     return dc("logs", "--no-color", "--no-log-prefix", servicio).todo
+
+
+def eventos_que_acaban(texto):
+    """Líneas del log de la API que terminan exactamente en texto."""
+    return [l for l in log_de("api").splitlines() if l.rstrip().endswith(texto)]
 
 
 TEMPORAL = None
@@ -614,37 +650,59 @@ def seccion_d():
     negativo("d) el email con cuenta recibe un aviso, sin enlace",
              len(aviso) == 1 and aviso[0]["asunto"] == ASUNTO_AVISO_CUENTA and "https://" not in aviso[0]["texto"],
              control, f"correos: {aviso}")
-    negativo("d) para una empresa que no existe no sale ningun correo",
-             correos_para("inexistente@registro.test") == [], control)
-    filas = valor("select count(*) from canal.solicitud_registro where email = 'inexistente@registro.test';")
-    negativo(f"d) ni se guarda nada ({filas} filas)", filas == "0", control)
 
-    # Tiempos: muestras intercaladas de los tres caminos; cada email nuevo es
-    # distinto (cada uno crea su solicitud). Control de sensibilidad: un 422
-    # (sin base de datos ni Redis) se distingue de un registro.
-    muestras = {"inexistente": [], "cuenta": [], "nuevo": [], "sin_bd": []}
+    # Tiempos. La propiedad: la respuesta sale antes de tocar la base de
+    # datos (app/solicitudes.py, procesar). Se afirma con dos comparaciones:
+    # cada camino del registro tarda como un 422 (que no llega a la ruta) y
+    # los tres caminos tardan lo mismo entre sí. Control de sensibilidad: una
+    # verificación con un token desconocido de una empresa real, que SÍ
+    # consulta la base de datos antes de responder, se distingue del 422 en
+    # al menos CONTROL_TIEMPO_MS. La tolerancia es menor que ese efecto: si
+    # no, la prueba aceptaría una fuga del tamaño de lo que dice ver.
+    # Muestras intercaladas, cada email nuevo distinto (cada uno crea su
+    # solicitud), y una pausa antes de cada petición para que la tarea de la
+    # anterior haya terminado: lo que se mide es la respuesta de cada camino,
+    # no la competencia con el trabajo de otro (ese residual queda
+    # documentado en docs/threat-model.md, 8).
+    caminos = ["inexistente", "cuenta", "nuevo", "sin_bd", "verificacion"]
+    muestras = {k: [] for k in caminos}
+    desconocido = f"{ident}.{'A' * 43}"
     for vuelta in range(10):
         tanda = []
         for i in range(4):
             tanda += [registro(EMPRESA_INEXISTENTE, "tiempos@registro.test"),
                       registro(ident, ADMINS["A"].email),
                       registro(ident, f"tiempo.{vuelta}.{i}@registro.test"),
-                      pt("POST", "/v1/personal/registro", {"empresa": ident})]
+                      pt("POST", "/v1/personal/registro", {"empresa": ident}),
+                      verificacion(desconocido)]
+        for peticion in tanda:
+            peticion["pausa"] = PAUSA_TIEMPOS
         res = http(tanda)
-        for j, nombre in enumerate(["inexistente", "cuenta", "nuevo", "sin_bd"] * 4):
+        for j, nombre in enumerate(caminos * 4):
             if "ms" in res[j]:
                 muestras[nombre].append(res[j]["ms"])
+    # La empresa inexistente no deja ni correo ni fila. Se mira aquí, tras
+    # las muestras de tiempo (decenas de segundos): su tarea se hace después
+    # de responder, y mirarlo antes podría dar 0 solo porque aún no ha
+    # terminado.
+    negativo("d) para una empresa que no existe no sale ningun correo",
+             correos_para("inexistente@registro.test") == [], control)
+    filas = valor("select count(*) from canal.solicitud_registro where email = 'inexistente@registro.test';")
+    negativo(f"d) ni se guarda nada ({filas} filas)", filas == "0", control)
     mediana = {k: statistics.median(v) for k, v in muestras.items() if v}
-    p("   medianas en ms: " + ", ".join(f"{k}={v:.1f}" for k, v in mediana.items()))
-    if len(mediana) != 4:
+    p("   medianas en ms: " + ", ".join(f"{k}={v:.2f}" for k, v in mediana.items()))
+    if len(mediana) != len(caminos):
         sinc("d) faltan muestras de tiempo")
         return
-    control = mediana["inexistente"] - mediana["sin_bd"] >= 2
-    negativo("d) tiempos: empresa inexistente y email con cuenta difieren menos de 3 ms",
-             abs(mediana["inexistente"] - mediana["cuenta"]) < 3, control,
-             f"control: un registro no se distingue de un 422 ({mediana})")
-    negativo("d) tiempos: empresa inexistente y email nuevo difieren menos de 3 ms",
-             abs(mediana["inexistente"] - mediana["nuevo"]) < 3, control, f"{mediana}")
+    control = mediana["verificacion"] - mediana["sin_bd"] >= CONTROL_TIEMPO_MS
+    detalle = f"control: una consulta a la base de datos no se distingue de un 422 ({mediana})"
+    for camino in ("inexistente", "cuenta", "nuevo"):
+        negativo(f"d) tiempos: el registro ({camino}) tarda como un 422, sin base de datos antes de responder "
+                 f"(menos de {TOLERANCIA_TIEMPO_MS} ms)",
+                 mediana[camino] - mediana["sin_bd"] < TOLERANCIA_TIEMPO_MS, control, detalle)
+    for a, b in (("inexistente", "cuenta"), ("inexistente", "nuevo"), ("cuenta", "nuevo")):
+        negativo(f"d) tiempos: {a} y {b} difieren menos de {TOLERANCIA_TIEMPO_MS} ms",
+                 abs(mediana[a] - mediana[b]) < TOLERANCIA_TIEMPO_MS, control, detalle)
 
 
 def seccion_e():
@@ -804,7 +862,7 @@ def seccion_h():
     # Las cuatro, dentro de la misma ventana de 15 minutos.
     while VENTANA_DESTINATARIO - int(time.time()) % VENTANA_DESTINATARIO < 120:
         time.sleep(10)
-    antes = log_de("api").count(TEXTO_EVENTO_DESTINATARIO)
+    antes = len(eventos_que_acaban(EVENTO_DESTINATARIO))
     res = http([registro(ident, "h.buzon@registro.test") for _ in range(4)]
                + [registro(EMPRESA_INEXISTENTE, "h.buzon@registro.test"), registro(ident, "h.otro@registro.test")])
     control = all(es(r, 202, CUERPO_202) for r in res[:3]) and es(res[5], 202, CUERPO_202)
@@ -813,8 +871,31 @@ def seccion_h():
         espera = (r.get("cabeceras") or {}).get("retry-after", "")
         negativo(f"h) {etiqueta} al mismo email -> 429 con Retry-After ({r.get('estado')}, {espera!r})",
                  es(r, 429, CUERPO_429) and espera.isdigit() and 1 <= int(espera) <= VENTANA_DESTINATARIO, control)
-    eventos = [l for l in log_de("api").splitlines() if TEXTO_EVENTO_DESTINATARIO in l]
-    negativo(f"h) un solo EVENTO limite_destinatario, sin el email ({len(eventos) - antes})",
+    eventos = eventos_que_acaban(EVENTO_DESTINATARIO)
+    negativo(f"h) un solo EVENTO limite_destinatario con regla=destinatario, sin el email ({len(eventos) - antes})",
+             len(eventos) - antes == 1 and not any("@" in l for l in eventos), control)
+
+    p("=== h) limite diario por destinatario (configurado en 2 al dia)")
+    con_limites(LIMITES_DESTINATARIO_DIA)
+    # Lejos de las 00:00 UTC: el tercero cae en el mismo día y lo que falta
+    # para medianoche supera los 15 minutos de la otra regla (si no, los dos
+    # Retry-After no se distinguirían).
+    while SEGUNDOS_DIA - int(time.time()) % SEGUNDOS_DIA < VENTANA_DESTINATARIO + 100:
+        time.sleep(10)
+    antes = len(eventos_que_acaban(EVENTO_DESTINATARIO_DIA))
+    res = http([registro(ident, "h.dia@registro.test") for _ in range(3)] + [registro(ident, "h.dia.otro@registro.test")])
+    hasta_medianoche = SEGUNDOS_DIA - int(time.time()) % SEGUNDOS_DIA
+    control = all(es(r, 202, CUERPO_202) for r in res[:2]) and es(res[3], 202, CUERPO_202)
+    pasa(control, f"h) control: dos registros al mismo email y uno a otro pasan ({[r.get('estado') for r in res]})")
+    espera = (res[2].get("cabeceras") or {}).get("retry-after", "")
+    # El Retry-After es lo que falta para las 00:00 UTC (la ventana del día),
+    # no los 15 minutos de la otra regla: con un margen por el reloj.
+    negativo(f"h) el tercero -> 429 con Retry-After hasta las 00:00 UTC ({res[2].get('estado')}, {espera!r}, "
+             f"faltan {hasta_medianoche} s)",
+             es(res[2], 429, CUERPO_429) and espera.isdigit()
+             and abs(int(espera) - hasta_medianoche) <= 30 and int(espera) > VENTANA_DESTINATARIO, control)
+    eventos = eventos_que_acaban(EVENTO_DESTINATARIO_DIA)
+    negativo(f"h) un solo EVENTO limite_destinatario con regla=destinatario_dia, sin el email ({len(eventos) - antes})",
              len(eventos) - antes == 1 and not any("@" in l for l in eventos), control)
     con_limites(LIMITES_PRUEBA)
 
@@ -882,6 +963,36 @@ def seccion_j():
         negativo(f"j) {etiqueta}: la API no arranca y registra {TEXTO_BLOQUEADO + motivo!r}",
                  TEXTO_BLOQUEADO + motivo in log and f"{TEXTO_BLOQUEADO}conexion" not in log, control_ok,
                  f"log: {log.strip()[-300:]!r}")
+
+
+def seccion_k():
+    p("=== k) con PostgreSQL parado, el registro responde el mismo 202 al momento y el fallo queda en el log")
+    # La última sección: deja PostgreSQL parado unos segundos y la API con
+    # su pool reconectando.
+    ident = EMPRESAS["A"][1]
+    control = una(registro(ident, "k.control@registro.test"))
+    control_ok = es(control, 202, CUERPO_202) and len(esperar_correos("k.control@registro.test", 1)) == 1
+    pasa(control_ok, f"k) control: con PostgreSQL en marcha, 202 y llega el correo ({control.get('estado')})")
+    antes = log_de("api").count(TEXTO_EVENTO_REGISTRO_FALLIDO)
+    dc("stop", "postgres")
+    try:
+        r = una(registro(ident, "k.sin.bd@registro.test"))
+        # El pool se rinde a los 10 s (app/bd.py); el evento sale después.
+        aparece = esperar(lambda: log_de("api").count(TEXTO_EVENTO_REGISTRO_FALLIDO) > antes, 60)
+    finally:
+        arranca = ejecutar(BASE + ["up", "-d", "--wait", "postgres"])
+    ms = r.get("ms", float("inf"))
+    negativo(f"k) sin PostgreSQL: el mismo 202, en menos de {MAXIMO_SIN_BD_MS} ms ({r.get('estado')}, {ms:.0f} ms)",
+             es(r, 202, CUERPO_202) and ms < MAXIMO_SIN_BD_MS, control_ok)
+    eventos = [l for l in log_de("api").splitlines() if TEXTO_EVENTO_REGISTRO_FALLIDO in l]
+    negativo(f"k) el fallo deja EVENTO registro_fallido con la clase del error, sin el email ({eventos[-1:]})",
+             aparece and not any("@" in l for l in eventos), control_ok)
+    negativo("k) y no sale ningun correo", correos_para("k.sin.bd@registro.test") == [], control_ok)
+    # Ni en el evento ni en ninguna otra línea (un traceback de uvicorn con
+    # el texto del error, por ejemplo).
+    negativo("k) el email no aparece en ninguna linea del log de la API",
+             "k.sin.bd@registro.test" not in log_de("api"), control_ok)
+    pasa(arranca.rc == 0, f"k) PostgreSQL vuelve a arrancar (codigo {arranca.rc})")
 
 
 def seccion_s():
@@ -979,7 +1090,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h,
-                        seccion_i, seccion_j):
+                        seccion_i, seccion_j, seccion_k):
             seccion()
     except Parada as e:
         parada = str(e)

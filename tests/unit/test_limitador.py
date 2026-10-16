@@ -11,7 +11,7 @@ from app import limitador
 
 # La configuración por defecto escrita entera: cada prueba cambia una sola cosa.
 VALIDA = ("denuncia=10/3600,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,cuenta=60/60,"
-          "registro=10/3600,destinatario=3/900")
+          "registro=10/3600,destinatario=3/900,destinatario_dia=10/86400")
 
 
 def con(cambio_viejo, cambio_nuevo):
@@ -70,14 +70,16 @@ class CargarLimites(unittest.TestCase):
         limites, origen = limitador.cargar_limites({})
         self.assertEqual(origen, "por defecto")
         self.assertEqual(limitador.describir_limites(limites),
-                         "acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 mensajes=30/3600 "
-                         "otras=60/60 registro=10/3600 seguimiento=60/60")
+                         "acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 "
+                         "destinatario_dia=10/86400 mensajes=30/3600 otras=60/60 registro=10/3600 seguimiento=60/60")
 
     def test_configurados_validos(self):
         limites, origen = limitador.cargar_limites(con("denuncia=10/3600", "denuncia=1000000/86400"))
         self.assertEqual(origen, "configurados")
         self.assertEqual(limites["denuncia"], limitador.Limite(1_000_000, 86_400))
         self.assertEqual(limites["otras"], limitador.Limite(60, 60))
+        # Un nombre con guion bajo es válido.
+        self.assertEqual(limites["destinatario_dia"], limitador.Limite(10, 86_400))
 
     def test_no_muta_los_de_por_defecto(self):
         limites, _ = limitador.cargar_limites({})
@@ -93,6 +95,10 @@ class CargarLimites(unittest.TestCase):
             "cero a la izquierda": (con("otras=60/60", "otras=060/60"), "CANARIO_LIMITES: elemento mal formado"),
             "cero peticiones": (con("otras=60/60", "otras=0/60"), "CANARIO_LIMITES: elemento mal formado"),
             "ocho digitos": (con("otras=60/60", "otras=10000000/60"), "CANARIO_LIMITES: elemento mal formado"),
+            "guion bajo al principio": (con("otras=", "_otras="), "CANARIO_LIMITES: elemento mal formado"),
+            "guion bajo al final": (con("otras=", "otras_="), "CANARIO_LIMITES: elemento mal formado"),
+            "dos guiones bajos": (con("destinatario_dia=", "destinatario__dia="),
+                                  "CANARIO_LIMITES: elemento mal formado"),
             "repetida": ({"CANARIO_LIMITES": VALIDA + ",otras=60/60"}, "CANARIO_LIMITES: la regla otras se repite"),
             "un millon y uno": (con("otras=60/60", "otras=1000001/60"),
                                 "CANARIO_LIMITES: otras supera 1000000 peticiones"),
@@ -100,19 +106,51 @@ class CargarLimites(unittest.TestCase):
             "ventana 86401": (con("otras=60/60", "otras=60/86401"),
                               "CANARIO_LIMITES: la ventana de otras no divide el dia"),
             "falta una": ({"CANARIO_LIMITES": VALIDA.replace(",cuenta=60/60", "")},
-                          ("CANARIO_LIMITES: reglas ['acceso', 'denuncia', 'destinatario', 'mensajes', 'otras', "
-                           "'registro', 'seguimiento'], se esperan ['acceso', 'cuenta', 'denuncia', 'destinatario', "
-                           "'mensajes', 'otras', 'registro', 'seguimiento']")),
-            "sobra una": ({"CANARIO_LIMITES": VALIDA + ",foo=1/60"},
-                          ("CANARIO_LIMITES: reglas ['acceso', 'cuenta', 'denuncia', 'destinatario', 'foo', "
+                          ("CANARIO_LIMITES: reglas ['acceso', 'denuncia', 'destinatario', 'destinatario_dia', "
                            "'mensajes', 'otras', 'registro', 'seguimiento'], se esperan ['acceso', 'cuenta', "
-                           "'denuncia', 'destinatario', 'mensajes', 'otras', 'registro', 'seguimiento']")),
+                           "'denuncia', 'destinatario', 'destinatario_dia', 'mensajes', 'otras', 'registro', "
+                           "'seguimiento']")),
+            "sobra una": ({"CANARIO_LIMITES": VALIDA + ",foo=1/60"},
+                          ("CANARIO_LIMITES: reglas ['acceso', 'cuenta', 'denuncia', 'destinatario', "
+                           "'destinatario_dia', 'foo', 'mensajes', 'otras', 'registro', 'seguimiento'], se esperan "
+                           "['acceso', 'cuenta', 'denuncia', 'destinatario', 'destinatario_dia', 'mensajes', 'otras', "
+                           "'registro', 'seguimiento']")),
         }
         for motivo, (entorno, mensaje) in casos.items():
             with self.subTest(motivo=motivo):
                 with self.assertRaises(limitador.ErrorConfiguracion) as error:
                     limitador.cargar_limites(entorno)
                 self.assertEqual(str(error.exception), mensaje)
+
+
+class DecidirVariasReglas(unittest.TestCase):
+    """decidir: las dos reglas del destinatario contadas a la vez."""
+    QUINCE = limitador.Limite(3, 900)
+    DIA = limitador.Limite(10, 86_400)
+
+    def test_en_el_limite_se_permite(self):
+        self.assertEqual(limitador.decidir([("destinatario", 3, self.QUINCE, 100),
+                                            ("destinatario_dia", 10, self.DIA, 5000)]),
+                         (True, 0, ()))
+
+    def test_basta_con_superar_una(self):
+        self.assertEqual(limitador.decidir([("destinatario", 2, self.QUINCE, 100),
+                                            ("destinatario_dia", 11, self.DIA, 5000)]),
+                         (False, 5000, ("destinatario_dia",)))
+        self.assertEqual(limitador.decidir([("destinatario", 4, self.QUINCE, 100),
+                                            ("destinatario_dia", 4, self.DIA, 5000)]),
+                         (False, 100, ("destinatario",)))
+
+    def test_retry_after_el_mayor_y_un_solo_primer_exceso(self):
+        # Las dos superadas: el mayor de los segundos, aunque la del día
+        # vaya primero o segunda; y solo la que acaba de pasar de su límite
+        # cuenta como primer exceso.
+        self.assertEqual(limitador.decidir([("destinatario", 5, self.QUINCE, 100),
+                                            ("destinatario_dia", 11, self.DIA, 5000)]),
+                         (False, 5000, ("destinatario_dia",)))
+        self.assertEqual(limitador.decidir([("destinatario_dia", 12, self.DIA, 50),
+                                            ("destinatario", 4, self.QUINCE, 800)]),
+                         (False, 800, ("destinatario",)))
 
 
 class HuellaDelCliente(unittest.TestCase):

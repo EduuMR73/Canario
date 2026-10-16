@@ -365,19 +365,20 @@ PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +ptt
 # peticiones por minuto desde pocas IPs. r) vuelve a arrancar la API sin
 # ellos y prueba los de producción.
 LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
-                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900")
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900,destinatario_dia=1000/86400")
 TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 "
-                        "destinatario=1000/900 mensajes=1000/3600 otras=1000/60 registro=1000/3600 "
+                        "destinatario=1000/900 destinatario_dia=1000/86400 mensajes=1000/3600 otras=1000/60 registro=1000/3600 "
                         "seguimiento=1000/60")
 TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 "
-                            "mensajes=30/3600 otras=60/60 registro=10/3600 seguimiento=60/60")
+                            "destinatario_dia=10/86400 mensajes=30/3600 otras=60/60 registro=10/3600 seguimiento=60/60")
 TEXTO_LIMITADOR_VERIFICADO = "LIMITADOR VERIFICADO"
 # regla -> (peticiones, ventana en segundos), los de producción. La regla
 # acceso (login del personal) y cuenta (rutas con sesión) las prueba con
 # ráfagas tests/security/verificar_personal.py; aquí solo cuentan para la
 # ventana de sus claves.
 LIMITES_PRODUCCION = {"denuncia": (10, 3600), "seguimiento": (60, 60), "mensajes": (30, 3600), "acceso": (10, 300),
-                      "otras": (60, 60), "cuenta": (60, 60), "registro": (10, 3600), "destinatario": (3, 900)}
+                      "otras": (60, 60), "cuenta": (60, 60), "registro": (10, 3600), "destinatario": (3, 900),
+                      "destinatario_dia": (10, 86400)}
 CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode()
 TEXTO_EVENTO_LIMITADOR = "EVENTO limitador_no_disponible: "
 # Clientes de prueba con IP fija en la red edge (fuera del rango automático):
@@ -2551,12 +2552,12 @@ def seccion_r():
     base_montajes = [(d / "pg", "contrasena_aplicacion"), (d / "maestra", "clave_maestra"),
                      (d / "hmac", "clave_hmac_codigos"), (d / "firma", "clave_firma_tokens")]
     validos = ("denuncia=5/3600,seguimiento=6/60,mensajes=7/3600,acceso=9/300,otras=8/60,cuenta=4/60,"
-               "registro=3/3600,destinatario=2/900")
+               "registro=3/3600,destinatario=2/900,destinatario_dia=1/86400")
     control_log = arrancar_api_temporal("r_control", base_montajes + [(d / "redis", "contrasena_redis")],
                                         {"CANARIO_LIMITES": validos})
     control = (f"{TEXTO_BLOQUEADO}conexion" in control_log
                and "LIMITES (configurados): acceso=9/300 cuenta=4/60 denuncia=5/3600 destinatario=2/900 "
-                   "mensajes=7/3600 otras=8/60 registro=3/3600 "
+                   "destinatario_dia=1/86400 mensajes=7/3600 otras=8/60 registro=3/3600 "
                    "seguimiento=6/60"
                in control_log)
     pasa(control, "r12) control: con el secreto de Redis y CANARIO_LIMITES validos la API los acepta, registra los "
@@ -2569,14 +2570,15 @@ def seccion_r():
         ("r_limites_incompletos", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=10/3600"},
          ("limites: CANARIO_LIMITES: reglas ['denuncia'], se esperan "
-          "['acceso', 'cuenta', 'denuncia', 'destinatario', 'mensajes', 'otras', 'registro', 'seguimiento']")),
+          "['acceso', 'cuenta', 'denuncia', 'destinatario', 'destinatario_dia', 'mensajes', 'otras', 'registro', "
+          "'seguimiento']")),
         ("r_limites_ventana", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=10/7,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,"
-                            "cuenta=60/60,registro=10/3600,destinatario=3/900"},
+                            "cuenta=60/60,registro=10/3600,destinatario=3/900,destinatario_dia=10/86400"},
          "limites: CANARIO_LIMITES: la ventana de denuncia no divide el dia"),
         ("r_limites_mal_formados", base_montajes + [(d / "redis", "contrasena_redis")],
          {"CANARIO_LIMITES": "denuncia=0/3600,seguimiento=60/60,mensajes=30/3600,acceso=10/300,otras=60/60,"
-                            "cuenta=60/60,registro=10/3600,destinatario=3/900"},
+                            "cuenta=60/60,registro=10/3600,destinatario=3/900,destinatario_dia=10/86400"},
          "limites: CANARIO_LIMITES: elemento mal formado"),
     ]
     for etiqueta, montajes, entorno_api, motivo in casos:

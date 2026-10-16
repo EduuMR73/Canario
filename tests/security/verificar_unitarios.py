@@ -67,15 +67,15 @@ PRUEBAS_POR_FICHERO = {
     "test_errores": 11,
     "test_frontera": 10,
     "test_instruccion": 18,
-    "test_limitador": 13,
+    "test_limitador": 16,
     "test_login": 8,
     "test_personal": 8,
-    "test_solicitudes": 7,
+    "test_solicitudes": 9,
     "test_tokens": 10,
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 185
+TOTAL_PRUEBAS = 190
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -165,6 +165,25 @@ MUTANTES = [
      "    if not _semaforo.acquire(blocking=False) and False:\n",
      "test_correo.Enviar.test_sin_hueco_se_descarta_sin_esperar",
      "los envios simultaneos no tienen tope (un SMTP lento agota los hilos de la API)"),
+    # Registro en segundo plano y las dos reglas del destinatario (bloque 5a-bis).
+    ("limitador.py", 're.compile(r"([a-z]+(?:_[a-z]+)*)=', 're.compile(r"([a-z_]+)=',
+     "test_limitador.CargarLimites.test_errores", "CANARIO_LIMITES admite guiones bajos sueltos en el nombre"),
+    ("limitador.py", "if cuenta > limite.peticiones]", "if cuenta >= limite.peticiones]",
+     "test_limitador.DecidirVariasReglas.test_en_el_limite_se_permite",
+     "la peticion que llega justo al limite ya se rechaza"),
+    ("limitador.py", "max(segundos for *_, segundos in superadas)", "min(segundos for *_, segundos in superadas)",
+     "test_limitador.DecidirVariasReglas.test_retry_after_el_mayor_y_un_solo_primer_exceso",
+     "el Retry-After invita a repetir antes de que se pueda (429 seguro)"),
+    ("solicitudes.py", 'registro.error("EVENTO registro_fallido: error=%s", type(error).__name__)',
+     'registro.error("EVENTO registro_fallido: error=%s", error)',
+     "test_solicitudes.Procesar.test_fallo_al_log_sin_email_y_sin_correo",
+     "un fallo del registro en segundo plano escribe el email en el log"),
+    ("solicitudes.py", "    except Exception as error:  # noqa: BLE001",
+     "    except psycopg.IntegrityError as error:  # noqa: BLE001",
+     "test_solicitudes.Procesar.test_fallo_al_log_sin_email_y_sin_correo",
+     "un error de la base de datos sale de la tarea sin pasar por el log (traceback de uvicorn)"),
+    ("solicitudes.py", "        correo.enviar(mensaje)\n", "        pass\n",
+     "test_solicitudes.Procesar.test_envia_el_correo_que_toca", "el registro en segundo plano no envia el correo"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

@@ -147,12 +147,12 @@ PERMISOS_ACL_APLICACION = ("resetkeys ~limite:* resetchannels -@all "
                            "+ping +multi +exec +incr +expire +ttl +client|setinfo")
 PERMISOS_ACL_INSPECTOR = "resetkeys ~* resetchannels -@all +ping +scan +get +pttl +dbsize +client|setinfo"
 LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
-                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900")
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900,destinatario_dia=1000/86400")
 TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 "
-                        "destinatario=1000/900 mensajes=1000/3600 otras=1000/60 registro=1000/3600 "
+                        "destinatario=1000/900 destinatario_dia=1000/86400 mensajes=1000/3600 otras=1000/60 registro=1000/3600 "
                         "seguimiento=1000/60")
 TEXTO_LIMITES_PRODUCCION = ("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 "
-                            "mensajes=30/3600 otras=60/60 registro=10/3600 seguimiento=60/60")
+                            "destinatario_dia=10/86400 mensajes=30/3600 otras=60/60 registro=10/3600 seguimiento=60/60")
 LIMITE_ACCESO = (10, 300)
 LIMITE_CUENTA = (60, 60)
 TEXTO_EVENTO_CUENTA = "EVENTO limite_cuenta: "

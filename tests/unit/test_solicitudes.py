@@ -1,9 +1,10 @@
 """Pruebas unitarias del registro "primero el email" (app/solicitudes.py).
 
 Uniformidad: POST /v1/personal/registro responde igual en todos los casos, y
-lo que haría distinguirlos es el trabajo hecho antes de responder. Como en
-tests/unit/test_login.py, aquí se comprueba la causa y no el tiempo (que
-mide la batería tests/security/verificar_registro.py): las mismas
+todo el trabajo se hace después de responder (procesar). Como defensa en
+profundidad frente a lo que ese trabajo pueda notarse en otras peticiones,
+y como en tests/unit/test_login.py, aquí se comprueba la causa y no el
+tiempo (que mide la batería tests/security/verificar_registro.py): las mismas
 sentencias, en el mismo orden, confirmando sin esperar al disco, exista o no
 la empresa, tenga o no cuenta el email. La base de datos se sustituye por un
 doble que registra las sentencias y responde lo que toca en cada camino.
@@ -15,7 +16,9 @@ import unittest
 import uuid
 from unittest import mock
 
-from app import cripto, personal, rutas_web, solicitudes
+import psycopg
+
+from app import correo, cripto, personal, rutas_web, solicitudes
 
 EMPRESA = uuid.UUID(int=1)
 IDENTIFICADOR = "0123456789abcdef0123456789abcdef"
@@ -144,3 +147,31 @@ class Origen(unittest.TestCase):
 
     def test_valido(self):
         self.assertEqual(solicitudes.cargar_origen({"CANARIO_ORIGEN_PERSONAL": ORIGEN}), ORIGEN)
+
+
+class Procesar(unittest.TestCase):
+    """procesar corre después de responder: lo que haga ya no cambia la
+    respuesta, así que un fallo solo puede ir al log, y sin datos."""
+
+    def test_fallo_al_log_sin_email_y_sin_correo(self):
+        error = psycopg.OperationalError(f'Key (email)=({EMAIL}) already exists')
+        with mock.patch.object(solicitudes, "solicitar", side_effect=error), \
+                mock.patch.object(correo, "enviar") as enviar, \
+                self.assertLogs("canario.solicitudes", "ERROR") as registro:
+            solicitudes.procesar(None, ORIGEN, IDENTIFICADOR, EMAIL)
+        self.assertEqual(registro.output,
+                         ["ERROR:canario.solicitudes:EVENTO registro_fallido: error=OperationalError"])
+        # El texto del error lleva el email (control): el log no.
+        self.assertIn(EMAIL, str(error))
+        self.assertNotIn(EMAIL, "\n".join(registro.output))
+        enviar.assert_not_called()
+
+    def test_envia_el_correo_que_toca(self):
+        mensaje = correo.Correo(tipo="verificacion", destinatario=EMAIL, asunto="Asunto", cuerpo="Cuerpo\n")
+        for devuelto, envios in ((mensaje, [mock.call(mensaje)]), (None, [])):
+            with self.subTest(devuelto=devuelto), \
+                    mock.patch.object(solicitudes, "solicitar", return_value=devuelto) as solicitar, \
+                    mock.patch.object(correo, "enviar") as enviar:
+                solicitudes.procesar("pool", ORIGEN, IDENTIFICADOR, EMAIL)
+                solicitar.assert_called_once_with("pool", ORIGEN, IDENTIFICADOR, EMAIL)
+                self.assertEqual(enviar.call_args_list, envios)
