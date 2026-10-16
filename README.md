@@ -116,7 +116,22 @@ Para leer el buzón, desde un contenedor en esa red (con la imagen de la API, qu
 docker run --rm --network canario_correo --entrypoint python canario-api -c "import urllib.request; print(urllib.request.urlopen('http://mailpit:8025/api/v1/messages').read().decode())"
 ```
 
-Sin Mailpit, el registro responde igual y cada correo deja `EVENTO correo_fallido` en el log de la API. La salida SMTP de producción no está decidida (modelo de amenazas, 8).
+`POST /v1/personal/registro` responde el 202 en el acto: guardar la solicitud y enviar el correo se hace después de responder, para que el tiempo no diga si la empresa existe o el email tiene cuenta. Por email caben 3 solicitudes cada 15 minutos y 10 al día (UTC); pasado eso, 429 con `Retry-After`. Si alguien agota el cupo de un email ajeno, su dueño puede esperar o pedir a un admin que le invite (`POST /v1/personal/usuarios`).
+
+**Antes de aprobar una solicitud**, el admin confirma por un canal interno de la empresa (su directorio, el responsable de esa persona) que quien la pide trabaja allí y debe tener ese rol; si no puede confirmarlo, la rechaza. Que alguien controle un email no demuestra que sea de la empresa (modelo de amenazas, 6.3).
+
+Lo que el registro deja en el log de la API, siempre sin el email:
+
+```
+EVENTO limite_destinatario: regla=<destinatario o destinatario_dia>
+EVENTO registro_fallido: error=<clase del error>
+EVENTO correo_fallido: tipo=<tipo de correo> error=<clase del error>
+EVENTO correo_descartado: tipo=<tipo de correo> motivo=envios_simultaneos
+```
+
+`registro_fallido` significa que alguien recibió su 202 y no le llegará nada (por ejemplo, PostgreSQL no respondía); el mensaje del 202 le dice que lo vuelva a pedir. Hoy nadie revisa estas líneas: en producción, el log tiene que salir del anfitrión y alguien tiene que mirarlo (modelo de amenazas, 8).
+
+Sin Mailpit, el registro responde igual y cada correo deja `EVENTO correo_fallido`. La salida SMTP de producción no es parte de esta entrega; su diseño está en el modelo de amenazas (8).
 
 ### Origen del sitio del denunciante
 
@@ -248,7 +263,7 @@ Diez baterías, una por área. Cada prueba negativa lleva su control positivo: s
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
 | `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción y no veraz (art. 32.3) |
 | `verificar_inyeccion.py` | Inyección SQL y validación de la frontera de entrada |
-| `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo), verificación, administración de solicitudes, límite por destinatario, logs sin rastro y el origen obligatorio |
+| `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo, sin base de datos antes de responder), verificación, administración de solicitudes, límites por destinatario (15 minutos y día), logs sin rastro, el origen obligatorio y el registro con PostgreSQL parado |
 | `verificar_escaneos.py` | Secretos en Git, dependencias, análisis estático, imágenes y SBOM |
 | `verificar_unitarios.py` | Las pruebas unitarias (`tests/unit/`) en la imagen de la API, y mutantes que demuestran que fallan cuando deben |
 
@@ -267,13 +282,13 @@ Cada batería usa un proyecto de Docker propio (`canario_<nombre>`), lo borra en
 
 ### Pruebas unitarias
 
-`tests/unit/` (16 ficheros, 185 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado, el login uniforme, el JWT, las páginas del denunciante (origen, formulario y plantillas) y el registro del personal (mismas sentencias en todos los caminos, origen obligatorio y correo sin inyección de cabeceras ni datos en el log). Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
+`tests/unit/` (16 ficheros, 190 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado, el login uniforme, el JWT, las páginas del denunciante (origen, formulario y plantillas) y el registro del personal (mismas sentencias en todos los caminos, el trabajo después de responder con su fallo al log sin el email, origen obligatorio y correo sin inyección de cabeceras ni datos en el log) y la decisión con varias reglas del limitador. Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
 
 ```powershell
 python tests\security\verificar_unitarios.py
 ```
 
-La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 32 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
+La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 38 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
 
 Para ejecutar solo las pruebas, sin controles ni mutantes (la imagen se borra al final; si se queda, la batería se detiene con `PARADA` al encontrarla):
 
