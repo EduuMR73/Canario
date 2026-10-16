@@ -23,8 +23,9 @@
   (el token del enlace), sin sesión. GET /v1/personal/solicitudes (las
   verificadas), POST .../{solicitud_id}/aprobacion (con el rol) y DELETE
   .../{solicitud_id} (rechazo): solo admin. Los correos salen después de
-  responder (BackgroundTask, app/correo.py), y la aprobación NO devuelve el
-  token de invitación: va solo al email verificado.
+  responder (BackgroundTask, app/correo.py); en el registro, también todo el
+  trabajo con la base de datos (solicitudes.procesar). La aprobación NO
+  devuelve el token de invitación: va solo al email verificado.
 * Instrucción (app/instruccion.py): GET /v1/personal/denuncias (listado sin
   contenido), GET .../{denuncia_id} (contenido y mensajes, solo quien la
   tiene asignada), POST .../{denuncia_id}/mensajes, POST .../{denuncia_id}/estado
@@ -112,7 +113,10 @@ MENSAJE_FINAL = "cerrar una denuncia exige un mensaje final para el denunciante"
 MENSAJE_NO_VERAZ = "declarar una denuncia no veraz no admite mensaje"
 MENSAJE_FRAGMENTO = "el texto indicado no está en esa posición"
 # Siempre el mismo, pase lo que pase con la solicitud (app/solicitudes.py).
-MENSAJE_REGISTRO = "si los datos son correctos, recibirá un correo en unos minutos"
+# Si la tarea de después de responder falla, el 202 ya ha salido: el mensaje
+# dice qué hacer si el correo no llega (app/solicitudes.py, cabecera).
+MENSAJE_REGISTRO = ("si los datos son correctos, recibirá un correo en unos minutos; "
+                    "si no le llega, vuelva a solicitarlo más tarde")
 MENSAJE_SOLICITUD = "solicitud no válida"
 
 # Topes de forma de la petición, holgados respecto a lo válido: lo que pase
@@ -434,17 +438,19 @@ def _con_correo(contenido, codigo, mensaje):
 @router.post("/registro", status_code=202)
 async def solicitar_registro(datos: SolicitudRegistro, peticion: Request):
     estado = peticion.app.state
-    # Segunda capa del limitador, por email (app/limitador.py): antes de
-    # tocar la base de datos, y la cuenta igual exista o no la empresa. El
-    # primer exceso de la ventana deja un evento, sin el email.
-    permitida, segundos, primer_exceso = await estado.limitador.consumir_destinatario(datos.email)
+    # Segunda capa del limitador, por email (app/limitador.py): la cuenta
+    # igual exista o no la empresa. El primer exceso de cada regla en su
+    # ventana deja un evento con la regla, sin el email.
+    permitida, segundos, primeros = await estado.limitador.consumir_destinatario(datos.email)
     if not permitida:
-        if primer_exceso:
-            registro.warning("EVENTO limite_destinatario")
+        for regla in primeros:
+            registro.warning("EVENTO limite_destinatario: regla=%s", regla)
         raise LimiteCuentaSuperado(segundos)
-    mensaje = await run_in_threadpool(solicitudes.solicitar, estado.pool, estado.origen_personal, datos.empresa,
-                                      datos.email)
-    return _con_correo({"mensaje": MENSAJE_REGISTRO}, 202, mensaje)
+    # La base de datos y el correo, después de responder (app/solicitudes.py,
+    # cabecera): lo que tarde cada camino no llega a la respuesta.
+    return JSONResponse(status_code=202, content={"mensaje": MENSAJE_REGISTRO},
+                        background=BackgroundTask(solicitudes.procesar, estado.pool, estado.origen_personal,
+                                                  datos.empresa, datos.email))
 
 
 @router.post("/registro/verificacion", status_code=204)

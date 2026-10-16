@@ -35,18 +35,30 @@ que cambia es el CORREO, que solo lee el dueño del buzón:
 * email con una solicitud ya verificada: aviso de que sigue pendiente (no se
   toca: solo su dueño pudo verificarla);
 * empresa inexistente o inactiva: nada.
-Y el tiempo es el mismo por construcción, como en el login
-(app/personal.py): todos los caminos ejecutan las mismas sentencias (sin
-empresa, con un contexto aleatorio y cero filas), la transacción confirma sin
-esperar al disco (SQL_RESERVA_ASINCRONA: si no, escribir o no una fila se
-notaría en el tiempo) y el correo sale después de responder
-(app/correo.py).
+Y el tiempo es el mismo por construcción: la ruta responde el 202 ANTES de
+tocar la base de datos, y todo el trabajo (solicitar y enviar el correo) lo
+hace procesar después de responder, en una BackgroundTask (OWASP Forgot
+Password Cheat Sheet: tiempo uniforme con llamadas asíncronas). Lo que tarde
+cada camino ya no está en la respuesta. Además, como defensa en
+profundidad frente a lo que la tarea pueda notarse en otras peticiones
+(compite por la misma base de datos), todos los caminos siguen ejecutando
+las mismas sentencias (sin empresa, con un contexto aleatorio y cero filas)
+y la transacción confirma sin esperar al disco (SQL_RESERVA_ASINCRONA).
+
+Lo que cuesta responder antes: si la tarea falla (por ejemplo, PostgreSQL no
+responde), quien pidió el registro ya tiene su 202 y no recibe nada. El
+fallo queda en el log (EVENTO registro_fallido, con la clase del error y sin
+el email) y el mensaje del 202 le dice que lo vuelva a pedir si no le llega
+el correo. Y si la API muere de golpe (SIGKILL: docker stop pasados 10
+segundos, o una caída), se pierde la tarea en curso; en una parada ordenada,
+uvicorn espera a que terminen.
 
 Una abierta por email y empresa (índice único parcial). Una solicitud sin
 verificar se sustituye por la nueva: el enlace anterior deja de valer, y el
 nuevo le llega igualmente al dueño del buzón, así que repetir la solicitud de
 otro solo le obliga a usar el último correo. Ese abuso, y el de inundar un
-buzón, lo acota la regla "destinatario" del limitador (app/limitador.py).
+buzón, lo acotan las reglas "destinatario" y "destinatario_dia" del
+limitador (app/limitador.py), que la ruta consume antes de responder.
 
 Límites asumidos:
 * El rechazo no avisa a quien lo pidió: el admin decide sin explicaciones,
@@ -54,6 +66,7 @@ Límites asumidos:
 * Sin correo de salida en producción (app/correo.py) el registro no entrega
   nada: punto abierto del modelo de amenazas.
 """
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -61,6 +74,8 @@ from dataclasses import dataclass
 import psycopg
 
 from app import bd, correo, cripto, personal, rutas_web
+
+registro = logging.getLogger("canario.solicitudes")
 
 VARIABLE_ORIGEN = "CANARIO_ORIGEN_PERSONAL"
 # Rutas de la SPA del personal a las que apuntan los enlaces. El token va en
@@ -246,6 +261,25 @@ def solicitar(pool, origen, identificador, email):
         return None
     return _correo_verificacion(email, nombre, _enlace(origen, RUTA_VERIFICACION,
                                                        personal.token_compuesto(identificador, token)))
+
+
+def procesar(pool, origen, identificador, email):
+    """El trabajo de una solicitud de registro, DESPUÉS de responder (la ruta
+    la pasa como BackgroundTask): solicitar y, si toca, enviar el correo.
+    Nunca lanza."""
+    try:
+        mensaje = solicitar(pool, origen, identificador, email)
+    # Exception y no una lista cerrada: tras responder, cualquier excepción
+    # solo llegaría a uvicorn, que volcaría el traceback, y el texto de un
+    # error de PostgreSQL puede llevar el email (el DETAIL de una clave
+    # duplicada, por ejemplo). Aquí queda solo la clase, y el fallo es
+    # visible en el log en vez de perderse.
+    except Exception as error:  # noqa: BLE001 - tras responder, el log es el único destino del error
+        registro.error("EVENTO registro_fallido: error=%s", type(error).__name__)
+        return
+    if mensaje is not None:
+        # correo.enviar tampoco lanza: su fallo deja EVENTO correo_fallido.
+        correo.enviar(mensaje)
 
 
 def verificar(pool, token):

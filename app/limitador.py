@@ -41,14 +41,24 @@ Qué hace:
   sabe de quién es la petición.
 * Segunda capa del registro, por destinatario (Sudhodanan y Paverd, 2022,
   6.2.2: limitar por el identificador sin verificar): cada solicitud de
-  registro consume la regla "destinatario" con el email al que se va a
-  escribir, sea cual sea la empresa y la IP. Sin ella, un atacante con
-  muchas IPs podría inundar de correos el buzón de cualquiera. El coste
-  conocido es el que señala el mismo artículo: quien agote el cupo de un
-  email retrasa el registro de su dueño. Por eso la ventana es corta (15
-  minutos): el retraso queda acotado, y la respuesta es un 429 con
-  Retry-After, no un silencio. La clave lleva un HMAC del email con la sal
-  del día y su propia etiqueta: el email nunca llega a Redis.
+  registro consume dos reglas con el email al que se va a escribir, sea cual
+  sea la empresa y la IP. "destinatario" acota la ráfaga (pocos correos en
+  15 minutos) y "destinatario_dia" el total del día: con solo la primera,
+  quien repitiera la ráfaga en cada ventana mandaría 96 ráfagas al día al
+  mismo buzón (bombardeo de correo, ATT&CK T1667). Las dos se cuentan en el
+  mismo MULTI: o se cuentan las dos o ninguna. Se rechaza si cualquiera se
+  supera, y el Retry-After es el mayor de los que se superan (antes no
+  serviría repetir). Los intentos rechazados también cuentan, como en el
+  resto de reglas. El coste conocido es el que señala el mismo artículo:
+  quien agote el cupo de un email retrasa el registro de su dueño, como
+  mucho hasta el día siguiente (UTC); la salida es que un admin le invite
+  (POST /v1/personal/usuarios no consume estas reglas). La respuesta es un
+  429 con Retry-After, no un silencio. La clave lleva un HMAC del email con
+  la sal del día y su propia etiqueta: el email nunca llega a Redis.
+  Límites de la regla diaria: como toda ventana fija, alrededor de las 00:00
+  UTC admite hasta el doble (20 en pocos minutos, nunca más de 20 en 24
+  horas); y la sal solo vive en este proceso, así que reiniciar la API pone
+  los contadores a cero.
 
 Configuración: los límites de producción son los literales de
 LIMITES_POR_DEFECTO. La variable de entorno CANARIO_LIMITES los sustituye
@@ -145,9 +155,10 @@ class Limite:
 # 10 por hora dejan sitio a quien se equivoca de email o a una oficina que
 # sale por la misma IP. La verificación (.../registro/verificacion) va en
 # "otras", como la renovación: su token tiene 256 bits y no envía correo.
-# "destinatario" tampoco es de ruta: la segunda capa del registro, por email
-# (ver la cabecera). 3 correos cada 15 minutos a un mismo buzón bastan para
-# quien repite la solicitud porque no le llegó la primera.
+# "destinatario" y "destinatario_dia" tampoco son de ruta: la segunda capa
+# del registro, por email (ver la cabecera). 3 correos cada 15 minutos a un
+# mismo buzón bastan para quien repite la solicitud porque no le llegó la
+# primera; 10 al día, para quien además se equivoca o lo intenta otro día.
 LIMITES_POR_DEFECTO = {
     "denuncia": Limite(10, 3600),
     "seguimiento": Limite(60, 60),
@@ -157,7 +168,10 @@ LIMITES_POR_DEFECTO = {
     "otras": Limite(60, 60),
     "cuenta": Limite(60, 60),
     "destinatario": Limite(3, 900),
+    "destinatario_dia": Limite(10, SEGUNDOS_DIA),
 }
+# Las reglas que consume cada solicitud de registro, por email.
+REGLAS_DESTINATARIO = ("destinatario", "destinatario_dia")
 
 RUTAS_ACCESO = {"/v1/personal/sesiones", "/v1/personal/activacion", "/v1/personal/activacion/confirmar",
                 "/v1/personal/contrasena"}
@@ -175,7 +189,9 @@ RUTAS_MENSAJES = {"/v1/seguimiento/mensajes", "/web/seguimiento/mensajes"}
 # contenedor y no toca ninguna dependencia.
 EXENTAS = {"/salud"}
 _RUTA_DENUNCIAS = re.compile(r"/(?:v1|web)/empresas/[^/]+/denuncias")
-_ELEMENTO_LIMITES = re.compile(r"([a-z]+)=([1-9][0-9]{0,6})/([1-9][0-9]{0,5})")
+# El nombre son palabras en minúsculas unidas por un guion bajo
+# ("destinatario_dia"): ni al principio, ni al final, ni dos seguidos.
+_ELEMENTO_LIMITES = re.compile(r"([a-z]+(?:_[a-z]+)*)=([1-9][0-9]{0,6})/([1-9][0-9]{0,5})")
 
 
 class ErrorConfiguracion(Exception):
@@ -298,6 +314,23 @@ def huella_destinatario(sal, email):
     return hmac.new(sal, ETIQUETA_DESTINATARIO + email.encode("ascii"), hashlib.sha256).hexdigest()[:32]
 
 
+def decidir(contadas):
+    """(permitida, segundos, primeros) de varias reglas contadas a la vez,
+    con contadas = [(regla, cuenta, límite, segundos hasta el fin de su ventana)].
+
+    Se rechaza si cualquiera supera su límite. segundos es el mayor de las
+    que se superan: repetir antes volvería a dar 429 (0 si se permite).
+    primeros son las reglas que acaban de pasar de su límite (cuenta =
+    límite + 1): una sola vez por ventana y regla, para que el log no se
+    pueda inundar con 429."""
+    superadas = [(regla, cuenta, limite, segundos) for regla, cuenta, limite, segundos in contadas
+                 if cuenta > limite.peticiones]
+    if not superadas:
+        return True, 0, ()
+    primeros = tuple(regla for regla, cuenta, limite, _ in superadas if cuenta == limite.peticiones + 1)
+    return False, max(segundos for *_, segundos in superadas), primeros
+
+
 class _Sal:
     """Sal aleatoria del día (UTC). Solo existe en la memoria del proceso."""
 
@@ -360,28 +393,38 @@ class Limitador:
         return cuenta <= limite.peticiones, segundos, cuenta == limite.peticiones + 1
 
     async def consumir_destinatario(self, email, instante=None):
-        """Cuenta un correo de registro a un email en la regla "destinatario".
-        Devuelve (permitida, segundos hasta el fin de la ventana, primer
-        exceso de la ventana). Lanza NoDisponible si Redis no lo ha contado."""
+        """Cuenta un correo de registro a un email en sus dos reglas
+        (REGLAS_DESTINATARIO), en un solo MULTI. Devuelve (permitida,
+        segundos para poder repetir, reglas con su primer exceso de la
+        ventana); ver decidir. Lanza NoDisponible si Redis no lo ha contado."""
         instante = time.time() if instante is None else instante
         huella = huella_destinatario(self._sal.del_instante(instante), email)
-        cuenta, limite, segundos = await self._contar("destinatario", huella, instante)
-        return cuenta <= limite.peticiones, segundos, cuenta == limite.peticiones + 1
+        return decidir(await self._contar_varias(REGLAS_DESTINATARIO, huella, instante))
 
     async def _contar(self, regla, huella, instante):
-        limite = self.limites[regla]
+        [(_, cuenta, limite, segundos)] = await self._contar_varias((regla,), huella, instante)
+        return cuenta, limite, segundos
+
+    async def _contar_varias(self, reglas, huella, instante):
+        """Cuenta la misma huella en varias reglas dentro de un MULTI, que
+        Redis ejecuta entero o no ejecuta: nunca queda una contada y otra no.
+        Devuelve [(regla, cuenta, límite, segundos hasta el fin de su ventana)]."""
         segundo = int(instante)
-        clave = f"limite:{regla}:{segundo // limite.ventana}:{huella}"
+        contadas = [(regla, self.limites[regla]) for regla in reglas]
         try:
             # Los comandos se envían por su nombre exacto: Redis.incr() envía
             # INCRBY, que la ACL no permite (comprobado con redis-py 8.1.0).
             async with self._cliente.pipeline(transaction=True) as tubo:
-                tubo.execute_command("INCR", clave)
-                tubo.execute_command("EXPIRE", clave, limite.ventana, "NX")
-                cuenta, _ = await tubo.execute()
+                for regla, limite in contadas:
+                    clave = f"limite:{regla}:{segundo // limite.ventana}:{huella}"
+                    tubo.execute_command("INCR", clave)
+                    tubo.execute_command("EXPIRE", clave, limite.ventana, "NX")
+                resultado = await tubo.execute()
         except (RedisError, OSError) as error:
             raise NoDisponible(type(error).__name__) from None
-        return cuenta, limite, limite.ventana - segundo % limite.ventana
+        # El resultado alterna INCR y EXPIRE: las cuentas son las posiciones pares.
+        return [(regla, resultado[2 * i], limite, limite.ventana - segundo % limite.ventana)
+                for i, (regla, limite) in enumerate(contadas)]
 
     async def verificar(self):
         """Comprueba Redis al arrancar. Devuelve la lista de fallos (sin secretos).
