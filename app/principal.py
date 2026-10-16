@@ -25,6 +25,7 @@ from app import (
     rutas_denuncias,
     rutas_personal,
     rutas_web,
+    solicitudes,
     verificacion_arranque,
 )
 
@@ -84,6 +85,15 @@ async def ciclo_de_vida(app):
         registro.error("ARRANQUE BLOQUEADO: origen_web: %s", error)
         raise verificacion_arranque.ArranqueBloqueado("origen_web") from None
     registro.info("ORIGEN WEB (%s): %s", procedencia_origen, origen_web)
+    # El origen de la SPA del personal, al que apuntan los enlaces de los
+    # correos del registro (app/solicitudes.py). Obligatorio: sin él, o mal
+    # escrito, la API no arranca.
+    try:
+        origen_personal = solicitudes.cargar_origen()
+    except rutas_web.ErrorConfiguracion as error:
+        registro.error("ARRANQUE BLOQUEADO: origen_personal: %s", error)
+        raise verificacion_arranque.ArranqueBloqueado("origen_personal") from None
+    registro.info("ORIGEN PERSONAL: %s", origen_personal)
     pool = bd.crear_pool()
     limitador_api = None
     try:
@@ -109,6 +119,7 @@ async def ciclo_de_vida(app):
         app.state.claves = claves_servidor
         app.state.limitador = limitador_api
         app.state.origen_web = origen_web
+        app.state.origen_personal = origen_personal
         yield
     finally:
         if limitador_api is not None:

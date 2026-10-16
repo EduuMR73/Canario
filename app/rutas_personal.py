@@ -18,6 +18,13 @@
 * GET y POST /v1/personal/usuarios, POST y DELETE .../{usuario_id}/invitacion
   (reinvitar y anular la invitación abierta) y POST .../{usuario_id}/baja:
   administración de cuentas, solo admin.
+* Registro "primero el email" (app/solicitudes.py): POST /v1/personal/registro
+  (empresa y email; siempre el mismo 202) y POST .../registro/verificacion
+  (el token del enlace), sin sesión. GET /v1/personal/solicitudes (las
+  verificadas), POST .../{solicitud_id}/aprobacion (con el rol) y DELETE
+  .../{solicitud_id} (rechazo): solo admin. Los correos salen después de
+  responder (BackgroundTask, app/correo.py), y la aprobación NO devuelve el
+  token de invitación: va solo al email verificado.
 * Instrucción (app/instruccion.py): GET /v1/personal/denuncias (listado sin
   contenido), GET .../{denuncia_id} (contenido y mensajes, solo quien la
   tiene asignada), POST .../{denuncia_id}/mensajes, POST .../{denuncia_id}/estado
@@ -78,8 +85,9 @@ from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.background import BackgroundTask
 
-from app import cripto, denuncias, instruccion, limitador, personal, tokens
+from app import correo, cripto, denuncias, instruccion, limitador, personal, solicitudes, tokens
 from app.frontera_http import REINTENTAR_TRAS, cuerpo_error
 from app.rutas_denuncias import LONGITUD_MAXIMA_TEXTO
 from app.validacion import TextoLibre, TextoLinea, validar_email
@@ -103,6 +111,9 @@ MENSAJE_DESTINO = "la cuenta de destino no está activa"
 MENSAJE_FINAL = "cerrar una denuncia exige un mensaje final para el denunciante"
 MENSAJE_NO_VERAZ = "declarar una denuncia no veraz no admite mensaje"
 MENSAJE_FRAGMENTO = "el texto indicado no está en esa posición"
+# Siempre el mismo, pase lo que pase con la solicitud (app/solicitudes.py).
+MENSAJE_REGISTRO = "si los datos son correctos, recibirá un correo en unos minutos"
+MENSAJE_SOLICITUD = "solicitud no válida"
 
 # Topes de forma de la petición, holgados respecto a lo válido: lo que pase
 # de aquí es un 422, sin llegar a la lógica. La política de contraseñas
@@ -173,6 +184,32 @@ class NuevoUsuario(BaseModel):
         return validar_email(texto)
 
 
+class SolicitudRegistro(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    # Solo empresa y email: un rol o una contraseña en el cuerpo son un 422
+    # (extra="forbid"). El rol lo elige el admin al aprobar.
+    empresa: TextoLinea = Field(max_length=LONGITUD_MAXIMA_IDENTIFICADOR)
+    email: TextoLinea
+
+    @field_validator("email")
+    @classmethod
+    def email_valido(cls, texto):
+        return validar_email(texto)
+
+
+class VerificacionRegistro(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    token: TextoLinea = Field(max_length=LONGITUD_MAXIMA_TOKEN)
+
+
+class AprobacionSolicitud(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    rol: Literal[personal.ROLES]
+
+
 def _texto_no_vacio(texto):
     # Como en app/rutas_denuncias.py: se guarda tal cual, pero un texto solo
     # de espacios no es un mensaje.
@@ -233,7 +270,8 @@ def _error(codigo, mensaje=None, cabeceras=None):
 
 
 class LimiteCuentaSuperado(Exception):
-    """La cuenta autenticada ha superado su regla "cuenta" en esta ventana."""
+    """La cuenta autenticada ha superado su regla "cuenta" en esta ventana, o
+    un email su regla "destinatario" (mismo 429)."""
 
     def __init__(self, segundos):
         super().__init__(segundos)
@@ -383,6 +421,65 @@ def dar_de_baja(usuario_id: str, peticion: Request, sesion: SesionPersonal):
 
 
 # ---------------------------------------------------------------------------
+# Registro (app/solicitudes.py)
+# ---------------------------------------------------------------------------
+
+def _con_correo(contenido, codigo, mensaje):
+    """Respuesta JSON y, si hay correo, su envío después de responder. El
+    cuerpo y las cabeceras no dependen de que haya correo."""
+    return JSONResponse(status_code=codigo, content=contenido,
+                        background=None if mensaje is None else BackgroundTask(correo.enviar, mensaje))
+
+
+@router.post("/registro", status_code=202)
+async def solicitar_registro(datos: SolicitudRegistro, peticion: Request):
+    estado = peticion.app.state
+    # Segunda capa del limitador, por email (app/limitador.py): antes de
+    # tocar la base de datos, y la cuenta igual exista o no la empresa. El
+    # primer exceso de la ventana deja un evento, sin el email.
+    permitida, segundos, primer_exceso = await estado.limitador.consumir_destinatario(datos.email)
+    if not permitida:
+        if primer_exceso:
+            registro.warning("EVENTO limite_destinatario")
+        raise LimiteCuentaSuperado(segundos)
+    mensaje = await run_in_threadpool(solicitudes.solicitar, estado.pool, estado.origen_personal, datos.empresa,
+                                      datos.email)
+    return _con_correo({"mensaje": MENSAJE_REGISTRO}, 202, mensaje)
+
+
+@router.post("/registro/verificacion", status_code=204)
+def verificar_registro(datos: VerificacionRegistro, peticion: Request):
+    solicitudes.verificar(peticion.app.state.pool, datos.token)
+    return Response(status_code=204)
+
+
+@router.get("/solicitudes")
+def listar_solicitudes(peticion: Request, sesion: SesionPersonal):
+    listado = solicitudes.listar(peticion.app.state.pool, sesion)
+    return JSONResponse(content={"solicitudes": [{"solicitud_id": str(s.solicitud_id), "email": s.email}
+                                                 for s in listado.solicitudes],
+                                 "hay_mas": listado.hay_mas})
+
+
+@router.post("/solicitudes/{solicitud_id}/aprobacion", status_code=201)
+def aprobar_solicitud(solicitud_id: str, datos: AprobacionSolicitud, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
+    try:
+        aprobacion = solicitudes.aprobar(estado.pool, sesion, estado.origen_personal, _uuid(solicitud_id),
+                                         datos.rol)
+    except ValueError:
+        return _error(422)
+    # Sin token_invitacion: solo lo recibe el email verificado.
+    return _con_correo({"usuario_id": str(aprobacion.usuario_id)}, 201, aprobacion.correo)
+
+
+@router.delete("/solicitudes/{solicitud_id}", status_code=204)
+def rechazar_solicitud(solicitud_id: str, peticion: Request, sesion: SesionPersonal):
+    solicitudes.rechazar(peticion.app.state.pool, sesion, _uuid(solicitud_id))
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
 # Instrucción (app/instruccion.py)
 # ---------------------------------------------------------------------------
 
@@ -505,7 +602,7 @@ def _manejador(codigo, mensaje=None, cabeceras=None):
 
 # Parámetros de ruta que identifican el recurso denegado. La secuencia de un
 # mensaje no hace falta: el recurso es la denuncia.
-IDS_EN_RUTA = ("denuncia_id", "usuario_id")
+IDS_EN_RUTA = ("denuncia_id", "usuario_id", "solicitud_id")
 
 
 def _id_para_registro(texto):
@@ -573,6 +670,7 @@ def instalar_errores(aplicacion):
     aplicacion.add_exception_handler(personal.SesionNoValida,
                                      _manejador(401, MENSAJE_SESION, {"WWW-Authenticate": "Bearer"}))
     aplicacion.add_exception_handler(personal.InvitacionNoValida, _manejador(401, MENSAJE_INVITACION))
+    aplicacion.add_exception_handler(solicitudes.SolicitudNoValida, _manejador(401, MENSAJE_SOLICITUD))
     aplicacion.add_exception_handler(personal.CodigoNoValido, _manejador(422, MENSAJE_CODIGO))
     aplicacion.add_exception_handler(personal.ContrasenaNoValida, _contrasena_no_valida)
     aplicacion.add_exception_handler(personal.Saturado, _manejador(503, None, {"Retry-After": REINTENTAR_TRAS}))

@@ -94,7 +94,23 @@ _PATRON_ORIGEN = re.compile(r"https://([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)(?
 
 
 class ErrorConfiguracion(Exception):
-    """CANARIO_ORIGEN_WEB no es un origen válido: la API no debe arrancar."""
+    """Un origen configurado (CANARIO_ORIGEN_WEB o CANARIO_ORIGEN_PERSONAL)
+    no es válido: la API no debe arrancar."""
+
+
+def analizar_origen(texto, variable):
+    """El origen tal cual si tiene la forma exacta que serializa un navegador;
+    si no, ErrorConfiguracion con el nombre de la variable. Lo usan los dos
+    orígenes de la configuración: este y el de la SPA del personal
+    (app/solicitudes.py)."""
+    encaje = _PATRON_ORIGEN.fullmatch(texto)
+    if not encaje:
+        raise ErrorConfiguracion(f"{variable}: se espera https://host o https://host:puerto, en minusculas")
+    puerto = encaje.group(2)
+    if puerto is not None and (int(puerto) > 65535 or puerto == "443"):
+        # El navegador omite el 443: "https://x:443" no coincidiría nunca.
+        raise ErrorConfiguracion(f"{variable}: puerto no valido (el 443 se omite)")
+    return texto
 
 
 def cargar_origen(entorno=None):
@@ -106,14 +122,7 @@ def cargar_origen(entorno=None):
     texto = entorno.get(VARIABLE_ORIGEN)
     if texto is None:
         return ORIGEN_POR_DEFECTO, "por defecto"
-    encaje = _PATRON_ORIGEN.fullmatch(texto)
-    if not encaje:
-        raise ErrorConfiguracion(f"{VARIABLE_ORIGEN}: se espera https://host o https://host:puerto, en minusculas")
-    puerto = encaje.group(2)
-    if puerto is not None and (int(puerto) > 65535 or puerto == "443"):
-        # El navegador omite el 443: "https://x:443" no coincidiría nunca.
-        raise ErrorConfiguracion(f"{VARIABLE_ORIGEN}: puerto no valido (el 443 se omite)")
-    return texto, "configurado"
+    return analizar_origen(texto, VARIABLE_ORIGEN), "configurado"
 
 
 def origen_aceptado(cabeceras, origen_web):

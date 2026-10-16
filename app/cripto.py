@@ -60,6 +60,8 @@ ETIQUETA_TOTP = b"canario/totp/v1"
 ETIQUETA_INVITACION = b"canario/invitacion/v1"
 ETIQUETA_DISPOSITIVO = b"canario/dispositivo/v1"
 ETIQUETA_RENOVACION = b"canario/renovacion/v1"
+# Enlace de verificación de una solicitud de registro (app/solicitudes.py).
+ETIQUETA_REGISTRO = b"canario/registro/v1"
 
 # Mismos valores que el CHECK de canal.mensaje.autor.
 AUTORES = {"denunciante": b"D", "personal": b"P"}
@@ -339,7 +341,7 @@ def uri_totp(secreto, email):
 
 
 # ---------------------------------------------------------------------------
-# Tokens del personal (invitación, dispositivo y sesión)
+# Tokens del personal (invitación, dispositivo, sesión y registro)
 # ---------------------------------------------------------------------------
 
 # 256 bits aleatorios en base64url sin relleno: 43 caracteres. Con esa
@@ -372,7 +374,7 @@ def leer_token(texto):
 
 
 def huella_token(etiqueta, crudo):
-    if etiqueta not in (ETIQUETA_INVITACION, ETIQUETA_DISPOSITIVO, ETIQUETA_RENOVACION):
+    if etiqueta not in (ETIQUETA_INVITACION, ETIQUETA_DISPOSITIVO, ETIQUETA_RENOVACION, ETIQUETA_REGISTRO):
         raise ValueError("etiqueta de token desconocida")
     if not isinstance(crudo, bytes) or len(crudo) != LONGITUD_TOKEN:
         raise ValueError("el token debe tener 32 bytes")

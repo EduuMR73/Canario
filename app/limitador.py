@@ -4,7 +4,8 @@ Qué hace:
 
 * Cada petición, salvo GET /salud, consume una unidad del contador de su
   regla para su cliente: denuncia, seguimiento, mensajes, acceso (login,
-  activación y cambio de contraseña del personal) u otras. Lo que no
+  activación y cambio de contraseña del personal), registro (solicitud de
+  registro del personal) u otras. Lo que no
   tiene regla propia cae en "otras": una ruta nueva queda limitada sin que
   nadie tenga que acordarse (cerrado por construcción).
 * Ventana fija: el número de ventana va dentro de la clave, y INCR y
@@ -38,6 +39,16 @@ Qué hace:
   La clave lleva un HMAC de empresa y cuenta con la misma sal del día y su
   propia etiqueta. Esta capa no puede ir en el middleware: ahí todavía no se
   sabe de quién es la petición.
+* Segunda capa del registro, por destinatario (Sudhodanan y Paverd, 2022,
+  6.2.2: limitar por el identificador sin verificar): cada solicitud de
+  registro consume la regla "destinatario" con el email al que se va a
+  escribir, sea cual sea la empresa y la IP. Sin ella, un atacante con
+  muchas IPs podría inundar de correos el buzón de cualquiera. El coste
+  conocido es el que señala el mismo artículo: quien agote el cupo de un
+  email retrasa el registro de su dueño. Por eso la ventana es corta (15
+  minutos): el retraso queda acotado, y la respuesta es un 429 con
+  Retry-After, no un silencio. La clave lleva un HMAC del email con la sal
+  del día y su propia etiqueta: el email nunca llega a Redis.
 
 Configuración: los límites de producción son los literales de
 LIMITES_POR_DEFECTO. La variable de entorno CANARIO_LIMITES los sustituye
@@ -96,6 +107,7 @@ ESPERA_ARRANQUE_SEGUNDOS = 15
 SEGUNDOS_DIA = 86_400
 ETIQUETA_CLIENTE = b"canario/limite/v1"
 ETIQUETA_CUENTA = b"canario/limite/cuenta/v1"
+ETIQUETA_DESTINATARIO = b"canario/limite/destinatario/v1"
 
 VARIABLE_LIMITES = "CANARIO_LIMITES"
 # Topes de lo que admite CANARIO_LIMITES: un valor fuera de ellos es un error
@@ -128,17 +140,28 @@ class Limite:
 # "cuenta" no es una regla de ruta: es la segunda capa de las rutas con
 # sesión, por identidad. Una persona no sostiene más de una petición por
 # segundo; un frontend que haga varias llamadas por pantalla sigue holgado.
+# "registro" (POST /v1/personal/registro) acota los correos que puede
+# provocar una IP: cada solicitud envía uno. Una persona se registra una vez;
+# 10 por hora dejan sitio a quien se equivoca de email o a una oficina que
+# sale por la misma IP. La verificación (.../registro/verificacion) va en
+# "otras", como la renovación: su token tiene 256 bits y no envía correo.
+# "destinatario" tampoco es de ruta: la segunda capa del registro, por email
+# (ver la cabecera). 3 correos cada 15 minutos a un mismo buzón bastan para
+# quien repite la solicitud porque no le llegó la primera.
 LIMITES_POR_DEFECTO = {
     "denuncia": Limite(10, 3600),
     "seguimiento": Limite(60, 60),
     "mensajes": Limite(30, 3600),
     "acceso": Limite(10, 300),
+    "registro": Limite(10, 3600),
     "otras": Limite(60, 60),
     "cuenta": Limite(60, 60),
+    "destinatario": Limite(3, 900),
 }
 
 RUTAS_ACCESO = {"/v1/personal/sesiones", "/v1/personal/activacion", "/v1/personal/activacion/confirmar",
                 "/v1/personal/contrasena"}
+RUTAS_REGISTRO = {"/v1/personal/registro"}
 # El denunciante tiene dos entradas a las mismas acciones: la API JSON (/v1) y
 # los formularios del sitio (/web, app/rutas_web.py). Cada acción tiene la
 # misma regla por las dos, y la regla es la clave del contador, así que
@@ -181,6 +204,8 @@ def regla_de(ruta):
         return "mensajes"
     if ruta in RUTAS_ACCESO:
         return "acceso"
+    if ruta in RUTAS_REGISTRO:
+        return "registro"
     if _RUTA_DENUNCIAS.fullmatch(ruta):
         return "denuncia"
     return "otras"
@@ -266,6 +291,13 @@ def huella_cuenta(sal, empresa_id, usuario_id):
     return hmac.new(sal, ETIQUETA_CUENTA + empresa_id.bytes + usuario_id.bytes, hashlib.sha256).hexdigest()[:32]
 
 
+def huella_destinatario(sal, email):
+    """HMAC-SHA256 de un email con la sal, truncado a 128 bits. El email llega
+    ya validado y en minúsculas (app/validacion.py, solo ASCII): la misma
+    dirección escrita con otras mayúsculas es el mismo destinatario."""
+    return hmac.new(sal, ETIQUETA_DESTINATARIO + email.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+
+
 class _Sal:
     """Sal aleatoria del día (UTC). Solo existe en la memoria del proceso."""
 
@@ -325,6 +357,15 @@ class Limitador:
         instante = time.time() if instante is None else instante
         huella = huella_cuenta(self._sal.del_instante(instante), empresa_id, usuario_id)
         cuenta, limite, segundos = await self._contar("cuenta", huella, instante)
+        return cuenta <= limite.peticiones, segundos, cuenta == limite.peticiones + 1
+
+    async def consumir_destinatario(self, email, instante=None):
+        """Cuenta un correo de registro a un email en la regla "destinatario".
+        Devuelve (permitida, segundos hasta el fin de la ventana, primer
+        exceso de la ventana). Lanza NoDisponible si Redis no lo ha contado."""
+        instante = time.time() if instante is None else instante
+        huella = huella_destinatario(self._sal.del_instante(instante), email)
+        cuenta, limite, segundos = await self._contar("destinatario", huella, instante)
         return cuenta <= limite.peticiones, segundos, cuenta == limite.peticiones + 1
 
     async def _contar(self, regla, huella, instante):

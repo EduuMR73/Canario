@@ -16,8 +16,8 @@
 --   secuencia, para no dejar rastro horario que ayude a correlacionar
 --   denunciantes. Las únicas excepciones son del lado del personal, nunca del
 --   denunciante: el bloqueo temporal por intentos fallidos (bloqueado_hasta)
---   y las caducidades de invitaciones, sesiones y dispositivos, que necesitan
---   hora para funcionar.
+--   y las caducidades de invitaciones, solicitudes de registro, sesiones y
+--   dispositivos, que necesitan hora para funcionar.
 -- * La fecha es la del calendario de la empresa: cada empresa tiene su zona
 --   horaria (solo las de España) y los triggers calculan el día con
 --   now() AT TIME ZONE esa zona. La Ley 2/2023 cuenta los plazos desde la
@@ -35,7 +35,9 @@
 --   para nadie, y las claves foráneas son ON DELETE NO ACTION. La única
 --   excepción es la supresión que exige la Ley 2/2023 (arts. 32.4 y 26.2),
 --   en 04_supresion.sql: una función con un dueño propio y un criterio fijo,
---   que solo ejecuta plataforma y que deja evidencia en la auditoría.
+--   que solo ejecuta plataforma y que deja evidencia en la auditoría. La
+--   misma ejecución poda las solicitudes de registro cerradas o caducadas,
+--   con otra función del mismo dueño.
 --
 -- Límites asumidos:
 -- * La RLS por variable de sesión no protege frente a una inyección SQL
@@ -211,6 +213,42 @@ CREATE TABLE canal.invitacion_personal (
 CREATE UNIQUE INDEX invitacion_personal_una_abierta
     ON canal.invitacion_personal (empresa_id, usuario_id) WHERE NOT cerrada;
 
+-- Solicitud de registro del personal, "primero el email" (app/solicitudes.py).
+-- Quien se registra solo da su email: no elige contraseña ni rol. Primero
+-- demuestra que el email es suyo (verificada) y después un admin la aprueba
+-- con un rol; la cuenta nace entonces por el camino de siempre, una
+-- invitación que solo llega a ese email. Así nadie puede preparar una cuenta
+-- con el email de otro (pre-hijacking: Sudhodanan y Paverd, 2022, 6.2.1:
+-- la causa raíz es no verificar la propiedad del identificador).
+-- * token_sha256: huella del token del enlace de verificación (como en
+--   invitacion_personal, 256 bits aleatorios: basta SHA-256).
+-- * caduca: 24 horas para verificar (6.2.2: poda corta de lo no verificado).
+--   Al verificarse, el trigger solicitud_registro_transicion la lleva a 30
+--   días, el plazo del admin para decidir. La API no tiene permiso sobre esta
+--   columna: la fija siempre la base de datos.
+-- * cerrada: aprobada, rechazada o sustituida por otra más reciente. Como
+--   mucho hay una abierta por email y empresa.
+-- Lo cerrado y lo caducado se borra con la supresión periódica
+-- (04_supresion.sql): un email que nunca se verificó no se guarda más de lo
+-- necesario.
+CREATE TABLE canal.solicitud_registro (
+    empresa_id uuid NOT NULL REFERENCES canal.empresa (id),
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    email text NOT NULL CHECK (
+        email = lower(email)
+        AND length(email) BETWEEN 3 AND 254
+        AND position('@' in email) > 1
+    ),
+    token_sha256 bytea NOT NULL CHECK (octet_length(token_sha256) = 32),
+    caduca timestamptz NOT NULL DEFAULT now() + interval '24 hours',
+    verificada boolean NOT NULL DEFAULT false,
+    cerrada boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (empresa_id, id),
+    UNIQUE (empresa_id, token_sha256)
+);
+CREATE UNIQUE INDEX solicitud_registro_una_abierta
+    ON canal.solicitud_registro (empresa_id, email) WHERE NOT cerrada;
+
 -- Dispositivo de confianza (OWASP, "Slow Down Online Guessing Attacks with
 -- Device Cookies"): se emite tras un login correcto o al activar la cuenta.
 -- Un login que lo presenta cuenta sus fallos aquí, no en la cuenta: el
@@ -366,6 +404,8 @@ ALTER TABLE canal.usuario_personal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.usuario_personal FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.invitacion_personal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.invitacion_personal FORCE ROW LEVEL SECURITY;
+ALTER TABLE canal.solicitud_registro ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canal.solicitud_registro FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.dispositivo_personal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.dispositivo_personal FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.sesion_personal ENABLE ROW LEVEL SECURITY;
@@ -409,6 +449,17 @@ CREATE POLICY invitacion_personal_insert ON canal.invitacion_personal
     FOR INSERT TO aplicacion
     WITH CHECK (empresa_id = canal.empresa_actual());
 CREATE POLICY invitacion_personal_update ON canal.invitacion_personal
+    FOR UPDATE TO aplicacion
+    USING (empresa_id = canal.empresa_actual())
+    WITH CHECK (empresa_id = canal.empresa_actual());
+
+CREATE POLICY solicitud_registro_select ON canal.solicitud_registro
+    FOR SELECT TO aplicacion
+    USING (empresa_id = canal.empresa_actual());
+CREATE POLICY solicitud_registro_insert ON canal.solicitud_registro
+    FOR INSERT TO aplicacion
+    WITH CHECK (empresa_id = canal.empresa_actual());
+CREATE POLICY solicitud_registro_update ON canal.solicitud_registro
     FOR UPDATE TO aplicacion
     USING (empresa_id = canal.empresa_actual())
     WITH CHECK (empresa_id = canal.empresa_actual());
@@ -477,6 +528,7 @@ REVOKE ALL ON TABLE canal.directorio_empresas FROM PUBLIC;
 REVOKE ALL ON TABLE canal.clave_empresa FROM PUBLIC;
 REVOKE ALL ON TABLE canal.usuario_personal FROM PUBLIC;
 REVOKE ALL ON TABLE canal.invitacion_personal FROM PUBLIC;
+REVOKE ALL ON TABLE canal.solicitud_registro FROM PUBLIC;
 REVOKE ALL ON TABLE canal.dispositivo_personal FROM PUBLIC;
 REVOKE ALL ON TABLE canal.sesion_personal FROM PUBLIC;
 REVOKE ALL ON TABLE canal.denuncia FROM PUBLIC;
@@ -495,6 +547,11 @@ GRANT SELECT ON canal.invitacion_personal TO aplicacion;
 GRANT INSERT (empresa_id, usuario_id, token_sha256) ON canal.invitacion_personal TO aplicacion;
 GRANT UPDATE (cerrada, hash_contrasena, secreto_totp_cifrado, version_clave_totp)
     ON canal.invitacion_personal TO aplicacion;
+-- Ni caduca ni el paso de verificada a falso o de cerrada a abierta: lo
+-- impiden los permisos por columna y el trigger solicitud_registro_transicion.
+GRANT SELECT ON canal.solicitud_registro TO aplicacion;
+GRANT INSERT (empresa_id, email, token_sha256) ON canal.solicitud_registro TO aplicacion;
+GRANT UPDATE (verificada, cerrada) ON canal.solicitud_registro TO aplicacion;
 GRANT SELECT ON canal.dispositivo_personal TO aplicacion;
 GRANT INSERT (empresa_id, usuario_id, token_sha256) ON canal.dispositivo_personal TO aplicacion;
 GRANT UPDATE (intentos_fallidos, bloqueado_hasta, revocado) ON canal.dispositivo_personal TO aplicacion;
@@ -681,6 +738,43 @@ BEGIN
 END
 $$;
 
+-- Transiciones de una solicitud de registro. La API solo puede escribir
+-- verificada y cerrada (permisos por columna), y aquí se limita también en
+-- qué sentido:
+-- * Una cerrada no se reabre y una verificada no deja de estarlo: un error
+--   de la API (o una API comprometida) no puede devolver a la cola una
+--   solicitud ya aprobada, rechazada o sustituida.
+-- * Solo se verifica una solicitud abierta y sin caducar, y al verificarla la
+--   caducidad pasa a 30 días, el plazo del admin para decidir. La fija la
+--   base de datos, con su hora, como las demás caducidades.
+-- * caduca no cambia por ningún otro camino (lo que traiga el UPDATE se
+--   descarta).
+-- Los errores usan los SQLSTATE propios de la clase CN (ver preparar_mensaje).
+CREATE FUNCTION canal.controlar_solicitud_registro() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, canal
+AS $$
+BEGIN
+    IF OLD.cerrada AND NOT NEW.cerrada THEN
+        RAISE EXCEPTION 'una solicitud de registro cerrada no se reabre'
+            USING ERRCODE = 'CN003';
+    END IF;
+    IF OLD.verificada AND NOT NEW.verificada THEN
+        RAISE EXCEPTION 'una solicitud de registro verificada no deja de estarlo'
+            USING ERRCODE = 'CN003';
+    END IF;
+    NEW.caduca := OLD.caduca;
+    IF NEW.verificada AND NOT OLD.verificada THEN
+        IF OLD.cerrada OR OLD.caduca <= now() THEN
+            RAISE EXCEPTION 'solo se verifica una solicitud abierta y sin caducar'
+                USING ERRCODE = 'CN003';
+        END IF;
+        NEW.caduca := now() + interval '30 days';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
 -- Recorre la cadena de auditoría visible (con RLS, la de la empresa del
 -- contexto) y devuelve la primera secuencia que se rompe, o NULL si está
 -- intacta. Se rompe si la secuencia no es consecutiva, si hash_anterior no es
@@ -745,6 +839,7 @@ REVOKE EXECUTE ON FUNCTION canal.encadenar_auditoria() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.rechazar_modificacion_auditoria() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.preparar_mensaje() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.fijar_fecha_denuncia() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION canal.controlar_solicitud_registro() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() TO aplicacion;
 
@@ -763,6 +858,9 @@ CREATE TRIGGER mensaje_preparar
 CREATE TRIGGER denuncia_fecha
     BEFORE INSERT ON canal.denuncia
     FOR EACH ROW EXECUTE FUNCTION canal.fijar_fecha_denuncia();
+CREATE TRIGGER solicitud_registro_transicion
+    BEFORE UPDATE ON canal.solicitud_registro
+    FOR EACH ROW EXECUTE FUNCTION canal.controlar_solicitud_registro();
 
 -- ---------------------------------------------------------------------------
 -- Ruta de búsqueda del rol de la aplicación

@@ -517,7 +517,7 @@ def _actor(usuario_id):
     return f"personal:{usuario_id}"
 
 
-def _resolver(pool, identificador):
+def resolver_empresa(pool, identificador):
     """Empresa activa de un identificador público, o None. Se consulta
     siempre, también con un identificador mal formado: el trabajo es el
     mismo en todos los caminos."""
@@ -525,7 +525,7 @@ def _resolver(pool, identificador):
         return conexion.execute(SQL_RESOLVER, [identificador]).fetchone()[0]
 
 
-def _leer_compuesto(texto):
+def leer_compuesto(texto):
     """(identificador, bytes) de un token "<identificador>.<token>", o None."""
     if not isinstance(texto, str) or texto.count(".") != 1:
         return None
@@ -536,7 +536,7 @@ def _leer_compuesto(texto):
     return None if crudo is None else (identificador, crudo)
 
 
-def _token_compuesto(identificador, token):
+def token_compuesto(identificador, token):
     return f"{identificador}.{token}"
 
 
@@ -583,7 +583,7 @@ def _nueva_sesion(conexion, claves, empresa_id, identificador, usuario_id, dispo
     sesion_id = conexion.execute(SQL_NUEVA_SESION, [
         empresa_id, usuario_id, dispositivo_id, cripto.huella_token(cripto.ETIQUETA_RENOVACION, crudo)]).fetchone()[0]
     return Acceso(token_acceso=tokens.emitir(claves.firma_tokens, identificador, usuario_id, sesion_id),
-                  token_renovacion=_token_compuesto(identificador, token_renovacion),
+                  token_renovacion=token_compuesto(identificador, token_renovacion),
                   token_dispositivo=token_dispositivo)
 
 
@@ -611,7 +611,7 @@ def iniciar_sesion(pool, claves, identificador, email, contrasena, codigo, token
     instante = time.time() if instante is None else instante
     email = email.lower()
     # Sin empresa, un contexto aleatorio: las mismas sentencias con cero filas.
-    resuelta = _resolver(pool, identificador)
+    resuelta = resolver_empresa(pool, identificador)
     empresa_id = resuelta or uuid.uuid4()
     crudo = cripto.leer_token(token_dispositivo) if token_dispositivo is not None else None
     huella = cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo or secrets.token_bytes(cripto.LONGITUD_TOKEN))
@@ -670,7 +670,7 @@ def autenticar(pool, claves, token):
         raise SesionNoValida from None
     # El identificador se resuelve en cada petición, como antes: una empresa
     # desactivada deja de resolverse y sus JWT dejan de valer al momento.
-    empresa_id = _resolver(pool, portador.identificador)
+    empresa_id = resolver_empresa(pool, portador.identificador)
     if empresa_id is None:
         raise SesionNoValida
     with bd.transaccion_empresa(pool, empresa_id, solo_lectura=True) as conexion:
@@ -688,11 +688,11 @@ def renovar(pool, claves, token_renovacion):
     """Tokens nuevos a cambio de un token de renovación vigente, o
     SesionNoValida. Si el token ya se había usado, revoca su sesión antes
     de rechazarlo (RFC 9700, 4.14.2)."""
-    leido = _leer_compuesto(token_renovacion)
+    leido = leer_compuesto(token_renovacion)
     if leido is None:
         raise SesionNoValida
     identificador, crudo = leido
-    empresa_id = _resolver(pool, identificador)
+    empresa_id = resolver_empresa(pool, identificador)
     if empresa_id is None:
         raise SesionNoValida
     usada = cripto.huella_token(cripto.ETIQUETA_RENOVACION, crudo)
@@ -711,7 +711,7 @@ def renovar(pool, claves, token_renovacion):
         raise SesionNoValida
     sesion_id, usuario_id = fila
     return Acceso(token_acceso=tokens.emitir(claves.firma_tokens, identificador, usuario_id, sesion_id),
-                  token_renovacion=_token_compuesto(identificador, nuevo))
+                  token_renovacion=token_compuesto(identificador, nuevo))
 
 
 def cerrar_sesion(pool, sesion):
@@ -761,15 +761,24 @@ def cambiar_contrasena(pool, claves, sesion, actual, nueva, codigo, instante=Non
 # Invitación y activación
 # ---------------------------------------------------------------------------
 
-def _empresa_de_invitacion(pool, token):
-    leido = _leer_compuesto(token)
+def empresa_de_token(pool, token, etiqueta):
+    """(empresa, huella) de un token compuesto con la etiqueta de su tipo, o
+    None si está mal formado o su empresa no está activa."""
+    leido = leer_compuesto(token)
     if leido is None:
-        raise InvitacionNoValida
+        return None
     identificador, crudo = leido
-    empresa_id = _resolver(pool, identificador)
+    empresa_id = resolver_empresa(pool, identificador)
     if empresa_id is None:
+        return None
+    return empresa_id, cripto.huella_token(etiqueta, crudo)
+
+
+def _empresa_de_invitacion(pool, token):
+    resultado = empresa_de_token(pool, token, cripto.ETIQUETA_INVITACION)
+    if resultado is None:
         raise InvitacionNoValida
-    return empresa_id, cripto.huella_token(cripto.ETIQUETA_INVITACION, crudo)
+    return resultado
 
 
 def activar(pool, claves, token, contrasena):
@@ -836,20 +845,20 @@ def _emitir_invitacion(conexion, empresa_id, identificador, usuario_id):
     conexion.execute(SQL_CERRAR_INVITACIONES, [usuario_id])
     conexion.execute(SQL_NUEVA_INVITACION, [empresa_id, usuario_id,
                                             cripto.huella_token(cripto.ETIQUETA_INVITACION, crudo)])
-    return _token_compuesto(identificador, token)
+    return token_compuesto(identificador, token)
 
 
 # ---------------------------------------------------------------------------
 # Administración de cuentas (solo admin)
 # ---------------------------------------------------------------------------
 
-def _exigir_admin(sesion):
+def exigir_admin(sesion):
     if sesion.rol != "admin":
         raise Prohibido
 
 
 def listar_usuarios(pool, sesion):
-    _exigir_admin(sesion)
+    exigir_admin(sesion)
     with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
         filas = conexion.execute(SQL_LISTAR_USUARIOS, {"tope_sin_confianza": TOPE_SIN_CONFIANZA}).fetchall()
     return [Usuario(usuario_id=f[0], email=f[1], rol=f[2], activo=f[3], activado=f[4],
@@ -865,31 +874,48 @@ def invitacion_pendiente(pool, sesion):
         return conexion.execute(SQL_INVITACION_PENDIENTE_DE, [sesion.usuario_id]).fetchone()[0]
 
 
-def invitar(pool, sesion, email, rol):
-    """Crea una cuenta sin credenciales y su invitación."""
-    _exigir_admin(sesion)
+def crear_cuenta_invitada(conexion, sesion, email, rol, accion):
+    """Crea una cuenta sin credenciales y su invitación en la transacción
+    abierta de un admin, y la audita con accion. El único camino por el que
+    nace una cuenta desde la API: la invitación manual (invitar) y la
+    aprobación de una solicitud de registro (app/solicitudes.py). Los errores de
+    la base de datos se traducen al salir de la transacción (_traducir_alta)."""
+    exigir_admin(sesion)
     if rol not in ROLES:
         raise ValueError("rol desconocido")
+    usuario_id = conexion.execute(SQL_NUEVO_USUARIO, [sesion.empresa_id, email.lower(), rol]).fetchone()[0]
+    token = _emitir_invitacion(conexion, sesion.empresa_id, sesion.identificador, usuario_id)
+    conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), accion, usuario_id])
+    return Invitacion(usuario_id=usuario_id, token_invitacion=token)
+
+
+@contextmanager
+def traducir_alta():
+    """Email repetido -> EmailDuplicado; email que no cumple el CHECK ->
+    ValueError. Envuelve la transacción entera: el error de PostgreSQL llega
+    al ejecutar la sentencia, y la transacción ya está abortada."""
     try:
-        with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
-            usuario_id = conexion.execute(SQL_NUEVO_USUARIO, [sesion.empresa_id, email.lower(), rol]).fetchone()[0]
-            token = _emitir_invitacion(conexion, sesion.empresa_id, sesion.identificador, usuario_id)
-            conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_INVITACION,
-                                           usuario_id])
+        yield
     except psycopg.Error as error:
         if error.sqlstate == SQLSTATE_DUPLICADO:
             raise EmailDuplicado from None
         if error.sqlstate == SQLSTATE_CHECK:
             raise ValueError("email no valido") from None
         raise
-    return Invitacion(usuario_id=usuario_id, token_invitacion=token)
+
+
+def invitar(pool, sesion, email, rol):
+    """Crea una cuenta sin credenciales y su invitación."""
+    exigir_admin(sesion)
+    with traducir_alta(), bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        return crear_cuenta_invitada(conexion, sesion, email, rol, ACCION_INVITACION)
 
 
 def reinvitar(pool, sesion, usuario_id):
     """Nueva invitación para una cuenta (recuperar el acceso, cerrar el camino
     sin confianza o reactivarla tras una baja). La anterior se cierra. La
     cuenta sigue funcionando con sus credenciales hasta que se confirme."""
-    _exigir_admin(sesion)
+    exigir_admin(sesion)
     with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
         if conexion.execute(SQL_USUARIO, [usuario_id]).fetchone() is None:
             raise NoEncontrado
@@ -903,7 +929,7 @@ def anular_invitacion(pool, sesion, usuario_id):
     reinvitación que nadie pidió. La cuenta queda como estaba (con sus
     credenciales, o sin ellas si nunca se activó). 404 si la cuenta no existe
     o no tiene ninguna invitación abierta."""
-    _exigir_admin(sesion)
+    exigir_admin(sesion)
     with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
         if conexion.execute(SQL_USUARIO, [usuario_id]).fetchone() is None:
             raise NoEncontrado
@@ -916,7 +942,7 @@ def anular_invitacion(pool, sesion, usuario_id):
 def dar_de_baja(pool, sesion, usuario_id):
     """Desactiva una cuenta y revoca sus sesiones, dispositivos e
     invitaciones. Nunca deja a la empresa sin un admin activado."""
-    _exigir_admin(sesion)
+    exigir_admin(sesion)
     with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
         admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()
         fila = conexion.execute(SQL_USUARIO, [usuario_id]).fetchone()

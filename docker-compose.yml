@@ -258,11 +258,19 @@ services:
     pids_limit: 64
     # Sin puertos publicados: solo se llega a la API a través del proxy (red
     # app). En data habla con PostgreSQL; pg_hba.conf solo admite su subred
-    # (samenet). En cache habla con Redis, el del limitador de peticiones.
+    # (samenet). En cache habla con Redis, el del limitador de peticiones. En
+    # correo, con el servidor SMTP de desarrollo (mailpit, app/correo.py).
     networks:
       - app
       - data
       - cache
+      - correo
+    # Origen de la SPA del personal: los enlaces de los correos del registro
+    # apuntan a él (app/solicitudes.py). Obligatorio y explícito, sin valor
+    # por defecto en el código: un enlace con un secreto no puede apuntar a
+    # un sitio que nadie eligió. El puerto 8445 queda reservado para la SPA.
+    environment:
+      CANARIO_ORIGEN_PERSONAL: "https://localhost:8445"
     # Secretos como ficheros en /run/secrets, nunca como variables de entorno:
     # la contraseña del rol aplicacion (se lee en cada conexión nueva), la
     # clave maestra (desenvuelve las claves de cada empresa), la clave del
@@ -332,6 +340,47 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  mailpit:
+    # Servidor SMTP de DESARROLLO: recibe los correos del registro del personal
+    # y no los entrega a nadie (app/correo.py). El perfil hace que
+    # "docker compose up" no lo arranque: se pide con --profile desarrollo.
+    # Sin él, cada correo deja EVENTO correo_fallido en el log de la API. La
+    # salida SMTP de producción no está decidida (docs/threat-model.md).
+    # Imagen fijada por versión y por digest, como el resto.
+    image: axllent/mailpit:v1.31.6@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
+    profiles:
+      - desarrollo
+    restart: unless-stopped
+    # La imagen arranca como root: aquí, un usuario sin privilegios propio
+    # (10003, sin cuenta en la imagen; Mailpit no la necesita). Los puertos
+    # 1025 y 8025 no son privilegiados.
+    user: "10003:10003"
+    # Sistema de ficheros raíz de solo lectura. Mailpit guarda los mensajes
+    # en una base de datos temporal en /tmp: en memoria, sin ejecución ni
+    # setuid, y se pierde al parar (son correos de prueba).
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 64
+    # Solo la red interna correo: sin salida a internet (un correo de prueba
+    # nunca puede llegar a un buzón real) y sin puertos publicados (una red
+    # interna no puede publicarlos). Los mensajes se leen con su API HTTP
+    # (puerto 8025) desde un contenedor en la misma red: README, sección
+    # Correo de desarrollo.
+    networks:
+      - correo
+    # Sin healthcheck propio: la imagen trae el suyo (/mailpit readyz).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   caddy:
     # Imagen propia (proxy/Dockerfile) sobre caddy:2.11.7-alpine fijada por
     # digest: sin la file capability del binario, /data/caddy solo para el
@@ -382,6 +431,10 @@ networks:
   cache:
     # Red interna: los contenedores no tienen salida a internet ni son
     # accesibles desde fuera del host.
+    internal: true
+  correo:
+    # Red interna entre la API y el SMTP de desarrollo (mailpit): sin salida a
+    # internet ni acceso desde fuera del host.
     internal: true
   data:
     # Red interna de la base de datos: sin salida a internet ni acceso desde

@@ -42,7 +42,10 @@ Repite lotes, cada uno en su transacción, hasta que uno vuelve vacío. Las
 denuncias que estaban en uso se saltan: al terminar se cuentan las que siguen
 cumpliendo el criterio y, si queda alguna, la orden lo dice y sale con código
 75, distinto del 1 de los errores, para que una ejecución programada separe
-"se suprime en la siguiente" de "hay que investigar". No verifica la base
+"se suprime en la siguiente" de "hay que investigar". Después poda, también
+por lotes, las solicitudes de registro del personal cerradas o caducadas
+(canal.podar_solicitudes_registro): la misma orden programada mantiene a raya
+los emails que nunca se verificaron. No verifica la base
 de datos como el arranque de la API: esas comprobaciones son las del rol
 aplicacion, y plataforma solo puede ejecutar la función, cuyo criterio está
 fijo en la base de datos.
@@ -99,6 +102,7 @@ SQL_INSERTAR_CLAVE = (
 )
 SQL_SUPRIMIR = "select empresa_id, articulo, suprimidas from canal.suprimir_denuncias_caducadas(%s)"
 SQL_CONTAR_CADUCADAS = "select canal.contar_denuncias_caducadas()"
+SQL_PODAR_SOLICITUDES = "select canal.podar_solicitudes_registro(%s)"
 # Mismo intervalo que acepta la función (1 a 500). Un lote pequeño retiene
 # pocos bloqueos y cabe de sobra en el statement_timeout de la sesión.
 LOTE_POR_DEFECTO = 100
@@ -207,10 +211,14 @@ def reinvitar_admin(identificador, email):
 
 
 def suprimir_caducadas(lote):
-    """Suprime las denuncias caducadas por lotes. Devuelve (totales, pendientes).
+    """Suprime las denuncias caducadas por lotes y poda las solicitudes de
+    registro. Devuelve (totales, pendientes, podadas).
 
     totales: {(empresa_id, articulo): suprimidas}. pendientes: las que siguen
     cumpliendo el criterio al terminar (estaban en uso y se saltaron).
+    podadas: solicitudes de registro borradas. Una en uso se salta y cae en
+    la ejecución siguiente; no es motivo de aviso, porque no la exige ningún
+    plazo legal.
     """
     totales = {}
     with bd.conectar("plataforma", bd.FICHERO_CONTRASENA_PLATAFORMA) as conexion:
@@ -228,7 +236,14 @@ def suprimir_caducadas(lote):
             # El recuento solo lee: en solo lectura no puede escribir nada.
             conexion.execute(bd.SQL_SOLO_LECTURA)
             pendientes = conexion.execute(SQL_CONTAR_CADUCADAS).fetchone()[0]
-    return totales, pendientes
+        podadas = 0
+        while True:
+            with conexion.transaction():
+                borradas = conexion.execute(SQL_PODAR_SOLICITUDES, [lote]).fetchone()[0]
+            if not borradas:
+                break
+            podadas += borradas
+    return totales, pendientes, podadas
 
 
 def _motivo(error):
@@ -307,11 +322,12 @@ def _lote(texto):
     return valor
 
 
-def _informar_supresion(totales, pendientes):
-    """Imprime solo recuentos por empresa y artículo. Devuelve el código de salida."""
+def _informar_supresion(totales, pendientes, podadas):
+    """Imprime solo recuentos. Devuelve el código de salida."""
     for (empresa_id, articulo), suprimidas in sorted(totales.items(), key=lambda e: (str(e[0][0]), e[0][1])):
         print(f"suprimidas: empresa_id={empresa_id} articulo={articulo} denuncias={suprimidas}")
     print(f"total suprimidas: {sum(totales.values())}")
+    print(f"solicitudes de registro podadas: {podadas}")
     if pendientes:
         print(f"AVISO: quedan {pendientes} denuncias caducadas que estaban en uso; "
               "vuelva a ejecutar suprimir-caducadas", file=sys.stderr)

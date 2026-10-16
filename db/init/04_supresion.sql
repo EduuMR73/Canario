@@ -15,6 +15,14 @@
 -- El resto del esquema no tiene ningún permiso ni política de DELETE: esta
 -- función es la única excepción, con un dueño propio y un criterio fijo.
 --
+-- La misma ejecución poda las solicitudes de registro del personal cerradas
+-- o caducadas (canal.podar_solicitudes_registro, al final): solo guardan un
+-- email, y uno que nunca se verificó no debe quedarse (RGPD, art. 5.1.c y
+-- 5.1.e, minimización y limitación del plazo). Mismo dueño y mismo rol que la
+-- ejecuta: el borrado sigue teniendo un único camino. No deja fila de
+-- auditoría: una solicitud no es parte del canal, y lo que importa de ella
+-- (la aprobación o el rechazo de un admin) ya está auditado.
+--
 -- Diseño:
 -- * El criterio vive en un solo sitio, canal.articulo_supresion(), que recibe
 --   las columnas de la fila (estado, fecha) y la zona horaria de su empresa.
@@ -280,5 +288,63 @@ $$;
 REVOKE EXECUTE ON FUNCTION canal.contar_denuncias_caducadas() FROM PUBLIC;
 ALTER FUNCTION canal.contar_denuncias_caducadas() OWNER TO propietario_supresion;
 GRANT EXECUTE ON FUNCTION canal.contar_denuncias_caducadas() TO plataforma;
+
+-- ---------------------------------------------------------------------------
+-- Poda de solicitudes de registro
+-- ---------------------------------------------------------------------------
+
+-- Leer el criterio (cerrada o caducada), bloquear y borrar. Como con las
+-- denuncias, bloquear con FOR UPDATE exige UPDATE sobre alguna columna: la
+-- política de UPDATE con WITH CHECK (false) permite bloquear y rechaza
+-- cualquier UPDATE real.
+GRANT SELECT (empresa_id, id, caduca, cerrada) ON canal.solicitud_registro TO propietario_supresion;
+GRANT UPDATE (cerrada) ON canal.solicitud_registro TO propietario_supresion;
+GRANT DELETE ON canal.solicitud_registro TO propietario_supresion;
+CREATE POLICY solicitud_registro_select_supresion ON canal.solicitud_registro
+    FOR SELECT TO propietario_supresion
+    USING (true);
+CREATE POLICY solicitud_registro_bloqueo_supresion ON canal.solicitud_registro
+    FOR UPDATE TO propietario_supresion
+    USING (true)
+    WITH CHECK (false);
+CREATE POLICY solicitud_registro_delete_supresion ON canal.solicitud_registro
+    FOR DELETE TO propietario_supresion
+    USING (true);
+
+-- Borra como mucho p_lote solicitudes cerradas o caducadas y devuelve
+-- cuántas. Una en uso (un admin la está aprobando) se salta con SKIP LOCKED y
+-- entra en la ejecución siguiente; la supresión nunca espera a la API. El
+-- criterio no puede dejar de cumplirse entre el bloqueo y el borrado: una
+-- cerrada no se reabre y una caducada no rejuvenece
+-- (canal.controlar_solicitud_registro, 02_esquema.sql). Quien la invoca
+-- repite lotes hasta que uno devuelve cero (app/gestion.py).
+CREATE FUNCTION canal.podar_solicitudes_registro(p_lote integer)
+RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, canal, pg_temp
+AS $$
+DECLARE
+    v_borradas bigint;
+BEGIN
+    IF p_lote IS NULL OR p_lote NOT BETWEEN 1 AND 500 THEN
+        RAISE EXCEPTION 'el lote debe estar entre 1 y 500'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    DELETE FROM canal.solicitud_registro s
+     USING (SELECT c.empresa_id, c.id
+              FROM canal.solicitud_registro c
+             WHERE c.cerrada OR c.caduca <= now()
+             ORDER BY c.empresa_id, c.id
+             LIMIT p_lote
+               FOR UPDATE SKIP LOCKED) b
+     WHERE s.empresa_id = b.empresa_id AND s.id = b.id;
+    GET DIAGNOSTICS v_borradas = ROW_COUNT;
+    RETURN v_borradas;
+END
+$$;
+REVOKE EXECUTE ON FUNCTION canal.podar_solicitudes_registro(integer) FROM PUBLIC;
+ALTER FUNCTION canal.podar_solicitudes_registro(integer) OWNER TO propietario_supresion;
+GRANT EXECUTE ON FUNCTION canal.podar_solicitudes_registro(integer) TO plataforma;
 
 COMMIT;
