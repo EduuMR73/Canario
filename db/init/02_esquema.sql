@@ -166,7 +166,10 @@ CREATE TABLE canal.usuario_personal (
         AND position('@' in email) > 1
     ),
     hash_contrasena text,
-    rol text NOT NULL CHECK (rol IN ('admin', 'instructor')),
+    -- auditor: lee la auditoría y verifica su cadena, nunca el contenido de
+    -- una denuncia (Ley 2/2023, art. 32.1.e, el delegado de protección de
+    -- datos; ver canal.controlar_asignacion_denuncia).
+    rol text NOT NULL CHECK (rol IN ('admin', 'instructor', 'auditor')),
     secreto_totp_cifrado bytea,
     totp_activo boolean NOT NULL DEFAULT false,
     intentos_fallidos integer NOT NULL DEFAULT 0 CHECK (intentos_fallidos >= 0),
@@ -738,6 +741,41 @@ BEGIN
 END
 $$;
 
+-- A quién se puede asignar una denuncia. El contenido solo lo lee quien la
+-- tiene asignada (app/instruccion.py), así que asignarla a una cuenta le da
+-- acceso al contenido: solo puede recibirla un rol que instruye. Es una lista
+-- de roles permitidos, no de excluidos: un rol que se añada en el futuro no
+-- puede recibir denuncias hasta que alguien lo decida aquí. Va en la base de
+-- datos, además de en la API, porque una API con un fallo (o comprometida)
+-- no debe poder abrir el contenido a quien no instruye. Cubre el INSERT
+-- (aplicacion puede insertar todas las columnas de denuncia) y el UPDATE de
+-- asignada_a. El rol de una cuenta no cambia nunca (no tiene UPDATE), así
+-- que basta con mirarlo aquí. La cuenta se lee con los permisos de quien
+-- escribe: bajo RLS, la de otra empresa no se ve, y la clave foránea
+-- compuesta ya rechaza esa asignación.
+CREATE FUNCTION canal.controlar_asignacion_denuncia() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, canal
+AS $$
+DECLARE
+    v_rol text;
+BEGIN
+    IF NEW.asignada_a IS NULL THEN
+        RETURN NEW;
+    END IF;
+    SELECT u.rol
+      INTO v_rol
+      FROM canal.usuario_personal u
+     WHERE u.empresa_id = NEW.empresa_id
+       AND u.id = NEW.asignada_a;
+    IF FOUND AND v_rol NOT IN ('admin', 'instructor') THEN
+        RAISE EXCEPTION 'una denuncia solo se asigna a una cuenta que instruye'
+            USING ERRCODE = 'CN004';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
 -- Transiciones de una solicitud de registro. La API solo puede escribir
 -- verificada y cerrada (permisos por columna), y aquí se limita también en
 -- qué sentido:
@@ -839,6 +877,7 @@ REVOKE EXECUTE ON FUNCTION canal.encadenar_auditoria() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.rechazar_modificacion_auditoria() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.preparar_mensaje() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.fijar_fecha_denuncia() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION canal.controlar_asignacion_denuncia() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.controlar_solicitud_registro() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() TO aplicacion;
@@ -858,6 +897,9 @@ CREATE TRIGGER mensaje_preparar
 CREATE TRIGGER denuncia_fecha
     BEFORE INSERT ON canal.denuncia
     FOR EACH ROW EXECUTE FUNCTION canal.fijar_fecha_denuncia();
+CREATE TRIGGER denuncia_asignacion
+    BEFORE INSERT OR UPDATE OF asignada_a ON canal.denuncia
+    FOR EACH ROW EXECUTE FUNCTION canal.controlar_asignacion_denuncia();
 CREATE TRIGGER solicitud_registro_transicion
     BEFORE UPDATE ON canal.solicitud_registro
     FOR EACH ROW EXECUTE FUNCTION canal.controlar_solicitud_registro();

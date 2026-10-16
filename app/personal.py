@@ -103,7 +103,16 @@ from app import bd, cripto, denuncias, tokens
 
 registro = logging.getLogger("canario.personal")
 
-ROLES = ("admin", "instructor")
+ROLES = ("admin", "instructor", "auditor")
+# Qué roles pueden hacer cada cosa, como listas de PERMITIDOS: un rol que se
+# añada a ROLES no puede nada hasta que alguien lo ponga aquí (denegar por
+# defecto, OWASP Top 10 A01). Lo que es solo de admin usa exigir_admin.
+# * Instrucción (app/instruccion.py): listar, leer y tratar denuncias. El
+#   auditor no está: revisa quién hizo qué, y para eso no necesita el
+#   contenido (Ley 2/2023, art. 32.1.e; docs/threat-model.md, 6.15).
+# * Auditoría: leerla y verificar su cadena.
+ROLES_INSTRUCCION = ("admin", "instructor")
+ROLES_AUDITORIA = ("admin", "auditor")
 
 # Argon2id, OWASP Password Storage Cheat Sheet (m=19 MiB, t=2, p=1).
 MEMORIA_ARGON2_KIB = 19456
@@ -854,6 +863,13 @@ def _emitir_invitacion(conexion, empresa_id, identificador, usuario_id):
 
 def exigir_admin(sesion):
     if sesion.rol != "admin":
+        raise Prohibido
+
+
+def exigir_rol(sesion, permitidos):
+    """Prohibido (403) si el rol de la sesión no está en permitidos. Antes de
+    abrir ninguna transacción: un rol insuficiente no toca la base de datos."""
+    if sesion.rol not in permitidos:
         raise Prohibido
 
 

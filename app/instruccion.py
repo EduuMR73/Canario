@@ -22,6 +22,15 @@ Quién ve qué (Ley 2/2023, arts. 32.1 y 8.5):
   auditoría que no se puede borrar.
 * Un instructor solo ve sus denuncias asignadas. Una que no es suya da el
   mismo 404 que una inexistente o de otra empresa: no puede saber si existe.
+* Un auditor lee la auditoría y verifica su cadena, y nada más: ni el
+  listado ni ninguna acción sobre una denuncia (403 antes de tocar la base de
+  datos, personal.ROLES_INSTRUCCION). Su trabajo es revisar quién hizo qué,
+  no el contenido (art. 32.1.e, el delegado de protección de datos). Son dos
+  barreras independientes: la puerta por rol de cada función y que nunca
+  puede tener una denuncia asignada (asignar y el trigger
+  canal.controlar_asignacion_denuncia), porque la asignación es la llave del
+  contenido. Leer la auditoría no deja fila, como para los admins: nadie
+  audita al auditor, que no puede cambiar nada (docs/threat-model.md, 8).
 
 Estados (TRANSICIONES, literal): nueva -> en_instruccion | inadmitida;
 en_instruccion -> resuelta | archivada; cualquiera -> no_veraz (abajo). Los
@@ -162,8 +171,13 @@ SQL_BLOQUEAR_ADMINS = (
     "select id, totp_activo from canal.usuario_personal where rol = 'admin' and activo order by id for key share"
 )
 SQL_BLOQUEAR_DESTINO = (
-    "select activo and totp_activo from canal.usuario_personal where id = %s for key share"
+    "select activo and totp_activo, rol from canal.usuario_personal where id = %s for key share"
 )
+# El trigger canal.controlar_asignacion_denuncia (02_esquema.sql) rechaza
+# asignar una denuncia a un rol que no instruye. asignar lo comprueba antes;
+# si esa comprobación fallara, la base de datos lo para igual y la respuesta
+# es la misma (DestinoNoValido), no un 500.
+SQLSTATE_DESTINO_NO_ASIGNABLE = "CN004"
 # Para las lecturas sin escritura (listados), en una transacción de solo
 # lectura: la comprobación y la consulta salen de la misma foto.
 SQL_ACTOR_ACTIVO = "select count(*) from canal.usuario_personal where id = %s and activo and totp_activo"
@@ -245,7 +259,8 @@ class LimiteMensajes(Exception):
 
 
 class DestinoNoValido(Exception):
-    """La cuenta a la que se asigna está dada de baja o sin activar."""
+    """La cuenta a la que se asigna está dada de baja, sin activar o con un
+    rol que no instruye (personal.ROLES_INSTRUCCION)."""
 
 
 class MensajeFinalObligatorio(Exception):
@@ -384,6 +399,7 @@ def leer_cursor(texto):
 def listar_denuncias(pool, sesion, estado=None, cursor=None):
     """Metadatos, nunca contenido: todas para un admin, las asignadas para un
     instructor. Más recientes primero, por páginas."""
+    personal.exigir_rol(sesion, personal.ROLES_INSTRUCCION)
     if estado is not None and estado not in ESTADOS:
         raise ValueError("estado desconocido")
     cursor_fecha, cursor_id = leer_cursor(cursor) if cursor is not None else (None, None)
@@ -403,12 +419,12 @@ def listar_denuncias(pool, sesion, estado=None, cursor=None):
 
 
 def listar_auditoria(pool, sesion, desde=1):
-    """Auditoría de la empresa, solo para admins, en orden de secuencia y por
-    páginas. Es lo que hace visibles los controles que se apoyan en ella:
+    """Auditoría de la empresa, para admins y auditores, en orden de secuencia
+    y por páginas. Es lo que hace visibles los controles que se apoyan en ella:
     quién se asignó una denuncia, quién la leyó y quién reinvitó una cuenta.
     No verifica la cadena: recorrerla entera es O(n) y cada página la
     recorrería otra vez (verificar_auditoria)."""
-    _exigir_admin(sesion)
+    personal.exigir_rol(sesion, personal.ROLES_AUDITORIA)
     with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
         _comprobar_actor(conexion, sesion)
         filas = conexion.execute(SQL_AUDITORIA, [desde, TAMANO_PAGINA_AUDITORIA + 1]).fetchall()
@@ -419,9 +435,9 @@ def listar_auditoria(pool, sesion, desde=1):
 
 def verificar_auditoria(pool, sesion):
     """Primera secuencia rota de la cadena de auditoría de la empresa, o None
-    si está intacta (canal.verificar_cadena_auditoria). Solo admin, como una
-    acción explícita aparte del listado."""
-    _exigir_admin(sesion)
+    si está intacta (canal.verificar_cadena_auditoria). Admin y auditor, como
+    una acción explícita aparte del listado."""
+    personal.exigir_rol(sesion, personal.ROLES_AUDITORIA)
     with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
         _comprobar_actor(conexion, sesion)
         return conexion.execute(SQL_VERIFICAR_CADENA).fetchone()[0]
@@ -434,6 +450,7 @@ def verificar_auditoria(pool, sesion):
 def leer_denuncia(pool, claves, sesion, denuncia_id):
     """Contenido y mensajes de una denuncia asignada a quien la pide. Deja
     una fila de auditoría por lectura."""
+    personal.exigir_rol(sesion, personal.ROLES_INSTRUCCION)
     with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
         _bloquear_actor(conexion, sesion)
         fila = conexion.execute(SQL_LEER_ASIGNADA, [denuncia_id, sesion.usuario_id]).fetchone()
@@ -450,6 +467,7 @@ def leer_denuncia(pool, claves, sesion, denuncia_id):
 
 def enviar_mensaje(pool, claves, sesion, denuncia_id, texto):
     """Mensaje del personal al denunciante, en una denuncia asignada."""
+    personal.exigir_rol(sesion, personal.ROLES_INSTRUCCION)
     try:
         with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
             _bloquear_actor(conexion, sesion)
@@ -469,6 +487,7 @@ def cambiar_estado(pool, claves, sesion, denuncia_id, nuevo, mensaje):
     """Cambia el estado de una denuncia asignada según TRANSICIONES. Cerrar
     exige mensaje final, que se inserta antes del cambio. Declarar no veraz
     exige ser admin y no admite mensaje (ver la cabecera)."""
+    personal.exigir_rol(sesion, personal.ROLES_INSTRUCCION)
     if nuevo not in ESTADOS_DESTINO:
         raise ValueError("estado desconocido")
     if nuevo == ESTADO_NO_VERAZ:
@@ -499,30 +518,37 @@ def cambiar_estado(pool, claves, sesion, denuncia_id, nuevo, mensaje):
 
 
 def asignar(pool, sesion, denuncia_id, destino_id):
-    """Asigna una denuncia abierta a una cuenta activa de la empresa. Solo
-    admin. El destino puede ser el propio admin (así clasifica una denuncia:
-    ver la cabecera)."""
+    """Asigna una denuncia abierta a una cuenta activa de la empresa con un
+    rol que instruye (ROLES_INSTRUCCION: asignarla da acceso al contenido).
+    Solo admin. El destino puede ser el propio admin (así clasifica una
+    denuncia: ver la cabecera)."""
     _exigir_admin(sesion)
-    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
-        admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()
-        if not any(admin_id == sesion.usuario_id and activado for admin_id, activado in admins):
-            raise personal.SesionNoValida
-        destino = conexion.execute(SQL_BLOQUEAR_DESTINO, [destino_id]).fetchone()
-        if destino is None:
-            raise personal.NoEncontrado
-        if not destino[0]:
-            raise DestinoNoValido
-        fila = conexion.execute(SQL_BLOQUEAR_DENUNCIA, [denuncia_id]).fetchone()
-        if fila is None:
-            raise personal.NoEncontrado
-        estado, asignada_a = fila
-        if estado in ESTADOS_CERRADOS:
-            raise DenunciaCerrada
-        # Idempotente: ya la tiene esa cuenta, no hay nada que cambiar ni auditar.
-        if asignada_a == destino_id:
-            return
-        conexion.execute(SQL_ASIGNAR, [destino_id, denuncia_id])
-        _auditar(conexion, sesion, ACCION_ASIGNACION, denuncia_id, destino_id)
+    try:
+        with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+            admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()
+            if not any(admin_id == sesion.usuario_id and activado for admin_id, activado in admins):
+                raise personal.SesionNoValida
+            destino = conexion.execute(SQL_BLOQUEAR_DESTINO, [destino_id]).fetchone()
+            if destino is None:
+                raise personal.NoEncontrado
+            activo, rol = destino
+            if not activo or rol not in personal.ROLES_INSTRUCCION:
+                raise DestinoNoValido
+            fila = conexion.execute(SQL_BLOQUEAR_DENUNCIA, [denuncia_id]).fetchone()
+            if fila is None:
+                raise personal.NoEncontrado
+            estado, asignada_a = fila
+            if estado in ESTADOS_CERRADOS:
+                raise DenunciaCerrada
+            # Idempotente: ya la tiene esa cuenta, no hay nada que cambiar ni auditar.
+            if asignada_a == destino_id:
+                return
+            conexion.execute(SQL_ASIGNAR, [destino_id, denuncia_id])
+            _auditar(conexion, sesion, ACCION_ASIGNACION, denuncia_id, destino_id)
+    except psycopg.Error as error:
+        if error.sqlstate == SQLSTATE_DESTINO_NO_ASIGNABLE:
+            raise DestinoNoValido from None
+        raise
 
 
 # ---------------------------------------------------------------------------
