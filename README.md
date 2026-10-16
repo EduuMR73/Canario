@@ -81,13 +81,15 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `POST /v1/personal/sesiones`, `POST /v1/personal/sesiones/renovacion`, `DELETE /v1/personal/sesiones/actual` | personal | Entrar (JWT de acceso de 5 minutos y token de renovación), renovar y salir |
 | `GET /v1/personal/yo`, `POST /v1/personal/contrasena` | personal | Datos de la propia cuenta y cambio de contraseña (devuelve tokens nuevos) |
 | `/v1/personal/usuarios...` | admin | Invitar, reinvitar, anular invitaciones y dar de baja |
-| `/v1/personal/denuncias...` | personal | Listar, leer, asignar, cambiar de estado y escribir mensajes |
+| `/v1/personal/denuncias...` | admin e instructor (asignar, solo admin) | Listar, leer, asignar, cambiar de estado y escribir mensajes |
 | `POST /v1/personal/denuncias/{id}/redaccion` y `.../mensajes/{secuencia}/redaccion` | admin con la denuncia asignada | Tachar datos que no deben conservarse (art. 32.2) |
-| `GET /v1/personal/auditoria` y `/auditoria/verificacion` | admin | Leer la auditoría y verificar su cadena |
+| `GET /v1/personal/auditoria` y `/auditoria/verificacion` | admin y auditor | Leer la auditoría y verificar su cadena |
 | `POST /v1/personal/registro` y `/registro/verificacion` | cualquiera | Pedir una cuenta del personal (empresa y email; siempre el mismo 202) y confirmar el email con el token del enlace |
 | `GET /v1/personal/solicitudes`, `POST .../{id}/aprobacion`, `DELETE .../{id}` | admin | Ver las solicitudes verificadas, aprobarlas con un rol (la invitación va solo al email) o rechazarlas |
 
 El código de seguimiento es lo único que identifica al denunciante: va en el cuerpo, nunca en la URL, para que no quede en ningún log.
+
+El personal tiene tres roles: `admin` (gestiona las cuentas y asigna las denuncias), `instructor` (instruye las denuncias que tiene asignadas) y `auditor` (lee la auditoría y verifica su cadena, nunca el contenido). El contenido de una denuncia solo lo lee quien la tiene asignada, y a un auditor no se le puede asignar ninguna: lo impide la API y, por debajo, un trigger de la base de datos (modelo de amenazas, 6.15).
 
 ### Las páginas del denunciante (8444)
 
@@ -282,13 +284,13 @@ Cada batería usa un proyecto de Docker propio (`canario_<nombre>`), lo borra en
 
 ### Pruebas unitarias
 
-`tests/unit/` (16 ficheros, 190 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado, el login uniforme, el JWT, las páginas del denunciante (origen, formulario y plantillas) y el registro del personal (mismas sentencias en todos los caminos, el trabajo después de responder con su fallo al log sin el email, origen obligatorio y correo sin inyección de cabeceras ni datos en el log) y la decisión con varias reglas del limitador. Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
+`tests/unit/` (16 ficheros, 195 pruebas, con `unittest` de la biblioteca estándar) prueba la lógica pura de `app/` sin base de datos, sin Redis y sin red: el cifrado y sus AAD, el relleno, el código de seguimiento, el TOTP con los vectores de RFC 4226 y RFC 6238, los tokens, la validación de la entrada, la redacción, el cursor y la máquina de estados, el limitador, las claves, la frontera HTTP, la traducción de errores a códigos HTTP, el contexto de empresa, la lógica del arranque verificado, el login uniforme, el JWT, las páginas del denunciante (origen, formulario y plantillas) y el registro del personal (mismas sentencias en todos los caminos, el trabajo después de responder con su fallo al log sin el email, origen obligatorio y correo sin inyección de cabeceras ni datos en el log) y la decisión con varias reglas del limitador. Son la base de la pirámide: responden en segundos sobre la lógica, y las baterías comprueban el comportamiento con la imagen, PostgreSQL y Redis reales. El solape entre las dos capas es a propósito.
 
 ```powershell
 python tests\security\verificar_unitarios.py
 ```
 
-La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 38 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
+La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 44 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
 
 Para ejecutar solo las pruebas, sin controles ni mutantes (la imagen se borra al final; si se queda, la batería se detiene con `PARADA` al encontrarla):
 
