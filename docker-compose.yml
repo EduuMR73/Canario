@@ -265,10 +265,12 @@ services:
       - data
       - cache
       - correo
-    # Origen de la SPA del personal: los enlaces de los correos del registro
-    # apuntan a él (app/solicitudes.py). Obligatorio y explícito, sin valor
-    # por defecto en el código: un enlace con un secreto no puede apuntar a
-    # un sitio que nadie eligió. El puerto 8445 queda reservado para la SPA.
+    # Origen de la SPA del personal (el 8445 de caddy): los enlaces de los
+    # correos del registro apuntan a él (app/solicitudes.py), y es el único
+    # Origin que la API acepta en una petición del navegador con cookies
+    # (app/rutas_personal.py). Obligatorio y explícito, sin valor por defecto
+    # en el código: un enlace con un secreto no puede apuntar a un sitio que
+    # nadie eligió.
     environment:
       CANARIO_ORIGEN_PERSONAL: "https://localhost:8445"
     # Secretos como ficheros en /run/secrets, nunca como variables de entorno:
@@ -395,8 +397,8 @@ services:
     # volumen de /data. /config no se monta: con persist_config off Caddy no
     # escribe ahí.
     read_only: true
-    # Sin ninguna capability: escucha en 8443 y 8444, que no son puertos
-    # privilegiados.
+    # Sin ninguna capability: escucha en 8443, 8444 y 8445, que no son
+    # puertos privilegiados.
     cap_drop:
       - ALL
     # Impide ganar privilegios nuevos (por ejemplo con binarios setuid).
@@ -407,10 +409,11 @@ services:
     pids_limit: 64
     # Únicos puertos publicados del proyecto, y solo en 127.0.0.1 del host
     # (nunca en 0.0.0.0). 8443: la API. 8444: el sitio del denunciante, en otro
-    # origen. Sin puerto 80.
+    # origen. 8445: la SPA del personal, en el suyo. Sin puerto 80.
     ports:
       - "127.0.0.1:8443:8443/tcp"
       - "127.0.0.1:8444:8444/tcp"
+      - "127.0.0.1:8445:8445/tcp"
     volumes:
       # Estado que debe sobrevivir a reinicios: el CA local y los certificados.
       # Si se perdiera, el CA se regeneraría y los clientes dejarían de confiar.

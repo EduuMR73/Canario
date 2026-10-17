@@ -35,13 +35,35 @@
   GET /v1/personal/auditoria y GET /v1/personal/auditoria/verificacion (solo
   admin).
 
-Este módulo es el único que sabe cómo viajan los tokens: el JWT de acceso en
-la cabecera Authorization (Bearer), y los de renovación y dispositivo en el
-cuerpo de sus peticiones. Sin cookies no hay CSRF: el navegador nunca envía
-estas credenciales por su cuenta (OWASP, Cross-Site Request Forgery
-Prevention Cheat Sheet: el ataque funciona porque el navegador añade las
-cookies solo). Un frontend web cambiaría solo esta capa (cookies __Host-
-HttpOnly, Secure y SameSite=Strict, más defensa CSRF), no app/personal.py.
+Este módulo es el único que sabe cómo viajan los tokens, y hay dos
+transportes (docs/threat-model.md, 6.3), que decide la dependencia
+_transporte en todas las rutas:
+
+* Cliente (las baterías, cualquier cliente que no sea un navegador): el JWT
+  de acceso en la cabecera Authorization (Bearer), y los de renovación y
+  dispositivo en el cuerpo de sus peticiones. Sin cookies no hay CSRF: este
+  cliente nunca envía credenciales por su cuenta.
+* Navegador (la SPA del personal, en CANARIO_ORIGEN_PERSONAL): los tres
+  tokens en cookies __Host- con HttpOnly, Secure y SameSite=Strict. Ningún
+  script de la página los lee, así que un XSS no puede llevárselos (ATT&CK
+  T1539); el cuerpo de las respuestas solo dice cuánto dura el acceso. Con
+  cookies sí hay CSRF, porque el navegador las añade solo (OWASP, Cross-Site
+  Request Forgery Prevention Cheat Sheet). La defensa es la que ese documento
+  llama la señal principal, Fetch Metadata, con el origen como respaldo
+  obligatorio: toda petición con cookies o con Sec-Fetch-Site debe traer
+  Sec-Fetch-Site same-origin y, si cambia algo (todo lo que no es GET ni
+  HEAD), Origin igual al de la SPA. SameSite=Strict no basta: se mide por
+  sitio y no por origen, y el 8443 y el 8444 son el mismo sitio que la SPA.
+  Las dos cabeceras las pone el navegador y una página no puede cambiarlas.
+  Un rechazo da 403 y deja EVENTO origen_rechazado.
+
+Bearer y cookie a la vez, o una cookie de Canario repetida, son un 401: con
+dos credenciales no se sabe cuál vale, y el analizador de Starlette se
+quedaría con la última sin avisar. Las cookies no se aíslan por puerto en
+ningún sentido (RFC 6265, 8.5): el proxy quita Cookie de las peticiones y
+Set-Cookie de las respuestas en el 8443 y el 8444 (proxy/Caddyfile), así que
+solo el 8445 las recibe y solo él las pone. app/personal.py no sabe nada del
+transporte.
 
 Respuestas: cualquier fallo del login da el mismo 401, con el mismo cuerpo
 (app/personal.py explica por qué el tiempo también es el mismo). Un JWT de
@@ -95,8 +117,6 @@ from app.validacion import TextoLibre, TextoLinea, validar_email
 
 registro = logging.getLogger("canario.personal")
 
-router = APIRouter(prefix="/v1/personal")
-
 MENSAJE_CREDENCIALES = "credenciales no válidas"
 MENSAJE_SESION = "sesión no válida"
 MENSAJE_INVITACION = "invitación no válida"
@@ -135,6 +155,108 @@ MAXIMO_TRAMOS = 50
 MAXIMO_MENSAJES = 200
 
 
+# ---------------------------------------------------------------------------
+# Transporte: cliente con Bearer o navegador con cookies (ver la cabecera)
+# ---------------------------------------------------------------------------
+# __Host-: el navegador solo las acepta con Secure, Path=/ y sin Domain, así
+# que quedan atadas a este host y nadie las cambia desde otra ruta o
+# subdominio (MDN, Cookies, "Cookie prefixes").
+COOKIE_ACCESO = "__Host-canario_acceso"
+COOKIE_RENOVACION = "__Host-canario_renovacion"
+COOKIE_DISPOSITIVO = "__Host-canario_dispositivo"
+COOKIES = (COOKIE_ACCESO, COOKIE_RENOVACION, COOKIE_DISPOSITIVO)
+# Cuánto las guarda el navegador. Quien decide si un token vale es siempre la
+# base de datos o la firma; esto solo evita que el navegador guarde de más.
+# La sesión caduca a las 8 horas y el dispositivo a los 90 días
+# (db/init/02_esquema.sql); el acceso, a los 5 minutos (app/tokens.py).
+DURACION_RENOVACION = 8 * 3600
+DURACION_DISPOSITIVO = 90 * 86400
+# Tope de forma de una cookie, holgado respecto al JWT (377 caracteres) y a
+# los tokens (76): lo que pase de aquí no es nuestro.
+LONGITUD_MAXIMA_COOKIE = 512
+# Los únicos métodos que no cambian nada; el resto exige Origin.
+METODOS_SEGUROS = ("GET", "HEAD")
+# Valores de Sec-Fetch-Site (especificación Fetch Metadata). En el log va el
+# valor solo si es uno de estos: lo demás lo ha escrito alguien a mano.
+SITIOS_FETCH = ("same-origin", "same-site", "cross-site", "none")
+
+
+class OrigenNoPermitido(Exception):
+    """Una petición del navegador que no viene de la SPA: 403."""
+
+    def __init__(self, sitio):
+        super().__init__(sitio)
+        if sitio is None:
+            self.sitio = "-"
+        else:
+            self.sitio = sitio if sitio in SITIOS_FETCH else "otro"
+
+
+def cookies_canario(cabeceras_cookie):
+    """Las cookies de Canario de las cabeceras Cookie, por nombre. Una
+    repetida o demasiado larga es SesionNoValida: no se elige ninguna. Las
+    demás cookies se ignoran."""
+    encontradas = {}
+    for cabecera in cabeceras_cookie:
+        for trozo in cabecera.split(";"):
+            nombre, _, valor = trozo.strip().partition("=")
+            if nombre not in COOKIES:
+                continue
+            if nombre in encontradas or len(valor) > LONGITUD_MAXIMA_COOKIE:
+                raise personal.SesionNoValida
+            encontradas[nombre] = valor.strip()
+    return encontradas
+
+
+def es_navegador(metodo, cabeceras, hay_cookies, origen_personal):
+    """True si la petición es de la SPA (cookies), False si es de un cliente
+    con Bearer. OrigenNoPermitido si es de un navegador pero no de la SPA, y
+    SesionNoValida si trae las dos credenciales.
+
+    Sin Sec-Fetch-Site ni cookies no es un navegador moderno (todos la envían
+    a un origen HTTPS desde marzo de 2023, MDN): es un cliente con Bearer,
+    que no corre riesgo de CSRF. Con cualquiera de las dos, se exige el mismo
+    origen. Un GET del mismo origen no lleva Origin (MDN, Origin), así que en
+    GET y HEAD basta Sec-Fetch-Site."""
+    sitio = cabeceras.get("sec-fetch-site")
+    if sitio is None and not hay_cookies:
+        return False
+    if sitio != "same-origin":
+        raise OrigenNoPermitido(sitio)
+    if metodo not in METODOS_SEGUROS and cabeceras.get("origin") != origen_personal:
+        raise OrigenNoPermitido(sitio)
+    if "authorization" in cabeceras:
+        raise personal.SesionNoValida
+    return True
+
+
+async def _transporte(peticion: Request):
+    """Dependencia de todas las rutas del router (cerrado por construcción:
+    una ruta nueva queda cubierta sin hacer nada). Deja en peticion.state el
+    transporte y las cookies de Canario."""
+    cookies = cookies_canario(peticion.headers.getlist("cookie"))
+    # La aplicación siempre lo tiene: sin él no arranca (app/principal.py).
+    # Si faltara, ningún Origin es igual a None y todo POST del navegador se
+    # rechaza: falla cerrado.
+    origen = getattr(peticion.app.state, "origen_personal", None)
+    peticion.state.navegador = es_navegador(peticion.method, peticion.headers, bool(cookies), origen)
+    peticion.state.cookies = cookies
+
+
+def _poner_cookie(respuesta, nombre, valor, segundos):
+    respuesta.set_cookie(nombre, valor, max_age=segundos, path="/", secure=True, httponly=True, samesite="strict")
+
+
+def _borrar_cookie(respuesta, nombre):
+    # Con los mismos atributos: el navegador ignora un borrado de una cookie
+    # __Host- sin Secure, y delete_cookie de Starlette pone secure=False por
+    # defecto (comprobado en la versión fijada, 1.7.0).
+    respuesta.delete_cookie(nombre, path="/", secure=True, httponly=True, samesite="strict")
+
+
+router = APIRouter(prefix="/v1/personal", dependencies=[Depends(_transporte)])
+
+
 # extra="forbid" y strict=True, como en app/rutas_denuncias.py. Cada campo de
 # texto es TextoLinea o TextoLibre (app/validacion.py): sin NUL, surrogates
 # ni caracteres de control.
@@ -165,7 +287,9 @@ class Login(BaseModel):
 class Renovacion(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    token_renovacion: TextoLinea = Field(max_length=LONGITUD_MAXIMA_TOKEN)
+    # Obligatorio para el cliente con Bearer y prohibido en el navegador, que
+    # manda {} y lo lleva en su cookie (renovar_sesion).
+    token_renovacion: TextoLinea | None = Field(default=None, max_length=LONGITUD_MAXIMA_TOKEN)
 
 
 class CambioContrasena(BaseModel):
@@ -283,17 +407,23 @@ class LimiteCuentaSuperado(Exception):
 
 
 async def _sesion(peticion: Request):
-    """Dependencia: sesión del JWT Bearer, o SesionNoValida; después, la
-    segunda capa del limitador, por cuenta. Un token que no vale no consume
-    el contador de ninguna cuenta (no se sabe de quién es); lo frena la capa
+    """Dependencia: sesión del JWT (de la cookie en el navegador, de la
+    cabecera Bearer en el cliente), o SesionNoValida; después, la segunda
+    capa del limitador, por cuenta. Un token que no vale no consume el
+    contador de ninguna cuenta (no se sabe de quién es); lo frena la capa
     por IP del middleware.
 
     El primer exceso de cada ventana deja un evento con empresa y cuenta (es
     del personal, no del denunciante, y sin IP): es la señal de una sesión
     que se usa de forma anómala. Solo el primero, para que el log no se
     pueda inundar con 429."""
-    esquema, _, token = peticion.headers.get("authorization", "").partition(" ")
-    if esquema != "Bearer" or not token:
+    if peticion.state.navegador:
+        token = peticion.state.cookies.get(COOKIE_ACCESO)
+    else:
+        esquema, _, token = peticion.headers.get("authorization", "").partition(" ")
+        if esquema != "Bearer":
+            token = None
+    if not token:
         raise personal.SesionNoValida
     estado = peticion.app.state
     sesion = await run_in_threadpool(personal.autenticar, estado.pool, estado.claves, token)
@@ -336,37 +466,75 @@ def activar(datos: Activacion, peticion: Request):
 def confirmar_activacion(datos: Confirmacion, peticion: Request):
     estado = peticion.app.state
     token = personal.confirmar_activacion(estado.pool, estado.claves, datos.token, datos.codigo_totp)
-    return JSONResponse(content={"token_dispositivo": token})
+    if not peticion.state.navegador:
+        return JSONResponse(content={"token_dispositivo": token})
+    respuesta = JSONResponse(content={})
+    _poner_cookie(respuesta, COOKIE_DISPOSITIVO, token, DURACION_DISPOSITIVO)
+    return respuesta
 
 
-def _tokens(acceso, codigo=200):
+def _tokens(peticion, acceso, codigo=200):
     """Respuesta con los tokens de una sesión. expira_en: segundos que dura
-    el acceso, para que el cliente renueve antes de que caduque."""
-    contenido = {"token_acceso": acceso.token_acceso, "token_renovacion": acceso.token_renovacion,
-                 "expira_en": tokens.DURACION_ACCESO}
-    if codigo == 201:
-        contenido["token_dispositivo"] = acceso.token_dispositivo
-    return JSONResponse(status_code=codigo, content=contenido)
+    el acceso, para que el cliente renueve antes de que caduque. En el
+    navegador, los tokens van en sus cookies y el cuerpo solo lleva
+    expira_en: ningún script de la página los ve."""
+    if not peticion.state.navegador:
+        contenido = {"token_acceso": acceso.token_acceso, "token_renovacion": acceso.token_renovacion,
+                     "expira_en": tokens.DURACION_ACCESO}
+        if codigo == 201:
+            contenido["token_dispositivo"] = acceso.token_dispositivo
+        return JSONResponse(status_code=codigo, content=contenido)
+    respuesta = JSONResponse(status_code=codigo, content={"expira_en": tokens.DURACION_ACCESO})
+    _poner_cookie(respuesta, COOKIE_ACCESO, acceso.token_acceso, tokens.DURACION_ACCESO)
+    _poner_cookie(respuesta, COOKIE_RENOVACION, acceso.token_renovacion, DURACION_RENOVACION)
+    # Solo el login entrega dispositivo, y solo si entró sin uno de confianza.
+    if codigo == 201 and acceso.token_dispositivo is not None:
+        _poner_cookie(respuesta, COOKIE_DISPOSITIVO, acceso.token_dispositivo, DURACION_DISPOSITIVO)
+    return respuesta
 
 
 @router.post("/sesiones", status_code=201)
 def iniciar_sesion(datos: Login, peticion: Request):
     estado = peticion.app.state
+    dispositivo = datos.token_dispositivo
+    if peticion.state.navegador:
+        # En el navegador el dispositivo viaja en su cookie; en el cuerpo
+        # sería un segundo sitio del que leerlo.
+        if dispositivo is not None:
+            return _error(422)
+        dispositivo = peticion.state.cookies.get(COOKIE_DISPOSITIVO) or None
     acceso = personal.iniciar_sesion(estado.pool, estado.claves, datos.empresa, datos.email, datos.contrasena,
-                                     datos.codigo_totp, datos.token_dispositivo)
-    return _tokens(acceso, 201)
+                                     datos.codigo_totp, dispositivo)
+    return _tokens(peticion, acceso, 201)
 
 
 @router.post("/sesiones/renovacion")
 def renovar_sesion(datos: Renovacion, peticion: Request):
     estado = peticion.app.state
-    return _tokens(personal.renovar(estado.pool, estado.claves, datos.token_renovacion))
+    if peticion.state.navegador:
+        if datos.token_renovacion is not None:
+            return _error(422)
+        token = peticion.state.cookies.get(COOKIE_RENOVACION)
+        if not token:
+            raise personal.SesionNoValida
+    else:
+        if datos.token_renovacion is None:
+            return _error(422)
+        token = datos.token_renovacion
+    return _tokens(peticion, personal.renovar(estado.pool, estado.claves, token))
 
 
 @router.delete("/sesiones/actual", status_code=204)
 def cerrar_sesion(peticion: Request, sesion: SesionPersonal):
     personal.cerrar_sesion(peticion.app.state.pool, sesion)
-    return Response(status_code=204)
+    respuesta = Response(status_code=204)
+    if peticion.state.navegador:
+        # La del dispositivo se queda: el equipo sigue siendo de confianza.
+        # Un 401 no borra ninguna: con el acceso caducado, la SPA necesita la
+        # renovación, y una cookie que ya no vale no abre nada.
+        _borrar_cookie(respuesta, COOKIE_ACCESO)
+        _borrar_cookie(respuesta, COOKIE_RENOVACION)
+    return respuesta
 
 
 @router.get("/yo")
@@ -379,8 +547,8 @@ def yo(peticion: Request, sesion: SesionPersonal):
 @router.post("/contrasena")
 def cambiar_contrasena(datos: CambioContrasena, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
-    return _tokens(personal.cambiar_contrasena(estado.pool, estado.claves, sesion, datos.contrasena_actual,
-                                               datos.contrasena_nueva, datos.codigo_totp))
+    return _tokens(peticion, personal.cambiar_contrasena(estado.pool, estado.claves, sesion, datos.contrasena_actual,
+                                                         datos.contrasena_nueva, datos.codigo_totp))
 
 
 @router.get("/usuarios")
@@ -645,6 +813,17 @@ def _denegado(codigo, mensaje=None):
     return manejar
 
 
+async def _origen_no_permitido(peticion, error):
+    # Sin cuenta (todavía no se ha autenticado) y sin IP. El método lo valida
+    # el servidor HTTP, la ruta es la plantilla fija del código y el sitio
+    # está normalizado (OrigenNoPermitido): nada de lo escrito por el cliente
+    # llega al log tal cual.
+    ruta = peticion.scope.get("route")
+    registro.warning("EVENTO origen_rechazado: metodo=%s ruta=%s sitio=%s", peticion.method,
+                     "-" if ruta is None else ruta.path, error.sitio)
+    return _error(403, MENSAJE_PROHIBIDO)
+
+
 async def _contrasena_no_valida(_peticion, error):
     # El motivo es un texto fijo de app/personal.py: nunca la contraseña.
     return _error(422, str(error))
@@ -680,6 +859,7 @@ def instalar_errores(aplicacion):
     aplicacion.add_exception_handler(personal.CodigoNoValido, _manejador(422, MENSAJE_CODIGO))
     aplicacion.add_exception_handler(personal.ContrasenaNoValida, _contrasena_no_valida)
     aplicacion.add_exception_handler(personal.Saturado, _manejador(503, None, {"Retry-After": REINTENTAR_TRAS}))
+    aplicacion.add_exception_handler(OrigenNoPermitido, _origen_no_permitido)
     aplicacion.add_exception_handler(personal.Prohibido, _denegado(403, MENSAJE_PROHIBIDO))
     aplicacion.add_exception_handler(personal.NoEncontrado, _denegado(404))
     aplicacion.add_exception_handler(personal.EmailDuplicado, _manejador(409, MENSAJE_DUPLICADO))

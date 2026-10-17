@@ -1,5 +1,5 @@
 # Proxy inverso de Canario: única puerta desde el exterior. En 8443, la API; en
-# 8444, el sitio del denunciante.
+# 8444, el sitio del denunciante; en 8445, la SPA del personal.
 #
 # Sin directiva "log" en ningún sitio: no hay logs de acceso. Si se declarase,
 # cada petición quedaría registrada con la IP del cliente (ver
@@ -125,6 +125,11 @@
 		Referrer-Policy "no-referrer"
 		# Nada se carga ni se ejecuta, y la respuesta no se puede incrustar.
 		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		# Ninguna respuesta de este puerto pone cookies. No se aíslan por puerto
+		# (RFC 6265, 8.5): una puesta aquí valdría también en el 8445, donde
+		# viaja la sesión del personal, y serviría para colocarle a alguien la
+		# sesión de otro (CSRF de login). Solo el 8445 las pone.
+		-Set-Cookie
 	}
 }
 
@@ -154,6 +159,28 @@
 		# Sin COEP: solo hace falta para el aislamiento entre orígenes, y la
 		# CSP ya no deja cargar nada de otro origen.
 		Cross-Origin-Resource-Policy "same-origin"
+		# Ni cookies: el camino anónimo no deja nada en el navegador, y una
+		# puesta aquí valdría en el 8445 (ver cabeceras_api).
+		-Set-Cookie
+	}
+}
+
+# SPA del personal (8445). En el bloque 6a solo reenvía la API del personal, que
+# responde JSON: la CSP es la de la API. La de la SPA (sus scripts y estilos,
+# Trusted Types) llega con la SPA en el 6b, comprobada con el build real.
+(cabeceras_spa) {
+	import cabeceras_comunes
+	header {
+		defer
+		# same-origin y no no-referrer, como en el 8444: con no-referrer, algunos
+		# POST salen con "Origin: null" (MDN, Origin), y la API exige el origen
+		# de la SPA en todo lo que cambia algo (app/rutas_personal.py).
+		Referrer-Policy "same-origin"
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		Cross-Origin-Opener-Policy "same-origin"
+		# Ningún otro origen carga estas respuestas, tampoco el 8443 ni el 8444,
+		# que son del mismo sitio.
+		Cross-Origin-Resource-Policy "same-origin"
 	}
 }
 
@@ -178,6 +205,12 @@ https://localhost:8443 {
 
 	import sin_range
 	import cabeceras_api
+
+	# Las cookies no se aíslan por puerto (RFC 6265, 8.5): las de la SPA del
+	# personal (8445) también las enviaría el navegador aquí. Este puerto es el
+	# del cliente con Bearer, así que no pasan a la API: el transporte con
+	# cookies solo existe por el 8445 (app/rutas_personal.py).
+	request_header -Cookie
 
 	# Tamaño máximo del cuerpo de una petición: 128 KiB, el mismo límite que
 	# aplica la API (app/frontera_http.py), que es la segunda capa. KiB y no KB:
@@ -227,8 +260,7 @@ https://localhost:8443 {
 }
 
 # Sitio del denunciante, en su propio puerto: es otro origen que la API, así
-# que la CSP, las cookies del personal (cuando su frontend las use) y form-action se
-# separan por origen sin CORS. No va en un subdominio porque *.localhost no
+# que la CSP y form-action se separan por origen sin CORS. No va en un subdominio porque *.localhost no
 # resuelve en Windows. Sirve los estáticos y, para todo lo demás, las páginas
 # del adaptador HTML de la API (app/rutas_web.py, bajo /web).
 https://localhost:8444 {
@@ -237,10 +269,10 @@ https://localhost:8444 {
 	import sin_range
 	import cabeceras_html
 
-	# Las cookies no se aíslan por puerto (RFC 6265, 8.5): las que ponga el
-	# personal en el 8443 (cuando su frontend las use) también las enviaría el
-	# navegador aquí. Las páginas del denunciante no usan ninguna, así que no
-	# pasa ninguna a la API: el camino anónimo no lleva nada que identifique.
+	# Las cookies no se aíslan por puerto (RFC 6265, 8.5): las de la sesión del
+	# personal (8445) también las enviaría el navegador aquí. Las páginas del
+	# denunciante no usan ninguna, así que no pasa ninguna a la API: el camino
+	# anónimo no lleva nada que identifique.
 	request_header -Cookie
 
 	# El mismo límite que en el 8443 y que en la API. El peor caso de un
@@ -396,11 +428,64 @@ https://localhost:8444 {
 	}
 }
 
-# Sitio por defecto de los dos puertos: cualquier petición cuyo Host no sea
+# SPA del personal, en su propio origen (CANARIO_ORIGEN_PERSONAL, en el
+# compose). La SPA y la API que usa comparten origen: /v1/personal/* se reenvía
+# a la API y la SPA la llama sin CORS, así que no hay ninguna regla de CORS que
+# configurar mal. Es el único puerto por el que viajan las cookies de sesión
+# del personal (app/rutas_personal.py).
+https://localhost:8445 {
+	tls internal
+
+	import sin_range
+	import cabeceras_spa
+
+	# El mismo límite que en el 8443 y que en la API.
+	request_body {
+		max_size 128KiB
+	}
+
+	# Solo la API del personal. El resto (/v1/empresas, /v1/seguimiento, /web,
+	# /salud) no es alcanzable desde aquí: el camino anónimo nunca recibe las
+	# cookies del personal. El matcher path limpia y decodifica, así que
+	# /v1/personal/../empresas o /v1/personal/%2e%2e/seguimiento no casan. Lo
+	# que casa llega a la API tal cual, y Starlette no resuelve "..": una ruta
+	# como /v1/empresas/../personal/yo no es ninguna de la API (404).
+	handle /v1/personal/* {
+		reverse_proxy api:8000 {
+			# Como en el 8443: Caddy lee el cuerpo entero antes de contactar con
+			# la API y corta él mismo con 413.
+			request_buffers 129KiB
+		}
+	}
+
+	# Los ficheros de la SPA llegan en el bloque 6b. Hasta entonces, nada más.
+	handle {
+		error 404
+	}
+
+	# Errores que genera Caddy: los lee la SPA, con el formato JSON de la API.
+	handle_errors {
+		import cabeceras_spa
+		header Content-Type "application/json"
+
+		@no_encontrado expression {err.status_code} == 404
+		respond @no_encontrado `{"detalle": "recurso no encontrado"}` 404
+
+		@demasiado_grande expression {err.status_code} == 413
+		respond @demasiado_grande `{"detalle": "cuerpo de la petición demasiado grande"}` 413
+
+		@no_disponible expression {err.status_code} >= 500
+		respond @no_disponible `{"detalle": "servicio no disponible"}` {err.status_code}
+
+		respond `{"detalle": "petición no válida"}` {err.status_code}
+	}
+}
+
+# Sitio por defecto de los tres puertos: cualquier petición cuyo Host no sea
 # localhost. Sin él, no casaría con ninguna ruta y Caddy respondería 200 vacío.
 # Responde 421 con las cabeceras y el formato JSON de la API: nadie llega aquí
 # desde un enlace del sitio, solo con un Host manipulado.
-https://:8443, https://:8444 {
+https://:8443, https://:8444, https://:8445 {
 	tls internal
 	import sin_range
 	import cabeceras_api
