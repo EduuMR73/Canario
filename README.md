@@ -53,10 +53,11 @@ Las órdenes se ejecutan en PowerShell desde la raíz del repositorio. Como la r
 
    El certificado se copia fuera del repositorio. Dentro del código de Python solo hay comillas simples, porque PowerShell 5 pierde las dobles internas al pasar argumentos a un programa.
 
-Hay dos puertos publicados, los dos solo en `127.0.0.1` y solo con el nombre `localhost` (cualquier otro `Host` recibe 421):
+Hay tres puertos publicados, todos solo en `127.0.0.1` y solo con el nombre `localhost` (cualquier otro `Host` recibe 421):
 
 - `8443`: la API.
 - `8444`: el sitio del denunciante, en otro origen: `https://localhost:8444/` (las páginas, más abajo) y su hoja de estilos.
+- `8445`: la SPA del personal, en el suyo. De momento solo reenvía la API del personal, con la sesión en cookies (más abajo); las pantallas llegan en el bloque 6b.
  Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
 
 Para parar sin perder datos:
@@ -88,6 +89,16 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `GET /v1/personal/solicitudes`, `POST .../{id}/aprobacion`, `DELETE .../{id}` | admin | Ver las solicitudes verificadas, aprobarlas con un rol (la invitación va solo al email) o rechazarlas |
 
 El código de seguimiento es lo único que identifica al denunciante: va en el cuerpo, nunca en la URL, para que no quede en ningún log.
+
+### La sesión del personal en el navegador (8445)
+
+La SPA del personal entra por `https://localhost:8445`, que solo reenvía `/v1/personal/*` a la API (modelo de amenazas, 6.3 y 6.11). Ahí los tokens no viajan en el cuerpo ni en `Authorization`, sino en tres cookies `__Host-` con `HttpOnly`, `Secure` y `SameSite=Strict`: ningún script de la página las lee. El cuerpo del login y de la renovación solo dice cuánto dura el acceso (`expira_en`). Para la SPA:
+
+- Toda petición lleva `Sec-Fetch-Site: same-origin` (la pone el navegador) y, si no es GET ni HEAD, `Origin: https://localhost:8445`. Sin ellas, 403.
+- La renovación se pide con `{}` en el cuerpo: el token va en su cookie. De una en una, también entre pestañas.
+- Bearer y cookie a la vez dan 401.
+
+Por el 8443 todo sigue igual: Bearer y los tokens en el cuerpo. El 8443 y el 8444 quitan las cookies en los dos sentidos, porque las cookies no se aíslan por puerto.
 
 El personal tiene tres roles: `admin` (gestiona las cuentas y asigna las denuncias), `instructor` (instruye las denuncias que tiene asignadas) y `auditor` (lee la auditoría y verifica su cadena, nunca el contenido). El contenido de una denuncia solo lo lee quien la tiene asignada, y a un auditor no se le puede asignar ninguna: lo impide la API y, por debajo, un trigger de la base de datos (modelo de amenazas, 6.15).
 
@@ -254,16 +265,17 @@ Si se restaura una copia de la base de datos, todo lo declarado no veraz o tacha
 
 ## Pruebas de seguridad
 
-Diez baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
+Once baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
 
 | Batería | Qué prueba |
 |---|---|
-| `verificar_esqueleto.py` | Proxy y API: sin salida a internet, solo los dos puertos del proxy, cabeceras, 421, estáticos del denunciante (sin rangos ni salir de `/srv`), logs sin IP, endurecimiento de los contenedores |
-| `verificar_web.py` | Sitio del denunciante: lo que el 8444 reenvía a la API (con una aplicación de eco) y las páginas con la API real: escapado, formularios de otro origen, cuerpo estricto, NUL y logs sin rastro |
+| `verificar_esqueleto.py` | Proxy y API: sin salida a internet, solo los tres puertos del proxy, cabeceras, 421, estáticos del denunciante (sin rangos ni salir de `/srv`), logs sin IP, endurecimiento de los contenedores |
+| `verificar_web.py` | Sitio del denunciante: lo que el 8444 reenvía a la API (con una aplicación de eco; las cookies, solo por el 8445) y las páginas con la API real: escapado, formularios de otro origen, cuerpo estricto, NUL y logs sin rastro |
 | `verificar_arranque.py` | Conexión a PostgreSQL con secretos y el arranque verificado de la API |
 | `verificar_esquema.py` | Esquema, RLS entre empresas, permisos, auditoría encadenada y supresión legal en la base de datos |
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
 | `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción y no veraz (art. 32.3) |
+| `verificar_sesion.py` | La sesión del personal en el navegador por el 8445: tokens solo en cookies con sus atributos exactos, CSRF desde otro puerto, rotación y reutilización, cierre, cookies que no salen por el 8443 y logs sin tokens |
 | `verificar_inyeccion.py` | Inyección SQL y validación de la frontera de entrada |
 | `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo, sin base de datos antes de responder), verificación, administración de solicitudes, límites por destinatario (15 minutos y día), logs sin rastro, el origen obligatorio y el registro con PostgreSQL parado |
 | `verificar_escaneos.py` | Secretos en Git, dependencias, análisis estático, imágenes y SBOM |
@@ -272,7 +284,7 @@ Diez baterías, una por área. Cada prueba negativa lleva su control positivo: s
 Para ejecutarlas:
 
 - Docker en marcha y los secretos generados.
-- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, inyección y registro arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
+- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, sesión, inyección y registro arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
 - `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades.
 - `verificar_unitarios.py` no necesita los secretos ni la pila parada: solo construye la imagen de la API.
 
