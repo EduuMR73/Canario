@@ -72,10 +72,11 @@ PRUEBAS_POR_FICHERO = {
     "test_personal": 8,
     "test_solicitudes": 9,
     "test_tokens": 10,
+    "test_transporte": 18,
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 195
+TOTAL_PRUEBAS = 213
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -205,6 +206,28 @@ MUTANTES = [
     ("instruccion.py", "if error.sqlstate == SQLSTATE_DESTINO_NO_ASIGNABLE:", "if False:",
      "test_instruccion.Asignar.test_el_rechazo_de_la_base_de_datos_es_el_mismo_409",
      "el rechazo del trigger de asignacion acaba en un 500"),
+    # Sesión del navegador con cookies (bloque 6a).
+    ("rutas_personal.py", '    if sitio != "same-origin":\n        raise OrigenNoPermitido(sitio)\n',
+     '    if sitio == "cross-site":\n        raise OrigenNoPermitido(sitio)\n',
+     "test_transporte.EsNavegador.test_rechazos_y_su_sitio_para_el_log",
+     "una peticion same-site (otro puerto de localhost) entra con las cookies (CSRF)"),
+    ("rutas_personal.py", 'if metodo not in METODOS_SEGUROS and cabeceras.get("origin") != origen_personal:',
+     "if False:",
+     "test_transporte.EsNavegador.test_rechazos_y_su_sitio_para_el_log",
+     "un POST con cookies se acepta sin el Origin de la SPA"),
+    ("rutas_personal.py", '    if "authorization" in cabeceras:\n        raise personal.SesionNoValida\n', "",
+     "test_transporte.EsNavegador.test_bearer_en_el_navegador_es_ambiguo", "Bearer y cookie a la vez se aceptan"),
+    ("rutas_personal.py", "if nombre in encontradas or len(valor)", "if len(valor)",
+     "test_transporte.CookiesCanario.test_repetida_o_demasiado_larga_no_vale_ninguna",
+     "con una cookie de Canario repetida vale la ultima (cookie inyectada desde otro puerto)"),
+    ("rutas_personal.py", 'max_age=segundos, path="/", secure=True, httponly=True',
+     'max_age=segundos, path="/", secure=True, httponly=False',
+     "test_transporte.Respuestas.test_login_en_el_navegador_pone_las_tres_cookies",
+     "las cookies de sesion se leen desde JavaScript (un XSS se lleva la sesion)"),
+    ("rutas_personal.py", '    respuesta.delete_cookie(nombre, path="/", secure=True,',
+     '    respuesta.delete_cookie(nombre, path="/", secure=False,',
+     "test_transporte.Respuestas.test_cierre_en_el_navegador_borra_acceso_y_renovacion",
+     "el cierre de sesion no borra las cookies __Host- (el navegador ignora un borrado sin Secure)"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

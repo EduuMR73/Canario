@@ -675,8 +675,9 @@ for destino in sys.argv[1:]:
     else:
         print(destino, "sin-conexion")
 """
-# Puertos en los que escucha Caddy: la API y el sitio del denunciante.
-PUERTOS_CADDY = ("8443", "8444")
+# Puertos en los que escucha Caddy: la API, el sitio del denunciante y la SPA
+# del personal.
+PUERTOS_CADDY = ("8443", "8444", "8445")
 # Cambio que convierte el Caddyfile real en el de control de la quita de Range:
 # el sitio del denunciante, el que tiene file_server, sin importar sin_range.
 CONTROL_SIN_RANGE = ("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n")

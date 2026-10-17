@@ -11,8 +11,10 @@ haga la API. Prueba:
   con la imagen fijada);
 * c) que las rutas que tras el rewrite saldrían de /web se rechazan en Caddy
   sin llegar a la API;
-* d) que la cabecera Cookie no llega a la API desde el 8444 (y sí desde el
-  8443: control de que el eco la vería);
+* d) que las cookies solo viajan por el 8445 (la SPA del personal): la
+  cabecera Cookie no llega a la API desde el 8444 ni desde el 8443, y un
+  Set-Cookie de la API no sale por ellos (por el 8445 sí, en los dos
+  sentidos: control de que el eco las vería);
 * e) que del backend solo pasa HTML: JSON, texto o sin tipo se convierten en
   la página de error del sitio, con su estado, Retry-After y Allow;
 * f) las cabeceras de seguridad de las páginas reenviadas y de los errores;
@@ -59,8 +61,8 @@ marcha y los secretos generados con scripts/generar_secretos.py):
 
 Usa un proyecto de Docker propio (canario_web). Necesita que el proyecto
 canario y las demás baterías estén parados: las subredes 10.88.0.0/28 y
-10.88.1.0/28 y los puertos 127.0.0.1:8443 y 127.0.0.1:8444 son fijos (si están
-en uso, PARADA). Al terminar lo borra todo (down -v y las imágenes
+10.88.1.0/28 y los puertos 127.0.0.1:8443, 127.0.0.1:8444 y 127.0.0.1:8445 son
+fijos (si están en uso, PARADA). Al terminar lo borra todo (down -v y las imágenes
 construidas, también la de gestion). No lee ningún secreto: la API y gestion
 los reciben de secrets/ como Docker secrets. Los ficheros auxiliares van a un
 directorio temporal del sistema, nunca al repositorio. La salida completa se
@@ -96,6 +98,7 @@ estado = {"falla": False, "sin_conclusion": False}
 # ---------------------------------------------------------------------------
 PUERTO_API = 8443
 PUERTO_WEB = 8444
+PUERTO_SPA = 8445
 SUBRED_APP = "10.88.0.0/28"
 SUBRED_EDGE = "10.88.1.0/28"
 IP_PROXY = "10.88.0.2"
@@ -131,6 +134,8 @@ INTERCEPTADAS = {
     "/prueba/sintipo404": (404, None, "Página no encontrada"),
 }
 TIPO_HTML = "text/html; charset=utf-8"
+# d) La cookie que pone el eco en sus rutas /prueba/cookie.
+COOKIE_ECO = "__Host-canario_acceso=inyectada; Path=/; Secure"
 
 # f) Cabeceras de las páginas del 8444 (proxy/Caddyfile, cabeceras_html).
 CABECERAS_HTML = {
@@ -178,6 +183,8 @@ EMPRESA_INEXISTENTE = "0" * 32
 ECO = r'''
 import json
 
+COOKIE = b"__Host-canario_acceso=inyectada; Path=/; Secure"
+
 # Respuestas fijas para e): estado, tipo (None: sin Content-Type) y cabeceras.
 CASOS = {
     "/web/prueba/json429": (429, b"application/json", [(b"retry-after", b"7")]),
@@ -186,6 +193,10 @@ CASOS = {
     "/web/prueba/texto500": (500, b"text/plain; charset=utf-8", []),
     "/web/prueba/sintipo404": (404, None, []),
     "/web/prueba/html422": (422, b"text/html; charset=utf-8", []),
+    # Para d): una respuesta que pone una cookie, por cada puerto.
+    "/web/prueba/cookie": (200, b"text/html; charset=utf-8", [(b"set-cookie", COOKIE)]),
+    "/prueba/cookie": (200, b"application/json", [(b"set-cookie", COOKIE)]),
+    "/v1/personal/prueba/cookie": (200, b"application/json", [(b"set-cookie", COOKIE)]),
 }
 
 
@@ -440,15 +451,29 @@ def seccion_c():
 
 
 def seccion_d():
-    p("=== d) la cabecera Cookie no llega a la API desde el 8444")
+    p("=== d) las cookies solo viajan por el 8445")
     cabeceras = {"Cookie": "sesion=canario", "X-Prueba": "canario"}
+    desde_spa = eco_de(peticion("GET", "/v1/personal/eco", puerto=PUERTO_SPA, cabeceras=cabeceras)) or {}
     desde_api = eco_de(peticion("GET", "/eco", puerto=PUERTO_API, cabeceras=cabeceras)) or {}
     desde_web = eco_de(peticion("GET", "/seguimiento", cabeceras=cabeceras)) or {}
-    # Control: el eco ve la Cookie cuando llega (por el 8443), y por el 8444 la
-    # petición llega con el resto de cabeceras (X-Prueba).
-    control = desde_api.get("cookie") == "sesion=canario" and desde_web.get("prueba") == "canario"
+    # Control: el eco ve la Cookie cuando llega (por el 8445), y por el 8443 y
+    # el 8444 la petición llega con el resto de cabeceras (X-Prueba).
+    control = (desde_spa.get("cookie") == "sesion=canario" and desde_api.get("prueba") == "canario"
+               and desde_web.get("prueba") == "canario")
+    detalle = f"8445: {desde_spa}; 8443: {desde_api}; 8444: {desde_web}"
     negativo(f"d) por el 8444 la API no recibe Cookie ({desde_web.get('cookie')!r})",
-             desde_web.get("cookie") is None, control, f"8443: {desde_api}; 8444: {desde_web}")
+             desde_web.get("cookie") is None, control, detalle)
+    negativo(f"d) por el 8443 la API no recibe Cookie ({desde_api.get('cookie')!r})",
+             desde_api.get("cookie") is None, control, detalle)
+    # Set-Cookie: una cookie puesta en el 8443 o el 8444 valdría en el 8445
+    # (no se aíslan por puerto). Control: por el 8445 sale tal cual.
+    codigo, cab, _ = peticion("GET", "/v1/personal/prueba/cookie", puerto=PUERTO_SPA)
+    control = codigo == 200 and "via" in cab and una(cab, "set-cookie") == COOKIE_ECO
+    pasa(control, f"d) control: un Set-Cookie de la API sale por el 8445 ({codigo}, {cab.get('set-cookie')})")
+    for puerto in (PUERTO_API, PUERTO_WEB):
+        codigo, cab, _ = peticion("GET", "/prueba/cookie", puerto=puerto)
+        negativo(f"d) por el {puerto} no sale el Set-Cookie de la API ({codigo}, {cab.get('set-cookie')})",
+                 codigo == 200 and "via" in cab and "set-cookie" not in cab, control)
 
 
 def seccion_e():
@@ -855,7 +880,7 @@ def subredes_ocupadas():
 
 def puertos_ocupados():
     ocupados = []
-    for puerto in (PUERTO_API, PUERTO_WEB):
+    for puerto in (PUERTO_API, PUERTO_WEB, PUERTO_SPA):
         s = socket.socket()
         s.settimeout(2)
         try:

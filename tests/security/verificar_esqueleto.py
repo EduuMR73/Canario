@@ -4,8 +4,8 @@ de la API (docker-compose.yml, Dockerfile, proxy/Dockerfile, proxy/Caddyfile y
 app/).
 
 Qué prueba: que la API no tiene salida a internet; que los únicos puertos
-publicados son los dos del proxy (8443, la API; 8444, el sitio del
-denunciante) y solo en 127.0.0.1; que solo /salud responde; las cabeceras de
+publicados son los tres del proxy (8443, la API; 8444, el sitio del
+denunciante; 8445, la SPA del personal) y solo en 127.0.0.1; que solo /salud responde; las cabeceras de
 seguridad con valores literales y sin Server; que un Host que no coincide con
 el SNI recibe 421; que el sitio del denunciante sirve sus estáticos con sus
 cabeceras y sin rangos, y que desde él no se alcanza la API fuera de /web (n;
@@ -29,8 +29,8 @@ Usa un proyecto de Docker propio (canario_esqueleto) y levanta los servicios
 api y caddy (y postgres y redis, de los que depende la API para su arranque
 verificado).
 Nunca toca el proyecto canario, pero necesita que esté
-parado: las subredes 10.88.0.0/28 y 10.88.1.0/28 y los puertos 127.0.0.1:8443
-y 127.0.0.1:8444 son fijos y no pueden estar en uso por otro proyecto (si lo
+parado: las subredes 10.88.0.0/28 y 10.88.1.0/28 y los puertos 127.0.0.1:8443,
+127.0.0.1:8444 y 127.0.0.1:8445 son fijos y no pueden estar en uso por otro proyecto (si lo
 están, PARADA). Al
 terminar lo borra todo (down -v y las imágenes construidas). No lee ningún
 secreto: docker compose solo necesita que los ficheros de secrets/ existan.
@@ -69,6 +69,7 @@ estado = {"falla": False, "sin_conclusion": False}
 # ---------------------------------------------------------------------------
 PUERTO = 8443
 PUERTO_DENUNCIANTE = 8444
+PUERTO_SPA = 8445
 SUBRED_APP = "10.88.0.0/28"
 SUBRED_EDGE = "10.88.1.0/28"
 IP_PROXY = "10.88.0.2"
@@ -120,7 +121,8 @@ MEMORIA = {"api": 268435456, "caddy": 134217728}  # 256m y 128m
 PIDS = 64
 CAP_CERO = "0000000000000000"
 PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}],
-                 "8444/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8444"}]}
+                 "8444/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8444"}],
+                 "8445/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8445"}]}
 # La API está en app (con el proxy), en data (con PostgreSQL), en cache (con
 # Redis, el del limitador) y en correo (con el SMTP de desarrollo), nunca en
 # edge.
@@ -916,8 +918,9 @@ def puertos_escuchando(texto):
 def seccion_l():
     p("=== l) Caddy: que escucha, cabeceras lentas y plazos")
     # Sin API de administración (2019) ni servidor de redirección: solo 8443
-    # (la API) y 8444 (el sitio del denunciante). Control: un Caddy con los
-    # valores por defecto escucha también en 2019 y en su puerto HTTP.
+    # (la API), 8444 (el sitio del denunciante) y 8445 (la SPA del personal).
+    # Control: un Caddy con los valores por defecto escucha también en 2019 y
+    # en su puerto HTTP.
     (TEMPORAL / "control_escucha").mkdir()
     (TEMPORAL / "control_escucha" / "Caddyfile").write_text(CADDYFILE_CONTROL_ESCUCHA, encoding="utf-8", newline="\n")
     nombre = f"{PROYECTO}_control_escucha"
@@ -930,8 +933,8 @@ def seccion_l():
     finally:
         ejecutar(["docker", "rm", "-f", nombre])
     real = puertos_escuchando(exec_("caddy", *ORDEN_ESCUCHA).out)
-    negativo(f"l) Caddy solo escucha en 8443 y 8444: sin API de administracion (2019) ni redireccion HTTP ({sorted(real)})",
-             real == {8443, 8444}, {2019, 8080, 8443} <= control, f"control: {sorted(control)}")
+    negativo(f"l) Caddy solo escucha en 8443, 8444 y 8445: sin API de administracion (2019) ni redireccion HTTP "
+             f"({sorted(real)})", real == {8443, 8444, 8445}, {2019, 8080, 8443} <= control, f"control: {sorted(control)}")
 
     # read_header: cabeceras a medias más de 10 s se cortan. Control: con 2 s
     # de pausa la petición llega.
@@ -1136,7 +1139,7 @@ def subredes_ocupadas():
 
 def puertos_ocupados():
     ocupados = []
-    for puerto in (PUERTO, PUERTO_DENUNCIANTE):
+    for puerto in (PUERTO, PUERTO_DENUNCIANTE, PUERTO_SPA):
         s = socket.socket()
         s.settimeout(2)
         try:
