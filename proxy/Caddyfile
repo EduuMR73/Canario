@@ -193,7 +193,12 @@
 		# - base-uri 'self' y no 'none': Angular necesita <base href="/"> para
 		#   cargar main-*.js, que va con ruta relativa, desde una ruta profunda.
 		# - form-action 'none': la SPA envía con fetch, nunca con formularios.
-		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; require-trusted-types-for 'script'; trusted-types angular; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
+		# - font-src 'self' (bloque 6b-4a): la fuente Geist va en el build
+		#   (media/geist-variable-*.woff2). Solo del propio origen: ni un
+		#   servidor de fuentes ajeno ve quién abre la SPA, ni una regla
+		#   @font-face inyectada podría pedir nada fuera (y no puede haberla:
+		#   style-src no admite estilos en línea).
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; require-trusted-types-for 'script'; trusted-types angular; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
 		Cross-Origin-Opener-Policy "same-origin"
 		# Ningún otro origen carga estas respuestas, tampoco el 8443 ni el 8444,
 		# que son del mismo sitio.

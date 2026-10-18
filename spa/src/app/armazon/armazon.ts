@@ -17,6 +17,11 @@ import { nombreRol } from '../nucleo/roles';
 // cambiar de página (WCAG 2.2, 2.4.1, técnicas ARIA11 y H69). Un enlace
 // href="#contenido" además no funcionaría aquí: con <base href="/"> lleva a
 // "/#contenido", es decir, a otra página.
+//
+// &ngsp; entre el email y el rol: Angular quita al compilar los textos que
+// solo tienen espacios (preserveWhitespaces es false por defecto), y la barra
+// decía "admin@empresa.testAdmin", también para un lector de pantalla.
+// &ngsp; es su forma de conservar un espacio.
 @Component({
   selector: 'app-armazon',
   imports: [RouterLink, RouterLinkActive, RouterOutlet],
@@ -31,7 +36,7 @@ import { nombreRol } from '../nucleo/roles';
             }
           </ul>
         </nav>
-        <p class="quien"><span class="quien-email">{{ yo.email }}</span> <span class="quien-rol">{{ nombreRol(yo.rol) }}</span></p>
+        <p class="quien"><span class="quien-email">{{ yo.email }}</span>&ngsp;<span class="quien-rol">{{ nombreRol(yo.rol) }}</span></p>
         <button type="button" class="secundario" (click)="cerrarSesion()" [attr.aria-disabled]="cerrando() || null">
           {{ cerrando() ? 'Cerrando la sesión...' : 'Cerrar la sesión' }}
         </button>

@@ -9,13 +9,35 @@
    contraste de cada pareja de texto y fondo (WCAG 2.2, 1.4.3: 4,5:1) y de
    bordes y foco (1.4.11: 3:1), que no hay colores fuera de :root y que toda
    variable usada existe. Si se añade una pareja nueva, se añade también
-   allí. Fuente del sistema: ningún fichero que descargar, y la CSP no tiene
-   font-src. La fuente propia y el modo oscuro llegan en el 6b-4. */
+   allí.
+
+   Modo oscuro (bloque 6b-4a): sigue la preferencia del sistema
+   (prefers-color-scheme), sin botón ni nada guardado en el navegador. El
+   segundo bloque :root redefine todos los colores, y la batería comprueba las
+   parejas en los dos temas y que el oscuro no se deja ninguno: uno olvidado
+   heredaría el claro sin que nadie lo viera. */
+
+/* Geist (Vercel), versión 1.7.2, la variable de pesos 100 a 900, autoalojada:
+   la sirve el mismo origen, así que la CSP solo necesita font-src 'self' y
+   ningún servidor de fuentes ajeno sabe quién abre la SPA. Es el fichero
+   Geist[wght].woff2 del release oficial sin tocar, renombrado sin corchetes
+   (Angular pone el nombre en la URL). Licencia SIL OFL 1.1 en
+   fuentes/OFL.txt. El rango de pesos es necesario: sin él, el navegador
+   tomaría la fuente como de peso 400 y fabricaría la negrita de 600 y 700.
+   swap: mientras llega, el texto sale con la fuente del sistema y no se
+   queda en blanco. */
+@font-face {
+  font-family: "Geist";
+  src: url("./fuentes/geist-variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
-  /* Solo claro hasta el 6b-4: el navegador no pinta oscuros los controles
-     de formulario sobre un fondo claro. */
-  color-scheme: light;
+  /* Los controles de formulario y las barras de desplazamiento del
+     navegador siguen al tema. */
+  color-scheme: light dark;
 
   --color-texto: #1a1a1a;
   --color-texto-suave: #4a4a4a;
@@ -44,6 +66,29 @@
   --ancho-pagina: 64rem;
 }
 
+/* Tema oscuro: los mismos nombres, todos. Fondo casi negro y el amarillo del
+   canario como acento. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-texto: #ededed;
+    --color-texto-suave: #a1a1a1;
+    --color-fondo: #0a0a0a;
+    --color-superficie: #1a1a1a;
+    --color-borde: #8f8f8f;
+    --color-separador: #2e2e2e;
+    --color-acento: #facc15;
+    --color-boton: #ededed;
+    --color-boton-texto: #0a0a0a;
+    --color-peligro: #f87171;
+    --color-peligro-texto: #0a0a0a;
+    --color-error-texto: #fecaca;
+    --color-error-fondo: #2a1212;
+    --color-aviso-fondo: #262005;
+    --color-etiqueta-fondo: #3d2e05;
+    --color-etiqueta-texto: #fde68a;
+  }
+}
+
 *,
 *::before,
 *::after {
@@ -52,7 +97,8 @@
 
 body {
   margin: 0;
-  font-family: system-ui, sans-serif;
+  /* La del sistema si Geist no llega o no tiene un carácter. */
+  font-family: "Geist", system-ui, sans-serif;
   line-height: 1.5;
   color: var(--color-texto);
   background: var(--color-fondo);
@@ -264,8 +310,14 @@ button[aria-disabled="true"] {
 /* Tablas: a 320 px se desplazan en horizontal dentro de su región, que se
    alcanza con el tabulador para moverla con el teclado. Una tabla de datos
    es contenido bidimensional y queda fuera de la regla del reajuste (WCAG
-   2.2, 1.4.10, nota 2). */
+   2.2, 1.4.10, nota 2).
+   position: relative la hace bloque contenedor de los .visualmente-oculto de
+   sus celdas, que son absolute: sin ella, su referencia es la página, el
+   scroll de la región no los recorta y estiran la página entera en
+   horizontal (comprobado en Chromium 153: 617 px a 320 de ancho, y 320 con
+   ella; tests/security/verificar_spa.py, p). */
 .tabla {
+  position: relative;
   overflow-x: auto;
   margin: 0 0 var(--espacio-4);
 }
