@@ -58,7 +58,7 @@ Hay tres puertos publicados, todos solo en `127.0.0.1` y solo con el nombre `loc
 
 - `8443`: la API.
 - `8444`: el sitio del denunciante, en otro origen: `https://localhost:8444/` (las páginas, más abajo) y su hoja de estilos.
-- `8445`: la SPA del personal, en el suyo: `https://localhost:8445/`. Hoy tiene el acceso (entrar, activar una cuenta y solicitar el acceso, más abajo), el menú de cada rol, las pantallas del admin para las cuentas y las solicitudes y las de las denuncias para el admin y el instructor, y reenvía la API del personal con la sesión en cookies; las pantallas del auditor llegan en el bloque 6b-3c.
+- `8445`: la SPA del personal, en el suyo: `https://localhost:8445/`. Hoy tiene el acceso (entrar, activar una cuenta y solicitar el acceso, más abajo), el menú de cada rol, las pantallas del admin para las cuentas y las solicitudes, las de las denuncias para el admin y el instructor y la de la auditoría para el admin y el auditor, y reenvía la API del personal con la sesión en cookies.
  Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
 
 Para parar sin perder datos:
@@ -85,7 +85,7 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `/v1/personal/usuarios...` | admin | Invitar, reinvitar, anular invitaciones y dar de baja |
 | `/v1/personal/denuncias...` | admin e instructor (asignar, solo admin) | Listar, leer, asignar, cambiar de estado y escribir mensajes |
 | `POST /v1/personal/denuncias/{id}/redaccion` y `.../mensajes/{secuencia}/redaccion` | admin con la denuncia asignada | Tachar datos que no deben conservarse (art. 32.2) |
-| `GET /v1/personal/auditoria` y `/auditoria/verificacion` | admin y auditor | Leer la auditoría y verificar su cadena |
+| `GET /v1/personal/auditoria`, `/auditoria/recientes` y `/auditoria/verificacion` | admin y auditor | Leer la auditoría desde el principio (`desde`) o desde lo más reciente (`antes`), con el email de quien actúa y de la cuenta afectada, y verificar su cadena |
 | `POST /v1/personal/registro` y `/registro/verificacion` | cualquiera | Pedir una cuenta del personal (empresa y email; siempre el mismo 202) y confirmar el email con el token del enlace |
 | `GET /v1/personal/solicitudes`, `POST .../{id}/aprobacion`, `DELETE .../{id}` | admin | Ver las solicitudes verificadas, aprobarlas con un rol (la invitación va solo al email) o rechazarlas |
 
@@ -126,6 +126,7 @@ La imagen del proxy compila la SPA en una primera etapa con Node y copia solo el
 | `/solicitudes` | Solo admin: aprobar con un rol o rechazar las solicitudes con el email confirmado |
 | `/denuncias` | Admin e instructor: el listado con filtro por estado. El admin ve todas y las asigna; el instructor, las suyas |
 | `/denuncias/<id>` | Admin e instructor, con la denuncia asignada: abrir el expediente con un botón (cada lectura queda en la auditoría y cuenta para el tope diario), escribir al denunciante, cambiar el estado y, solo el admin, declararla no veraz |
+| `/auditoria` | Admin y auditor: quién hizo qué, lo más reciente primero, con emails; cargar las anteriores, actualizar y verificar la cadena |
 | `/cuenta` | Con sesión, para todos los roles: cambiar la contraseña, que cierra las demás sesiones |
 | `/inicio` | Con sesión: el email, el rol y el aviso de una reinvitación; cerrar la sesión |
 
@@ -315,9 +316,9 @@ Doce baterías, una por área. Cada prueba negativa lleva su control positivo: s
 | `verificar_arranque.py` | Conexión a PostgreSQL con secretos y el arranque verificado de la API |
 | `verificar_esquema.py` | Esquema, RLS entre empresas, permisos, auditoría encadenada y supresión legal en la base de datos |
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
-| `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción y no veraz (art. 32.3) |
+| `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción, no veraz (art. 32.3) y la auditoría por la API (emails y páginas) |
 | `verificar_sesion.py` | La sesión del personal en el navegador por el 8445: tokens solo en cookies con sus atributos exactos, CSRF desde otro puerto, rotación y reutilización, cierre, cookies que no salen por el 8443 y logs sin tokens |
-| `verificar_spa.py` | La SPA del personal en el 8445: cabeceras y CSP exactas, nada en línea (con un mutante), imagen sin Node, contexto de compilación aislado, rutas, las pruebas unitarias sin red (con cinco mutantes), el contraste de la base visual, y en un Chromium real la carga sin violaciones de la CSP, Trusted Types, la activación, el login, la renovación entre pestañas, el cierre, el registro con su correo, las pantallas por rol (menú, páginas de otro rol, solicitudes, cuentas y contraseña) y las denuncias (listado y asignación, expediente que no se lee solo, XSS almacenado con un mutante, id con `..`, mensajes, estados, no veraz y "atrás" tras cerrar la sesión) |
+| `verificar_spa.py` | La SPA del personal en el 8445: cabeceras y CSP exactas, nada en línea (con un mutante), imagen sin Node, contexto de compilación aislado, rutas, las pruebas unitarias sin red (con siete mutantes), el contraste de la base visual, y en un Chromium real la carga sin violaciones de la CSP, Trusted Types, la activación, el login, la renovación entre pestañas, el cierre, el registro con su correo, las pantallas por rol (menú, páginas de otro rol, solicitudes, cuentas y contraseña), las denuncias (listado y asignación, expediente que no se lee solo, XSS almacenado con un mutante, id con `..`, mensajes, estados, no veraz y "atrás" tras cerrar la sesión) y la auditoría (emails, páginas, actualizar, verificación y un email con HTML con un mutante) |
 | `verificar_inyeccion.py` | Inyección SQL y validación de la frontera de entrada |
 | `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo, sin base de datos antes de responder), verificación, administración de solicitudes, límites por destinatario (15 minutos y día), logs sin rastro, el origen obligatorio y el registro con PostgreSQL parado |
 | `verificar_escaneos.py` | Secretos en Git, dependencias de Python y de npm, análisis estático, imágenes y SBOM |
