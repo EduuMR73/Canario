@@ -1,0 +1,154 @@
+import { HttpHeaders, provideHttpClient, withInterceptors } from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+import { TestBed } from '@angular/core/testing';
+import { Router, provideRouter } from '@angular/router';
+import { firstValueFrom } from 'rxjs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiPersonal } from './api';
+import { CERROJO, Cerrojo, renovarSesion } from './renovacion';
+
+// Oráculos literales: las rutas y la cabecera de la API
+// (app/rutas_personal.py), no las constantes del código que se prueba.
+const YO = '/v1/personal/yo';
+const SESIONES = '/v1/personal/sesiones';
+const RENOVACION = '/v1/personal/sesiones/renovacion';
+const CIERRE = '/v1/personal/sesiones/actual';
+const CON_BEARER = new HttpHeaders({ 'WWW-Authenticate': 'Bearer' });
+const CUENTA = { usuario_id: 'u', email: 'admin@canario.test', rol: 'admin', invitacion_pendiente: false };
+const LOGIN = { empresa: 'e', email: 'admin@canario.test', contrasena: 'x', codigo_totp: '000000' };
+
+// Cerrojo falso con la misma semántica que Web Locks: un trabajo cada vez,
+// en orden de llegada. Apunta los nombres que recibe.
+function cerrojoFalso(nombres: string[]): Cerrojo {
+  let cola: Promise<unknown> = Promise.resolve();
+  return <T>(nombre: string, trabajo: () => Promise<T>): Promise<T> => {
+    nombres.push(nombre);
+    const turno = cola.then(trabajo);
+    cola = turno.catch(() => undefined);
+    return turno;
+  };
+}
+
+// Deja correr las promesas pendientes (la renovación va por un cerrojo y una
+// promesa compartida).
+async function sinPendientes(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((resolver) => setTimeout(resolver, 0));
+  }
+}
+
+function sesionCaducada(): { status: number; statusText: string; headers: HttpHeaders } {
+  return { status: 401, statusText: 'Unauthorized', headers: CON_BEARER };
+}
+
+describe('renovación de la sesión', () => {
+  let http: HttpTestingController;
+  let api: ApiPersonal;
+  let router: Router;
+  let nombres: string[];
+
+  beforeEach(() => {
+    nombres = [];
+    TestBed.configureTestingModule({
+      providers: [
+        provideHttpClient(withInterceptors([renovarSesion])),
+        provideHttpClientTesting(),
+        provideRouter([]),
+        { provide: CERROJO, useValue: cerrojoFalso(nombres) },
+      ],
+    });
+    http = TestBed.inject(HttpTestingController);
+    api = TestBed.inject(ApiPersonal);
+    router = TestBed.inject(Router);
+  });
+
+  afterEach(() => {
+    http.verify();
+    TestBed.resetTestingModule();
+  });
+
+  it('con un 401 de sesión renueva una vez, dentro del cerrojo, y repite la petición una vez', async () => {
+    const respuesta = firstValueFrom(api.yo());
+    http.expectOne(YO).flush(null, sesionCaducada());
+    await sinPendientes();
+    const renovacion = http.expectOne(RENOVACION);
+    expect(renovacion.request.method).toBe('POST');
+    expect(renovacion.request.body).toEqual({});
+    renovacion.flush({ expira_en: 300 });
+    await sinPendientes();
+    http.expectOne(YO).flush(CUENTA);
+    await expect(respuesta).resolves.toEqual(CUENTA);
+    expect(nombres).toEqual(['canario-renovacion']);
+  });
+
+  it('repite también una petición que cambia algo (el 401 llega antes de que la ruta haga nada)', async () => {
+    const respuesta = firstValueFrom(api.cerrarSesion());
+    http.expectOne(CIERRE).flush(null, sesionCaducada());
+    await sinPendientes();
+    http.expectOne(RENOVACION).flush({ expira_en: 300 });
+    await sinPendientes();
+    const repetida = http.expectOne(CIERRE);
+    expect(repetida.request.method).toBe('DELETE');
+    repetida.flush(null, { status: 204, statusText: 'No Content' });
+    await expect(respuesta).resolves.toBeNull();
+  });
+
+  it('un login fallido no renueva, aunque su 401 traiga WWW-Authenticate: Bearer', async () => {
+    const respuesta = firstValueFrom(api.iniciarSesion(LOGIN));
+    http.expectOne(SESIONES).flush({ detalle: 'credenciales no válidas' }, sesionCaducada());
+    await expect(respuesta).rejects.toMatchObject({ status: 401 });
+    await sinPendientes();
+    http.expectNone(RENOVACION);
+    http.expectNone(SESIONES);
+  });
+
+  it('un 401 sin WWW-Authenticate: Bearer no renueva', async () => {
+    const respuesta = firstValueFrom(api.yo());
+    http.expectOne(YO).flush(null, { status: 401, statusText: 'Unauthorized' });
+    await expect(respuesta).rejects.toMatchObject({ status: 401 });
+    await sinPendientes();
+    http.expectNone(RENOVACION);
+  });
+
+  it('si la renovación falla con 401, no repite la petición y lleva a /entrar', async () => {
+    const navegar = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
+    const respuesta = firstValueFrom(api.yo());
+    http.expectOne(YO).flush(null, sesionCaducada());
+    await sinPendientes();
+    http.expectOne(RENOVACION).flush({ detalle: 'sesión no válida' }, sesionCaducada());
+    await expect(respuesta).rejects.toMatchObject({ status: 401 });
+    await sinPendientes();
+    http.expectNone(YO);
+    http.expectNone(RENOVACION);
+    expect(navegar).toHaveBeenCalledWith('/entrar');
+  });
+
+  it('si la renovación falla por la red, no lleva a /entrar', async () => {
+    const navegar = vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
+    const respuesta = firstValueFrom(api.yo());
+    http.expectOne(YO).flush(null, sesionCaducada());
+    await sinPendientes();
+    http.expectOne(RENOVACION).error(new ProgressEvent('error'));
+    await expect(respuesta).rejects.toMatchObject({ status: 0 });
+    expect(navegar).not.toHaveBeenCalled();
+  });
+
+  it('dos peticiones con 401 a la vez comparten una sola renovación', async () => {
+    const primera = firstValueFrom(api.yo());
+    const segunda = firstValueFrom(api.yo());
+    const caducadas = http.match(YO);
+    expect(caducadas.length).toBe(2);
+    caducadas.forEach((peticion) => peticion.flush(null, sesionCaducada()));
+    await sinPendientes();
+    http.expectOne(RENOVACION).flush({ expira_en: 300 });
+    await sinPendientes();
+    const repetidas = http.match(YO);
+    expect(repetidas.length).toBe(2);
+    repetidas.forEach((peticion) => peticion.flush(CUENTA));
+    await expect(primera).resolves.toEqual(CUENTA);
+    await expect(segunda).resolves.toEqual(CUENTA);
+    await sinPendientes();
+    http.expectNone(RENOVACION);
+    expect(nombres).toEqual(['canario-renovacion']);
+  });
+});
