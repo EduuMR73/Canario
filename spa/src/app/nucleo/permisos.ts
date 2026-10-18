@@ -25,6 +25,9 @@ export interface EntradaMenu {
 // ruta en app.routes.ts, que los toma de aquí: una sola lista.
 export const MENU = {
   inicio: { ruta: '/inicio', texto: 'Inicio', roles: TODOS },
+  // El auditor no: revisa quién hizo qué en la auditoría, no el contenido
+  // (app/instruccion.py, ROLES_INSTRUCCION).
+  denuncias: { ruta: '/denuncias', texto: 'Denuncias', roles: ['admin', 'instructor'] },
   cuentas: { ruta: '/cuentas', texto: 'Cuentas', roles: ['admin'] },
   solicitudes: { ruta: '/solicitudes', texto: 'Solicitudes', roles: ['admin'] },
   cuenta: { ruta: '/cuenta', texto: 'Mi cuenta', roles: TODOS },

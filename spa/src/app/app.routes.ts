@@ -6,6 +6,9 @@ import { Verificacion } from './acceso/verificacion/verificacion';
 import { Armazon } from './armazon/armazon';
 import { Cuenta } from './cuenta/cuenta';
 import { Cuentas } from './cuentas/cuentas';
+import { Denuncias } from './denuncias/denuncias';
+import { Expediente } from './denuncias/expediente';
+import { conIdDeDenuncia } from './denuncias/textos';
 import { Inicio } from './inicio/inicio';
 import { NoDisponible } from './no-disponible/no-disponible';
 import { NoEncontrada } from './no-encontrada/no-encontrada';
@@ -39,6 +42,16 @@ export const routes: Routes = [
     canActivateChild: [permitirPorRol],
     children: [
       { path: 'inicio', component: Inicio, title: 'Inicio - Canario', data: { roles: MENU.inicio.roles } },
+      {
+        path: 'denuncias', component: Denuncias, title: 'Denuncias - Canario',
+        data: { roles: MENU.denuncias.roles },
+      },
+      // Solo con un uuid (denuncias/textos.ts, conIdDeDenuncia): cualquier
+      // otra cosa es "no encontrada" sin pedir nada a la API.
+      {
+        path: 'denuncias/:id', component: Expediente, title: 'Denuncia - Canario', canMatch: [conIdDeDenuncia],
+        data: { roles: MENU.denuncias.roles },
+      },
       { path: 'cuentas', component: Cuentas, title: 'Cuentas - Canario', data: { roles: MENU.cuentas.roles } },
       {
         path: 'solicitudes', component: Solicitudes, title: 'Solicitudes de registro - Canario',

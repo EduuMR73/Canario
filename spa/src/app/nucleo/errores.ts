@@ -25,7 +25,7 @@ export function textoDeError(error: unknown, propios: TextosPropios = {}): strin
     return TEXTO_SIN_CONEXION;
   }
   if (error.status === 429) {
-    return `Demasiadas peticiones seguidas. Espere ${espera(error.headers.get('Retry-After'))} y vuelva a intentarlo.`;
+    return `Demasiadas peticiones seguidas. Espere ${esperaDe(error)} y vuelva a intentarlo.`;
   }
   if (error.status === 503) {
     return TEXTO_NO_DISPONIBLE;
@@ -46,9 +46,13 @@ export function detalleDe(error: unknown): string | null {
   return null;
 }
 
-// Retry-After en segundos (la API no envía fechas), en minutos si pasa de
-// uno. Si no se puede leer, un texto genérico en vez de un número inventado.
-function espera(valor: string | null): string {
+// La espera del Retry-After de un 429, en segundos (la API no envía fechas):
+// en minutos si pasa de uno y en horas si pasa de una, porque el tope de
+// lecturas (app/instruccion.py) espera hasta el día siguiente y "1440
+// minutos" no se entiende. Se redondea hacia arriba: nunca antes de tiempo.
+// Si no se puede leer, un texto genérico en vez de un número inventado.
+export function esperaDe(error: HttpErrorResponse): string {
+  const valor = error.headers.get('Retry-After');
   const segundos = valor !== null && /^\d+$/.test(valor) ? Number(valor) : NaN;
   if (Number.isNaN(segundos)) {
     return 'unos minutos';
@@ -56,6 +60,10 @@ function espera(valor: string | null): string {
   if (segundos < 60) {
     return segundos === 1 ? '1 segundo' : `${segundos} segundos`;
   }
-  const minutos = Math.ceil(segundos / 60);
-  return minutos === 1 ? '1 minuto' : `${minutos} minutos`;
+  if (segundos <= 3600) {
+    const minutos = Math.ceil(segundos / 60);
+    return minutos === 1 ? '1 minuto' : `${minutos} minutos`;
+  }
+  const horas = Math.ceil(segundos / 3600);
+  return `${horas} horas`;
 }

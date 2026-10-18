@@ -78,7 +78,8 @@ main.ancho {
    pueden alcanzar con el tabulador y el contorno solo despistaría. */
 h1:focus,
 h2:focus,
-[role="status"]:focus {
+[role="status"]:focus,
+[role="alert"]:focus {
   outline: none;
 }
 
@@ -98,7 +99,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: var(--color-texto);
   background: var(--color-fondo);
@@ -312,4 +314,59 @@ td.acciones > * {
 /* El enlace de una invitación: largo y sin espacios. */
 .enlace {
   word-break: break-all;
+}
+
+/* Filtro del listado de denuncias: el campo y su botón en una línea, que se
+   parte si no cabe. */
+.filtro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--espacio-2) var(--espacio-4);
+  margin: 0 0 var(--espacio-4);
+}
+
+.filtro .campo {
+  margin: 0;
+}
+
+/* Los datos de una denuncia: término y valor en la misma línea. */
+.ficha {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--espacio-1) var(--espacio-4);
+}
+
+.ficha dt {
+  font-weight: 600;
+}
+
+.ficha dd {
+  margin: 0;
+}
+
+/* El texto de una denuncia y de sus mensajes: lo escribe otra persona, así
+   que se respetan sus saltos de línea, y una cadena larga sin espacios (una
+   URL, una carga pegada) se parte en vez de desbordar a 320 px. */
+.texto-libre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: var(--espacio-2) var(--espacio-3);
+  background: var(--color-superficie);
+  border-radius: var(--radio);
+}
+
+.mensajes {
+  padding-left: 0;
+  list-style: none;
+}
+
+.mensajes > li {
+  margin: 0 0 var(--espacio-4);
+}
+
+.mensaje-cabecera {
+  margin: 0 0 var(--espacio-1);
+  color: var(--color-texto-suave);
+  font-size: 0.875rem;
 }
