@@ -146,9 +146,9 @@ CABECERAS_SPA = {
     "strict-transport-security": "max-age=63072000",
     "x-content-type-options": "nosniff",
     "referrer-policy": "same-origin",
-    "content-security-policy": ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-                                "require-trusted-types-for 'script'; trusted-types angular; base-uri 'self'; "
-                                "form-action 'none'; frame-ancestors 'none'"),
+    "content-security-policy": ("default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+                                "connect-src 'self'; require-trusted-types-for 'script'; trusted-types angular; "
+                                "base-uri 'self'; form-action 'none'; frame-ancestors 'none'"),
     "cache-control": "no-store",
     "cross-origin-opener-policy": "same-origin",
     "cross-origin-resource-policy": "same-origin",

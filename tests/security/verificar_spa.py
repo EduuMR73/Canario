@@ -12,16 +12,17 @@ etapa. Prueba:
   contraseña) en 5 minutos desde el mismo cliente, y el límite de producción
   los cortaría según dónde caiga el cambio de ventana. Los límites de
   producción los prueba verificar_denuncia.py, r);
-* b) las cabeceras exactas de la página, del script, de la hoja de estilos y de
-  un error, con su tipo de contenido;
+* b) las cabeceras exactas de la página, del script, de la hoja de estilos, de
+  la fuente y de un error, con su tipo de contenido, y que la fuente que
+  sirve Caddy es, byte a byte, la del release fijado (sha256);
 * c) que index.html no lleva nada en línea (ni <script> sin src, ni <style>,
   ni atributos on* o style), que es lo que permite la CSP sin 'unsafe-inline',
   y que declara lang="es". Control: la etapa de compilación con un mutante
   (inlineCritical activado y una regla de CSS) sí lo lleva;
 * d) que la imagen final no lleva Node ni npm (control: la imagen base de la
-  compilación sí), y que /srv/spa solo contiene index.html, un main-*.js y un
-  styles-*.css, de root y sin escritura para nadie más (control: /data/caddy,
-  que es del usuario de Caddy, sale con su dueño);
+  compilación sí), y que /srv/spa solo contiene index.html, un main-*.js, un
+  styles-*.css y media/ con la fuente, de root y sin escritura para nadie más
+  (control: /data/caddy, que es del usuario de Caddy, sale con su dueño);
 * e) que el contexto de compilación está aislado: unos ficheros centinela
   puestos en una copia de spa/ (en node_modules/, en dist/ y en la raíz) no
   llegan a la etapa de compilación (control: package.json sí llega);
@@ -61,12 +62,14 @@ etapa. Prueba:
   token sale de la URL, se envía al pulsar el botón y, después, el admin ve
   la solicitud por la API;
 * k) la base visual de spa/src/styles.css, sin Docker: el contraste de cada
-  pareja de colores que usa (4,5:1 el texto y 3:1 bordes y foco, WCAG 2.2,
-  1.4.3 y 1.4.11), que no hay colores fuera de :root y que toda variable
-  usada existe. Control: la fórmula da 4,54:1 y 4,48:1 con los grises
-  #767676 y #777777 sobre blanco, y tres mutantes de la hoja (un gris claro,
-  un color suelto y una variable que no existe) hacen saltar cada
-  comprobación. Y en spa/src/app, también sin Docker, que ningún botón lleva
+  pareja de colores que usa, en el tema claro y en el oscuro (4,5:1 el texto
+  y 3:1 bordes y foco, WCAG 2.2, 1.4.3 y 1.4.11), que el oscuro redefine
+  todos los colores del claro, que no hay colores fuera de los dos :root y
+  que toda variable usada existe. Control: la fórmula da 4,54:1 y 4,48:1 con
+  los grises #767676 y #777777 sobre blanco, y cinco mutantes de la hoja (un
+  gris claro en cada tema, un color que falta en el oscuro, un color suelto y
+  una variable que no existe) hacen saltar cada comprobación. Y en
+  spa/src/app, también sin Docker, que ningún botón lleva
   disabled ligado y que cada fichero lleva los aria-disabled de su
   inventario (control: entrar.ts con disabled hace saltar las dos);
 * l) las pantallas por rol en Chromium (bloque 6b-3a): el menú de cada rol;
@@ -124,7 +127,15 @@ etapa. Prueba:
   con más de 100 denuncias (creadas por la API pública), "Cargar más" trae la
   segunda página sin repetir ni perder filas (las mismas que lista la API) y
   el foco acaba en el aviso que dice que es el final; ninguna violación de la
-  CSP ni error de JavaScript.
+  CSP ni error de JavaScript;
+* p) la fuente y el tema oscuro en Chromium (bloque 6b-4a): Geist es la única
+  fuente de la página y está cargada; con el sistema en oscuro el fondo es el
+  del tema oscuro (control: en claro, el del claro); a 320 px de ancho (WCAG
+  2.2, 1.4.10) ni la entrada ni las páginas del admin desbordan en
+  horizontal (control: un elemento de 400 px sí desborda); la barra separa el
+  email del rol con un espacio; ninguna violación
+  de la CSP ni error de JavaScript (control: una fuente de otro origen sí
+  deja su violación de font-src).
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
 misma forma (docs/threat-model.md, 8); Web Locks y las cookies en otros
@@ -141,7 +152,12 @@ verificar_esquema.py. De los botones ocupados, el doble clic solo en el login:
 las guardas de las demás acciones no tienen prueba en el navegador; y el foco
 al error cuando falla una acción (asignar, cuentas y solicitudes), porque
 provocar cada 404 y 409 desde la pantalla exigiría cambiar los datos por
-debajo a mitad del recorrido.
+debajo a mitad del recorrido. Del tema oscuro, en el navegador solo el fondo:
+el contraste de cada pareja lo comprueba k) sobre la hoja. Del ancho de 320
+px, las páginas del instructor y del auditor y el expediente de una denuncia:
+usan las mismas piezas que las del admin. Y que Geist tenga todos los
+caracteres del castellano: si le falta uno, el navegador lo pinta con la
+fuente del sistema.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -238,7 +254,7 @@ REQUISITOS_PLAYWRIGHT = (
     "typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8\n"
 )
 
-CSP_SPA = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+CSP_SPA = ("default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; "
            "require-trusted-types-for 'script'; trusted-types angular; base-uri 'self'; "
            "form-action 'none'; frame-ancestors 'none'")
 CABECERAS_SPA = {
@@ -254,6 +270,12 @@ TIPO_HTML = "text/html; charset=utf-8"
 TIPO_JS = "text/javascript; charset=utf-8"
 TIPO_CSS = "text/css; charset=utf-8"
 TIPO_JSON = "application/json"
+# b) La fuente (spa/src/fuentes): Geist[wght].woff2 del release v1.7.2 de
+# github.com/vercel/geist-font (zip con sha256 7fc800d2...b04e2, el que
+# publica GitHub). Su tipo lo da /etc/mime.types de la imagen de Caddy: Go no
+# lo trae en su tabla propia.
+TIPO_FUENTE = "font/woff2"
+SHA256_FUENTE = "a369fcf5628ea2aa4e1b9e2ec6a5b3624e365bda588e1f0f2f12b564f728fbb8"
 CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
 CUERPO_405 = '{"detalle": "petición no válida"}'.encode()
 
@@ -263,8 +285,13 @@ LANG_ES = b'<html lang="es">'
 BASE_HREF = b'<base href="/">'
 PATRON_MAIN = re.compile(rb'<script src="(main-[A-Z0-9]{8}\.js)" type="module"></script>')
 PATRON_ESTILOS = re.compile(rb'<link rel="stylesheet" href="(styles-[A-Z0-9]{8}\.css)">')
-# d) Los únicos ficheros de /srv/spa.
-PATRON_FICHERO_SPA = re.compile(r"(index\.html|main-[A-Z0-9]{8}\.js|styles-[A-Z0-9]{8}\.css)")
+# b) La fuente, como la referencia la hoja del build (Angular la deja en
+# media/ con un hash en el nombre).
+PATRON_FUENTE = re.compile(rb'url\(\s*["\']?(?:\./)?(media/geist-variable-[A-Z0-9]{8}\.woff2)["\']?\s*\)')
+# d) Los únicos ficheros de /srv/spa: cinco, contando el directorio media.
+PATRON_FICHERO_SPA = re.compile(r"(index\.html|main-[A-Z0-9]{8}\.js|styles-[A-Z0-9]{8}\.css|media"
+                                r"|media/geist-variable-[A-Z0-9]{8}\.woff2)")
+FICHEROS_SPA = 5
 
 # c) Lo que delata algo en línea en un HTML.
 EN_LINEA = {
@@ -287,6 +314,7 @@ RUTAS_SPA = [
     ("GET", "/denuncias/abc", 200, TIPO_HTML, "spa"),
     ("GET", "/a/b/c/d", 200, TIPO_HTML, "spa"),
     ("GET", "/main-NOEXISTE.js", 404, TIPO_JSON, "404"),
+    ("GET", "/media/NOEXISTE.woff2", 404, TIPO_JSON, "404"),
     ("GET", "/favicon.ico", 404, TIPO_JSON, "404"),
     ("GET", "/3rdpartylicenses.txt", 404, TIPO_JSON, "404"),
     ("GET", "/package.json", 404, TIPO_JSON, "404"),
@@ -419,6 +447,8 @@ PATRON_VERIFICACION = re.compile(r"https://localhost:8445/registro/verificacion#
 # sus variables: (primer plano, fondo, contraste mínimo). 4,5:1 para el texto
 # (WCAG 2.2, 1.4.3) y 3:1 para bordes de controles y foco (1.4.11). El
 # separador de las tablas no está: es decoración, la tabla se entiende sin él.
+# Se comprueban en los dos temas: el claro (el :root de fuera) y el oscuro (el
+# :root de @media (prefers-color-scheme: dark), sobre el claro).
 ESTILOS_SPA = RAIZ / "spa" / "src" / "styles.css"
 PAREJAS_CONTRASTE = (
     ("--color-texto", "--color-fondo", 4.5),
@@ -438,6 +468,12 @@ PAREJAS_CONTRASTE = (
 )
 # Mutantes de la hoja para los controles de k).
 MUTANTE_GRIS = ("--color-texto-suave: #4a4a4a;", "--color-texto-suave: #8a8a8a;")
+# En el oscuro: el gris suave del claro sobre el fondo casi negro, y un color
+# que se le olvida (heredaría el del claro).
+MUTANTE_GRIS_OSCURO = ("    --color-texto-suave: #a1a1a1;", "    --color-texto-suave: #4a4a4a;")
+MUTANTE_OLVIDADO = ("    --color-separador: #2e2e2e;\n", "")
+PATRON_TEMA_OSCURO = re.compile(r"@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)\s*\{\s*:root\s*\{(.*?)\}\s*\}",
+                                re.DOTALL)
 MUTANTE_COLOR_SUELTO = "\n.mutante { color: #000000; }\n"
 MUTANTE_VARIABLE = "\n.mutante { color: var(--color-que-no-existe); }\n"
 # k) Los botones ocupados (spa/src/app): cuántos llevan aria-disabled en cada
@@ -563,6 +599,14 @@ MUTANTE_GUARDA = ("    if (this.enviando()) {\n      return;\n    }\n    this.en
 TAMANO_PAGINA_DENUNCIAS = 100
 DENUNCIAS_O = TAMANO_PAGINA_DENUNCIAS
 TEXTO_FINAL_LISTA = "Es el final de la lista."
+
+# p) La fuente y el tema oscuro. El fondo de la página en cada tema
+# (spa/src/styles.css, --color-fondo), como lo da getComputedStyle.
+FONDO_CLARO = "rgb(255, 255, 255)"
+FONDO_OSCURO = "rgb(10, 10, 10)"
+FUENTES_ESPERADAS = [["Geist", "loaded"]]
+# Las páginas del admin que se miran a 320 px, además de /entrar.
+RUTAS_ANCHO = ["/inicio", "/denuncias", "/cuentas", "/solicitudes", "/auditoria", "/cuenta"]
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -1615,6 +1659,70 @@ asyncio.run(ejecutar_personal(pasos_botones))
 '''
 
 
+# p) La fuente, el tema oscuro y el ancho de 320 px. Recibe el SPKI, el
+# identificador, el email, la contraseña, el secreto TOTP y el último paso
+# usado del admin, y las rutas que se miran. Cada contexto lleva su tema y su
+# ancho: Playwright los emula como lo haría el sistema.
+NAVEGADOR_ESTETICA = NAVEGADOR_PERSONAL + r'''
+spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin = sys.argv[1:7]
+rutas_ancho = json.loads(sys.argv[7])
+usados[secreto_admin] = int(paso_admin)
+# La familia sin comillas, las ponga Chromium o no.
+FUENTES = "() => [...document.fonts].map((f) => [f.family.replace(/[\"']/g, ''), f.status])"
+FONDO = "() => getComputedStyle(document.body).backgroundColor"
+ANCHO = "() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]"
+
+
+async def pagina_con(navegador, nombre, tema):
+    contexto = await navegador.new_context(viewport={"width": 320, "height": 640}, color_scheme=tema)
+    pagina = await contexto.new_page()
+    vigilar(pagina, nombre)
+    paginas[nombre] = pagina
+    return pagina
+
+
+async def pasos_estetica(navegador):
+    claro = await pagina_con(navegador, "claro", "light")
+    await claro.goto(ORIGEN + "/entrar")
+    await h1(claro)
+    # Una función que devuelve la promesa: Playwright espera a que se cumpla.
+    await claro.evaluate("() => document.fonts.ready.then(() => null)")
+    res["fuentes"] = await claro.evaluate(FUENTES)
+    res["fondo_claro"] = await claro.evaluate(FONDO)
+    anchos = {"/entrar": await claro.evaluate(ANCHO)}
+    await entrar(claro, email_admin, contrasena_admin, secreto_admin)
+    # El texto de la barra tal cual, sin depender del ancho: textContent.
+    res["quien"] = await claro.evaluate("() => document.querySelector('.quien').textContent.trim()")
+    for ruta_pedida in rutas_ancho:
+        await abrir(claro, ruta_pedida)
+        anchos[ruta_pedida] = await claro.evaluate(ANCHO)
+    res["anchos"] = anchos
+    res["ultimo_paso_admin"] = usados[secreto_admin]
+
+    oscuro = await pagina_con(navegador, "oscuro", "dark")
+    await oscuro.goto(ORIGEN + "/entrar")
+    await h1(oscuro)
+    res["fondo_oscuro"] = await oscuro.evaluate(FONDO)
+
+    # Lo que sigue deja mensajes en la consola a propósito. La comprobación
+    # de la consola mira solo hasta aquí.
+    res["consola_antes_del_control"] = len(consola)
+    # Control del ancho: un elemento de 400 px, puesto con el CSSOM, que la
+    # CSP no limita (un atributo style sí lo bloquearía).
+    await claro.evaluate("() => { const d = document.createElement('div'); d.style.width = '400px'; "
+                         "d.style.height = '1px'; document.body.append(d); }")
+    res["ancho_control"] = await claro.evaluate(ANCHO)
+    # Control de la consola: una fuente de otro origen deja su violación de
+    # font-src.
+    await claro.evaluate("() => new FontFace('Ajena', 'url(https://ejemplo.invalid/ajena.woff2)')"
+                         ".load().then(() => null, () => null)")
+    await asyncio.sleep(1)
+
+
+asyncio.run(ejecutar_personal(pasos_estetica))
+'''
+
+
 # ---------------------------------------------------------------------------
 # Utilidades de ejecución y de informe
 # ---------------------------------------------------------------------------
@@ -1927,6 +2035,25 @@ def seccion_b():
             pasa(una(cab, nombre) == valor, f"b) {etiqueta}: {nombre}: {cab.get(nombre)!r}")
         pasa("server" not in cab and "accept-ranges" not in cab, f"b) {etiqueta}: sin Server ni Accept-Ranges")
 
+    # La fuente: la referencia la hoja del build, y Caddy la sirve con su
+    # tipo, las mismas cabeceras y los bytes del release fijado.
+    _, _, hoja = peticion("GET", f"/{ESTILOS}")
+    fuente = PATRON_FUENTE.search(hoja)
+    if fuente is None:
+        pasa(False, f"b) la hoja {ESTILOS} referencia media/geist-variable-*.woff2 "
+                    f"({re.findall(rb'url[(][^)]*[)]', hoja)[:5]})")
+        return
+    ruta_fuente = "/" + fuente.group(1).decode()
+    codigo, cab, cuerpo = peticion("GET", ruta_fuente)
+    p(f"   la hoja carga {ruta_fuente}")
+    pasa(codigo == 200 and una(cab, "content-type") == TIPO_FUENTE,
+         f"b) fuente: {codigo}, content-type: {cab.get('content-type')!r}")
+    for nombre, valor in CABECERAS_SPA.items():
+        pasa(una(cab, nombre) == valor, f"b) fuente: {nombre}: {cab.get(nombre)!r}")
+    pasa("server" not in cab and "accept-ranges" not in cab, "b) fuente: sin Server ni Accept-Ranges")
+    huella = hashlib.sha256(cuerpo).hexdigest()
+    pasa(huella == SHA256_FUENTE, f"b) fuente: es la del release fijado (sha256 {huella[:16]}..., {len(cuerpo)} bytes)")
+
 
 def seccion_c_e():
     p("=== c) index.html sin nada en linea y e) contexto de compilacion aislado")
@@ -1973,14 +2100,17 @@ def seccion_d():
     negativo(f"d) sin node, npm, npx ni corepack en la imagen final ({final.out.split()})", not final.out.split(),
              "/usr/local/bin/node" in control.out, f"control: {control.out.split()}")
 
-    r = en_imagen(IMAGEN_PROXY, "find /srv/spa /data/caddy -maxdepth 1 -exec stat -c '%u:%g %a %n' {} +")
+    # /srv/spa con un nivel más (media/ y su fuente); de /data/caddy, solo él.
+    r = en_imagen(IMAGEN_PROXY, "find /srv/spa -maxdepth 2 -exec stat -c '%u:%g %a %n' {} + ; "
+                                "find /data/caddy -maxdepth 0 -exec stat -c '%u:%g %a %n' {} +")
     filas = [linea.split(" ", 2) for linea in r.out.splitlines() if linea.count(" ") >= 2]
     datos = {nombre: (dueno, int(modo, 8)) for dueno, modo, nombre in filas}
     control = datos.get("/data/caddy", ("", 0))[0] == "10002:10002" and "/srv/spa/index.html" in datos
     spa = {nombre: v for nombre, v in datos.items() if nombre.startswith("/srv/spa/")}
     nombres = sorted(n.removeprefix("/srv/spa/") for n in spa)
-    negativo(f"d) /srv/spa solo contiene index.html, un main-*.js y un styles-*.css ({nombres})",
-             len(nombres) == 3 and all(PATRON_FICHERO_SPA.fullmatch(n) for n in nombres), control,
+    negativo(f"d) /srv/spa solo contiene index.html, un main-*.js, un styles-*.css y media/ con la fuente "
+             f"({nombres})",
+             len(nombres) == FICHEROS_SPA and all(PATRON_FICHERO_SPA.fullmatch(n) for n in nombres), control,
              f"control: {r.todo.strip()[-300:]!r}")
     de_otro = sorted(n for n, (dueno, modo) in {**spa, "/srv/spa": datos.get("/srv/spa", ("", 0))}.items()
                      if dueno != "0:0" or modo & 0o022)
@@ -2255,25 +2385,34 @@ def contraste(a, b):
 
 
 def revisar_hoja(css):
-    """Lo que k) comprueba de una hoja: (parejas sin contraste suficiente,
-    colores fuera de :root, variables usadas que no existen). Sin
-    comentarios, que pueden nombrar colores."""
+    """Lo que k) comprueba de una hoja: (parejas sin contraste suficiente en
+    algún tema, colores fuera de los dos :root, variables usadas que no
+    existen, colores del claro que el oscuro no redefine). Sin comentarios,
+    que pueden nombrar colores."""
     sin_comentarios = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
-    raiz = re.search(r":root\s*\{(.*?)\}", sin_comentarios, re.DOTALL)
-    if raiz is None:
-        raise Parada("spa/src/styles.css no tiene bloque :root")
-    variables = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", raiz.group(1)))
+    oscuro = PATRON_TEMA_OSCURO.search(sin_comentarios)
+    if oscuro is None:
+        raise Parada("spa/src/styles.css no tiene el :root de @media (prefers-color-scheme: dark)")
+    resto = sin_comentarios[:oscuro.start()] + sin_comentarios[oscuro.end():]
+    raices = list(re.finditer(r":root\s*\{(.*?)\}", resto, re.DOTALL))
+    if len(raices) != 1:
+        raise Parada(f"spa/src/styles.css debe tener un solo :root fuera del tema oscuro (tiene {len(raices)})")
+    raiz = raices[0]
+    claro = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", raiz.group(1)))
+    propias = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", oscuro.group(1)))
     flojas = []
-    for frente, fondo, minimo in PAREJAS_CONTRASTE:
-        a, b = variables.get(frente, ""), variables.get(fondo, "")
-        if not (re.fullmatch(r"#[0-9a-f]{6}", a) and re.fullmatch(r"#[0-9a-f]{6}", b)):
-            flojas.append(f"{frente}/{fondo}: no son #rrggbb ({a!r}, {b!r})")
-        elif contraste(a, b) < minimo:
-            flojas.append(f"{frente}/{fondo}: {contraste(a, b):.2f} < {minimo}")
-    fuera = sin_comentarios[:raiz.start()] + sin_comentarios[raiz.end():]
+    for tema, variables in (("claro", claro), ("oscuro", {**claro, **propias})):
+        for frente, fondo, minimo in PAREJAS_CONTRASTE:
+            a, b = variables.get(frente, ""), variables.get(fondo, "")
+            if not (re.fullmatch(r"#[0-9a-f]{6}", a) and re.fullmatch(r"#[0-9a-f]{6}", b)):
+                flojas.append(f"{tema} {frente}/{fondo}: no son #rrggbb ({a!r}, {b!r})")
+            elif contraste(a, b) < minimo:
+                flojas.append(f"{tema} {frente}/{fondo}: {contraste(a, b):.2f} < {minimo}")
+    fuera = resto[:raiz.start()] + resto[raiz.end():]
     sueltos = re.findall(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(", fuera)
     usadas = set(re.findall(r"var\((--[a-z0-9-]+)\)", sin_comentarios))
-    return flojas, sueltos, sorted(usadas - set(variables))
+    olvidados = sorted(n for n in claro if n.startswith("--color-") and n not in propias)
+    return flojas, sueltos, sorted(usadas - set(claro) - set(propias)), olvidados
 
 
 def revisar_botones(textos):
@@ -2288,22 +2427,30 @@ def revisar_botones(textos):
 
 
 def seccion_k():
-    p("=== k) base visual: contraste de los colores, sin colores sueltos y sin variables que no existen; "
+    p("=== k) base visual: contraste de los colores en los dos temas, sin colores sueltos y sin variables que no existen; "
       "botones ocupados con aria-disabled")
     control = round(contraste("#767676", "#ffffff"), 2) == 4.54 and round(contraste("#777777", "#ffffff"), 2) == 4.48
     pasa(control, "k) control: la formula de contraste da 4,54:1 con #767676 y 4,48:1 con #777777 sobre blanco")
     css = ESTILOS_SPA.read_text(encoding="utf-8")
-    flojas, sueltos, inexistentes = revisar_hoja(css)
-    if css.count(MUTANTE_GRIS[0]) != 1:
-        sinc("k) el mutante del gris claro no encuentra --color-texto-suave en spa/src/styles.css")
-        control_gris = False
-    else:
-        control_gris = bool(revisar_hoja(css.replace(*MUTANTE_GRIS))[0])
+    flojas, sueltos, inexistentes, olvidados = revisar_hoja(css)
+    # Cada mutante, con el índice de lo que debe hacer saltar en revisar_hoja.
+    controles = {}
+    for nombre, mutante, indice in (("gris claro", MUTANTE_GRIS, 0), ("gris del oscuro", MUTANTE_GRIS_OSCURO, 0),
+                                    ("color olvidado", MUTANTE_OLVIDADO, 3)):
+        if css.count(mutante[0]) != 1:
+            sinc(f"k) el mutante del {nombre} no encuentra su texto en spa/src/styles.css")
+            controles[nombre] = False
+        else:
+            controles[nombre] = bool(revisar_hoja(css.replace(*mutante))[indice])
     control_suelto = bool(revisar_hoja(css + MUTANTE_COLOR_SUELTO)[1])
     control_variable = bool(revisar_hoja(css + MUTANTE_VARIABLE)[2])
-    negativo(f"k) las {len(PAREJAS_CONTRASTE)} parejas de colores llegan a su contraste minimo {flojas}".rstrip(),
-             not flojas, control and control_gris, "control: con un gris claro la comprobacion no salta")
-    negativo(f"k) ningun color fuera de :root {sueltos}".rstrip(), not sueltos, control_suelto,
+    negativo(f"k) las {len(PAREJAS_CONTRASTE)} parejas de colores llegan a su contraste minimo en los dos temas "
+             f"{flojas}".rstrip(),
+             not flojas, control and controles["gris claro"] and controles["gris del oscuro"],
+             "control: con un gris claro en uno de los temas la comprobacion no salta")
+    negativo(f"k) el tema oscuro redefine todos los colores del claro {olvidados}".rstrip(), not olvidados,
+             controles["color olvidado"], "control: un color que falta en el oscuro no se detecta")
+    negativo(f"k) ningun color fuera de los dos :root {sueltos}".rstrip(), not sueltos, control_suelto,
              "control: un color suelto no se detecta")
     negativo(f"k) toda variable usada esta definida {inexistentes}".rstrip(), not inexistentes, control_variable,
              "control: una variable que no existe no se detecta")
@@ -2873,6 +3020,60 @@ def seccion_o():
              f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
 
 
+def seccion_p():
+    global ULTIMO_PASO
+    p("=== p) la fuente y el tema oscuro en Chromium, y la SPA a 320 px sin desbordar")
+    if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
+        sinc("p) sin el secreto TOTP del admin (i no termino) no se pueden mirar sus paginas")
+        return
+    res = navegador("navegador_p", NAVEGADOR_ESTETICA,
+                    [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
+                     json.dumps(RUTAS_ANCHO)])
+    if res is None:
+        sinc("p) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"p) el recorrido se interrumpe: {res['excepcion']}")
+        p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ULTIMO_PASO = res.get("ultimo_paso_admin", ULTIMO_PASO)
+
+    pasa(res.get("fuentes") == FUENTES_ESPERADAS,
+         f"p) la pagina usa una sola fuente, Geist, y esta cargada ({res.get('fuentes')})")
+
+    # El tema: el fondo en claro es el control de que se lee el de la hoja.
+    control_tema = res.get("fondo_claro") == FONDO_CLARO
+    pasa(control_tema, f"p) control: con el sistema en claro, el fondo es el del claro ({res.get('fondo_claro')!r})")
+    negativo(f"p) con el sistema en oscuro, el fondo es el del oscuro ({res.get('fondo_oscuro')!r})",
+             res.get("fondo_oscuro") == FONDO_OSCURO, control_tema)
+
+    # La barra separa el email del rol: Angular quita los espacios entre
+    # elementos y salían pegados.
+    pasa(res.get("quien") == f"{EMAIL_ADMIN} {NOMBRE_ROL_ADMIN}",
+         f"p) la barra separa el email del rol ({res.get('quien')!r})")
+
+    # 320 px, con un elemento de 400 px como control.
+    ancho_control = res.get("ancho_control") or [0, 0]
+    control_ancho = ancho_control[0] > ancho_control[1] > 0
+    pasa(control_ancho, f"p) control: un elemento de 400 px desborda a 320 px ({ancho_control})")
+    anchos = res.get("anchos") or {}
+    anchas = {r: a for r, a in anchos.items() if not 0 < a[0] <= a[1]}
+    mirar = ["/entrar", *RUTAS_ANCHO]
+    negativo(f"p) a 320 px ninguna pagina desborda en horizontal ({len(anchos)} de {len(mirar)}) "
+             f"{anchas if anchas else ''}".rstrip(),
+             sorted(anchos) == sorted(mirar) and not anchas, control_ancho, f"{anchos}")
+
+    # Consola.
+    consola, errores = res.get("consola") or [], res.get("errores") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    control_csp = any("font-src" in m for m in senales_csp(consola[corte:]))
+    pasa(control_csp, f"p) control: una fuente de otro origen deja su violacion de font-src "
+                      f"({senales_csp(consola[corte:])[:1]})")
+    negativo(f"p) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
+             f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
+             not senales_csp(consola[:corte]) and not errores, control_csp,
+             f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
+
+
 # ---------------------------------------------------------------------------
 # Limpieza, precondiciones y arranque
 # ---------------------------------------------------------------------------
@@ -3005,7 +3206,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o):
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p):
             seccion()
     except Parada as e:
         parada = str(e)
