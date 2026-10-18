@@ -165,9 +165,9 @@
 	}
 }
 
-# SPA del personal (8445). En el bloque 6a solo reenvía la API del personal, que
-# responde JSON: la CSP es la de la API. La de la SPA (sus scripts y estilos,
-# Trusted Types) llega con la SPA en el 6b, comprobada con el build real.
+# SPA del personal (8445): los ficheros de la SPA y la API del personal, en el
+# mismo origen. La misma CSP vale para los dos: la API responde JSON, que no
+# ejecuta nada aunque la CSP permita los scripts propios.
 (cabeceras_spa) {
 	import cabeceras_comunes
 	header {
@@ -176,7 +176,24 @@
 		# POST salen con "Origin: null" (MDN, Origin), y la API exige el origen
 		# de la SPA en todo lo que cambia algo (app/rutas_personal.py).
 		Referrer-Policy "same-origin"
-		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		# Solo lo propio, comprobado con el build real (bloque 6b-1):
+		# - script-src y style-src 'self': index.html no lleva nada en línea
+		#   (inlineCritical desactivado en spa/angular.json) y los componentes
+		#   no declaran estilos, que Angular inyectaría con <style>. Sin
+		#   'unsafe-inline' ni nonces: un HTML inyectado no ejecuta nada.
+		# - connect-src 'self': la SPA solo habla con su propio origen (la API
+		#   va por /v1/personal). Un script inyectado no puede mandar datos a
+		#   otro servidor con fetch. Navegar fuera sí puede (CSP3 no tiene
+		#   navigate-to): es un límite asumido (docs/threat-model.md, 8).
+		# - Trusted Types: el navegador rechaza asignar un texto a innerHTML y a
+		#   los demás sumideros de DOM XSS si no pasa por una política. Solo
+		#   existe la de Angular, que sanea lo que recibe; 'angular#unsafe-bypass'
+		#   (la de bypassSecurityTrust*) no está permitida. Solo lo aplican los
+		#   navegadores basados en Chromium (8).
+		# - base-uri 'self' y no 'none': Angular necesita <base href="/"> para
+		#   cargar main-*.js, que va con ruta relativa, desde una ruta profunda.
+		# - form-action 'none': la SPA envía con fetch, nunca con formularios.
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; require-trusted-types-for 'script'; trusted-types angular; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
 		Cross-Origin-Opener-Policy "same-origin"
 		# Ningún otro origen carga estas respuestas, tampoco el 8443 ni el 8444,
 		# que son del mismo sitio.
@@ -439,14 +456,19 @@ https://localhost:8445 {
 	import sin_range
 	import cabeceras_spa
 
+	# ServeContent anuncia "Accept-Ranges: bytes" aunque Range se haya quitado
+	# (ver el sitio del 8444). Aquí va en todo el sitio: la API no la pone, y
+	# así ningún file_server de la SPA queda sin la quita.
+	header -Accept-Ranges
+
 	# El mismo límite que en el 8443 y que en la API.
 	request_body {
 		max_size 128KiB
 	}
 
-	# Solo la API del personal. El resto (/v1/empresas, /v1/seguimiento, /web,
-	# /salud) no es alcanzable desde aquí: el camino anónimo nunca recibe las
-	# cookies del personal. El matcher path limpia y decodifica, así que
+	# De la API, solo la del personal. El resto (/v1/empresas, /v1/seguimiento,
+	# /web, /salud) no es alcanzable desde aquí: el camino anónimo nunca recibe
+	# las cookies del personal. El matcher path limpia y decodifica, así que
 	# /v1/personal/../empresas o /v1/personal/%2e%2e/seguimiento no casan. Lo
 	# que casa llega a la API tal cual, y Starlette no resuelve "..": una ruta
 	# como /v1/empresas/../personal/yo no es ninguna de la API (404).
@@ -458,9 +480,41 @@ https://localhost:8445 {
 		}
 	}
 
-	# Los ficheros de la SPA llegan en el bloque 6b. Hasta entonces, nada más.
-	handle {
+	# El resto de /v1 es la API, aunque no se reenvíe: 404 en JSON, como lo
+	# espera quien llama a la API, y no la página de la SPA.
+	@resto_api path /v1 /v1/*
+	handle @resto_api {
 		error 404
+	}
+
+	# La SPA, desde /srv/spa (copiada en la imagen de root, proxy/Dockerfile).
+	# Tres casos, en orden:
+	# 1. Un fichero que existe (index.html, main-*.js, styles-*.css): se sirve.
+	#    "/" es el directorio y file_server sirve su index.html. Sin browse.
+	# 2. Una ruta con extensión que no existe (un main-*.js de otra versión):
+	#    404. Si diera index.html, el navegador recibiría HTML donde espera un
+	#    script, y el fallo quedaría escondido.
+	# 3. Cualquier otra ruta es de la SPA (/denuncias/x): index.html, y el
+	#    router de Angular pinta la página o "Página no encontrada". Ninguna
+	#    ruta de la SPA lleva un punto (spa/src/app/app.routes.ts).
+	# Solo GET y HEAD; file_server responde 405 al resto.
+	handle {
+		root * /srv/spa
+
+		@fichero file
+		handle @fichero {
+			file_server
+		}
+
+		@con_extension path_regexp \.[^/]*$
+		handle @con_extension {
+			error 404
+		}
+
+		handle {
+			rewrite * /index.html
+			file_server
+		}
 	}
 
 	# Errores que genera Caddy: los lee la SPA, con el formato JSON de la API.

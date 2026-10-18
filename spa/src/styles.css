@@ -1,0 +1,4 @@
+/* Estilos globales de la SPA del personal. Todo el CSS vive aquí y sale en un
+   fichero propio: los componentes no declaran estilos, porque Angular los
+   inyecta con elementos <style> en línea, que la CSP (style-src 'self',
+   proxy/Caddyfile) bloquea. El aspecto llega en el bloque 6b-4. */

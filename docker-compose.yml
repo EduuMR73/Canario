@@ -386,9 +386,14 @@ services:
   caddy:
     # Imagen propia (proxy/Dockerfile) sobre caddy:2.11.7-alpine fijada por
     # digest: sin la file capability del binario, /data/caddy solo para el
-    # usuario 10002 y el Caddyfile dentro de la imagen.
+    # usuario 10002 y el Caddyfile dentro de la imagen. La SPA del personal se
+    # compila en una primera etapa con Node, que no llega a la imagen final.
     build:
       context: ./proxy
+      # spa/ como contexto aparte: el Dockerfile copia de ahí solo los ficheros
+      # que nombra, y el contexto principal sigue siendo proxy/.
+      additional_contexts:
+        spa: ./spa
     restart: unless-stopped
     depends_on:
       api:

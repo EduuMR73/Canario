@@ -1,0 +1,7 @@
+# Lo que genera un build o una instalación local. La imagen del proxy no lo
+# necesita: proxy/Dockerfile copia de spa/ solo los ficheros que nombra.
+/node_modules
+/dist
+/out-tsc
+/.angular
+npm-debug.log
