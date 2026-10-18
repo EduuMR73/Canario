@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Batería de escaneos de seguridad: secretos en Git, dependencias de Python,
 análisis estático, vulnerabilidades y secretos de las imágenes, configuración
-de los Dockerfiles y SBOM.
+de los Dockerfiles, dependencias de npm de la SPA y SBOM.
 
 Qué prueba:
   a) que las herramientas son las fijadas (versión y digest) y responden;
@@ -27,7 +27,12 @@ Qué prueba:
   h) un SBOM CycloneDX por imagen, que se deja en el directorio temporal del
      sistema (canario_sbom);
   i) versiones de las herramientas y fecha de la base de datos de Trivy, para
-     poder reproducir el resultado.
+     poder reproducir el resultado;
+  j) Trivy sobre spa/package-lock.json, con las dependencias de desarrollo:
+     ninguna vulnerabilidad HIGH o CRITICAL con arreglo publicado. La imagen de
+     Caddy solo lleva el JavaScript compilado, sin package.json: Trivy no
+     sabría de qué paquetes viene, así que se escanea el lock. Las de
+     desarrollo cuentan porque se ejecutan al compilar (proxy/Dockerfile).
 Cada prueba negativa lleva su control positivo con datos sintéticos: si el
 control falla, el resultado es SIN CONCLUSION, nunca PASA. Los oráculos son
 literales.
@@ -116,6 +121,14 @@ PAQUETE_ALTERADO = "fastapi"
 TEST_BANDIT_CONTROL = "B602"
 CODIGO_BANDIT_CONTROL = "import subprocess\n\n\ndef f(orden):\n    return subprocess.call(orden, shell=True)\n"
 CHECK_CONTROL_DOCKERFILE = "DS-0002"
+# Control de j): un lock con @angular/common 22.0.0, que tiene este aviso HIGH
+# con arreglo en la 22.0.1 (Trivy 0.74.0 lo informa por su CVE, comprobado).
+AVISO_CONTROL_NPM = "CVE-2026-54266"
+LOCK_CONTROL = {
+    "name": "control", "lockfileVersion": 3, "requires": True,
+    "packages": {"": {"name": "control", "dependencies": {"@angular/common": "22.0.0"}},
+                 "node_modules/@angular/common": {"version": "22.0.0"}},
+}
 DOCKERFILE_CONTROL = "FROM alpine:3.20\nRUN echo hola\n"
 SEGUIDOS_EN_SECRETS = ["secrets/.gitkeep", "secrets/README.md"]
 SBOM_API_CONTROL = ("fastapi", "0.143.0")
@@ -817,6 +830,52 @@ def seccion_g():
 
 
 # ---------------------------------------------------------------------------
+# j) Dependencias de npm de la SPA (Trivy fs sobre el lock)
+# ---------------------------------------------------------------------------
+def lock_npm(directorio):
+    """Trivy sobre el package-lock.json de un directorio, sin red, con las
+    dependencias de desarrollo y todas las severidades: el criterio se aplica
+    después, igual para el control y para el real."""
+    r = trivy(["fs", "/lock", "--scanners", "vuln", "--include-dev-deps", "--skip-db-update", "--offline-scan",
+               "--skip-version-check", "--no-progress", "-q", "--format", "json"],
+              montajes=[montaje(directorio, "/lock")])
+    return r, json_de_texto(r.out)
+
+
+def seccion_j():
+    p("=== j) dependencias de npm de la SPA (Trivy sobre spa/package-lock.json)")
+    control_dir = TEMPORAL / "lock_control"
+    escribir(control_dir / "package-lock.json", json.dumps(LOCK_CONTROL))
+    _, informe = lock_npm(control_dir)
+    # El control pasa por el mismo criterio que el real: HIGH o CRITICAL y con
+    # arreglo publicado.
+    control = any(v["VulnerabilityID"] == AVISO_CONTROL_NPM and v.get("Severity") in SEVERIDADES.split(",")
+                  and v.get("FixedVersion") for _, v in hallazgos(informe)[0])
+    pasa(control, f"j) control: Trivy detecta {AVISO_CONTROL_NPM} ({SEVERIDADES}, con arreglo) en un lock con "
+                  "@angular/common 22.0.0")
+
+    # Una copia: la herramienta no ve el repositorio.
+    real_dir = TEMPORAL / "lock_spa"
+    real_dir.mkdir()
+    shutil.copyfile(RAIZ / "spa" / "package-lock.json", real_dir / "package-lock.json")
+    r, informe = lock_npm(real_dir)
+    if informe is None:
+        raise Parada(f"Trivy no produjo JSON para spa/package-lock.json: {r.err.strip()[-300:]}")
+    paquetes = sum(len(res.get("Packages") or []) for res in informe.get("Results") or [])
+    objetivos = [res.get("Target") for res in informe.get("Results") or []]
+    pasa(objetivos == ["package-lock.json"] and paquetes > 0, f"j) Trivy analiza el lock ({objetivos}, {paquetes} paquetes)")
+    vulns = hallazgos(informe)[0]
+    graves = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("InstalledVersion"), v.get("FixedVersion"))
+                     for _, v in vulns if v.get("Severity") in SEVERIDADES.split(",") and v.get("FixedVersion")})
+    negativo(f"j) spa/package-lock.json: ninguna vulnerabilidad {SEVERIDADES} con arreglo publicado",
+             not graves, control, str(graves))
+    claves_graves = {g[:2] for g in graves}
+    resto = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("Severity")) for _, v in vulns
+                    if (v["VulnerabilityID"], v["PkgName"]) not in claves_graves})
+    p(f"   resto de avisos (otras severidades o sin arreglo): {len(resto)}" + (f" -> {resto}" if resto else ""))
+
+
+# ---------------------------------------------------------------------------
 # h) SBOM e i) reproducibilidad
 # ---------------------------------------------------------------------------
 def seccion_h():
@@ -932,14 +991,15 @@ def main():
     TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_escaneos_"))
     parada = None
     try:
-        for seccion in (seccion_a, seccion_b, seccion_c_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i):
+        for seccion in (seccion_a, seccion_b, seccion_c_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
+                        seccion_j):
             try:
                 seccion()
             except SinRed as e:
                 # Sin red no hay conclusión posible sobre lo que dependía de ella.
                 sinc(f"{seccion.__name__}: {e}")
                 if seccion is seccion_e:
-                    break  # f), g), h) e i) dependen de las imágenes y de la base de datos
+                    break  # f) a j) dependen de las imágenes y de la base de datos
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
