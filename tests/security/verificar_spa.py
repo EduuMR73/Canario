@@ -38,10 +38,11 @@ etapa. Prueba:
   se leen los certificados públicos, nunca una clave;
 * h) las pruebas unitarias de la SPA (Vitest, spa/src/app/**/*.spec.ts) en
   la etapa de compilación, sin red (control: con red, el mismo contenedor sí
-  sale). Control positivo de las pruebas: tres mutantes (el interceptor de
-  renovación sin la marca RENOVABLE y sin la renovación compartida, y el
-  guard de las páginas sin la comprobación del rol) hacen fallar la prueba
-  que los vigila;
+  sale). Control positivo de las pruebas: cinco mutantes (el interceptor de
+  renovación sin la marca RENOVABLE y sin la renovación compartida, el guard
+  de las páginas sin la comprobación del rol, el cliente de denuncias sin la
+  comprobación del uuid y "no veraz" ofrecido al instructor) hacen fallar la
+  prueba que los vigila;
 * i) el recorrido del personal en Chromium, con los formularios rellenados por
   su etiqueta (si un campo no la tiene, la prueba falla): activación desde el
   enlace con el token en el fragmento, que sale de la URL y no queda en la
@@ -78,13 +79,36 @@ etapa. Prueba:
   sesión del auditor (control: antes de la baja entraba) y la propia cuenta
   no tiene botón de baja; cambiar la contraseña con la actual mal da su
   aviso sin renovar la sesión, y con la buena la sesión sigue viva; ninguna
-  violación de la CSP ni error de JavaScript.
+  violación de la CSP ni error de JavaScript;
+* m) las denuncias en Chromium (bloque 6b-3b), con dos denuncias creadas por
+  la API pública como un denunciante, con cargas XSS en el texto y en un
+  mensaje (una con U+202E): el admin ve las dos y el instructor solo la suya;
+  el admin asigna desde el listado y solo tiene enlace a las suyas (control:
+  tras asignarse una, lo tiene); /denuncias/..%2Fusuarios, que el router
+  decodifica a "../usuarios", es "no encontrada" sin pedir nada a la API
+  (control: con un uuid, la página de la denuncia); la carga directa de la
+  página no lee el expediente ni deja fila de auditoría (control: el botón lo
+  lee una vez y deja una fila); las cargas salen como texto literal, sin
+  crear elementos ni ejecutar nada (control: el main-*.js de un mutante con
+  [innerHTML], con la página y su CSP reales, crea el <img> y la CSP bloquea
+  su carga), con dir="auto", y el
+  expediente no va al almacenamiento ni a la consola; el mensaje y los
+  cambios de estado no vuelven a leer; cerrar sin mensaje final no envía
+  nada (control: con él, sí); "no veraz" solo lo tiene el admin y pide
+  confirmación; tras cerrar la sesión, "atrás" acaba en /entrar sin el
+  expediente (control: antes estaba); ninguna violación de la CSP ni error de
+  JavaScript.
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
 misma forma (docs/threat-model.md, 8); Web Locks y las cookies en otros
 navegadores que no sean Chromium; accesibilidad completa (axe, bloque 6b-5);
 el botón "Copiar el enlace", porque el portapapeles de Chromium sin pantalla
-necesita permisos que la prueba tendría que conceder a mano.
+necesita permisos que la prueba tendría que conceder a mano. De las
+denuncias, en el navegador no prueba "Cargar más" (harían falta más de 100
+denuncias; el cursor lo prueba verificar_personal.py y la SPA lo reenvía tal
+cual), el aviso de 20 lecturas ni el 429 del tope (harían falta 20 y 51
+denuncias; el texto del aviso tiene su prueba unitaria y el tope, la suya en
+verificar_personal.py).
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -282,10 +306,22 @@ PRUEBAS_UNITARIAS = (
     "la situación: activa, sin activar o desactivada",
     "los avisos: invitación abierta y entrada desde navegadores nuevos",
     "el enlace de activación lleva el token en el fragmento",
+    "429 con una espera de más de una hora la da en horas, redondeando hacia arriba",
+    "un id que no es un uuid no llega a ninguna petición",
+    "sin mensaje, el cambio de estado no envía el campo",
+    "los cambios de estado que se ofrecen son los de la API, sin no veraz",
+    "los estados cerrados, que exigen mensaje final y no admiten más mensajes",
+    "el instructor no puede declarar no veraz; el admin sí",
+    "las fechas de la API se leen como día, sin pasar por Date",
+    "el aviso de lecturas sale a partir de 20",
+    "el autor de un mensaje: denunciante, usted u otra persona del personal",
+    "la categoría con su nombre, o tal cual si no se conoce",
+    "la ruta de una denuncia solo casa con un uuid",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
-# Mutantes del interceptor y del guard: (qué quita, fichero, texto original,
-# texto mutado, la prueba que debe fallar).
+# Mutantes del interceptor, del guard, del cliente de denuncias y de los
+# permisos del expediente: (qué quita, fichero, texto original, texto mutado,
+# la prueba que debe fallar).
 MUTANTES_UNITARIOS = (
     ("sin la marca RENOVABLE", "src/app/nucleo/renovacion.ts",
      "  if (!peticion.context.get(RENOVABLE)) {", "  if (false) {",
@@ -296,6 +332,12 @@ MUTANTES_UNITARIOS = (
     ("sin la comprobacion del rol", "src/app/nucleo/permisos.ts",
      "  if (!roles.includes(yo.rol)) {", "  if (false) {",
      "un instructor que pide /cuentas vuelve a /inicio"),
+    ("sin la comprobacion del uuid en el cliente de denuncias", "src/app/nucleo/api-denuncias.ts",
+     "  if (!esIdDenuncia(id)) {", "  if (false) {",
+     "un id que no es un uuid no llega a ninguna petición"),
+    ("no veraz tambien para el instructor", "src/app/denuncias/textos.ts",
+     "  return rol === 'admin';", "  return true;",
+     "el instructor no puede declarar no veraz; el admin sí"),
 )
 # process.exit: el agente de Node mantiene viva la conexión y el proceso no
 # terminaría solo.
@@ -358,8 +400,9 @@ MUTANTE_VARIABLE = "\n.mutante { color: var(--color-que-no-existe); }\n"
 EMAIL_INSTRUCTORA = "instructora@spa.test"
 EMAIL_AUDITOR = "auditor@spa.test"
 CONTRASENA_NUEVAS = secrets.token_urlsafe(18)
-MENU_ADMIN = ["Inicio", "Cuentas", "Solicitudes", "Mi cuenta"]
-MENU_OTROS = ["Inicio", "Mi cuenta"]
+MENU_ADMIN = ["Inicio", "Denuncias", "Cuentas", "Solicitudes", "Mi cuenta"]
+MENU_INSTRUCTOR = ["Inicio", "Denuncias", "Mi cuenta"]
+MENU_AUDITOR = ["Inicio", "Mi cuenta"]
 H1_MI_CUENTA = "Mi cuenta"
 PATRON_ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
 TEXTO_SIN_ROL = f"Elija el rol de {EMAIL_REGISTRO} antes de aprobar."
@@ -379,6 +422,33 @@ PATRON_ENLACE_CORREO = re.compile(r"https://localhost:8445/activacion#([0-9a-f]{
 # Lo que delata una violación de la CSP o de Trusted Types en la consola de
 # Chromium.
 SENALES_CSP = ("Content Security Policy", "TrustedHTML", "TrustedScript", "Trusted Type")
+
+# m) Las denuncias (spa/src/app/denuncias).
+EMAIL_INSTRUCTOR_M = "instructor.m@spa.test"
+H1_DENUNCIA = "Denuncia"
+# Un id que el router decodifica a "../usuarios" (spa/src/app/nucleo/api-denuncias.ts).
+RUTA_CSPT = "/denuncias/..%2Fusuarios"
+# Lo que escribe un denunciante anónimo. Si algo se ejecutara, pondría
+# window.canarioXss; MARCA_CARGA identifica las cargas en la página y en la
+# consola.
+MARCA_CARGA = "canario-carga-xss"
+CARGA_DENUNCIA = ('<img src=x onerror="window.canarioXss=1"><script>window.canarioXss=2</script>'
+                  '<svg onload="window.canarioXss=3"></svg> ' + MARCA_CARGA)
+# Con U+202E (RIGHT-TO-LEFT OVERRIDE), que dir="auto" aísla (CWE-451).
+CARGA_MENSAJE = "\u202e<b>negrita</b> <a href=\"javascript:window.canarioXss=4\">enlace</a> " + MARCA_CARGA
+TEXTO_PERSONAL = "Gracias por su denuncia: la estamos revisando."
+TEXTO_FINAL = "Hemos resuelto la denuncia y aplicado las medidas oportunas."
+TEXTO_MENSAJE_ENVIADO = "Mensaje enviado."
+TEXTO_EN_INSTRUCCION = "Estado cambiado a En instrucción."
+TEXTO_CIERRE = "Estado cambiado a Resuelta. El mensaje final se ha enviado y saldrá numerado al volver a leer."
+CABECERA_PENDIENTE = "Mensaje final · Usted · saldrá numerado al volver a leer"
+FOCO_EXPEDIENTE = "Expediente"
+FOCO_NO_VERAZ = "Confirmar: declarar no veraz"
+# El control del XSS: el texto de la denuncia con [innerHTML] en vez de
+# interpolación (spa/src/app/denuncias/contenido.ts). El sanitizador de
+# Angular quita onerror, el <script> y el <svg>, pero deja el <img>.
+MUTANTE_XSS = ('<p class="texto-libre" dir="auto" id="expediente-texto">{{ expediente().texto }}</p>',
+               '<p class="texto-libre" dir="auto" id="expediente-texto" [innerHTML]="expediente().texto"></p>')
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -684,20 +754,16 @@ async def pasos(contexto):
 asyncio.run(ejecutar(spki, pasos))
 '''
 
-# l) Las pantallas por rol, con tres cuentas en tres contextos (cada uno con
-# sus cookies). Recibe el SPKI, el identificador, el email, la contraseña, el
-# secreto TOTP y el último paso usado del admin, el email de la solicitud de
-# j), los emails de la instructora y del auditor y la contraseña de las dos.
-# Nunca devuelve un token ni un secreto: solo si tienen la forma esperada.
-NAVEGADOR_ROLES = NAVEGADOR_COMUN + r'''
+# Parte común de los scripts de l) y m): varias cuentas del personal, cada una
+# en su contexto (con sus cookies). Las funciones usan spki, identificador y
+# contrasena, que cada script define antes de llamarlas, y usados, donde cada
+# script pone el último paso TOTP del admin.
+NAVEGADOR_PERSONAL = NAVEGADOR_COMUN + r'''
 import re
-(spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin, email_registro,
- email_instructora, email_auditor, contrasena) = sys.argv[1:11]
 ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
-USUARIOS = "/v1/personal/usuarios"
 # El último paso TOTP usado por cada secreto: cada cuenta lleva el suyo, así
 # que no hay que esperar al código de otra.
-usados = {secreto_admin: int(paso_admin)}
+usados = {}
 
 
 async def codigo_de(secreto):
@@ -802,6 +868,40 @@ async def esperar_texto(pagina, selector):
     elemento = pagina.locator(selector)
     await elemento.wait_for()
     return await elemento.inner_text()
+
+
+async def esperar_otro(pagina, selector, anterior):
+    # Un aviso de la acción anterior sigue a la vista hasta que llega el
+    # nuevo: se espera a que cambie su texto.
+    await pagina.wait_for_function(
+        "([s, a]) => { const e = document.querySelector(s); return e !== null && e.textContent.trim() !== a; }",
+        arg=[selector, anterior])
+    return await pagina.locator(selector).inner_text()
+
+
+async def ejecutar_personal(pasos):
+    async with async_playwright() as pw:
+        navegador = await pw.chromium.launch(args=[f"--ignore-certificate-errors-spki-list={spki}"])
+        try:
+            await pasos(navegador)
+        except Exception as e:
+            res["excepcion"] = f"{type(e).__name__}: {e}"[:600]
+            res["avisos_visibles"] = await avisos_visibles()
+        res["consola"], res["errores"] = consola, errores
+        await navegador.close()
+    print(json.dumps(res, ensure_ascii=False))
+'''
+
+# l) Las pantallas por rol, con tres cuentas. Recibe el SPKI, el
+# identificador, el email, la contraseña, el secreto TOTP y el último paso
+# usado del admin, el email de la solicitud de j), los emails de la
+# instructora y del auditor y la contraseña de las dos. Nunca devuelve un
+# token ni un secreto: solo si tienen la forma esperada.
+NAVEGADOR_ROLES = NAVEGADOR_PERSONAL + r'''
+(spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin, email_registro,
+ email_instructora, email_auditor, contrasena) = sys.argv[1:11]
+USUARIOS = "/v1/personal/usuarios"
+usados[secreto_admin] = int(paso_admin)
 
 
 async def pasos_roles(navegador):
@@ -923,20 +1023,233 @@ async def pasos_roles(navegador):
     res["ultimo_paso_admin"] = usados[secreto_admin]
 
 
-async def ejecutar_roles():
-    async with async_playwright() as pw:
-        navegador = await pw.chromium.launch(args=[f"--ignore-certificate-errors-spki-list={spki}"])
-        try:
-            await pasos_roles(navegador)
-        except Exception as e:
-            res["excepcion"] = f"{type(e).__name__}: {e}"[:600]
-            res["avisos_visibles"] = await avisos_visibles()
-        res["consola"], res["errores"] = consola, errores
-        await navegador.close()
-    print(json.dumps(res, ensure_ascii=False))
+asyncio.run(ejecutar_personal(pasos_roles))
+'''
+
+# m) Las denuncias. Recibe el SPKI, el identificador, el email, la
+# contraseña, el secreto TOTP y el último paso usado del admin, el email y la
+# contraseña de un instructor nuevo y el nombre del main-*.js servido. Lee de
+# /prueba/datos.json los ids de las dos denuncias, las cargas y sus textos (en
+# un fichero y no en la línea de órdenes: llevan U+202E y comillas), y de
+# /prueba/mutante.js el main-*.js del mutante con [innerHTML].
+NAVEGADOR_DENUNCIAS = NAVEGADOR_PERSONAL + r'''
+(spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin, email_instructor, contrasena,
+ principal) = sys.argv[1:10]
+with open("/prueba/datos.json", encoding="utf-8") as fichero:
+    datos = json.load(fichero)
+D1, D2, MARCA = datos["d1"], datos["d2"], datos["marca"]
+with open("/prueba/mutante.js", "rb") as fichero:
+    MUTANTE = fichero.read()
+usados[secreto_admin] = int(paso_admin)
+RUTA_D1 = "/v1/personal/denuncias/" + D1
+TEXTOS_LIBRES = """() => {
+  const bloques = [...document.querySelectorAll('main .texto-libre')];
+  return {
+    textos: bloques.map((b) => b.textContent),
+    hijos: bloques.reduce((n, b) => n + b.childElementCount, 0),
+    dir: bloques.map((b) => b.getAttribute('dir')),
+    peligrosos: document.querySelectorAll('main img, main script, main svg, main iframe, main a[href^="javascript"]').length,
+    bandera: typeof window.canarioXss,
+  };
+}"""
 
 
-asyncio.run(ejecutar_roles())
+def lecturas_d1(marca):
+    return len([e for e in eventos[marca:] if e["tipo"] == "peticion" and e["metodo"] == "GET" and e["ruta"] == RUTA_D1])
+
+
+async def auditadas(pagina, denuncia_id):
+    # Filas lectura_denuncia de la auditoría sobre una denuncia, leídas por la
+    # API como admin (la auditoría tiene una sola página en esta prueba).
+    return await pagina.evaluate("""async (d) => {
+      const r = await fetch('/v1/personal/auditoria');
+      const j = await r.json();
+      return j.filas.filter((f) => f.accion === 'lectura_denuncia' && f.objeto_id === d).length;
+    }""", denuncia_id)
+
+
+async def abrir_expediente(pagina):
+    await pagina.get_by_role("button", name="Abrir el expediente", exact=True).click()
+    await pagina.locator("#expediente-texto").wait_for()
+
+
+async def enlaces_a(pagina, denuncia):
+    return await pagina.get_by_role("link", name="Ir a la denuncia " + denuncia, exact=True).count()
+
+
+async def pasos_denuncias(navegador):
+    admin = await pagina_nueva(navegador, "admin")
+    await entrar(admin, email_admin, contrasena_admin, secreto_admin)
+    res["menu_admin"] = await menu(admin)
+
+    # Un instructor propio de m: l no devuelve el secreto TOTP de los suyos.
+    await ir_por_menu(admin, "Cuentas")
+    await invitar(admin, email_instructor, "instructor")
+    enlace = await esperar_texto(admin, "#cuentas-enlace")
+    instructor = await pagina_nueva(navegador, "instructor")
+    secreto_instructor = await activar(instructor, enlace)
+    await entrar(instructor, email_instructor, contrasena, secreto_instructor)
+    res["menu_instructor"] = await menu(instructor)
+
+    # Admin: el listado entero; sin enlace a las que no tiene asignadas.
+    res["h1_listado"] = await ir_por_menu(admin, "Denuncias")
+    await admin.get_by_role("row").filter(has_text=D2).wait_for()
+    res["filas_admin"] = sorted(await admin.locator("tbody th[scope=row]").all_inner_texts())
+    res["enlaces_admin_antes"] = [await enlaces_a(admin, D1), await enlaces_a(admin, D2)]
+    await admin.get_by_label("Asignar la denuncia " + D1 + " a", exact=True).select_option(label=email_instructor)
+    marca = len(eventos)
+    await admin.get_by_role("button", name="Asignar la denuncia " + D1, exact=True).click()
+    res["asignada_d1"] = await esperar_texto(admin, "#denuncias-hecho")
+    await admin.get_by_role("row").filter(has_text=D1).filter(has_text=email_instructor).wait_for()
+    res["asignar_api"] = api_desde(marca)
+    res["fila_d1_admin"] = await fila(admin, D1)
+    await admin.get_by_label("Asignar la denuncia " + D2 + " a", exact=True).select_option(label=email_admin)
+    await admin.get_by_role("button", name="Asignar la denuncia " + D2, exact=True).click()
+    res["asignada_d2"] = await esperar_otro(admin, "#denuncias-hecho", res["asignada_d1"])
+    await admin.get_by_role("link", name="Ir a la denuncia " + D2, exact=True).wait_for()
+    res["enlaces_admin_despues"] = [await enlaces_a(admin, D1), await enlaces_a(admin, D2)]
+
+    # Instructor: solo la suya.
+    res["h1_listado_instructor"] = await ir_por_menu(instructor, "Denuncias")
+    await instructor.get_by_role("link", name="Ir a la denuncia " + D1, exact=True).wait_for()
+    res["filas_instructor"] = await instructor.locator("tbody th[scope=row]").all_inner_texts()
+
+    # Un id que no es un uuid: "no encontrada" sin pedir nada a la API
+    # (control: con el uuid, la página de la denuncia).
+    marca = len(eventos)
+    res["cspt"] = await abrir(instructor, "/denuncias/..%2Fusuarios")
+    res["cspt_api"] = [e for e in api_desde(marca)
+                       if e["ruta"].startswith(("/v1/personal/usuarios", "/v1/personal/denuncias"))]
+
+    # Carga directa: la página no lee nada (control: el botón, una lectura y
+    # una fila de auditoría).
+    marca = len(eventos)
+    res["directa"] = await abrir(instructor, "/denuncias/" + D1)
+    res["directa_boton"] = await instructor.get_by_role("button", name="Abrir el expediente", exact=True).count()
+    res["directa_lecturas"] = lecturas_d1(marca)
+    res["auditadas_antes"] = await auditadas(admin, D1)
+    marca_abrir = len(eventos)
+    await abrir_expediente(instructor)
+    res["foco_abrir"] = await foco(instructor)
+    res["abrir_lecturas"] = lecturas_d1(marca_abrir)
+    res["auditadas_despues"] = await auditadas(admin, D1)
+
+    # Las cargas salen como texto.
+    res["xss"] = await instructor.evaluate(TEXTOS_LIBRES)
+    res["almacen_instructor"] = await almacenamiento(instructor)
+    res["no_veraz_instructor"] = await instructor.get_by_role("button", name="Declarar no veraz", exact=True).count()
+
+    # Un mensaje: se añade sin volver a leer.
+    await instructor.get_by_label("Mensaje para el denunciante", exact=True).fill(datos["texto_personal"])
+    marca = len(eventos)
+    await instructor.get_by_role("button", name="Enviar el mensaje", exact=True).click()
+    res["mensaje_hecho"] = await esperar_texto(instructor, "#expediente-hecho")
+    await asyncio.sleep(1)
+    res["mensaje_api"] = api_desde(marca)
+    res["mensajes_vistos"] = await instructor.locator(".mensajes > li").all_inner_texts()
+
+    # Estados: en instrucción, y cerrar sin mensaje final (no envía nada) y
+    # con él.
+    await instructor.get_by_label("Estado nuevo", exact=True).select_option("en_instruccion")
+    marca = len(eventos)
+    await instructor.get_by_role("button", name="Cambiar el estado", exact=True).click()
+    res["estado_1"] = await esperar_otro(instructor, "#expediente-hecho", res["mensaje_hecho"])
+    await asyncio.sleep(1)
+    res["estado_1_api"] = api_desde(marca)
+    res["estado_visto_1"] = await instructor.inner_text("#expediente-estado")
+    await instructor.get_by_label("Estado nuevo", exact=True).select_option("resuelta")
+    await instructor.get_by_label("Mensaje final para el denunciante", exact=True).wait_for()
+    marca = len(eventos)
+    await instructor.get_by_role("button", name="Cambiar el estado", exact=True).click()
+    await asyncio.sleep(1)
+    res["cierre_sin_mensaje_api"] = api_desde(marca)
+    res["cierre_sin_mensaje_falta"] = await instructor.locator("#expediente-final").evaluate("e => e.validity.valueMissing")
+    await instructor.get_by_label("Mensaje final para el denunciante", exact=True).fill(datos["texto_final"])
+    marca = len(eventos)
+    await instructor.get_by_role("button", name="Cambiar el estado", exact=True).click()
+    res["cierre"] = await esperar_otro(instructor, "#expediente-hecho", res["estado_1"])
+    await asyncio.sleep(1)
+    res["cierre_api"] = api_desde(marca)
+    res["estado_visto_2"] = await instructor.inner_text("#expediente-estado")
+    res["mensajes_tras_cierre"] = await instructor.locator(".mensajes > li").all_inner_texts()
+    res["formularios_tras_cierre"] = await instructor.locator("main textarea, #expediente-destino").count()
+    res["lecturas_tras_acciones"] = lecturas_d1(marca_abrir)
+
+    # Admin: la suya se abre, tiene "no veraz" y pide confirmación.
+    await ir_por_menu(admin, "Denuncias")
+    await admin.get_by_role("link", name="Ir a la denuncia " + D2, exact=True).click()
+    await admin.get_by_role("button", name="Abrir el expediente", exact=True).wait_for()
+    await abrir_expediente(admin)
+    res["no_veraz_admin"] = await admin.get_by_role("button", name="Declarar no veraz", exact=True).count()
+    await admin.get_by_role("button", name="Declarar no veraz", exact=True).click()
+    await admin.get_by_role("button", name="Declarar no veraz", exact=True).wait_for(state="detached")
+    res["foco_no_veraz"] = await foco(admin)
+    marca = len(eventos)
+    await admin.get_by_role("button", name="Confirmar: declarar no veraz", exact=True).click()
+    res["no_veraz_hecho"] = await esperar_texto(admin, "#expediente-hecho")
+    res["no_veraz_api"] = api_desde(marca)
+    await ir_por_menu(admin, "Denuncias")
+    await admin.get_by_role("row").filter(has_text=D1).wait_for()
+    res["filas_admin_final"] = await admin.locator("tbody th[scope=row]").all_inner_texts()
+
+    # Lo que sigue deja mensajes en la consola a propósito: el mutante (el
+    # aviso del sanitizador y la violación de la CSP de su <img>) y el control
+    # de la CSP. La comprobación de la consola mira solo hasta aquí.
+    res["consola_antes_del_control"] = len(consola)
+
+    # Control de la prueba del XSS: el mismo expediente con el main-*.js del
+    # mutante ([innerHTML]). Solo se sustituye el script: la página
+    # (index.html) llega de Caddy sin tocar, y la CSP y Trusted Types se
+    # aplican con las cabeceras de la página, no con las del script. Sin
+    # route.fetch: esa petición la hace Playwright fuera de Chromium, sin el
+    # SPKI de la CA de Caddy, y el TLS falla (la primera versión de esta
+    # prueba se quedaba colgada así).
+    async def servir_mutante(peticion_ruta):
+        await peticion_ruta.fulfill(status=200, content_type="text/javascript; charset=utf-8", body=MUTANTE)
+
+    await instructor.context.route(ORIGEN + "/" + principal, servir_mutante)
+    await abrir(instructor, "/denuncias/" + D1)
+    await abrir_expediente(instructor)
+    res["mutante"] = await instructor.evaluate(
+        "() => { const t = document.querySelector('#expediente-texto'); "
+        "return {img: t.querySelectorAll('img').length, hijos: t.childElementCount}; }")
+    await asyncio.sleep(1)
+    await instructor.context.unroute(ORIGEN + "/" + principal)
+    # Que la CSP seguía puesta con el mutante: bloquea la carga de su <img>.
+    # El texto es el que escribe Chromium (Playwright 1.63.0), visto en su
+    # consola.
+    res["mutante_csp"] = [m for m in consola[res["consola_antes_del_control"]:]
+                          if "Loading the image" in m and "violates the following Content Security Policy directive" in m]
+
+    # "Atrás" tras cerrar la sesión: no vuelve el expediente (control: antes
+    # de cerrarla estaba en la página).
+    await abrir(instructor, "/denuncias")
+    await instructor.get_by_role("link", name="Ir a la denuncia " + D1, exact=True).click()
+    await instructor.get_by_role("button", name="Abrir el expediente", exact=True).wait_for()
+    await abrir_expediente(instructor)
+    res["atras_antes"] = MARCA in await html(instructor)
+    await instructor.get_by_role("button", name="Cerrar la sesión", exact=True).click()
+    await instructor.wait_for_url(ORIGEN + "/entrar")
+    # Las rutas por las que pasa la pestaña: "atrás" tiene que llevar de
+    # verdad a /denuncias, o la prueba no demostraría nada.
+    visitadas = []
+    instructor.on("framenavigated", lambda marco: visitadas.append(ruta(marco.url)) if marco.parent_frame is None else None)
+    await instructor.go_back()
+    # Una función y no una expresión: Playwright evalúa las expresiones con
+    # eval en la página, y la CSP sin 'unsafe-eval' lo bloquea (EvalError).
+    await instructor.wait_for_function("() => location.pathname === '/entrar'")
+    res["atras_visitadas"] = visitadas
+    res["atras_h1"] = await h1(instructor)
+    await instructor.wait_for_load_state("networkidle")
+    res["atras_ruta"] = ruta(instructor.url)
+    res["atras_marca"] = MARCA in await html(instructor)
+
+    # Control de la consola: una conexión a otro origen sí deja su violación.
+    await admin.evaluate("fetch('https://ejemplo.invalid/').catch(() => null)")
+    await asyncio.sleep(1)
+
+
+asyncio.run(ejecutar_personal(pasos_denuncias))
 '''
 
 
@@ -1003,6 +1316,7 @@ CA_LOCAL = None
 IMAGEN_PROXY = ""
 IMAGEN_API = ""
 IMAGEN_MUTANTE = f"{PROYECTO}_mutante"
+IMAGEN_MUTANTE_XSS = f"{PROYECTO}_mutante_xss"
 IMAGEN_PRUEBAS = f"{PROYECTO}_pruebas"
 SPKI_INTERMEDIA = ""
 SPKI_RAIZ = ""
@@ -1109,17 +1423,20 @@ def copia_de_spa(nombre):
     return copia
 
 
-def navegador(nombre, script, argumentos):
+def navegador(nombre, script, argumentos, ficheros=None):
     """Ejecuta un script de Playwright en Chromium y devuelve su JSON, o None.
     El navegador comparte la red del contenedor de Caddy: localhost:8445 es
     Caddy, con el mismo Host y el mismo SNI que desde el host. Mínimo
     privilegio: pwuser, raíz de solo lectura y sin capacidades (Playwright
     lanza Chromium sin su sandbox por defecto). La red la usa pip. Si falla,
-    solo se informa de stderr: stdout puede llevar el secreto TOTP de i)."""
+    solo se informa de stderr: stdout puede llevar el secreto TOTP de i).
+    ficheros ({nombre: bytes}) van junto al script, en /prueba."""
     directorio = TEMPORAL / nombre
     directorio.mkdir()
     (directorio / "navegador.py").write_text(script, encoding="utf-8", newline="\n")
     (directorio / "requisitos.txt").write_text(REQUISITOS_PLAYWRIGHT, encoding="utf-8", newline="\n")
+    for nombre_fichero, contenido in (ficheros or {}).items():
+        (directorio / nombre_fichero).write_bytes(contenido)
     caddy = dc("ps", "-q", "caddy").out.strip()
     r = ejecutar(["docker", "run", "--rm", "--network", f"container:{caddy}", "--user", USUARIO_PLAYWRIGHT,
                   "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--shm-size", "512m",
@@ -1634,7 +1951,7 @@ def seccion_l():
 
     # Menú y guard por rol, con la página propia como control.
     pasa(res.get("menu_admin") == MENU_ADMIN, f"l) el menu del admin ({res.get('menu_admin')})")
-    pasa(res.get("menu_instructora") == MENU_OTROS and res.get("menu_auditor") == MENU_OTROS,
+    pasa(res.get("menu_instructora") == MENU_INSTRUCTOR and res.get("menu_auditor") == MENU_AUDITOR,
          f"l) el menu de la instructora y del auditor ({res.get('menu_instructora')}, {res.get('menu_auditor')})")
     propia = res.get("instructora_cuenta") or {}
     control_guard = propia == {"ruta": "/cuenta", "h1": H1_MI_CUENTA}
@@ -1721,12 +2038,193 @@ def seccion_l():
              f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
 
 
+def ids_denuncias(acceso):
+    """Los ids de las denuncias de la empresa, por la API del 8443 con el
+    token del admin (Bearer)."""
+    codigo, _, cuerpo = peticion("GET", "/v1/personal/denuncias", puerto=PUERTO_API,
+                                 cabeceras={"Authorization": f"Bearer {acceso}"})
+    if codigo != 200:
+        raise Parada(f"m) el admin no puede listar las denuncias por la API ({codigo})")
+    return {d["denuncia_id"] for d in json.loads(cuerpo)["denuncias"]}
+
+
+def crear_denuncia(acceso, texto):
+    """Crea una denuncia por la API pública del 8443, como un denunciante, y
+    devuelve (id, código de seguimiento). La API no da el id al denunciante:
+    sale del listado del admin, antes y después."""
+    antes = ids_denuncias(acceso)
+    codigo, _, cuerpo = peticion("POST", f"/v1/empresas/{IDENTIFICADOR}/denuncias", puerto=PUERTO_API,
+                                 datos={"categoria": "fraude", "texto": texto})
+    seguimiento = (json.loads(cuerpo) if codigo == 201 else {}).get("codigo_seguimiento")
+    nuevas = ids_denuncias(acceso) - antes
+    if not seguimiento or len(nuevas) != 1:
+        raise Parada(f"m) no se pudo crear una denuncia de preparacion ({codigo})")
+    return nuevas.pop(), seguimiento
+
+
+def main_del_mutante_xss():
+    """El main-*.js de la SPA con el texto de la denuncia en [innerHTML], de
+    una copia de spa/ (el repositorio no se toca)."""
+    copia = copia_de_spa("spa_mutante_xss")
+    fichero = copia / "src" / "app" / "denuncias" / "contenido.ts"
+    texto = fichero.read_text(encoding="utf-8")
+    if texto.count(MUTANTE_XSS[0]) != 1:
+        raise Parada("m) el mutante del XSS no encuentra el texto de la denuncia en contenido.ts")
+    fichero.write_text(texto.replace(*MUTANTE_XSS), encoding="utf-8", newline="\n")
+    compilacion(copia, IMAGEN_MUTANTE_XSS)
+    r = en_imagen(IMAGEN_MUTANTE_XSS, "cat /spa/dist/canario-spa/browser/main-*.js")
+    if r.rc != 0 or len(r.out) < 1000:
+        raise Parada(f"m) no se pudo leer el main-*.js del mutante del XSS: {r.err.strip()[-300:]!r}")
+    return r.out.encode("utf-8")
+
+
+def seccion_m():
+    global ULTIMO_PASO
+    p("=== m) denuncias en Chromium: listado, asignacion, expediente sin lectura automatica, XSS, mensajes y estados")
+    if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
+        sinc("m) sin el secreto TOTP del admin (i no termino) no se pueden probar las denuncias")
+        return
+
+    # Preparación por la API del 8443: el admin con Bearer (para saber los
+    # ids) y el denunciante, que escribe las cargas en la denuncia y en un
+    # mensaje.
+    codigo_totp = codigo_tras(SECRETO_ADMIN, ULTIMO_PASO)
+    ULTIMO_PASO = int(time.time()) // 30
+    codigo, _, cuerpo = peticion("POST", RUTA_SESIONES, puerto=PUERTO_API, datos={
+        "empresa": IDENTIFICADOR, "email": EMAIL_ADMIN, "contrasena": CONTRASENA_ADMIN, "codigo_totp": codigo_totp})
+    acceso = (json.loads(cuerpo) if codigo == 201 else {}).get("token_acceso")
+    if not acceso:
+        raise Parada(f"m) el admin no pudo iniciar sesion por la API ({codigo})")
+    d1, seguimiento = crear_denuncia(acceso, CARGA_DENUNCIA)
+    d2, _ = crear_denuncia(acceso, "Denuncia sin cargas, para el admin.")
+    codigo, _, _ = peticion("POST", "/v1/seguimiento/mensajes", puerto=PUERTO_API,
+                            datos={"codigo": seguimiento, "texto": CARGA_MENSAJE})
+    if codigo != 201:
+        raise Parada(f"m) el denunciante no pudo escribir su mensaje ({codigo})")
+    mutante = main_del_mutante_xss()
+
+    datos = {"d1": d1, "d2": d2, "marca": MARCA_CARGA, "texto_personal": TEXTO_PERSONAL, "texto_final": TEXTO_FINAL}
+    res = navegador("navegador_m", NAVEGADOR_DENUNCIAS,
+                    [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
+                     EMAIL_INSTRUCTOR_M, CONTRASENA_NUEVAS, MAIN],
+                    {"datos.json": json.dumps(datos, ensure_ascii=False).encode("utf-8"), "mutante.js": mutante})
+    if res is None:
+        sinc("m) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"m) el recorrido se interrumpe: {res['excepcion']}")
+        p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ruta_d1 = f"/v1/personal/denuncias/{d1}"
+
+    # Menú y listado.
+    pasa(res.get("menu_admin") == MENU_ADMIN and res.get("menu_instructor") == MENU_INSTRUCTOR,
+         f"m) el menu del admin y del instructor lleva Denuncias ({res.get('menu_admin')}, {res.get('menu_instructor')})")
+    control_listado = res.get("filas_admin") == sorted([d1, d2])
+    pasa(control_listado, f"m) control: el admin ve las dos denuncias ({res.get('filas_admin')})")
+    negativo(f"m) el instructor solo ve la que tiene asignada ({res.get('filas_instructor')})",
+             res.get("filas_instructor") == [d1], control_listado)
+    control_enlace = res.get("enlaces_admin_despues") == [0, 1]
+    pasa(control_enlace, f"m) control: tras asignarse una, el admin tiene su enlace ({res.get('enlaces_admin_despues')})")
+    negativo(f"m) sin asignar, el admin no tiene enlace a la denuncia ({res.get('enlaces_admin_antes')})",
+             res.get("enlaces_admin_antes") == [0, 0], control_enlace)
+    asignar = respuestas(res.get("asignar_api") or [])
+    pasa(res.get("asignada_d1") == f"La denuncia {d1} está asignada a {EMAIL_INSTRUCTOR_M}."
+         and ("PUT", f"{ruta_d1}/asignacion", 204) in asignar and EMAIL_INSTRUCTOR_M in (res.get("fila_d1_admin") or ""),
+         f"m) el admin asigna desde el listado y la fila dice a quien ({res.get('asignada_d1')!r}, {asignar})")
+
+    # Un id que no es un uuid y la carga directa.
+    control_directa = (res.get("directa") == {"ruta": f"/denuncias/{d1}", "h1": H1_DENUNCIA}
+                       and res.get("directa_boton") == 1)
+    pasa(control_directa, f"m) control: /denuncias/<uuid> abre la pagina de la denuncia ({res.get('directa')})")
+    negativo(f"m) {RUTA_CSPT} es 'no encontrada' y no pide nada a la API ({res.get('cspt')}, "
+             f"{respuestas(res.get('cspt_api') or [])})",
+             res.get("cspt") == {"ruta": RUTA_CSPT, "h1": H1_NO_ENCONTRADA} and res.get("cspt_api") == [], control_directa)
+    control_lectura = res.get("abrir_lecturas") == 1 and res.get("auditadas_despues") == 1
+    pasa(control_lectura, f"m) control: el boton lee una vez y deja una fila de auditoria "
+                          f"({res.get('abrir_lecturas')}, {res.get('auditadas_despues')})")
+    negativo(f"m) la carga directa no lee nada ni deja fila ({res.get('directa_lecturas')}, {res.get('auditadas_antes')})",
+             res.get("directa_lecturas") == 0 and res.get("auditadas_antes") == 0, control_lectura)
+    pasa(res.get("foco_abrir") == FOCO_EXPEDIENTE, f"m) al abrir, el foco va al expediente ({res.get('foco_abrir')!r})")
+
+    # XSS almacenado, con el mutante como control.
+    mutado = res.get("mutante") or {}
+    control_xss = mutado.get("img") == 1 and bool(res.get("mutante_csp"))
+    pasa(control_xss, f"m) control: con [innerHTML], la carga crea un <img> aunque la CSP siga puesta y bloquee su "
+                      f"carga ({mutado}, {(res.get('mutante_csp') or [''])[0][:120]!r})")
+    xss = res.get("xss") or {}
+    negativo(f"m) las cargas salen como texto literal, sin crear ningun elemento ni ejecutar nada "
+             f"({xss.get('hijos')}, {xss.get('peligrosos')}, {xss.get('bandera')})",
+             xss.get("textos") == [CARGA_DENUNCIA, CARGA_MENSAJE] and xss.get("hijos") == 0
+             and xss.get("peligrosos") == 0 and xss.get("bandera") == "undefined", control_xss,
+             f"textos {xss.get('textos')}")
+    pasa(xss.get("dir") == ["auto", "auto"], f"m) los textos libres llevan dir=\"auto\" ({xss.get('dir')})")
+    consola, errores = res.get("consola") or [], res.get("errores") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    pasa(res.get("almacen_instructor") == [0, 0] and not any(MARCA_CARGA in m for m in consola[:corte]),
+         f"m) el expediente no va al almacenamiento ni a la consola ({res.get('almacen_instructor')})")
+
+    # Mensajes y estados, sin volver a leer.
+    mensaje = respuestas(res.get("mensaje_api") or [])
+    vistos = res.get("mensajes_vistos") or [""]
+    pasa(res.get("mensaje_hecho") == TEXTO_MENSAJE_ENVIADO and mensaje == [("POST", f"{ruta_d1}/mensajes", 201)]
+         and "Mensaje 2 · Usted" in vistos[-1] and TEXTO_PERSONAL in vistos[-1],
+         f"m) el mensaje se envia y se anade con su numero, sin volver a leer ({mensaje}, {vistos[-1]!r})")
+    estado_1 = respuestas(res.get("estado_1_api") or [])
+    pasa(res.get("estado_1") == TEXTO_EN_INSTRUCCION and estado_1 == [("POST", f"{ruta_d1}/estado", 204)]
+         and res.get("estado_visto_1") == "En instrucción",
+         f"m) pasa a En instruccion ({res.get('estado_1')!r}, {estado_1})")
+    cierre = respuestas(res.get("cierre_api") or [])
+    control_cierre = cierre == [("POST", f"{ruta_d1}/estado", 204)]
+    pasa(control_cierre, f"m) control: con el mensaje final, cerrar se envia ({cierre})")
+    negativo(f"m) cerrar sin mensaje final no envia nada ({respuestas(res.get('cierre_sin_mensaje_api') or [])}, "
+             f"falta {res.get('cierre_sin_mensaje_falta')})",
+             res.get("cierre_sin_mensaje_api") == [] and res.get("cierre_sin_mensaje_falta") is True, control_cierre)
+    tras_cierre = res.get("mensajes_tras_cierre") or [""]
+    pasa(res.get("cierre") == TEXTO_CIERRE and res.get("estado_visto_2") == "Resuelta"
+         and CABECERA_PENDIENTE in tras_cierre[-1] and TEXTO_FINAL in tras_cierre[-1]
+         and res.get("formularios_tras_cierre") == 0,
+         f"m) tras cerrar: el estado, el mensaje final pendiente de numero y sin formularios ({res.get('cierre')!r})")
+    pasa(res.get("lecturas_tras_acciones") == 1,
+         f"m) mensaje y estados no vuelven a leer el expediente ({res.get('lecturas_tras_acciones')} lectura)")
+
+    # No veraz: solo el admin, con confirmación.
+    control_no_veraz = res.get("no_veraz_admin") == 1
+    pasa(control_no_veraz, f"m) control: el admin tiene 'Declarar no veraz' en la suya ({res.get('no_veraz_admin')})")
+    negativo(f"m) el instructor no tiene 'Declarar no veraz' ({res.get('no_veraz_instructor')})",
+             res.get("no_veraz_instructor") == 0, control_no_veraz)
+    no_veraz = respuestas(res.get("no_veraz_api") or [])
+    pasa(res.get("foco_no_veraz") == FOCO_NO_VERAZ and no_veraz == [("POST", f"/v1/personal/denuncias/{d2}/estado", 204)]
+         and res.get("no_veraz_hecho") == (f"La denuncia {d2} está declarada no veraz: ya no existe para el canal y se "
+                                           "suprimirá en la siguiente ejecución de la supresión.")
+         and res.get("filas_admin_final") == [d1],
+         f"m) no veraz pide confirmacion, se declara y sale del listado ({res.get('foco_no_veraz')!r}, {no_veraz}, "
+         f"{res.get('filas_admin_final')})")
+
+    # "Atrás" tras cerrar la sesión.
+    control_atras = res.get("atras_antes") is True and "/denuncias" in (res.get("atras_visitadas") or [])
+    pasa(control_atras, f"m) control: antes de cerrar la sesion el expediente esta en la pagina, y 'atras' pasa por "
+                        f"/denuncias ({res.get('atras_visitadas')})")
+    negativo(f"m) tras cerrar la sesion, 'atras' acaba en /entrar sin el expediente ({res.get('atras_ruta')!r}, "
+             f"{res.get('atras_h1')!r})",
+             res.get("atras_ruta") == "/entrar" and res.get("atras_h1") == H1_ENTRAR and res.get("atras_marca") is False,
+             control_atras)
+
+    # Consola.
+    control_csp = bool(senales_csp(consola[corte:]))
+    pasa(control_csp, f"m) control: el mutante y una conexion a otro origen dejan su violacion de la CSP "
+                      f"({consola[corte:][:1]})")
+    negativo(f"m) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
+             f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
+             not senales_csp(consola[:corte]) and not errores, control_csp,
+             f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
+
+
 # ---------------------------------------------------------------------------
 # Limpieza, precondiciones y arranque
 # ---------------------------------------------------------------------------
 def limpiar():
     unitarios = [f"{IMAGEN_MUTANTE}_unitario_{i}" for i in range(1, len(MUTANTES_UNITARIOS) + 1)]
-    ejecutar(["docker", "image", "rm", "-f", IMAGEN_MUTANTE, IMAGEN_PRUEBAS, *unitarios])
+    ejecutar(["docker", "image", "rm", "-f", IMAGEN_MUTANTE, IMAGEN_MUTANTE_XSS, IMAGEN_PRUEBAS, *unitarios])
     return dc("down", "-v", "--rmi", "local")
 
 
@@ -1852,7 +2350,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l):
+                        seccion_j, seccion_k, seccion_l, seccion_m):
             seccion()
     except Parada as e:
         parada = str(e)

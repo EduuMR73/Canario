@@ -41,9 +41,9 @@ describe('permisos por rol', () => {
   }
 
   it('el menú de cada rol solo lleva sus páginas', () => {
-    expect(menuDe('admin').map((e) => e.texto)).toEqual(['Inicio', 'Cuentas', 'Solicitudes', 'Mi cuenta']);
-    expect(menuDe('admin').map((e) => e.ruta)).toEqual(['/inicio', '/cuentas', '/solicitudes', '/cuenta']);
-    expect(menuDe('instructor').map((e) => e.texto)).toEqual(['Inicio', 'Mi cuenta']);
+    expect(menuDe('admin').map((e) => e.texto)).toEqual(['Inicio', 'Denuncias', 'Cuentas', 'Solicitudes', 'Mi cuenta']);
+    expect(menuDe('admin').map((e) => e.ruta)).toEqual(['/inicio', '/denuncias', '/cuentas', '/solicitudes', '/cuenta']);
+    expect(menuDe('instructor').map((e) => e.texto)).toEqual(['Inicio', 'Denuncias', 'Mi cuenta']);
     expect(menuDe('auditor').map((e) => e.texto)).toEqual(['Inicio', 'Mi cuenta']);
   });
 

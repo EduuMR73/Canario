@@ -16,6 +16,15 @@ describe('textos de error', () => {
       'Demasiadas peticiones seguidas. Espere 30 segundos y vuelva a intentarlo.');
   });
 
+  it('429 con una espera de más de una hora la da en horas, redondeando hacia arriba', () => {
+    expect(textoDeError(error(429, { 'Retry-After': '3600' }))).toBe(
+      'Demasiadas peticiones seguidas. Espere 60 minutos y vuelva a intentarlo.');
+    expect(textoDeError(error(429, { 'Retry-After': '3601' }))).toBe(
+      'Demasiadas peticiones seguidas. Espere 2 horas y vuelva a intentarlo.');
+    expect(textoDeError(error(429, { 'Retry-After': '86400' }))).toBe(
+      'Demasiadas peticiones seguidas. Espere 24 horas y vuelva a intentarlo.');
+  });
+
   it('429 sin un Retry-After legible no inventa un número', () => {
     expect(textoDeError(error(429, { 'Retry-After': 'mañana' }))).toBe(
       'Demasiadas peticiones seguidas. Espere unos minutos y vuelva a intentarlo.');
