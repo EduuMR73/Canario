@@ -6,7 +6,12 @@ La pila entera con la imagen real del proxy, que compila la SPA en su primera
 etapa. Prueba:
 
 * a) arranque de la pila (con Mailpit) y alta de una empresa y de la
-  invitación de su primer admin;
+  invitación de su primer admin. La API arranca con límites de petición
+  altos (CANARIO_LIMITES, en un compose adicional del directorio temporal) y
+  el log debe decirlo: i) y l) hacen más de 10 accesos (login, activación y
+  contraseña) en 5 minutos desde el mismo cliente, y el límite de producción
+  los cortaría según dónde caiga el cambio de ventana. Los límites de
+  producción los prueba verificar_denuncia.py, r);
 * b) las cabeceras exactas de la página, del script, de la hoja de estilos y de
   un error, con su tipo de contenido;
 * c) que index.html no lleva nada en línea (ni <script> sin src, ni <style>,
@@ -31,11 +36,12 @@ etapa. Prueba:
   SPKI de la CA intermedia, que es lo que Caddy envía (control: con el SPKI de
   la raíz, que no envía, la carga falla con ERR_CERT_AUTHORITY_INVALID). Solo
   se leen los certificados públicos, nunca una clave;
-* h) las pruebas unitarias de la SPA (Vitest, spa/src/app/nucleo/*.spec.ts)
-  en la etapa de compilación, sin red (control: con red, el mismo contenedor
-  sí sale). Control positivo de las pruebas: dos mutantes del interceptor de
-  renovación (sin la marca RENOVABLE y sin la renovación compartida) hacen
-  fallar la prueba que los vigila;
+* h) las pruebas unitarias de la SPA (Vitest, spa/src/app/**/*.spec.ts) en
+  la etapa de compilación, sin red (control: con red, el mismo contenedor sí
+  sale). Control positivo de las pruebas: tres mutantes (el interceptor de
+  renovación sin la marca RENOVABLE y sin la renovación compartida, y el
+  guard de las páginas sin la comprobación del rol) hacen fallar la prueba
+  que los vigila;
 * i) el recorrido del personal en Chromium, con los formularios rellenados por
   su etiqueta (si un campo no la tiene, la prueba falla): activación desde el
   enlace con el token en el fragmento, que sale de la URL y no queda en la
@@ -51,11 +57,34 @@ etapa. Prueba:
   origen sí deja su violación en la consola);
 * j) la verificación del registro desde el enlace del correo (Mailpit): el
   token sale de la URL, se envía al pulsar el botón y, después, el admin ve
-  la solicitud por la API.
+  la solicitud por la API;
+* k) la base visual de spa/src/styles.css, sin Docker: el contraste de cada
+  pareja de colores que usa (4,5:1 el texto y 3:1 bordes y foco, WCAG 2.2,
+  1.4.3 y 1.4.11), que no hay colores fuera de :root y que toda variable
+  usada existe. Control: la fórmula da 4,54:1 y 4,48:1 con los grises
+  #767676 y #777777 sobre blanco, y tres mutantes de la hoja (un gris claro,
+  un color suelto y una variable que no existe) hacen saltar cada
+  comprobación;
+* l) las pantallas por rol en Chromium (bloque 6b-3a): el menú de cada rol;
+  una página de otro rol abierta por su URL lleva a /inicio (control: la del
+  propio rol se abre) y la API responde 403 aunque la SPA se saltara
+  (control: el admin, 200); el admin aprueba la solicitud de j con un rol
+  elegido (sin rol no envía nada) y la invitación llega al correo, sin que el
+  token pase por la página; invita a dos cuentas y el enlace se muestra como
+  texto, nunca como enlace, sin quedar en la URL ni en el almacenamiento, y
+  desaparece al salir de la página (control: antes de salir está); con esos
+  enlaces se activan una instructora y un auditor; reinvitar avisa al titular
+  en /inicio, anular quita el aviso, la baja pide confirmación y cierra la
+  sesión del auditor (control: antes de la baja entraba) y la propia cuenta
+  no tiene botón de baja; cambiar la contraseña con la actual mal da su
+  aviso sin renovar la sesión, y con la buena la sesión sigue viva; ninguna
+  violación de la CSP ni error de JavaScript.
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
 misma forma (docs/threat-model.md, 8); Web Locks y las cookies en otros
-navegadores que no sean Chromium; accesibilidad completa (axe, bloque 6b-5).
+navegadores que no sean Chromium; accesibilidad completa (axe, bloque 6b-5);
+el botón "Copiar el enlace", porque el portapapeles de Chromium sin pantalla
+necesita permisos que la prueba tendría que conceder a mano.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -114,6 +143,15 @@ BASE = ["docker", "compose", "-p", PROYECTO, "-f", "docker-compose.yml", "--prof
 
 lineas_salida = []
 estado = {"falla": False, "sin_conclusion": False}
+
+# Límites altos para esta batería (ver a), en la cabecera), los mismos que las
+# secciones funcionales de tests/security/verificar_denuncia.py, y la línea
+# con la que la API los anuncia al arrancar (app/limitador.py).
+LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
+                  "cuenta=1000/60,registro=1000/3600,destinatario=1000/900,destinatario_dia=1000/86400")
+TEXTO_LIMITES_PRUEBA = ("LIMITES (configurados): acceso=1000/300 cuenta=1000/60 denuncia=1000/3600 "
+                        "destinatario=1000/900 destinatario_dia=1000/86400 mensajes=1000/3600 otras=1000/60 "
+                        "registro=1000/3600 seguimiento=1000/60")
 
 # ---------------------------------------------------------------------------
 # Oráculos literales
@@ -217,7 +255,7 @@ ERROR_TLS = "net::ERR_CERT_AUTHORITY_INVALID"
 ERROR_TRUSTED_HTML = "This document requires 'TrustedHTML' assignment"
 ERROR_POLITICA = "Policy \"angular#unsafe-bypass\" disallowed"
 
-# h) Pruebas unitarias (spa/src/app/nucleo/*.spec.ts): sus nombres, tal cual.
+# h) Pruebas unitarias (spa/src/app/**/*.spec.ts): sus nombres, tal cual.
 PRUEBAS_UNITARIAS = (
     "con un 401 de sesión renueva una vez, dentro del cerrojo, y repite la petición una vez",
     "repite también una petición que cambia algo (el 401 llega antes de que la ruta haga nada)",
@@ -235,10 +273,19 @@ PRUEBAS_UNITARIAS = (
     "429 sin un Retry-After legible no inventa un número",
     "sin red, servicio caído y el texto propio de la página",
     "el detalle de la API solo si es un texto",
+    "el menú de cada rol solo lleva sus páginas",
+    "un instructor que pide /cuentas vuelve a /inicio",
+    "un admin abre /cuentas, y la cuenta se pide una sola vez",
+    "una página sin roles no se abre para nadie",
+    "si /yo falla por la red, lleva a /no-disponible y recuerda la página",
+    "con un 401 no deja pasar ni lleva a otra página (lo hace el interceptor)",
+    "la situación: activa, sin activar o desactivada",
+    "los avisos: invitación abierta y entrada desde navegadores nuevos",
+    "el enlace de activación lleva el token en el fragmento",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
-# Mutantes del interceptor: (qué quita, fichero, texto original, texto mutado,
-# la prueba que debe fallar).
+# Mutantes del interceptor y del guard: (qué quita, fichero, texto original,
+# texto mutado, la prueba que debe fallar).
 MUTANTES_UNITARIOS = (
     ("sin la marca RENOVABLE", "src/app/nucleo/renovacion.ts",
      "  if (!peticion.context.get(RENOVABLE)) {", "  if (false) {",
@@ -246,6 +293,9 @@ MUTANTES_UNITARIOS = (
     ("sin la renovacion compartida", "src/app/nucleo/renovacion.ts",
      "    this.enCurso ??= this.cerrojo(", "    this.enCurso = this.cerrojo(",
      "dos peticiones con 401 a la vez comparten una sola renovación"),
+    ("sin la comprobacion del rol", "src/app/nucleo/permisos.ts",
+     "  if (!roles.includes(yo.rol)) {", "  if (false) {",
+     "un instructor que pide /cuentas vuelve a /inicio"),
 )
 # process.exit: el agente de Node mantiene viva la conexión y el proceso no
 # terminaría solo.
@@ -277,6 +327,55 @@ TEXTO_VERIFICADO = ("Email confirmado. Un admin de su empresa revisará la solic
                     "otro correo para activar la cuenta.")
 ASUNTO_VERIFICACION = "Confirme su email para registrarse en Canario"
 PATRON_VERIFICACION = re.compile(r"https://localhost:8445/registro/verificacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
+
+# k) La base visual. Las parejas que usa spa/src/styles.css, por el nombre de
+# sus variables: (primer plano, fondo, contraste mínimo). 4,5:1 para el texto
+# (WCAG 2.2, 1.4.3) y 3:1 para bordes de controles y foco (1.4.11). El
+# separador de las tablas no está: es decoración, la tabla se entiende sin él.
+ESTILOS_SPA = RAIZ / "spa" / "src" / "styles.css"
+PAREJAS_CONTRASTE = (
+    ("--color-texto", "--color-fondo", 4.5),
+    ("--color-texto", "--color-superficie", 4.5),
+    ("--color-texto", "--color-aviso-fondo", 4.5),
+    ("--color-texto-suave", "--color-fondo", 4.5),
+    ("--color-texto-suave", "--color-superficie", 4.5),
+    ("--color-acento", "--color-fondo", 4.5),
+    ("--color-acento", "--color-superficie", 4.5),
+    ("--color-boton-texto", "--color-boton", 4.5),
+    ("--color-peligro-texto", "--color-peligro", 4.5),
+    ("--color-error-texto", "--color-error-fondo", 4.5),
+    ("--color-etiqueta-texto", "--color-etiqueta-fondo", 4.5),
+    ("--color-borde", "--color-fondo", 3.0),
+    ("--color-acento", "--color-aviso-fondo", 3.0),
+    ("--color-peligro", "--color-error-fondo", 3.0),
+)
+# Mutantes de la hoja para los controles de k).
+MUTANTE_GRIS = ("--color-texto-suave: #4a4a4a;", "--color-texto-suave: #8a8a8a;")
+MUTANTE_COLOR_SUELTO = "\n.mutante { color: #000000; }\n"
+MUTANTE_VARIABLE = "\n.mutante { color: var(--color-que-no-existe); }\n"
+
+# l) Las pantallas por rol (spa/src/app).
+EMAIL_INSTRUCTORA = "instructora@spa.test"
+EMAIL_AUDITOR = "auditor@spa.test"
+CONTRASENA_NUEVAS = secrets.token_urlsafe(18)
+MENU_ADMIN = ["Inicio", "Cuentas", "Solicitudes", "Mi cuenta"]
+MENU_OTROS = ["Inicio", "Mi cuenta"]
+H1_MI_CUENTA = "Mi cuenta"
+PATRON_ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
+TEXTO_SIN_ROL = f"Elija el rol de {EMAIL_REGISTRO} antes de aprobar."
+TEXTO_APROBADA = f"Aprobada: {EMAIL_REGISTRO} recibirá un correo para activar su cuenta como Auditor."
+TEXTO_SIN_SOLICITUDES = "No hay solicitudes pendientes."
+FOCO_ENLACE = f"Enlace de activación para {EMAIL_INSTRUCTORA}"
+TEXTO_DUPLICADA = "Ya existe una cuenta con ese email."
+AVISO_INVITACION = ("Hay una invitación abierta para su cuenta. Si no la ha pedido usted, avise a un admin de su "
+                    "empresa para que la anule.")
+TEXTO_ANULADA = f"Se ha anulado la invitación de {EMAIL_INSTRUCTORA}."
+TEXTO_BAJA = f"{EMAIL_AUDITOR} está de baja: sus sesiones se han cerrado. Se puede reactivar con una invitación."
+TEXTO_CONTRASENA_MAL = "La contraseña actual o el código no son correctos."
+TEXTO_CONTRASENA_CAMBIADA = ("Contraseña cambiada. Se han cerrado sus otras sesiones y retirado los demás "
+                             "dispositivos de confianza.")
+ASUNTO_INVITACION = "Active su cuenta del personal en Canario"
+PATRON_ENLACE_CORREO = re.compile(r"https://localhost:8445/activacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 # Lo que delata una violación de la CSP o de Trusted Types en la consola de
 # Chromium.
 SENALES_CSP = ("Content Security Policy", "TrustedHTML", "TrustedScript", "Trusted Type")
@@ -585,6 +684,261 @@ async def pasos(contexto):
 asyncio.run(ejecutar(spki, pasos))
 '''
 
+# l) Las pantallas por rol, con tres cuentas en tres contextos (cada uno con
+# sus cookies). Recibe el SPKI, el identificador, el email, la contraseña, el
+# secreto TOTP y el último paso usado del admin, el email de la solicitud de
+# j), los emails de la instructora y del auditor y la contraseña de las dos.
+# Nunca devuelve un token ni un secreto: solo si tienen la forma esperada.
+NAVEGADOR_ROLES = NAVEGADOR_COMUN + r'''
+import re
+(spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin, email_registro,
+ email_instructora, email_auditor, contrasena) = sys.argv[1:11]
+ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
+USUARIOS = "/v1/personal/usuarios"
+# El último paso TOTP usado por cada secreto: cada cuenta lleva el suyo, así
+# que no hay que esperar al código de otra.
+usados = {secreto_admin: int(paso_admin)}
+
+
+async def codigo_de(secreto):
+    while True:
+        actual = int(time.time()) // 30
+        if actual > usados.get(secreto, -1):
+            usados[secreto] = actual
+            return totp(secreto, actual)
+        await asyncio.sleep(30 - time.time() % 30 + 0.5)
+
+
+paginas = {}
+
+
+async def pagina_nueva(navegador, nombre):
+    contexto = await navegador.new_context()
+    pagina = await contexto.new_page()
+    vigilar(pagina, nombre)
+    paginas[nombre] = pagina
+    return pagina
+
+
+async def avisos_visibles():
+    # Si el recorrido se corta, lo que cada página enseña en role=alert (un
+    # 429, un código no válido...): el informe dice qué ha pasado en vez de
+    # dejar solo un timeout.
+    vistos = {}
+    for nombre, pagina in paginas.items():
+        try:
+            vistos[nombre] = await pagina.get_by_role("alert").all_inner_texts()
+        except Exception as e:
+            vistos[nombre] = [f"no se pudo leer: {type(e).__name__}"]
+    return vistos
+
+
+async def h1(pagina):
+    await pagina.locator("main h1").wait_for()
+    return await pagina.inner_text("main h1")
+
+
+async def abrir(pagina, ruta_pedida):
+    # Carga directa, como un enlace o la barra de direcciones; espera a que
+    # el guard decida y la página se pinte.
+    await pagina.goto(ORIGEN + ruta_pedida)
+    titulo = await h1(pagina)
+    await pagina.wait_for_load_state("networkidle")
+    return {"ruta": ruta(pagina.url), "h1": titulo}
+
+
+async def entrar(pagina, email, clave, secreto):
+    await pagina.goto(ORIGEN + "/entrar")
+    await pagina.get_by_label("Empresa").fill(identificador)
+    await pagina.get_by_label("Email").fill(email)
+    await pagina.get_by_label("Contraseña", exact=True).fill(clave)
+    await pagina.get_by_label(CODIGO).fill(await codigo_de(secreto))
+    await pagina.get_by_role("button", name="Entrar", exact=True).click()
+    await pagina.wait_for_url(ORIGEN + "/inicio")
+    await pagina.locator(".cuenta dd").first.wait_for()
+
+
+async def menu(pagina):
+    return await pagina.get_by_role("navigation", name="Principal").get_by_role("link").all_inner_texts()
+
+
+async def ir_por_menu(pagina, texto):
+    await pagina.get_by_role("navigation", name="Principal").get_by_role("link", name=texto, exact=True).click()
+    return await h1(pagina)
+
+
+async def activar(pagina, enlace):
+    await pagina.goto(enlace)
+    await pagina.get_by_label("Contraseña nueva").fill(contrasena)
+    await pagina.get_by_label("Repita la contraseña").fill(contrasena)
+    await pagina.get_by_role("button", name="Continuar", exact=True).click()
+    await pagina.get_by_role("heading", name="Paso 2 de 2: configure la aplicación de autenticación").wait_for()
+    secreto = (await pagina.locator("#activacion-secreto").inner_text()).replace(" ", "")
+    await pagina.get_by_label(CODIGO).fill(await codigo_de(secreto))
+    await pagina.get_by_role("button", name="Activar la cuenta", exact=True).click()
+    await pagina.get_by_role("heading", name="Cuenta activada").wait_for()
+    return secreto
+
+
+async def estado_api(pagina, ruta_api):
+    return await pagina.evaluate("fetch('" + ruta_api + "').then(r => r.status)")
+
+
+async def html(pagina):
+    return await pagina.evaluate("document.documentElement.outerHTML")
+
+
+async def fila(pagina, email):
+    return await pagina.get_by_role("row").filter(has_text=email).inner_text()
+
+
+async def invitar(pagina, email, rol):
+    await pagina.get_by_label("Email").fill(email)
+    await pagina.get_by_label("Rol", exact=True).select_option(rol)
+    await pagina.get_by_role("button", name="Invitar", exact=True).click()
+
+
+async def esperar_texto(pagina, selector):
+    elemento = pagina.locator(selector)
+    await elemento.wait_for()
+    return await elemento.inner_text()
+
+
+async def pasos_roles(navegador):
+    admin = await pagina_nueva(navegador, "admin")
+    await entrar(admin, email_admin, contrasena_admin, secreto_admin)
+    res["menu_admin"] = await menu(admin)
+
+    # Solicitudes: sin rol no se envía nada; con rol, se aprueba.
+    res["h1_solicitudes"] = await ir_por_menu(admin, "Solicitudes")
+    marca = len(eventos)
+    await admin.get_by_role("button", name="Aprobar a " + email_registro, exact=True).click()
+    res["sin_rol"] = await admin.get_by_role("alert").inner_text()
+    await asyncio.sleep(1)
+    res["sin_rol_api"] = api_desde(marca)
+    await admin.get_by_label("Rol para " + email_registro).select_option("auditor")
+    marca = len(eventos)
+    await admin.get_by_role("button", name="Aprobar a " + email_registro, exact=True).click()
+    res["aprobada"] = await esperar_texto(admin, "#solicitudes-hecho")
+    await admin.get_by_text("No hay solicitudes pendientes.").wait_for()
+    res["aprobada_api"] = api_desde(marca)
+    res["aprobada_token"] = "/activacion#" in await html(admin)
+
+    # Cuentas: dos invitaciones con su enlace a la vista.
+    res["h1_cuentas"] = await ir_por_menu(admin, "Cuentas")
+    await invitar(admin, email_instructora, "instructor")
+    enlace_instructora = await esperar_texto(admin, "#cuentas-enlace")
+    res["foco_enlace"] = await foco(admin)
+    res["enlace_instructora"] = bool(ENLACE.fullmatch(enlace_instructora))
+    res["enlaces_a"] = await admin.locator("a[href*='activacion']").count()
+    res["ruta_con_enlace"] = ruta(admin.url) + ("#" if "#" in admin.url else "")
+    res["almacen_admin"] = await almacenamiento(admin)
+    await invitar(admin, email_auditor, "auditor")
+    await admin.get_by_role("heading", name="Enlace de activación para " + email_auditor).wait_for()
+    enlace_auditor = await admin.locator("#cuentas-enlace").inner_text()
+    res["enlace_auditor"] = bool(ENLACE.fullmatch(enlace_auditor))
+    token = enlace_auditor.split("#", 1)[-1]
+    res["token_antes_de_salir"] = token in await html(admin)
+    await ir_por_menu(admin, "Inicio")
+    await ir_por_menu(admin, "Cuentas")
+    await admin.get_by_role("row").filter(has_text=email_auditor).wait_for()
+    res["token_tras_salir"] = token in await html(admin)
+    await invitar(admin, email_instructora, "instructor")
+    res["duplicada"] = await admin.get_by_role("alert").inner_text()
+    res["usuarios_admin"] = await estado_api(admin, USUARIOS)
+
+    # Instructora: activa la cuenta con su enlace y entra.
+    instructora = await pagina_nueva(navegador, "instructora")
+    secreto_instructora = await activar(instructora, enlace_instructora)
+    await entrar(instructora, email_instructora, contrasena, secreto_instructora)
+    res["menu_instructora"] = await menu(instructora)
+    res["instructora_cuentas"] = await abrir(instructora, "/cuentas")
+    res["instructora_solicitudes"] = await abrir(instructora, "/solicitudes")
+    res["instructora_cuenta"] = await abrir(instructora, "/cuenta")
+    res["usuarios_instructora"] = await estado_api(instructora, USUARIOS)
+
+    # Auditor: igual.
+    auditor = await pagina_nueva(navegador, "auditor")
+    secreto_auditor = await activar(auditor, enlace_auditor)
+    await entrar(auditor, email_auditor, contrasena, secreto_auditor)
+    res["menu_auditor"] = await menu(auditor)
+    res["auditor_cuentas"] = await abrir(auditor, "/cuentas")
+    res["auditor_inicio_antes"] = await abrir(auditor, "/inicio")
+
+    # Admin: reinvitar, anular y dar de baja.
+    await abrir(admin, "/cuentas")
+    res["fila_instructora"] = await fila(admin, email_instructora)
+    res["baja_propia"] = await admin.get_by_role("button", name="Dar de baja a " + email_admin, exact=True).count()
+    res["baja_otra"] = await admin.get_by_role("button", name="Dar de baja a " + email_auditor, exact=True).count()
+    await admin.get_by_role("button", name="Reinvitar a " + email_instructora, exact=True).click()
+    res["reinvitada_enlace"] = bool(ENLACE.fullmatch(await esperar_texto(admin, "#cuentas-enlace")))
+    await admin.get_by_role("button", name="Anular la invitación de " + email_instructora, exact=True).wait_for()
+    res["fila_reinvitada"] = await fila(admin, email_instructora)
+    await abrir(instructora, "/inicio")
+    res["aviso_instructora"] = [t for t in await instructora.get_by_role("alert").all_inner_texts()]
+    await admin.get_by_role("button", name="Anular la invitación de " + email_instructora, exact=True).click()
+    res["anulada"] = await esperar_texto(admin, "#cuentas-hecho")
+    await admin.get_by_role("button", name="Anular la invitación de " + email_instructora, exact=True).wait_for(
+        state="detached")
+    res["fila_anulada"] = await fila(admin, email_instructora)
+    await admin.get_by_role("button", name="Dar de baja a " + email_auditor, exact=True).click()
+    # Leer el foco justo después del clic mide el DOM viejo: el botón pulsado
+    # sigue ahí y tiene el foco. Angular repinta y ejecuta afterNextRender
+    # (que mueve el foco) en la misma tarea (ApplicationRef, synchronizeOnce),
+    # así que cuando el botón ha desaparecido el foco ya está donde lo dejó la
+    # página.
+    await admin.get_by_role("button", name="Dar de baja a " + email_auditor, exact=True).wait_for(state="detached")
+    res["foco_confirmar"] = await foco(admin)
+    await admin.get_by_role("button", name="Confirmar la baja", exact=True).click()
+    # El aviso de la anulación sigue a la vista hasta que la baja lo cambia.
+    await admin.wait_for_function(
+        "([s, a]) => { const e = document.querySelector(s); return e !== null && e.textContent.trim() !== a; }",
+        arg=["#cuentas-hecho", res["anulada"]])
+    res["baja"] = await esperar_texto(admin, "#cuentas-hecho")
+    await admin.get_by_role("button", name="Dar de baja a " + email_auditor, exact=True).wait_for(state="detached")
+    res["fila_baja"] = await fila(admin, email_auditor)
+    res["auditor_inicio_despues"] = await abrir(auditor, "/inicio")
+
+    # Instructora: cambiar la contraseña, primero con la actual mal.
+    await ir_por_menu(instructora, "Mi cuenta")
+    await instructora.get_by_label("Contraseña actual").fill(contrasena + "-mal")
+    await instructora.get_by_label("Contraseña nueva", exact=True).fill(contrasena + "-2")
+    await instructora.get_by_label("Repita la contraseña nueva").fill(contrasena + "-2")
+    await instructora.get_by_label(CODIGO).fill("000000")
+    marca = len(eventos)
+    await instructora.get_by_role("button", name="Cambiar la contraseña", exact=True).click()
+    res["contrasena_mal"] = await instructora.get_by_role("alert").inner_text()
+    await asyncio.sleep(1)
+    res["contrasena_mal_api"] = api_desde(marca)
+    await instructora.get_by_label("Contraseña actual").fill(contrasena)
+    await instructora.get_by_label(CODIGO).fill(await codigo_de(secreto_instructora))
+    await instructora.get_by_role("button", name="Cambiar la contraseña", exact=True).click()
+    res["contrasena_cambiada"] = await esperar_texto(instructora, "#cuenta-hecho")
+    res["yo_tras_cambio"] = await estado_api(instructora, "/v1/personal/yo")
+
+    # Control de la consola: una conexión a otro origen sí deja su violación.
+    res["consola_antes_del_control"] = len(consola)
+    await admin.evaluate("fetch('https://ejemplo.invalid/').catch(() => null)")
+    await asyncio.sleep(1)
+    res["ultimo_paso_admin"] = usados[secreto_admin]
+
+
+async def ejecutar_roles():
+    async with async_playwright() as pw:
+        navegador = await pw.chromium.launch(args=[f"--ignore-certificate-errors-spki-list={spki}"])
+        try:
+            await pasos_roles(navegador)
+        except Exception as e:
+            res["excepcion"] = f"{type(e).__name__}: {e}"[:600]
+            res["avisos_visibles"] = await avisos_visibles()
+        res["consola"], res["errores"] = consola, errores
+        await navegador.close()
+    print(json.dumps(res, ensure_ascii=False))
+
+
+asyncio.run(ejecutar_roles())
+'''
+
 
 # ---------------------------------------------------------------------------
 # Utilidades de ejecución y de informe
@@ -854,6 +1208,9 @@ def seccion_a():
         raise Parada("no arranca la pila")
     IMAGEN_PROXY, IMAGEN_API = imagen_de("caddy"), imagen_de("api")
     p(f"imagen del proxy: {IMAGEN_PROXY}")
+    registro = dc("logs", "--no-color", "--no-log-prefix", "api").todo
+    pasa(TEXTO_LIMITES_PRUEBA in registro,
+         f"a) la API usa los limites de prueba y el log lo dice ({TEXTO_LIMITES_PRUEBA!r})")
     CA_LOCAL = TEMPORAL / "root.crt"
     r = dc("cp", f"caddy:{RAIZ_CA}", str(CA_LOCAL))
     if r.rc != 0 or not CA_LOCAL.is_file():
@@ -1152,6 +1509,7 @@ def seccion_i():
 
 
 def seccion_j():
+    global ULTIMO_PASO
     p("=== j) verificacion del registro desde el enlace del correo")
     enlace = None
     for _ in range(30):
@@ -1185,9 +1543,13 @@ def seccion_j():
     if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
         sinc("j) sin el secreto TOTP del admin (i no termino) no se puede comprobar la solicitud")
         return
+    codigo_totp = codigo_tras(SECRETO_ADMIN, ULTIMO_PASO)
+    # Para l): el paso de este código ya está usado. Leído después de
+    # calcularlo, así que como mucho es el siguiente, nunca uno anterior.
+    ULTIMO_PASO = int(time.time()) // 30
     codigo, _, cuerpo = peticion("POST", RUTA_SESIONES, puerto=PUERTO_API, datos={
         "empresa": IDENTIFICADOR, "email": EMAIL_ADMIN, "contrasena": CONTRASENA_ADMIN,
-        "codigo_totp": codigo_tras(SECRETO_ADMIN, ULTIMO_PASO)})
+        "codigo_totp": codigo_totp})
     acceso = (json.loads(cuerpo) if codigo == 201 else {}).get("token_acceso")
     if not acceso:
         sinc(f"j) el admin no pudo iniciar sesion por la API ({codigo})")
@@ -1196,6 +1558,167 @@ def seccion_j():
                                  cabeceras={"Authorization": f"Bearer {acceso}"})
     emails = [s.get("email") for s in (json.loads(cuerpo) if codigo == 200 else {}).get("solicitudes", [])]
     pasa(emails == [EMAIL_REGISTRO], f"j) el admin ve la solicitud verificada ({codigo}, {emails})")
+
+
+def luminancia(color):
+    """Luminancia relativa de un #rrggbb (WCAG 2.2, definiciones)."""
+    canales = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    lineales = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in canales]
+    return 0.2126 * lineales[0] + 0.7152 * lineales[1] + 0.0722 * lineales[2]
+
+
+def contraste(a, b):
+    claro, oscuro = sorted((luminancia(a), luminancia(b)), reverse=True)
+    return (claro + 0.05) / (oscuro + 0.05)
+
+
+def revisar_hoja(css):
+    """Lo que k) comprueba de una hoja: (parejas sin contraste suficiente,
+    colores fuera de :root, variables usadas que no existen). Sin
+    comentarios, que pueden nombrar colores."""
+    sin_comentarios = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    raiz = re.search(r":root\s*\{(.*?)\}", sin_comentarios, re.DOTALL)
+    if raiz is None:
+        raise Parada("spa/src/styles.css no tiene bloque :root")
+    variables = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", raiz.group(1)))
+    flojas = []
+    for frente, fondo, minimo in PAREJAS_CONTRASTE:
+        a, b = variables.get(frente, ""), variables.get(fondo, "")
+        if not (re.fullmatch(r"#[0-9a-f]{6}", a) and re.fullmatch(r"#[0-9a-f]{6}", b)):
+            flojas.append(f"{frente}/{fondo}: no son #rrggbb ({a!r}, {b!r})")
+        elif contraste(a, b) < minimo:
+            flojas.append(f"{frente}/{fondo}: {contraste(a, b):.2f} < {minimo}")
+    fuera = sin_comentarios[:raiz.start()] + sin_comentarios[raiz.end():]
+    sueltos = re.findall(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(", fuera)
+    usadas = set(re.findall(r"var\((--[a-z0-9-]+)\)", sin_comentarios))
+    return flojas, sueltos, sorted(usadas - set(variables))
+
+
+def seccion_k():
+    p("=== k) base visual: contraste de los colores, sin colores sueltos y sin variables que no existen")
+    control = round(contraste("#767676", "#ffffff"), 2) == 4.54 and round(contraste("#777777", "#ffffff"), 2) == 4.48
+    pasa(control, "k) control: la formula de contraste da 4,54:1 con #767676 y 4,48:1 con #777777 sobre blanco")
+    css = ESTILOS_SPA.read_text(encoding="utf-8")
+    flojas, sueltos, inexistentes = revisar_hoja(css)
+    if css.count(MUTANTE_GRIS[0]) != 1:
+        sinc("k) el mutante del gris claro no encuentra --color-texto-suave en spa/src/styles.css")
+        control_gris = False
+    else:
+        control_gris = bool(revisar_hoja(css.replace(*MUTANTE_GRIS))[0])
+    control_suelto = bool(revisar_hoja(css + MUTANTE_COLOR_SUELTO)[1])
+    control_variable = bool(revisar_hoja(css + MUTANTE_VARIABLE)[2])
+    negativo(f"k) las {len(PAREJAS_CONTRASTE)} parejas de colores llegan a su contraste minimo {flojas}".rstrip(),
+             not flojas, control and control_gris, "control: con un gris claro la comprobacion no salta")
+    negativo(f"k) ningun color fuera de :root {sueltos}".rstrip(), not sueltos, control_suelto,
+             "control: un color suelto no se detecta")
+    negativo(f"k) toda variable usada esta definida {inexistentes}".rstrip(), not inexistentes, control_variable,
+             "control: una variable que no existe no se detecta")
+
+
+def seccion_l():
+    global ULTIMO_PASO
+    p("=== l) pantallas por rol en Chromium: menu, guard, solicitudes, cuentas y contrasena")
+    if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
+        sinc("l) sin el secreto TOTP del admin (i no termino) no se pueden probar las pantallas")
+        return
+    res = navegador("navegador_l", NAVEGADOR_ROLES,
+                    [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
+                     EMAIL_REGISTRO, EMAIL_INSTRUCTORA, EMAIL_AUDITOR, CONTRASENA_NUEVAS])
+    if res is None:
+        sinc("l) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"l) el recorrido se interrumpe: {res['excepcion']}")
+        p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ULTIMO_PASO = res.get("ultimo_paso_admin", ULTIMO_PASO)
+
+    # Menú y guard por rol, con la página propia como control.
+    pasa(res.get("menu_admin") == MENU_ADMIN, f"l) el menu del admin ({res.get('menu_admin')})")
+    pasa(res.get("menu_instructora") == MENU_OTROS and res.get("menu_auditor") == MENU_OTROS,
+         f"l) el menu de la instructora y del auditor ({res.get('menu_instructora')}, {res.get('menu_auditor')})")
+    propia = res.get("instructora_cuenta") or {}
+    control_guard = propia == {"ruta": "/cuenta", "h1": H1_MI_CUENTA}
+    pasa(control_guard, f"l) control: la instructora abre /cuenta por su URL ({propia})")
+    for clave, ruta_pedida in (("instructora_cuentas", "/cuentas"), ("instructora_solicitudes", "/solicitudes"),
+                               ("auditor_cuentas", "/cuentas")):
+        negativo(f"l) {clave.split('_')[0]} pide {ruta_pedida} por su URL y vuelve a /inicio ({res.get(clave)})",
+                 res.get(clave) == {"ruta": "/inicio", "h1": H1_INICIO}, control_guard)
+    negativo(f"l) y la API responde 403 a la instructora en /usuarios ({res.get('usuarios_instructora')})",
+             res.get("usuarios_instructora") == 403, res.get("usuarios_admin") == 200,
+             f"control: el admin recibe {res.get('usuarios_admin')}")
+
+    # Solicitudes.
+    aprobada_api = res.get("aprobada_api") or []
+    aprobacion = [e for e in aprobada_api if e["tipo"] == "respuesta" and e["ruta"].endswith("/aprobacion")]
+    control_aprobar = [e["estado"] for e in aprobacion] == [201] and res.get("aprobada") == TEXTO_APROBADA
+    pasa(control_aprobar, f"l) control: con el rol elegido, la solicitud se aprueba ({respuestas(aprobada_api)}, "
+                          f"{res.get('aprobada')!r})")
+    negativo(f"l) sin rol, aprobar no envia nada y lo dice ({res.get('sin_rol')!r}, {res.get('sin_rol_api')})",
+             res.get("sin_rol") == TEXTO_SIN_ROL and res.get("sin_rol_api") == [], control_aprobar)
+    negativo("l) el token de la invitacion aprobada no pasa por la pagina", res.get("aprobada_token") is False,
+             control_aprobar)
+    enlace_correo = None
+    for _ in range(30):
+        for correo in buzon():
+            encaje = PATRON_ENLACE_CORREO.search(correo.get("texto") or "")
+            if EMAIL_REGISTRO in correo.get("para", []) and correo.get("asunto") == ASUNTO_INVITACION and encaje:
+                enlace_correo = encaje.group(0)
+        if enlace_correo:
+            break
+        time.sleep(1)
+    pasa(enlace_correo is not None, "l) la invitacion de la solicitud aprobada llega al correo verificado")
+
+    # El enlace de una invitación.
+    pasa(res.get("enlace_instructora") is True and res.get("enlace_auditor") is True
+         and res.get("reinvitada_enlace") is True,
+         "l) invitar y reinvitar muestran un enlace con la forma de la activacion")
+    pasa(res.get("foco_enlace") == FOCO_ENLACE, f"l) el foco va al encabezado del enlace ({res.get('foco_enlace')!r})")
+    pasa(res.get("enlaces_a") == 0, f"l) el enlace se muestra como texto, sin <a> que lo abra ({res.get('enlaces_a')})")
+    pasa(res.get("ruta_con_enlace") == "/cuentas" and res.get("almacen_admin") == [0, 0],
+         f"l) el token no va a la URL ni al almacenamiento ({res.get('ruta_con_enlace')!r}, {res.get('almacen_admin')})")
+    negativo("l) al salir de la pagina y volver, el enlace ya no esta", res.get("token_tras_salir") is False,
+             res.get("token_antes_de_salir") is True, "control: antes de salir no estaba en la pagina")
+    pasa(res.get("duplicada") == TEXTO_DUPLICADA, f"l) invitar un email que ya tiene cuenta ({res.get('duplicada')!r})")
+
+    # Reinvitar, anular y dar de baja.
+    pasa("Activa" in (res.get("fila_instructora") or ""), f"l) la instructora sale activa ({res.get('fila_instructora')!r})")
+    control_reinvitada = "Invitación abierta" in (res.get("fila_reinvitada") or "")
+    pasa(control_reinvitada, f"l) control: tras reinvitar, la fila avisa de la invitacion ({res.get('fila_reinvitada')!r})")
+    pasa(res.get("aviso_instructora") == [AVISO_INVITACION],
+         f"l) y la instructora ve el aviso en /inicio ({res.get('aviso_instructora')})")
+    negativo(f"l) anular quita el aviso de la fila ({res.get('anulada')!r})",
+             res.get("anulada") == TEXTO_ANULADA and "Invitación abierta" not in (res.get("fila_anulada") or "x"),
+             control_reinvitada)
+    negativo(f"l) la propia cuenta no tiene boton de baja ({res.get('baja_propia')})", res.get("baja_propia") == 0,
+             res.get("baja_otra") == 1, f"control: la del auditor tiene {res.get('baja_otra')}")
+    pasa(res.get("foco_confirmar") == "Confirmar la baja",
+         f"l) la baja pide confirmacion y el foco va a ella ({res.get('foco_confirmar')!r})")
+    pasa(res.get("baja") == TEXTO_BAJA and "Desactivada" in (res.get("fila_baja") or ""),
+         f"l) la baja se confirma y la cuenta sale desactivada ({res.get('baja')!r})")
+    antes = res.get("auditor_inicio_antes") or {}
+    control_baja = antes == {"ruta": "/inicio", "h1": H1_INICIO}
+    negativo(f"l) tras la baja, el auditor no entra y va a /entrar ({res.get('auditor_inicio_despues')})",
+             res.get("auditor_inicio_despues") == {"ruta": "/entrar", "h1": H1_ENTRAR}, control_baja,
+             f"control: antes de la baja {antes}")
+
+    # Cambiar la contraseña.
+    control_cambio = res.get("contrasena_cambiada") == TEXTO_CONTRASENA_CAMBIADA and res.get("yo_tras_cambio") == 200
+    pasa(control_cambio, f"l) control: con la contrasena actual, se cambia y la sesion sigue viva "
+                         f"({res.get('contrasena_cambiada')!r}, {res.get('yo_tras_cambio')})")
+    mal = respuestas(res.get("contrasena_mal_api") or [])
+    negativo(f"l) con la actual mal, lo dice y no renueva la sesion ({res.get('contrasena_mal')!r}, {mal})",
+             res.get("contrasena_mal") == TEXTO_CONTRASENA_MAL and mal == [("POST", "/v1/personal/contrasena", 401)],
+             control_cambio)
+
+    # Consola.
+    consola, errores = res.get("consola") or [], res.get("errores") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    control_csp = bool(senales_csp(consola[corte:]))
+    pasa(control_csp, f"l) control: una conexion a otro origen deja su violacion de la CSP ({consola[corte:][:1]})")
+    negativo(f"l) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
+             f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
+             not senales_csp(consola[:corte]) and not errores, control_csp,
+             f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
 
 
 # ---------------------------------------------------------------------------
@@ -1320,10 +1843,16 @@ def main():
         p(f"PARADA: docker compose config falla (genere los secretos con scripts/generar_secretos.py): {r.err.strip()[:300]}")
         terminar_con_parada()
     TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_spa_"))
+    # Los límites de prueba, solo para la API de este proyecto temporal: el
+    # fichero vive en el directorio temporal y docker-compose.yml no cambia.
+    limites = TEMPORAL / "limites_prueba.yml"
+    limites.write_text(f"services:\n  api:\n    environment:\n      CANARIO_LIMITES: \"{LIMITES_PRUEBA}\"\n",
+                       encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(limites)])
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j):
+                        seccion_j, seccion_k, seccion_l):
             seccion()
     except Parada as e:
         parada = str(e)
