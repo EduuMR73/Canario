@@ -66,6 +66,22 @@ class Enviar(unittest.TestCase):
         self.assertEqual(registro.output,
                          ["ERROR:canario.correo:EVENTO correo_fallido: tipo=verificacion error=ValueError"])
 
+    def test_enviar_todos_sigue_tras_un_fallo(self):
+        # Un aviso a varias personas: el fallo con una no deja sin aviso a las demás.
+        enviados = []
+
+        def enviar(mensaje):
+            if mensaje["To"] == "falla@empresa.es":
+                raise OSError
+            enviados.append(mensaje["To"])
+
+        destinos = ("a@empresa.es", "falla@empresa.es", "b@empresa.es")
+        with mock.patch.object(smtplib, "SMTP") as smtp, self.assertLogs("canario.correo", "ERROR") as registro:
+            smtp.return_value.__enter__.return_value.send_message.side_effect = enviar
+            correo.enviar_todos([un_correo(d, "aviso_lecturas") for d in destinos])
+        self.assertEqual(enviados, ["a@empresa.es", "b@empresa.es"])
+        self.assertEqual(registro.output, ["ERROR:canario.correo:EVENTO correo_fallido: tipo=aviso_lecturas error=OSError"])
+
     def test_sin_hueco_se_descarta_sin_esperar(self):
         ocupados = 0
         try:

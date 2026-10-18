@@ -12,7 +12,10 @@ Qué prueba:
 * c) el control positivo de extremo a extremo: solicitud, correo con el
   enlace (token en el fragmento), verificación, la solicitud aparece al admin,
   aprobación con un rol (sin token en la respuesta), correo de invitación,
-  activación con TOTP, login con el rol aprobado y la fila de auditoría;
+  activación con TOTP, login con el rol aprobado y la fila de auditoría; el
+  aviso de la activación llega al admin de la empresa, sin tokens, y no a la
+  cuenta activada ni a otra empresa (en b, la del primer admin, sin nadie a
+  quien avisar, deja EVENTO aviso_sin_destinatario);
 * d) enumeración: la misma respuesta byte a byte para una empresa que no
   existe, un email con cuenta y uno nuevo; lo que cambia es el correo, que
   solo lee el dueño del buzón (aviso sin enlace, o nada); y el tiempo
@@ -139,6 +142,8 @@ ASUNTO_VERIFICACION = "Confirme su email para registrarse en Canario"
 ASUNTO_AVISO_CUENTA = "Intento de registro con su email en Canario"
 ASUNTO_AVISO_PENDIENTE = "Su solicitud de registro en Canario sigue pendiente"
 ASUNTO_INVITACION = "Active su cuenta del personal en Canario"
+ASUNTO_ACTIVACION = "Aviso de Canario: se ha activado una cuenta del personal"
+TEXTO_SIN_DESTINATARIO = "EVENTO aviso_sin_destinatario: tipo=aviso_activacion empresa="
 PATRON_VERIFICACION = re.compile(r"https://localhost:8445/registro/verificacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 PATRON_ACTIVACION = re.compile(r"https://localhost:8445/activacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 ACCION_APROBACION = "aprobacion_registro"
@@ -575,6 +580,13 @@ def seccion_b():
         if SESIONES[clave] is None:
             raise Parada(f"no se pudo iniciar sesion con el admin de {clave}")
     pasa(True, f"b) empresas A y B con su admin activado y en sesion ({EMPRESAS['A'][1]}, {EMPRESAS['B'][1]})")
+    # El primer admin de cada empresa no tiene a quién avisar de su
+    # activación (app/avisos.py): el aviso que no llega a nadie se ve en el log.
+    sin_destino = [l for l in log_de("api").splitlines() if TEXTO_SIN_DESTINATARIO in l]
+    pasa(sorted(l[l.index("empresa=") + len("empresa="):] for l in sin_destino)
+         == sorted(EMPRESAS[c][0] for c in ("A", "B")),
+         f"b) la activacion de cada primer admin, sin nadie a quien avisar, deja EVENTO aviso_sin_destinatario "
+         f"({len(sin_destino)})")
     buzon("borrar")
 
 
@@ -616,6 +628,20 @@ def seccion_c():
     persona = Cuenta(ident, email)
     activada = token_invitacion is not None and activar(persona, token_invitacion)
     pasa(activada, "c) la persona activa su cuenta con el enlace del correo (contrasena y TOTP)")
+    # Aviso de activación (app/avisos.py): una cuenta más que puede leer
+    # denuncias, y quien vigila la empresa lo sabe. Control: le llega al admin
+    # de A, con la cuenta y el rol. Ni a la propia cuenta ni a otra empresa.
+    avisos = [c for c in esperar_correos(ADMINS["A"].email, 1) if c["asunto"] == ASUNTO_ACTIVACION]
+    control = (activada and len(avisos) == 1 and avisos[0].get("de") == REMITENTE
+               and f"La cuenta {email} de Empresa Registro A se ha activado en Canario con el rol instructor"
+               in (avisos[0].get("texto") or ""))
+    pasa(control, f"c) control: el admin de A recibe el aviso de la activacion, con la cuenta y el rol ({len(avisos)})")
+    negativo("c) el aviso no lleva el token de invitacion ni el de dispositivo",
+             control and token_invitacion not in avisos[0]["texto"]
+             and (persona.dispositivo or "-") not in avisos[0]["texto"], control)
+    negativo("c) la cuenta activada no recibe su propio aviso, ni el admin de otra empresa",
+             not any(c["asunto"] == ASUNTO_ACTIVACION for c in correos_para(email) + correos_para(ADMINS["B"].email)),
+             control)
     sesion = iniciar_sesion(persona) if activada else None
     yo = json_de(una(pt("GET", "/v1/personal/yo", token=sesion))) if sesion else {}
     pasa(bool(yo) and yo.get("rol") == "instructor" and yo.get("email") == email,

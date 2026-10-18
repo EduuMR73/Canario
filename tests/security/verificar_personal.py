@@ -81,6 +81,15 @@ y 6.9). Qué prueba:
   asignar o redactar una denuncia, y al administrar cuentas o solicitudes,
   sin cambiar nada (control: el instructor asignado lee la denuncia); y no se
   le puede asignar una denuncia (409, sin fila; control: a un instructor sí).
+* Tope de lecturas (app/instruccion.py), con sus valores de producción (20 y
+  50): cada denuncia nueva suma y releer no; la vigésima y la quincuagésima
+  dejan un EVENTO con la cuenta y sin ids, una sola vez; doce lecturas
+  simultáneas con diez plazas dan exactamente diez 200 y dos 429; pasado el
+  tope, una nueva da 429 con su mensaje y Retry-After hasta la medianoche de
+  la empresa, sin fila; releer sigue permitido y otra cuenta no se ve
+  afectada; un intento de aviso por cada admin y auditor (sin Mailpit, su
+  EVENTO correo_fallido). Si el día de la empresa cambia a mitad, SIN
+  CONCLUSION.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
   misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
@@ -182,6 +191,13 @@ CUERPO_422_CORTA = '{"detalle": "la contraseña debe tener entre 12 y 128 caract
 CUERPO_422_CONTIENE = '{"detalle": "la contraseña no puede contener el email ni el nombre de la empresa"}'.encode()
 CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
 CUERPO_403 = b'{"detalle": "permiso denegado"}'
+# Tope de lecturas (app/instruccion.py): literales, no leídos del código.
+LECTURAS_AVISO = 20
+LECTURAS_TOPE = 50
+CUERPO_429_LECTURAS = ('{"detalle": "ha abierto hoy el máximo de 50 denuncias distintas; '
+                       'puede seguir con las que ya abrió y abrir otras mañana"}').encode()
+TEXTO_EVENTO_LECTURAS = "EVENTO limite_lecturas_"
+TEXTO_CORREO_LECTURAS = "EVENTO correo_fallido: tipo=aviso_lecturas "
 CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
 CUERPO_409_DUPLICADO = b'{"detalle": "ya existe una cuenta con ese email"}'
 CUERPO_409_ULTIMO = '{"detalle": "la empresa se quedaría sin ningún admin activo"}'.encode()
@@ -246,7 +262,7 @@ ID_CON_SALTO = "x%0AEVENTO%20redaccion:%20falso"
 CUERPO_409_FRAGMENTO = '{"detalle": "el texto indicado no está en esa posición"}'.encode()
 CLAVES_LISTADO = ["denuncias", "siguiente"]
 CLAVES_FILA_DENUNCIA = ["asignada_a", "asignada_activa", "denuncia_id", "estado", "fecha"]
-CLAVES_EXPEDIENTE = ["categoria", "denuncia_id", "estado", "fecha", "mensajes", "texto"]
+CLAVES_EXPEDIENTE = ["categoria", "denuncia_id", "estado", "fecha", "lecturas", "mensajes", "texto"]
 CLAVES_MENSAJE_PERSONAL = ["autor", "autor_id", "fecha", "secuencia", "texto"]
 CLAVES_MENSAJE_SEGUIMIENTO = ["autor", "fecha", "secuencia", "texto"]
 CLAVES_AUDITORIA = ["filas", "siguiente"]
@@ -2519,6 +2535,142 @@ def seccion_k_auditor():
              control_ok, f"respuesta: {rechazo.get('estado')}, fila: {sin_cambio}")
 
 
+def crear_denuncias(empresa, cuantas):
+    """cuantas denuncias por la API pública, una detrás de otra en una sola
+    ejecución del cliente. Devuelve sus ids, de la base de datos."""
+    antes = ids_denuncias(empresa)
+    textos = [f"texto de denuncia lecturas {secrets.token_hex(12)}" for _ in range(cuantas)]
+    respuestas = http([pt("POST", f"/v1/empresas/{EMPRESAS[empresa][1]}/denuncias",
+                          {"categoria": "fraude", "texto": t}) for t in textos])
+    codigos = [(json_de(r) or {}).get("codigo_seguimiento") for r in respuestas]
+    nuevas = ids_denuncias(empresa) - antes
+    if any(r.get("estado") != 201 for r in respuestas) or not all(codigos) or len(nuevas) != cuantas:
+        raise Parada(f"no se pudieron crear las denuncias de preparacion: {[r.get('estado') for r in respuestas]}")
+    for texto, codigo in zip(textos, codigos):
+        TEXTOS_SENSIBLES[f"texto de la denuncia {len(TEXTOS_SENSIBLES)}"] = texto
+        TEXTOS_SENSIBLES[f"codigo de la denuncia {len(TEXTOS_SENSIBLES)}"] = codigo
+    return sorted(nuevas)
+
+
+def lecturas_de(respuesta):
+    """El campo lecturas de una lectura (hoy y tope), o None."""
+    return (json_de(respuesta) or {}).get("lecturas")
+
+
+def eventos_lecturas(usuario_id):
+    """Los EVENTO limite_lecturas_* de una cuenta, desde "EVENTO" (sin el
+    nivel ni el nombre del registrador que van delante)."""
+    return [linea[linea.index(TEXTO_EVENTO_LECTURAS):] for linea in lineas_log("api")
+            if TEXTO_EVENTO_LECTURAS in linea and f"cuenta={usuario_id}" in linea]
+
+
+def intentos_aviso_lecturas():
+    return sum(TEXTO_CORREO_LECTURAS in linea for linea in lineas_log("api"))
+
+
+def seccion_k_lecturas():
+    p("=== kl) tope de lecturas: denuncias distintas por cuenta y dia, avisos y lecturas simultaneas")
+    admin2 = CUENTAS["admin2"]
+    token_admin2 = sesion_de(admin2)
+    # Un admin propio de la sección: empieza el día sin lecturas.
+    lector, _ = invitar(token_admin2, "admin_lecturas", "admin.lecturas@alfa.test", rol="admin")
+    preparar_cuenta(lector)
+    token = sesion_de(lector)
+    # 52 = el tope y dos más, que quedan fuera.
+    ids = crear_denuncias("A", LECTURAS_TOPE + 2)
+    asignadas = http([asignar_peticion(token, d, lector.usuario_id) for d in ids])
+    if any(r.get("estado") != 204 for r in asignadas):
+        raise Parada(f"no se pudieron autoasignar las denuncias: {[r.get('estado') for r in asignadas]}")
+    actor = f"personal:{lector.usuario_id}"
+    # Quién debe recibir los avisos, con una consulta propia de la batería:
+    # admins y auditores activos y activados de A, salvo el lector.
+    vigilantes = valor(f"select count(*) from canal.usuario_personal where empresa_id = '{EMPRESAS['A'][0]}' "
+                       f"and rol in ('admin', 'auditor') and activo and totp_activo and id <> '{lector.usuario_id}';")
+    correos_antes = intentos_aviso_lecturas()
+
+    # kl1) Hasta el aviso: cada denuncia nueva suma una, y la vigésima avisa.
+    primeras = http([pt("GET", rd(d), token=token) for d in ids[:LECTURAS_AVISO - 1]])
+    control = (all(r.get("estado") == 200 for r in primeras)
+               and [lecturas_de(r) for r in primeras] == [{"hoy": n, "tope": 50} for n in range(1, 20)])
+    pasa(control, "kl1) control: las 19 primeras se leen (200) y cada una suma: lecturas 1 a 19 de 50")
+    negativo("kl1) sin EVENTO de aviso antes de la vigesima", eventos_lecturas(lector.usuario_id) == [], control)
+    vigesima = una(pt("GET", rd(ids[19]), token=token))
+    releida = una(pt("GET", rd(ids[0]), token=token))
+    eventos = eventos_lecturas(lector.usuario_id)
+    pasa(vigesima.get("estado") == 200 and lecturas_de(vigesima) == {"hoy": 20, "tope": 50}
+         and eventos == [(f"EVENTO limite_lecturas_aviso: empresa={EMPRESAS['A'][0]} cuenta={lector.usuario_id} "
+                          f"lecturas=20 destinatarios={vigilantes}")],
+         f"kl1) la vigesima avisa una vez, con la cuenta y sin ids de denuncias ({eventos})")
+    negativo("kl1) releer una ya abierta no suma ni vuelve a avisar",
+             releida.get("estado") == 200 and lecturas_de(releida) == {"hoy": 20, "tope": 50}
+             and len(eventos_lecturas(lector.usuario_id)) == 1, control)
+
+    # kl2) Hasta el tope, con las últimas doce a la vez: de las 40 abiertas,
+    #      solo caben diez más. Escribir la fila espera al bloqueo de la
+    #      auditoría, así que exactamente diez pasan y dos reciben el 429.
+    medias = http([pt("GET", rd(d), token=token) for d in ids[20:40]])
+    control_40 = all(r.get("estado") == 200 for r in medias) and lecturas_de(medias[-1]) == {"hoy": 40, "tope": 50}
+    pasa(control_40, "kl2) control: las lecturas 21 a 40 se leen (200)")
+    a_la_vez = http([{"grupo": [pt("GET", rd(d), token=token) for d in ids[40:]]}])
+    estados = sorted(r.get("estado") for r in a_la_vez)
+    pasa(control_40 and estados == [200] * 10 + [429] * 2,
+         f"kl2) doce lecturas simultaneas con diez plazas: diez 200 y dos 429 ({estados})")
+    rechazadas = [d for d, r in zip(ids[40:], a_la_vez) if r.get("estado") == 429]
+    filas = valor(f"select count(*) || '|' || count(distinct objeto_id) from canal.registro_auditoria "
+                  f"where actor = '{actor}' and accion = 'lectura_denuncia';")
+    mismo_dia = valor(f"select count(distinct fecha) from canal.registro_auditoria where actor = '{actor}';") == "1"
+    if not mismo_dia:
+        sinc("kl2) el dia de la empresa cambio a mitad de la seccion: el conteo no tiene conclusion")
+        return
+    negativo(f"kl2) las rechazadas no dejan fila: 51 lecturas de 50 denuncias distintas ({filas})",
+             filas == "51|50", control_40)
+    eventos = eventos_lecturas(lector.usuario_id)
+    pasa(len(eventos) == 2 and eventos[1] == (f"EVENTO limite_lecturas_tope: empresa={EMPRESAS['A'][0]} "
+                                              f"cuenta={lector.usuario_id} lecturas=50 destinatarios={vigilantes}"),
+         f"kl2) la quincuagesima avisa una vez del tope ({eventos[1:]})")
+    negativo("kl2) ningun evento lleva el id de una denuncia",
+             not any(d in linea for d in ids for linea in eventos), len(eventos) == 2)
+
+    # kl3) Pasado el tope: una nueva da el 429 con su mensaje, el
+    #      Retry-After hasta la medianoche de la empresa y nada de contenido.
+    #      Releer sigue permitido y otra cuenta no se ve afectada.
+    nueva = una(pt("GET", rd(rechazadas[0]), token=token)) if rechazadas else {}
+    vieja = una(pt("GET", rd(ids[5]), token=token))
+    control_vieja = vieja.get("estado") == 200 and lecturas_de(vieja) == {"hoy": 50, "tope": 50}
+    pasa(control_vieja, "kl3) control: pasado el tope, releer una ya abierta sigue permitido (200)")
+    # La medianoche, con otra fórmula que la de la API: date_trunc en la zona de la empresa.
+    hasta = int(valor(f"select ceil(extract(epoch from date_trunc('day', now() + interval '1 day', e.zona_horaria) "
+                      f"- now())) from canal.empresa e where e.id = '{EMPRESAS['A'][0]}';"))
+    espera = (nueva.get("cabeceras") or {}).get("retry-after", "")
+    negativo(f"kl3) una denuncia nueva da 429 con su mensaje y Retry-After hasta la medianoche de la empresa "
+             f"({nueva.get('estado')}, {espera!r}, {hasta})",
+             nueva.get("estado") == 429 and nueva.get("cuerpo") == CUERPO_429_LECTURAS and espera.isdigit()
+             and 1 <= int(espera) <= 90_000 and abs(int(espera) - hasta) <= 10, control_vieja)
+    negativo("kl3) y no deja fila ni otro evento",
+             valor(f"select count(*) from canal.registro_auditoria where actor = '{actor}' "
+                   f"and accion = 'lectura_denuncia' and objeto_id = '{rechazadas[0] if rechazadas else ids[0]}';") == "0"
+             and len(eventos_lecturas(lector.usuario_id)) == 2, control_vieja)
+    if rechazadas:
+        preparar(asignar_peticion(token_admin2, rechazadas[0], admin2.usuario_id), "reasignar a admin2")
+    otra = una(pt("GET", rd(rechazadas[0]), token=token_admin2)) if rechazadas else {}
+    negativo("kl3) otra cuenta lee esa misma denuncia: el tope es de cada cuenta",
+             otra.get("estado") == 200 and (lecturas_de(otra) or {}).get("tope") == 50, control_vieja,
+             f"respuesta: {otra.get('estado')}")
+
+    # kl4) Los avisos salen hacia quien vigila: sin Mailpit en esta batería,
+    #      cada intento deja su EVENTO correo_fallido (el envío real, con quién
+    #      lo recibe y quién no, lo prueba tests/security/verificar_registro.py).
+    esperados = 2 * int(vigilantes)
+    # Salen después de responder: se espera a que estén todos, y después se
+    # comprueba que no hay de más.
+    esperar(lambda: intentos_aviso_lecturas() - correos_antes >= esperados, 30)
+    intentos = intentos_aviso_lecturas() - correos_antes
+    pasa(int(vigilantes) >= 2 and intentos == esperados,
+         f"kl4) un intento de aviso por vigilante en el aviso y en el tope ({intentos} de {esperados})")
+    sin_destino = [l for l in lineas_log("api") if "EVENTO aviso_sin_destinatario: tipo=aviso_lecturas" in l]
+    negativo("kl4) con vigilantes no sale EVENTO aviso_sin_destinatario", sin_destino == [], int(vigilantes) >= 2)
+
+
 def seccion_l():
     p("=== l) gestion lee en solo lectura y con una sola foto")
     r = dc("run", "--rm", "-T", "--entrypoint", "python", "gestion", "-c", GESTION_DENTRO, EMPRESAS["A"][1])
@@ -2794,7 +2946,8 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
-                        seccion_k, seccion_k_no_veraz, seccion_k_redaccion, seccion_k_auditor, seccion_l, seccion_i,
+                        seccion_k, seccion_k_no_veraz, seccion_k_redaccion, seccion_k_auditor, seccion_k_lecturas,
+                        seccion_l, seccion_i,
                         seccion_h):
             seccion()
     except Parada as e:

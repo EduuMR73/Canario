@@ -1,0 +1,52 @@
+"""Pruebas unitarias de los avisos de seguridad (app/avisos.py): a quién van
+y qué dicen. El envío real a Mailpit, con quién lo recibe y quién no, lo
+prueba tests/security/verificar_registro.py.
+"""
+import unittest
+import uuid
+from unittest import mock
+
+from app import avisos, correo, personal
+
+EMAILS = ("auditora@empresa.es", "otro.admin@empresa.es")
+
+
+class Destinatarios(unittest.TestCase):
+    def test_los_roles_que_leen_la_auditoria(self):
+        # Quien recibe los avisos es quien puede comprobarlos en la auditoría.
+        self.assertEqual(personal.ROLES_AUDITORIA, ("admin", "auditor"))
+        self.assertIn("rol in ('admin', 'auditor') and activo and totp_activo and id <> %s", avisos.SQL_DESTINATARIOS)
+
+    def test_excluye_la_cuenta_de_la_que_se_avisa(self):
+        conexion = mock.Mock()
+        conexion.execute.return_value.fetchall.return_value = [(e,) for e in EMAILS]
+        conexion.execute.return_value.fetchone.return_value = ("Empresa",)
+        excluida = uuid.UUID(int=5)
+        self.assertEqual(avisos.destinatarios(conexion, excluida), ("Empresa", EMAILS))
+        self.assertEqual(conexion.execute.call_args_list[0].args, (avisos.SQL_DESTINATARIOS, [excluida]))
+
+
+class Correos(unittest.TestCase):
+    def test_lecturas_aviso_y_tope(self):
+        aviso = avisos.correos_lecturas("Empresa", EMAILS, "lectora@empresa.es", 20, 50)
+        tope = avisos.correos_lecturas("Empresa", EMAILS, "lectora@empresa.es", 50, 50)
+        for correos in (aviso, tope):
+            self.assertEqual([c.destinatario for c in correos], list(EMAILS))
+            self.assertTrue(all(c.tipo == "aviso_lecturas" and "lectora@empresa.es" in c.cuerpo for c in correos))
+            # Se puede componer: el tipo es uno de correo.TIPOS.
+            correo.componer(correos[0])
+        self.assertIn("ha abierto hoy 20 denuncias distintas", aviso[0].cuerpo)
+        self.assertNotIn("Ha llegado al tope", aviso[0].cuerpo)
+        self.assertIn("Ha llegado al tope de 50", tope[0].cuerpo)
+
+    def test_activacion(self):
+        correos = avisos.correos_activacion("Empresa", EMAILS, "nueva@empresa.es", "instructor")
+        self.assertEqual([c.destinatario for c in correos], list(EMAILS))
+        self.assertTrue(all(c.tipo == "aviso_activacion" for c in correos))
+        self.assertIn("La cuenta nueva@empresa.es de Empresa se ha activado en Canario con el rol instructor",
+                      correos[0].cuerpo)
+        correo.componer(correos[0])
+
+    def test_sin_destinatarios_no_hay_correos(self):
+        self.assertEqual(avisos.correos_lecturas("Empresa", (), "x@empresa.es", 20, 50), ())
+        self.assertEqual(avisos.correos_activacion("Empresa", (), "x@empresa.es", "admin"), ())

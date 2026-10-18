@@ -815,6 +815,12 @@ select c.relname,
     r = sup("select pg_get_indexdef('canal.sesion_personal_tokens_usados'::regclass);")
     comparar("c) indice GIN sobre los tokens de renovacion usados", r.lineas(), [
         "CREATE INDEX sesion_personal_tokens_usados ON canal.sesion_personal USING gin (tokens_usados)"])
+    # Tope de lecturas (app/instruccion.py): el conteo de cada lectura usa
+    # este indice parcial en vez de recorrer la auditoria entera.
+    r = sup("select pg_get_indexdef('canal.auditoria_lecturas'::regclass);")
+    comparar("c) indice parcial de las lecturas de la auditoria", r.lineas(), [
+        ("CREATE INDEX auditoria_lecturas ON canal.registro_auditoria USING btree (empresa_id, actor, fecha, objeto_id) "
+         "WHERE (accion = 'lectura_denuncia'::text)")])
 
 
 def seccion_d():

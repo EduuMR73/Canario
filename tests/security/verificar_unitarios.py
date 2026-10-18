@@ -59,14 +59,15 @@ estado = {"falla": False, "sin_conclusion": False}
 # cambiar este número a mano: es lo que hace visible un fichero que no corre.
 PRUEBAS_POR_FICHERO = {
     "test_arranque": 4,
+    "test_avisos": 5,
     "test_bd": 9,
     "test_claves": 7,
-    "test_correo": 7,
+    "test_correo": 8,
     "test_cripto": 38,
     "test_denuncias": 10,
     "test_errores": 11,
     "test_frontera": 10,
-    "test_instruccion": 23,
+    "test_instruccion": 28,
     "test_limitador": 16,
     "test_login": 8,
     "test_personal": 8,
@@ -76,7 +77,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 213
+TOTAL_PRUEBAS = 224
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -206,6 +207,26 @@ MUTANTES = [
     ("instruccion.py", "if error.sqlstate == SQLSTATE_DESTINO_NO_ASIGNABLE:", "if False:",
      "test_instruccion.Asignar.test_el_rechazo_de_la_base_de_datos_es_el_mismo_409",
      "el rechazo del trigger de asignacion acaba en un 500"),
+    # Tope de lecturas y avisos a quien vigila (bloque A2).
+    ("instruccion.py", "    if distintas > LECTURAS_TOPE:\n", "    if distintas > LECTURAS_TOPE + 1:\n",
+     "test_instruccion.DecidirLecturas.test_fronteras", "el tope deja abrir una denuncia de mas"),
+    ("instruccion.py", "    if primera and distintas == LECTURAS_AVISO:", "    if distintas == LECTURAS_AVISO:",
+     "test_instruccion.DecidirLecturas.test_fronteras", "releer la vigesima denuncia vuelve a avisar"),
+    ("instruccion.py", "            raise LimiteLecturas(segundos)\n", "            pass\n",
+     "test_instruccion.LeerConTope.test_por_encima_del_tope_rechaza_sin_avisar", "pasado el tope se sigue leyendo"),
+    ("instruccion.py",
+     ("        _auditar(conexion, sesion, ACCION_LECTURA, denuncia_id)\n"
+      "        distintas, veces, segundos = conexion.execute(\n"
+      "            SQL_LECTURAS_DEL_DIA, {\"denuncia\": denuncia_id, \"actor\": _actor(sesion)}).fetchone()\n"),
+     ("        distintas, veces, segundos = conexion.execute(\n"
+      "            SQL_LECTURAS_DEL_DIA, {\"denuncia\": denuncia_id, \"actor\": _actor(sesion)}).fetchone()\n"
+      "        _auditar(conexion, sesion, ACCION_LECTURA, denuncia_id)\n"),
+     "test_instruccion.LeerConTope.test_la_fila_se_escribe_antes_de_contar",
+     "se cuenta antes de escribir: dos lecturas simultaneas pasan con la ultima plaza"),
+    ("avisos.py", "and totp_activo and id <> %s order by email", "and totp_activo and %s is not null order by email",
+     "test_avisos.Destinatarios.test_los_roles_que_leen_la_auditoria", "el aviso tambien le llega a la cuenta sospechosa"),
+    ("correo.py", "    for uno in correos:\n        enviar(uno)\n", "    for uno in correos[:1]:\n        enviar(uno)\n",
+     "test_correo.Enviar.test_enviar_todos_sigue_tras_un_fallo", "un aviso a varias personas solo le llega a la primera"),
     # Sesión del navegador con cookies (bloque 6a).
     ("rutas_personal.py", '    if sitio != "same-origin":\n        raise OrigenNoPermitido(sitio)\n',
      '    if sitio == "cross-site":\n        raise OrigenNoPermitido(sitio)\n',

@@ -1,6 +1,8 @@
 """Pruebas unitarias de la lógica pura de app/instruccion.py: la redacción
-(art. 32.2), el cursor del listado, la máquina de estados y quién puede qué
-(los roles, antes de tocar la base de datos, y a quién se asigna una denuncia).
+(art. 32.2), el cursor del listado, la máquina de estados, quién puede qué
+(los roles, antes de tocar la base de datos, y a quién se asigna una denuncia)
+y el tope de lecturas (sus fronteras, el orden escribir y contar, y a quién
+avisa).
 
 La redacción es destructiva e irreversible: un error de posición dejaría a la
 vista un dato que había que suprimir, o taparía otro. Por eso los oráculos
@@ -15,7 +17,7 @@ from unittest import mock
 
 import psycopg
 
-from app import instruccion, personal
+from app import avisos, instruccion, personal
 
 UUID_CURSOR = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
@@ -258,3 +260,97 @@ class Asignar(unittest.TestCase):
             self.asignar(_ConexionAsignar("instructor", _ErrorAsignacion("trigger")))
         with self.assertRaises(psycopg.OperationalError):
             self.asignar(_ConexionAsignar("instructor", psycopg.OperationalError("otro")))
+
+
+class DecidirLecturas(unittest.TestCase):
+    """El tope de lecturas: oráculo literal de cada frontera."""
+
+    def test_umbrales_literales(self):
+        # Cambiarlos es una decisión (docs/threat-model.md, 8), no un efecto secundario.
+        self.assertEqual((instruccion.LECTURAS_AVISO, instruccion.LECTURAS_TOPE), (20, 50))
+
+    def test_fronteras(self):
+        casos = {
+            (1, True): (True, None),
+            (19, True): (True, None),
+            (20, True): (True, "aviso"),
+            # Releer la vigésima no vuelve a avisar.
+            (20, False): (True, None),
+            (21, True): (True, None),
+            (49, True): (True, None),
+            (50, True): (True, "tope"),
+            (50, False): (True, None),
+            (51, True): (False, None),
+        }
+        for (distintas, primera), esperado in casos.items():
+            with self.subTest(distintas=distintas, primera=primera):
+                self.assertEqual(instruccion.decidir_lecturas(distintas, primera), esperado)
+
+
+class _ConexionLeer:
+    """Doble de la conexión de leer_denuncia: una denuncia asignada sin
+    mensajes y el conteo de lecturas que se le diga. Registra las sentencias
+    y los avisos que se piden."""
+
+    def __init__(self, distintas, veces):
+        self.distintas, self.veces = distintas, veces
+        self.sentencias = []
+
+    def execute(self, sql, parametros=None):
+        self.sentencias.append(sql)
+        respuesta = mock.Mock()
+        if sql == instruccion.SQL_LEER_ASIGNADA:
+            respuesta.fetchone.return_value = (datetime.date(2026, 10, 18), "nueva", b"cifrado", 1)
+        elif sql == instruccion.SQL_LECTURAS_DEL_DIA:
+            respuesta.fetchone.return_value = (self.distintas, self.veces, 3600)
+        elif sql == avisos.SQL_DESTINATARIOS:
+            respuesta.fetchall.return_value = [("auditora@empresa.es",), ("otro.admin@empresa.es",)]
+        elif sql == avisos.SQL_NOMBRE_EMPRESA:
+            respuesta.fetchone.return_value = ("Empresa",)
+        elif sql == instruccion.SQL_EMAIL_ACTOR:
+            respuesta.fetchone.return_value = ("lectora@empresa.es",)
+        return respuesta
+
+
+class LeerConTope(unittest.TestCase):
+    ADMIN = types.SimpleNamespace(rol="admin", usuario_id=uuid.UUID(int=8), empresa_id=uuid.UUID(int=1))
+
+    def leer(self, conexion):
+        @contextlib.contextmanager
+        def transaccion(_pool, _empresa_id, solo_lectura=False):
+            yield conexion
+
+        with mock.patch.object(instruccion.bd, "transaccion_empresa", transaccion), \
+                mock.patch.object(instruccion.denuncias, "leer_mensajes_y_claves", return_value=([], {})), \
+                mock.patch.object(instruccion.denuncias, "descifrar_expediente",
+                                  return_value=({"categoria": "fraude", "texto": "t"}, [])):
+            return instruccion.leer_denuncia(None, None, self.ADMIN, uuid.UUID(int=3))
+
+    def test_la_fila_se_escribe_antes_de_contar(self):
+        # Contar antes dejaría pasar a dos lecturas simultáneas con la última plaza.
+        conexion = _ConexionLeer(1, 1)
+        self.leer(conexion)
+        self.assertLess(conexion.sentencias.index(instruccion.SQL_AUDITAR),
+                        conexion.sentencias.index(instruccion.SQL_LECTURAS_DEL_DIA))
+
+    def test_por_encima_del_tope_rechaza_sin_avisar(self):
+        conexion = _ConexionLeer(51, 1)
+        with self.assertRaises(instruccion.LimiteLecturas) as error:
+            self.leer(conexion)
+        self.assertEqual(error.exception.segundos, 3600)
+        self.assertNotIn(avisos.SQL_DESTINATARIOS, conexion.sentencias)
+        # Control: en el tope justo, se lee y se avisa.
+        lectura = self.leer(_ConexionLeer(50, 1))
+        self.assertEqual((lectura.lecturas_hoy, lectura.umbral), (50, "tope"))
+
+    def test_aviso_a_quien_vigila(self):
+        lectura = self.leer(_ConexionLeer(20, 1))
+        self.assertEqual((lectura.lecturas_hoy, lectura.umbral), (20, "aviso"))
+        self.assertEqual([c.destinatario for c in lectura.correos], ["auditora@empresa.es", "otro.admin@empresa.es"])
+        self.assertTrue(all(c.tipo == "aviso_lecturas" and "lectora@empresa.es" in c.cuerpo for c in lectura.correos))
+        # Ni el id de la denuncia ni su contenido van en el aviso.
+        self.assertFalse(any(str(uuid.UUID(int=3)) in c.cuerpo or "fraude" in c.cuerpo for c in lectura.correos))
+        # Control: sin umbral no se pide ningún aviso.
+        conexion = _ConexionLeer(21, 1)
+        self.assertEqual(self.leer(conexion).correos, ())
+        self.assertNotIn(avisos.SQL_DESTINATARIOS, conexion.sentencias)
