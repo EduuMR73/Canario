@@ -66,7 +66,9 @@ etapa. Prueba:
   usada existe. Control: la fórmula da 4,54:1 y 4,48:1 con los grises
   #767676 y #777777 sobre blanco, y tres mutantes de la hoja (un gris claro,
   un color suelto y una variable que no existe) hacen saltar cada
-  comprobación;
+  comprobación. Y en spa/src/app, también sin Docker, que ningún botón lleva
+  disabled ligado y que cada fichero lleva los aria-disabled de su
+  inventario (control: entrar.ts con disabled hace saltar las dos);
 * l) las pantallas por rol en Chromium (bloque 6b-3a): el menú de cada rol;
   una página de otro rol abierta por su URL lleva a /inicio (control: la del
   propio rol se abre) y la API responde 403 aunque la SPA se saltara
@@ -113,20 +115,33 @@ etapa. Prueba:
   cadena está intacta; el email sale como texto literal sin crear elementos ni
   ejecutar nada (control: el main-*.js de un mutante con [innerHTML] crea el
   <img> y la CSP bloquea su carga); ninguna violación de la CSP ni error de
-  JavaScript.
+  JavaScript;
+* o) los botones ocupados en Chromium (bloque 6b-3d): tras un login fallido
+  con Enter desde el botón, el foco sigue en "Entrar" (control: con el
+  main-*.js de un mutante con disabled, acaba en el <body>); un doble clic en
+  "Entrar" hace una sola petición (control: el mutante sin la guarda hace
+  dos), con un email sin cuenta para no sumar fallos al bloqueo de ninguna;
+  con más de 100 denuncias (creadas por la API pública), "Cargar más" trae la
+  segunda página sin repetir ni perder filas (las mismas que lista la API) y
+  el foco acaba en el aviso que dice que es el final; ninguna violación de la
+  CSP ni error de JavaScript.
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
 misma forma (docs/threat-model.md, 8); Web Locks y las cookies en otros
 navegadores que no sean Chromium; accesibilidad completa (axe, bloque 6b-5);
 el botón "Copiar el enlace", porque el portapapeles de Chromium sin pantalla
 necesita permisos que la prueba tendría que conceder a mano. De las
-denuncias, en el navegador no prueba "Cargar más" (harían falta más de 100
-denuncias; el cursor lo prueba verificar_personal.py y la SPA lo reenvía tal
-cual), el aviso de 20 lecturas ni el 429 del tope (harían falta 20 y 51
-denuncias; el texto del aviso tiene su prueba unitaria y el tope, la suya en
-verificar_personal.py). De la auditoría, el aviso de una cadena rota: romperla
-exige saltarse los triggers que la hacen inmutable; el texto tiene su prueba
-unitaria y la detección, la suya en verificar_esquema.py.
+denuncias, en el navegador no prueba el aviso de 20 lecturas ni el 429 del
+tope (harían falta 20 y 51 denuncias; el texto del aviso tiene su prueba
+unitaria y el tope, la suya en verificar_personal.py), ni "Cargar más" en una
+página intermedia (harían falta más de 200). De la auditoría, el aviso de una
+cadena rota: romperla exige saltarse los triggers que la hacen inmutable; el
+texto tiene su prueba unitaria y la detección, la suya en
+verificar_esquema.py. De los botones ocupados, el doble clic solo en el login:
+las guardas de las demás acciones no tienen prueba en el navegador; y el foco
+al error cuando falla una acción (asignar, cuentas y solicitudes), porque
+provocar cada 404 y 409 desde la pantalla exigiría cambiar los datos por
+debajo a mitad del recorrido.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -173,6 +188,7 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.parse
 
 RAIZ = pathlib.Path.cwd()
 PROYECTO = "canario_spa"
@@ -424,6 +440,30 @@ PAREJAS_CONTRASTE = (
 MUTANTE_GRIS = ("--color-texto-suave: #4a4a4a;", "--color-texto-suave: #8a8a8a;")
 MUTANTE_COLOR_SUELTO = "\n.mutante { color: #000000; }\n"
 MUTANTE_VARIABLE = "\n.mutante { color: var(--color-que-no-existe); }\n"
+# k) Los botones ocupados (spa/src/app): cuántos llevan aria-disabled en cada
+# fichero, contados a mano en el bloque 6b-3d. Ninguno lleva disabled ligado:
+# a un botón disabled Chromium le quita el foco y no se lo devuelve
+# (docs/threat-model.md, 6.11). Un botón ocupado nuevo se añade aquí.
+APP_SPA = RAIZ / "spa" / "src" / "app"
+BOTONES_OCUPADOS = {
+    "acceso/activacion/activacion.ts": 2,
+    "acceso/entrar/entrar.ts": 1,
+    "acceso/registro/registro.ts": 1,
+    "acceso/verificacion/verificacion.ts": 1,
+    "armazon/armazon.ts": 1,
+    "auditoria/auditoria.ts": 3,
+    "cuenta/cuenta.ts": 1,
+    "cuentas/cuentas.ts": 5,
+    "denuncias/denuncias.ts": 2,
+    "denuncias/expediente.ts": 6,
+    "solicitudes/solicitudes.ts": 3,
+}
+PATRON_DISABLED = re.compile(r"\[(?:attr\.)?disabled\]")
+PATRON_ARIA_DISABLED = re.compile(r"\[attr\.aria-disabled\]")
+# Mutante de entrar.ts: el botón con disabled, como antes del 6b-3d. Lo usan
+# k), sobre el texto, y o), compilado.
+FICHERO_ENTRAR = "acceso/entrar/entrar.ts"
+MUTANTE_DISABLED = ('[attr.aria-disabled]="enviando() || null"', '[disabled]="enviando()"')
 
 # l) Las pantallas por rol (spa/src/app).
 EMAIL_INSTRUCTORA = "instructora@spa.test"
@@ -510,6 +550,19 @@ PATRON_DIA = re.compile(r"\d{2}/\d{2}/\d{4}")
 # El control del XSS de la auditoría: "sobre qué" con [innerHTML] en vez de
 # interpolación (spa/src/app/auditoria/auditoria.ts).
 MUTANTE_XSS_AUDITORIA = ('<td class="dato">{{ sobre(fila) }}</td>', '<td class="dato" [innerHTML]="sobre(fila)"></td>')
+
+# o) Los botones ocupados (spa/src/app). Un email sin cuenta: el login falla
+# con el mismo 401 y ningún fallo suma al bloqueo de una cuenta de la prueba
+# (app/personal.py, FALLOS_ANTES_DE_ESPERAR = 5; i ya gastó uno del admin).
+EMAIL_SIN_CUENTA = "nadie.o@spa.test"
+# El control del doble clic: entrar() sin su guarda.
+MUTANTE_GUARDA = ("    if (this.enviando()) {\n      return;\n    }\n    this.enviando.set(true);",
+                  "    this.enviando.set(true);")
+# app/instruccion.py, TAMANO_PAGINA_DENUNCIAS. o) crea una página entera más
+# por la API pública, para que haya una segunda.
+TAMANO_PAGINA_DENUNCIAS = 100
+DENUNCIAS_O = TAMANO_PAGINA_DENUNCIAS
+TEXTO_FINAL_LISTA = "Es el final de la lista."
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -1439,6 +1492,128 @@ async def pasos_auditoria(navegador):
 asyncio.run(ejecutar_personal(pasos_auditoria))
 '''
 
+# o) Los botones ocupados. Recibe el SPKI, el identificador, el email, la
+# contraseña, el secreto TOTP y el último paso usado del admin, el email sin
+# cuenta y el nombre del main-*.js servido. Lee de /prueba/foco.js y
+# /prueba/guarda.js los main-*.js de los mutantes de entrar.ts (con disabled y
+# sin la guarda).
+NAVEGADOR_BOTONES = NAVEGADOR_PERSONAL + r'''
+(spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin, email_sin_cuenta,
+ principal) = sys.argv[1:9]
+with open("/prueba/foco.js", "rb") as fichero:
+    MUTANTE_FOCO = fichero.read()
+with open("/prueba/guarda.js", "rb") as fichero:
+    MUTANTE_GUARDA = fichero.read()
+usados[secreto_admin] = int(paso_admin)
+SESIONES = "/v1/personal/sesiones"
+# El elemento con el foco, por su etiqueta y su texto (el del <body>, vacío:
+# sería la página entera).
+ACTIVO = ("() => { const e = document.activeElement; "
+          "return e === null ? null : [e.tagName, e === document.body ? '' : e.textContent.trim()]; }")
+
+
+async def con_mutante(pagina, cuerpo):
+    # Solo se sustituye el main-*.js, como en m): la página y su CSP llegan
+    # de Caddy sin tocar.
+    async def servir(peticion_ruta):
+        await peticion_ruta.fulfill(status=200, content_type="text/javascript; charset=utf-8", body=cuerpo)
+
+    await pagina.context.route(ORIGEN + "/" + principal, servir)
+
+
+async def login_fallido(pagina):
+    # El formulario de /entrar con el email sin cuenta. Devuelve el botón.
+    await pagina.goto(ORIGEN + "/entrar")
+    await pagina.get_by_label("Empresa").fill(identificador)
+    await pagina.get_by_label("Email").fill(email_sin_cuenta)
+    await pagina.get_by_label("Contraseña", exact=True).fill("una-contrasena-que-no-vale")
+    await pagina.get_by_label(CODIGO).fill("000000")
+    return pagina.get_by_role("button", name="Entrar", exact=True)
+
+
+async def foco_tras_enter(pagina):
+    # Con el teclado: el foco en "Entrar" y Enter. El foco de antes es el
+    # control (estaba en el botón); el de después se lee cuando la página ha
+    # repintado con el error.
+    boton = await login_fallido(pagina)
+    await boton.focus()
+    antes = await pagina.evaluate(ACTIVO)
+    await pagina.keyboard.press("Enter")
+    alerta = pagina.get_by_role("alert")
+    await alerta.wait_for()
+    await asyncio.sleep(0.5)
+    return {"antes": antes, "despues": await pagina.evaluate(ACTIVO), "alerta": await alerta.inner_text()}
+
+
+async def posts_al_pulsar(pagina, veces):
+    # Los POST /sesiones que salen al pulsar "Entrar" una vez o con un doble
+    # clic.
+    boton = await login_fallido(pagina)
+    marca = len(eventos)
+    if veces == 2:
+        await boton.dblclick()
+    else:
+        await boton.click()
+    await pagina.get_by_role("alert").wait_for()
+    await asyncio.sleep(1.5)
+    return len([e for e in eventos[marca:]
+                if e["tipo"] == "peticion" and e["metodo"] == "POST" and e["ruta"] == SESIONES])
+
+
+async def pasos_botones(navegador):
+    # El login con la SPA real.
+    visita = await pagina_nueva(navegador, "visita")
+    res["foco_real"] = await foco_tras_enter(visita)
+    res["un_clic"] = await posts_al_pulsar(visita, 1)
+    res["doble_clic"] = await posts_al_pulsar(visita, 2)
+
+    # "Cargar más" con el teclado hasta el final, como admin, que ve todas.
+    admin = await pagina_nueva(navegador, "admin")
+    await entrar(admin, email_admin, contrasena_admin, secreto_admin)
+    await ir_por_menu(admin, "Denuncias")
+    await admin.locator("main tbody tr").first.wait_for()
+    res["primera"] = await admin.locator("tbody th[scope=row]").all_inner_texts()
+    boton = admin.get_by_role("button", name="Cargar más", exact=True)
+    res["boton"] = await boton.count()
+    hecho, pulsaciones = None, 0
+    while pulsaciones < 3 and await boton.count() == 1:
+        await boton.focus()
+        await admin.keyboard.press("Enter")
+        hecho = (await esperar_texto(admin, "#denuncias-hecho") if hecho is None
+                 else await esperar_otro(admin, "#denuncias-hecho", hecho))
+        pulsaciones += 1
+    res["hecho"], res["pulsaciones"] = hecho, pulsaciones
+    try:
+        # Una función y no una expresión: la CSP sin 'unsafe-eval' bloquea eval.
+        await admin.wait_for_function(
+            "() => document.activeElement !== null && document.activeElement.id === 'denuncias-hecho'", timeout=5000)
+    except Exception:
+        pass
+    res["foco_final"] = await admin.evaluate(ACTIVO)
+    res["boton_final"] = await boton.count()
+    res["todas"] = await admin.locator("tbody th[scope=row]").all_inner_texts()
+    res["ultimo_paso_admin"] = usados[secreto_admin]
+
+    # Lo que sigue deja mensajes en la consola a propósito: los mutantes y el
+    # control de la CSP. La comprobación de la consola mira solo hasta aquí.
+    res["consola_antes_del_control"] = len(consola)
+
+    # Los controles, cada uno en su contexto con el main-*.js de su mutante.
+    pagina_foco = await pagina_nueva(navegador, "mutante_foco")
+    await con_mutante(pagina_foco, MUTANTE_FOCO)
+    res["foco_mutante"] = await foco_tras_enter(pagina_foco)
+    pagina_guarda = await pagina_nueva(navegador, "mutante_guarda")
+    await con_mutante(pagina_guarda, MUTANTE_GUARDA)
+    res["doble_clic_mutante"] = await posts_al_pulsar(pagina_guarda, 2)
+
+    # Control de la consola: una conexión a otro origen sí deja su violación.
+    await admin.evaluate("fetch('https://ejemplo.invalid/').catch(() => null)")
+    await asyncio.sleep(1)
+
+
+asyncio.run(ejecutar_personal(pasos_botones))
+'''
+
 
 # ---------------------------------------------------------------------------
 # Utilidades de ejecución y de informe
@@ -1505,6 +1680,8 @@ IMAGEN_API = ""
 IMAGEN_MUTANTE = f"{PROYECTO}_mutante"
 IMAGEN_MUTANTE_XSS = f"{PROYECTO}_mutante_xss"
 IMAGEN_MUTANTE_XSS_AUDITORIA = f"{PROYECTO}_mutante_xss_auditoria"
+IMAGEN_MUTANTE_FOCO = f"{PROYECTO}_mutante_foco"
+IMAGEN_MUTANTE_GUARDA = f"{PROYECTO}_mutante_guarda"
 IMAGEN_PRUEBAS = f"{PROYECTO}_pruebas"
 SPKI_INTERMEDIA = ""
 SPKI_RAIZ = ""
@@ -2006,7 +2183,7 @@ def seccion_i():
     consola, errores = res.get("consola") or [], res.get("errores") or []
     corte = res.get("consola_antes_del_control", len(consola))
     control_csp = bool(senales_csp(consola[corte:]))
-    pasa(control_csp, f"i) control: una conexion a otro origen deja su violacion de la CSP en la consola ({consola[corte:][:1]})")
+    pasa(control_csp, f"i) control: una conexion a otro origen deja su violacion de la CSP en la consola ({senales_csp(consola[corte:])[:1]})")
     negativo(f"i) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
              f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
              not senales_csp(consola[:corte]) and not errores, control_csp,
@@ -2099,8 +2276,20 @@ def revisar_hoja(css):
     return flojas, sueltos, sorted(usadas - set(variables))
 
 
+def revisar_botones(textos):
+    """Lo que k) comprueba de los componentes ({ruta relativa: texto}):
+    (ficheros con disabled ligado, ficheros cuyo número de aria-disabled no es
+    el de BOTONES_OCUPADOS)."""
+    con_disabled = sorted(f for f, texto in textos.items() if PATRON_DISABLED.search(texto))
+    cuentas = {f: len(PATRON_ARIA_DISABLED.findall(texto)) for f, texto in textos.items()}
+    distintos = sorted(f for f in set(cuentas) | set(BOTONES_OCUPADOS)
+                       if cuentas.get(f, 0) != BOTONES_OCUPADOS.get(f, 0))
+    return con_disabled, distintos
+
+
 def seccion_k():
-    p("=== k) base visual: contraste de los colores, sin colores sueltos y sin variables que no existen")
+    p("=== k) base visual: contraste de los colores, sin colores sueltos y sin variables que no existen; "
+      "botones ocupados con aria-disabled")
     control = round(contraste("#767676", "#ffffff"), 2) == 4.54 and round(contraste("#777777", "#ffffff"), 2) == 4.48
     pasa(control, "k) control: la formula de contraste da 4,54:1 con #767676 y 4,48:1 con #777777 sobre blanco")
     css = ESTILOS_SPA.read_text(encoding="utf-8")
@@ -2118,6 +2307,21 @@ def seccion_k():
              "control: un color suelto no se detecta")
     negativo(f"k) toda variable usada esta definida {inexistentes}".rstrip(), not inexistentes, control_variable,
              "control: una variable que no existe no se detecta")
+
+    # Los botones ocupados, con el mutante de entrar.ts como control.
+    textos = {f.relative_to(APP_SPA).as_posix(): f.read_text(encoding="utf-8") for f in APP_SPA.rglob("*.ts")}
+    con_disabled, distintos = revisar_botones(textos)
+    if textos.get(FICHERO_ENTRAR, "").count(MUTANTE_DISABLED[0]) != 1:
+        sinc(f"k) el mutante de los botones no encuentra su texto en {FICHERO_ENTRAR}")
+        control_botones = False
+    else:
+        mutado = {**textos, FICHERO_ENTRAR: textos[FICHERO_ENTRAR].replace(*MUTANTE_DISABLED)}
+        control_botones = revisar_botones(mutado) == ([FICHERO_ENTRAR], [FICHERO_ENTRAR])
+    negativo(f"k) ningun boton de la SPA lleva disabled ligado {con_disabled}".rstrip(), not con_disabled,
+             control_botones, "control: entrar.ts con disabled no se detecta")
+    negativo(f"k) cada fichero lleva los aria-disabled de su inventario "
+             f"({sum(BOTONES_OCUPADOS.values())} en {len(BOTONES_OCUPADOS)}) {distintos}".rstrip(),
+             not distintos, control_botones, "control: entrar.ts sin aria-disabled no se detecta")
 
 
 def seccion_l():
@@ -2219,7 +2423,7 @@ def seccion_l():
     consola, errores = res.get("consola") or [], res.get("errores") or []
     corte = res.get("consola_antes_del_control", len(consola))
     control_csp = bool(senales_csp(consola[corte:]))
-    pasa(control_csp, f"l) control: una conexion a otro origen deja su violacion de la CSP ({consola[corte:][:1]})")
+    pasa(control_csp, f"l) control: una conexion a otro origen deja su violacion de la CSP ({senales_csp(consola[corte:])[:1]})")
     negativo(f"l) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
              f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
              not senales_csp(consola[:corte]) and not errores, control_csp,
@@ -2257,12 +2461,12 @@ def main_de_mutante(seccion, fichero_relativo, mutacion, imagen):
     fichero = copia / fichero_relativo
     texto = fichero.read_text(encoding="utf-8")
     if texto.count(mutacion[0]) != 1:
-        raise Parada(f"{seccion}) el mutante del XSS no encuentra su texto en {fichero_relativo}")
+        raise Parada(f"{seccion}) el mutante {imagen} no encuentra su texto en {fichero_relativo}")
     fichero.write_text(texto.replace(*mutacion), encoding="utf-8", newline="\n")
     compilacion(copia, imagen)
     r = en_imagen(imagen, "cat /spa/dist/canario-spa/browser/main-*.js")
     if r.rc != 0 or len(r.out) < 1000:
-        raise Parada(f"{seccion}) no se pudo leer el main-*.js del mutante del XSS: {r.err.strip()[-300:]!r}")
+        raise Parada(f"{seccion}) no se pudo leer el main-*.js del mutante {imagen}: {r.err.strip()[-300:]!r}")
     return r.out.encode("utf-8")
 
 
@@ -2407,7 +2611,7 @@ def seccion_m():
     # Consola.
     control_csp = bool(senales_csp(consola[corte:]))
     pasa(control_csp, f"m) control: el mutante y una conexion a otro origen dejan su violacion de la CSP "
-                      f"({consola[corte:][:1]})")
+                      f"({senales_csp(consola[corte:])[:1]})")
     negativo(f"m) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
              f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
              not senales_csp(consola[:corte]) and not errores, control_csp,
@@ -2557,8 +2761,113 @@ def seccion_n():
     corte = res.get("consola_antes_del_control", len(consola))
     control_csp = bool(senales_csp(consola[corte:]))
     pasa(control_csp, f"n) control: el mutante y una conexion a otro origen dejan su violacion de la CSP "
-                      f"({consola[corte:][:1]})")
+                      f"({senales_csp(consola[corte:])[:1]})")
     negativo(f"n) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
+             f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
+             not senales_csp(consola[:corte]) and not errores, control_csp,
+             f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
+
+
+def ids_paginados(cabeceras):
+    """Los ids de todas las denuncias que ve el admin, página a página por la
+    API del 8443: el oráculo de "Cargar más", que no pasa por la SPA."""
+    ids, cursor = [], None
+    for _ in range(20):
+        ruta = "/v1/personal/denuncias"
+        if cursor is not None:
+            ruta += "?cursor=" + urllib.parse.quote(cursor, safe="")
+        codigo, _, cuerpo = peticion("GET", ruta, puerto=PUERTO_API, cabeceras=cabeceras)
+        if codigo != 200:
+            raise Parada(f"o) el admin no puede listar las denuncias por la API ({codigo})")
+        pagina = json.loads(cuerpo)
+        ids += [d["denuncia_id"] for d in pagina["denuncias"]]
+        cursor = pagina["siguiente"]
+        if cursor is None:
+            return ids
+    raise Parada("o) el listado de denuncias de la API no termina en 20 paginas")
+
+
+def seccion_o():
+    global ULTIMO_PASO
+    p("=== o) botones ocupados en Chromium: el foco tras un login fallido, el doble clic y 'Cargar mas' hasta el final")
+    if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
+        sinc("o) sin el secreto TOTP del admin (i no termino) no se pueden probar los botones")
+        return
+
+    # Preparación por la API del 8443: una página entera de denuncias más,
+    # como un denunciante, y la lista completa que ve el admin (Bearer).
+    codigo_totp = codigo_tras(SECRETO_ADMIN, ULTIMO_PASO)
+    ULTIMO_PASO = int(time.time()) // 30
+    codigo, _, cuerpo = peticion("POST", RUTA_SESIONES, puerto=PUERTO_API, datos={
+        "empresa": IDENTIFICADOR, "email": EMAIL_ADMIN, "contrasena": CONTRASENA_ADMIN, "codigo_totp": codigo_totp})
+    acceso = (json.loads(cuerpo) if codigo == 201 else {}).get("token_acceso")
+    if not acceso:
+        raise Parada(f"o) el admin no pudo iniciar sesion por la API ({codigo})")
+    for i in range(DENUNCIAS_O):
+        codigo, _, _ = peticion("POST", f"/v1/empresas/{IDENTIFICADOR}/denuncias", puerto=PUERTO_API,
+                                datos={"categoria": "fraude", "texto": f"Denuncia {i + 1} para la segunda pagina."})
+        if codigo != 201:
+            raise Parada(f"o) no se pudo crear la denuncia de relleno {i + 1} ({codigo})")
+    visibles = ids_paginados({"Authorization": f"Bearer {acceso}"})
+    entrar = pathlib.Path("src", "app", *FICHERO_ENTRAR.split("/"))
+    mutante_foco = main_de_mutante("o", entrar, MUTANTE_DISABLED, IMAGEN_MUTANTE_FOCO)
+    mutante_guarda = main_de_mutante("o", entrar, MUTANTE_GUARDA, IMAGEN_MUTANTE_GUARDA)
+
+    res = navegador("navegador_o", NAVEGADOR_BOTONES,
+                    [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
+                     EMAIL_SIN_CUENTA, MAIN],
+                    {"foco.js": mutante_foco, "guarda.js": mutante_guarda})
+    if res is None:
+        sinc("o) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"o) el recorrido se interrumpe: {res['excepcion']}")
+        p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ULTIMO_PASO = res.get("ultimo_paso_admin", ULTIMO_PASO)
+
+    # El foco tras un login fallido con Enter, con el mutante con disabled
+    # como control.
+    boton = ["BUTTON", "Entrar"]
+    real, mutado = res.get("foco_real") or {}, res.get("foco_mutante") or {}
+    control_foco = mutado.get("antes") == boton and mutado.get("despues") == ["BODY", ""]
+    pasa(control_foco, f"o) control: con disabled, tras un login fallido con Enter el foco acaba en el <body> "
+                       f"({mutado.get('antes')}, {mutado.get('despues')})")
+    negativo(f"o) con aria-disabled, el foco sigue en 'Entrar' ({real.get('antes')}, {real.get('despues')})",
+             real.get("antes") == boton and real.get("despues") == boton, control_foco)
+    pasa(real.get("alerta") == ALERTA_LOGIN, f"o) el fallo se anuncia con role=alert ({real.get('alerta')!r})")
+
+    # El doble clic, con el mutante sin la guarda como control.
+    control_guarda = res.get("doble_clic_mutante") == 2
+    pasa(control_guarda, f"o) control: sin la guarda, un doble clic en 'Entrar' hace dos peticiones "
+                         f"({res.get('doble_clic_mutante')})")
+    negativo(f"o) un doble clic en 'Entrar' hace una sola peticion ({res.get('doble_clic')}; con un clic, "
+             f"{res.get('un_clic')})",
+             res.get("doble_clic") == 1 and res.get("un_clic") == 1, control_guarda)
+
+    # "Cargar más" hasta el final, contra la lista de la API.
+    if len(visibles) <= TAMANO_PAGINA_DENUNCIAS:
+        sinc(f"o) el admin ve {len(visibles)} denuncias: no hay segunda pagina que cargar")
+    else:
+        primera, todas = res.get("primera") or [], res.get("todas") or []
+        control_paginas = primera == visibles[:TAMANO_PAGINA_DENUNCIAS] and res.get("boton") == 1
+        pasa(control_paginas, f"o) control: la primera pagina son las {TAMANO_PAGINA_DENUNCIAS} primeras de la API, "
+                              f"con 'Cargar mas' ({len(primera)}, {res.get('boton')})")
+        negativo(f"o) 'Cargar mas' completa la lista con las mismas {len(visibles)} filas que la API, sin repetir "
+                 f"({res.get('pulsaciones')} pulsaciones, {len(todas)} filas)",
+                 todas == visibles, control_paginas)
+        ultima = len(visibles) - TAMANO_PAGINA_DENUNCIAS * ((len(visibles) - 1) // TAMANO_PAGINA_DENUNCIAS)
+        cargadas = "Se ha cargado 1 denuncia más." if ultima == 1 else f"Se han cargado {ultima} denuncias más."
+        esperado = f"{cargadas} {TEXTO_FINAL_LISTA}"
+        pasa(res.get("hecho") == esperado and res.get("foco_final") == ["P", esperado] and res.get("boton_final") == 0,
+             f"o) al final lo dice, el boton desaparece y el foco va al aviso ({res.get('hecho')!r}, "
+             f"foco {res.get('foco_final')})")
+
+    # Consola.
+    consola, errores = res.get("consola") or [], res.get("errores") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    control_csp = bool(senales_csp(consola[corte:]))
+    pasa(control_csp, f"o) control: una conexion a otro origen deja su violacion de la CSP ({senales_csp(consola[corte:])[:1]})")
+    negativo(f"o) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
              f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
              not senales_csp(consola[:corte]) and not errores, control_csp,
              f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
@@ -2570,7 +2879,7 @@ def seccion_n():
 def limpiar():
     unitarios = [f"{IMAGEN_MUTANTE}_unitario_{i}" for i in range(1, len(MUTANTES_UNITARIOS) + 1)]
     ejecutar(["docker", "image", "rm", "-f", IMAGEN_MUTANTE, IMAGEN_MUTANTE_XSS, IMAGEN_MUTANTE_XSS_AUDITORIA,
-              IMAGEN_PRUEBAS, *unitarios])
+              IMAGEN_MUTANTE_FOCO, IMAGEN_MUTANTE_GUARDA, IMAGEN_PRUEBAS, *unitarios])
     return dc("down", "-v", "--rmi", "local")
 
 
@@ -2696,7 +3005,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n):
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o):
             seccion()
     except Parada as e:
         parada = str(e)
