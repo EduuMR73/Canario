@@ -15,8 +15,9 @@ Quién ve qué (Ley 2/2023, arts. 32.1 y 8.5):
 * Un admin ve el listado de todas las denuncias (fecha, estado y asignación,
   sin contenido) y asigna. Para clasificar una denuncia sin asignar se la
   asigna a sí mismo y, si procede, la reasigna: cada paso queda en la
-  auditoría, que los admins leen por la API (listar_auditoria) y cuya cadena
-  verifican aparte (verificar_auditoria).
+  auditoría, que admins y auditores leen por la API (listar_auditoria y
+  listar_auditoria_reciente) y cuya cadena verifican aparte
+  (verificar_auditoria).
 * Asignar es idempotente: asignar a la cuenta que ya la tiene no escribe ni
   deja fila. Un no-op auditado sería ruido y una forma de inundar una
   auditoría que no se puede borrar.
@@ -31,6 +32,33 @@ Quién ve qué (Ley 2/2023, arts. 32.1 y 8.5):
   canal.controlar_asignacion_denuncia), porque la asignación es la llave del
   contenido. Leer la auditoría no deja fila, como para los admins: nadie
   audita al auditor, que no puede cambiar nada (docs/threat-model.md, 8).
+
+Auditoría por la API (listar_auditoria y listar_auditoria_reciente):
+* Cada fila trae, además de los ids, el email de quien actuó (actor_email) y
+  el de la cuenta sobre la que actuó (cuenta_email), resueltos aquí en la
+  misma transacción de solo lectura. Sin ellos el auditor no podría
+  interpretar nada: la auditoría solo guarda ids, y él no puede leer las
+  cuentas (403 en /usuarios). La tabla no cambia: el hash sigue cubriendo los
+  ids, y el email de una cuenta no se puede cambiar ni borrar (la API no
+  tiene UPDATE sobre esa columna ni DELETE en la tabla), así que un id lleva
+  siempre al mismo email.
+* Dónde está la cuenta depende de la acción: en objeto_id en las acciones
+  sobre cuentas (ACCIONES_CUENTA_EN_OBJETO) y en destino_id en la asignación
+  (ACCIONES_CUENTA_EN_DESTINO). No se cruza cualquier uuid con las cuentas:
+  redaccion_mensaje lleva en destino_id un mensaje, y rechazo_registro lleva
+  en objeto_id una solicitud. Una acción de cuenta nueva que no se añada a
+  esas listas sale con cuenta_email null y el id a la vista: se nota, no
+  engaña.
+* actor_email es null para 'plataforma' y 'sistema', que no son cuentas.
+* Dos órdenes, cada uno en su ruta: desde el principio (desde, ascendente:
+  lo que recorre quien revisa o exporta) y desde lo más reciente (antes,
+  descendente: lo que mira primero quien vigila). Un parámetro que cambiara
+  el sentido de otro dejaría combinaciones sin sentido que habría que
+  rechazar. Las dos paginan por la secuencia, que no se mueve: las filas que
+  llegan mientras tanto no desplazan las páginas, como haría un OFFSET.
+* Así el auditor ve los emails de casi todas las cuentas de su empresa (las
+  que aparecen en la auditoría). Es lo que necesita para su trabajo, y se
+  acepta (docs/threat-model.md, 8).
 
 Estados (TRANSICIONES, literal): nueva -> en_instruccion | inadmitida;
 en_instruccion -> resuelta | archivada; cualquiera -> no_veraz (abajo). Los
@@ -155,7 +183,7 @@ from dataclasses import dataclass
 
 import psycopg
 
-from app import avisos, bd, cripto, denuncias, personal
+from app import avisos, bd, cripto, denuncias, personal, solicitudes
 
 # Los estados visibles: los únicos que el listado admite como filtro.
 # 'no_veraz' no está: para la API no existe (ver la cabecera).
@@ -176,6 +204,18 @@ ACCION_LECTURA = "lectura_denuncia"
 ACCION_MENSAJE = "mensaje_personal"
 ACCION_ASIGNACION = "asignacion"
 PREFIJO_ACCION_ESTADO = "estado_"
+
+# Dónde guarda la auditoría la cuenta sobre la que se actuó (ver la
+# cabecera). Las demás acciones no tienen cuenta: lectura_denuncia,
+# mensaje_personal, estado_*, redaccion_* y supresion_* actúan sobre una
+# denuncia, y rechazo_registro sobre una solicitud.
+ACCIONES_CUENTA_EN_OBJETO = frozenset({
+    personal.ACCION_ACCESO, personal.ACCION_ACTIVACION, personal.ACCION_CAMBIO_CONTRASENA,
+    personal.ACCION_INVITACION, personal.ACCION_BAJA, personal.ACCION_ANULACION_INVITACION,
+    personal.ACCION_INVITACION_PLATAFORMA, personal.ACCION_REINVITACION_PLATAFORMA,
+    solicitudes.ACCION_APROBACION,
+})
+ACCIONES_CUENTA_EN_DESTINO = frozenset({ACCION_ASIGNACION})
 
 # Tope de lecturas (ver la cabecera): denuncias distintas por cuenta y día de
 # la empresa. Son criterio, no una cifra de otra aplicación: no hay datos de
@@ -275,12 +315,38 @@ SQL_LISTAR = """
      order by d.fecha desc, d.id desc
      limit %(limite)s
 """
-SQL_AUDITORIA = """
-    select secuencia, fecha, actor, accion, objeto_id, destino_id
-      from canal.registro_auditoria
-     where secuencia >= %s
-     order by secuencia
-     limit %s
+# Las filas de la auditoría con los emails (ver la cabecera). El actor del
+# personal es 'personal:<id>' (_actor); 'plataforma' y 'sistema' no cruzan
+# con ninguna cuenta, y una acción que no está en ninguna de las dos listas
+# deja el CASE en null y tampoco. La empresa va en cada join, como en
+# SQL_LISTAR, aunque la RLS ya la limita.
+_SQL_FILAS_AUDITORIA = """
+    select a.secuencia, a.fecha, a.actor, a.accion, a.objeto_id, a.destino_id, ua.email, uc.email
+      from canal.registro_auditoria a
+      left join canal.usuario_personal ua
+        on ua.empresa_id = a.empresa_id and a.actor = 'personal:' || ua.id::text
+      left join canal.usuario_personal uc
+        on uc.empresa_id = a.empresa_id and uc.id = case
+             when a.accion = any(%(en_objeto)s) then a.objeto_id
+             when a.accion = any(%(en_destino)s) then a.destino_id
+           end
+"""
+SQL_AUDITORIA = _SQL_FILAS_AUDITORIA + """
+     where a.secuencia >= %(desde)s
+     order by a.secuencia
+     limit %(limite)s
+"""
+# Desde lo más reciente: la primera página y las anteriores. Dos sentencias
+# en vez de una con "%(antes)s is null or": cada una dice exactamente lo que
+# pide.
+SQL_AUDITORIA_RECIENTE = _SQL_FILAS_AUDITORIA + """
+     order by a.secuencia desc
+     limit %(limite)s
+"""
+SQL_AUDITORIA_ANTERIOR = _SQL_FILAS_AUDITORIA + """
+     where a.secuencia < %(antes)s
+     order by a.secuencia desc
+     limit %(limite)s
 """
 SQL_VERIFICAR_CADENA = "select canal.verificar_cadena_auditoria()"
 
@@ -390,12 +456,24 @@ class FilaAuditoria:
     accion: str
     objeto_id: uuid.UUID | None
     destino_id: uuid.UUID | None
+    # None si el actor no es una cuenta ('plataforma', 'sistema').
+    actor_email: str | None
+    # None si la acción no es sobre una cuenta (ver la cabecera).
+    cuenta_email: str | None
 
 
 @dataclass(frozen=True)
 class PaginaAuditoria:
     filas: tuple
     siguiente: int | None
+
+
+@dataclass(frozen=True)
+class PaginaAuditoriaReciente:
+    filas: tuple
+    # Lo que se pasa como antes para la página siguiente, hacia el principio;
+    # None si no hay más.
+    anterior: int | None
 
 
 # ---------------------------------------------------------------------------
@@ -511,19 +589,42 @@ def listar_denuncias(pool, sesion, estado=None, cursor=None):
     return PaginaDenuncias(denuncias=tuple(pagina), siguiente=siguiente)
 
 
+def _leer_auditoria(pool, sesion, sql, parametros):
+    """Una página más una fila de la auditoría de la empresa (la de más dice
+    si hay otra página), con los emails. Admin y auditor."""
+    personal.exigir_rol(sesion, personal.ROLES_AUDITORIA)
+    with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
+        _comprobar_actor(conexion, sesion)
+        filas = conexion.execute(sql, {
+            **parametros, "en_objeto": sorted(ACCIONES_CUENTA_EN_OBJETO),
+            "en_destino": sorted(ACCIONES_CUENTA_EN_DESTINO), "limite": TAMANO_PAGINA_AUDITORIA + 1,
+        }).fetchall()
+    return [FilaAuditoria(*f) for f in filas]
+
+
 def listar_auditoria(pool, sesion, desde=1):
     """Auditoría de la empresa, para admins y auditores, en orden de secuencia
     y por páginas. Es lo que hace visibles los controles que se apoyan en ella:
     quién se asignó una denuncia, quién la leyó y quién reinvitó una cuenta.
     No verifica la cadena: recorrerla entera es O(n) y cada página la
     recorrería otra vez (verificar_auditoria)."""
-    personal.exigir_rol(sesion, personal.ROLES_AUDITORIA)
-    with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
-        _comprobar_actor(conexion, sesion)
-        filas = conexion.execute(SQL_AUDITORIA, [desde, TAMANO_PAGINA_AUDITORIA + 1]).fetchall()
-    pagina = [FilaAuditoria(*f) for f in filas[:TAMANO_PAGINA_AUDITORIA]]
+    filas = _leer_auditoria(pool, sesion, SQL_AUDITORIA, {"desde": desde})
+    pagina = filas[:TAMANO_PAGINA_AUDITORIA]
     siguiente = pagina[-1].secuencia + 1 if len(filas) > TAMANO_PAGINA_AUDITORIA else None
     return PaginaAuditoria(filas=tuple(pagina), siguiente=siguiente)
+
+
+def listar_auditoria_reciente(pool, sesion, antes=None):
+    """La misma auditoría desde lo más reciente: sin antes, la última página;
+    con antes, la página de secuencias menores. anterior es la secuencia más
+    baja de la página si quedan más, para pedir la siguiente con ella."""
+    if antes is None:
+        filas = _leer_auditoria(pool, sesion, SQL_AUDITORIA_RECIENTE, {})
+    else:
+        filas = _leer_auditoria(pool, sesion, SQL_AUDITORIA_ANTERIOR, {"antes": antes})
+    pagina = filas[:TAMANO_PAGINA_AUDITORIA]
+    anterior = pagina[-1].secuencia if len(filas) > TAMANO_PAGINA_AUDITORIA else None
+    return PaginaAuditoriaReciente(filas=tuple(pagina), anterior=anterior)
 
 
 def verificar_auditoria(pool, sesion):

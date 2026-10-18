@@ -32,8 +32,9 @@
   y PUT .../{denuncia_id}/asignacion (solo admin). POST .../{denuncia_id}/redaccion
   y POST .../{denuncia_id}/mensajes/{secuencia}/redaccion (tachar parte del
   texto, art. 32.2; solo admin con la denuncia asignada).
-  GET /v1/personal/auditoria y GET /v1/personal/auditoria/verificacion (solo
-  admin).
+  GET /v1/personal/auditoria (desde el principio, con desde),
+  GET .../auditoria/recientes (desde lo más reciente, con antes) y
+  GET .../auditoria/verificacion: admin y auditor.
 
 Este módulo es el único que sabe cómo viajan los tokens, y hay dos
 transportes (docs/threat-model.md, 6.3), que decide la dependencia
@@ -771,15 +772,26 @@ def asignar(denuncia_id: str, datos: Asignacion, peticion: Request, sesion: Sesi
     return Response(status_code=204)
 
 
+def _fila_auditoria(fila):
+    return {"secuencia": fila.secuencia, "fecha": fila.fecha.isoformat(), "actor": fila.actor,
+            "actor_email": fila.actor_email, "accion": fila.accion, "objeto_id": _opcional(fila.objeto_id),
+            "destino_id": _opcional(fila.destino_id), "cuenta_email": fila.cuenta_email}
+
+
 @router.get("/auditoria")
 def listar_auditoria(peticion: Request, sesion: SesionPersonal, desde: int = Query(default=1, ge=1, le=2 ** 62)):
     pagina = instruccion.listar_auditoria(peticion.app.state.pool, sesion, desde)
-    return JSONResponse(content={
-        "filas": [{"secuencia": f.secuencia, "fecha": f.fecha.isoformat(), "actor": f.actor, "accion": f.accion,
-                   "objeto_id": _opcional(f.objeto_id), "destino_id": _opcional(f.destino_id)}
-                  for f in pagina.filas],
-        "siguiente": pagina.siguiente,
-    })
+    return JSONResponse(content={"filas": [_fila_auditoria(f) for f in pagina.filas], "siguiente": pagina.siguiente})
+
+
+# antes empieza en 2: por debajo de 1 no hay secuencias, así que antes=1 solo
+# puede venir de un cliente que se ha equivocado, y se le dice (422) en vez
+# de darle una página vacía.
+@router.get("/auditoria/recientes")
+def listar_auditoria_reciente(peticion: Request, sesion: SesionPersonal,
+                              antes: int | None = Query(default=None, ge=2, le=2 ** 62)):
+    pagina = instruccion.listar_auditoria_reciente(peticion.app.state.pool, sesion, antes)
+    return JSONResponse(content={"filas": [_fila_auditoria(f) for f in pagina.filas], "anterior": pagina.anterior})
 
 
 @router.get("/auditoria/verificacion")

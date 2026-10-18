@@ -4,6 +4,7 @@ import { Entrar } from './acceso/entrar/entrar';
 import { Registro } from './acceso/registro/registro';
 import { Verificacion } from './acceso/verificacion/verificacion';
 import { Armazon } from './armazon/armazon';
+import { Auditoria } from './auditoria/auditoria';
 import { Cuenta } from './cuenta/cuenta';
 import { Cuentas } from './cuentas/cuentas';
 import { Denuncias } from './denuncias/denuncias';
@@ -56,6 +57,10 @@ export const routes: Routes = [
       {
         path: 'solicitudes', component: Solicitudes, title: 'Solicitudes de registro - Canario',
         data: { roles: MENU.solicitudes.roles },
+      },
+      {
+        path: 'auditoria', component: Auditoria, title: 'Auditoría - Canario',
+        data: { roles: MENU.auditoria.roles },
       },
       { path: 'cuenta', component: Cuenta, title: 'Mi cuenta - Canario', data: { roles: MENU.cuenta.roles } },
     ],

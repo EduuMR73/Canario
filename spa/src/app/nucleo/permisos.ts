@@ -30,6 +30,8 @@ export const MENU = {
   denuncias: { ruta: '/denuncias', texto: 'Denuncias', roles: ['admin', 'instructor'] },
   cuentas: { ruta: '/cuentas', texto: 'Cuentas', roles: ['admin'] },
   solicitudes: { ruta: '/solicitudes', texto: 'Solicitudes', roles: ['admin'] },
+  // app/personal.py, ROLES_AUDITORIA: el instructor no.
+  auditoria: { ruta: '/auditoria', texto: 'Auditoría', roles: ['admin', 'auditor'] },
   cuenta: { ruta: '/cuenta', texto: 'Mi cuenta', roles: TODOS },
 } as const satisfies Record<string, EntradaMenu>;
 

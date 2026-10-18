@@ -142,7 +142,9 @@ button.peligro {
   color: var(--color-peligro-texto);
 }
 
-button:disabled {
+/* aria-disabled: ocupado pero sin perder el foco (spa/src/app/auditoria). */
+button:disabled,
+button[aria-disabled="true"] {
   opacity: 0.6;
   cursor: progress;
 }
