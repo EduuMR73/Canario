@@ -1,4 +1,119 @@
 /* Estilos globales de la SPA del personal. Todo el CSS vive aquí y sale en un
    fichero propio: los componentes no declaran estilos, porque Angular los
    inyecta con elementos <style> en línea, que la CSP (style-src 'self',
-   proxy/Caddyfile) bloquea. El aspecto llega en el bloque 6b-4. */
+   proxy/Caddyfile) bloquea. El aspecto llega en el bloque 6b-4: esto es lo
+   mínimo para que los formularios se lean y se usen bien. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+  color: #1a1a1a;
+  background: #ffffff;
+}
+
+main {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+/* Los encabezados con tabindex="-1" reciben el foco por código al cambiar
+   de página o de paso (app/nucleo/foco.ts): sin contorno, porque no se
+   pueden alcanzar con el tabulador y el contorno solo despistaría. */
+h1:focus,
+h2:focus {
+  outline: none;
+}
+
+.campo {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0 0 1rem;
+}
+
+label {
+  font-weight: 600;
+}
+
+input {
+  font: inherit;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid #6b6b6b;
+  border-radius: 0.25rem;
+  /* Nunca más ancho que la pantalla, también a 320 px. */
+  max-width: 100%;
+}
+
+.ayuda {
+  font-size: 0.875rem;
+  color: #4a4a4a;
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  border: 1px solid #1a1a1a;
+  border-radius: 0.25rem;
+  background: #1a1a1a;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* Foco siempre visible con teclado (WCAG 2.2, 2.4.7). */
+:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
+}
+
+/* El error no depende solo del color: lleva borde y va en role="alert". */
+.error {
+  border-left: 4px solid #b91c1c;
+  padding: 0.5rem 0.75rem;
+  background: #fef2f2;
+  color: #7f1d1d;
+}
+
+.aviso {
+  border-left: 4px solid #1d4ed8;
+  padding: 0.5rem 0.75rem;
+  background: #eff6ff;
+}
+
+/* El QR siempre negro sobre blanco, también en modo oscuro: los lectores
+   necesitan ese contraste. */
+.qr {
+  display: block;
+  width: 12rem;
+  height: 12rem;
+  max-width: 100%;
+  background: #ffffff;
+}
+
+.secreto {
+  font-size: 1.125rem;
+  letter-spacing: 0.05em;
+  word-break: break-all;
+}
+
+.cuenta dt {
+  font-weight: 600;
+}
+
+.cuenta dd {
+  margin: 0 0 0.75rem;
+  overflow-wrap: anywhere;
+}

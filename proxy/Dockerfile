@@ -28,7 +28,11 @@ COPY --from=spa --chown=node:node package.json package-lock.json .npmrc ./
 # no la tiene o no cuadra (Angular no publica attestations de procedencia).
 RUN npm ci --ignore-scripts --no-audit --no-fund  && npm audit signatures
 
-COPY --from=spa --chown=node:node angular.json tsconfig.json tsconfig.app.json ./
+# tsconfig.spec.json y los *.spec.ts no entran en el build (tsconfig.app.json
+# los excluye): están aquí para que tests/security/verificar_spa.py ejecute
+# las pruebas unitarias en esta misma etapa, sin red. La imagen final solo
+# copia dist/.
+COPY --from=spa --chown=node:node angular.json tsconfig.json tsconfig.app.json tsconfig.spec.json ./
 COPY --from=spa --chown=node:node src/ src/
 RUN npx ng build
 
