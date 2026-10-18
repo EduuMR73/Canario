@@ -124,6 +124,16 @@ El token de los enlaces de correo sale de la URL en cuanto se abre la página y 
 
 El personal tiene tres roles: `admin` (gestiona las cuentas y asigna las denuncias), `instructor` (instruye las denuncias que tiene asignadas) y `auditor` (lee la auditoría y verifica su cadena, nunca el contenido). El contenido de una denuncia solo lo lee quien la tiene asignada, y a un auditor no se le puede asignar ninguna: lo impide la API y, por debajo, un trigger de la base de datos (modelo de amenazas, 6.15).
 
+Cada cuenta puede abrir **50 denuncias distintas al día** (el día de la empresa); releer una ya abierta no cuenta y sigue permitido después. La lectura devuelve `lecturas: {hoy, tope}`. Pasado el tope, una denuncia nueva da 429 con un mensaje que lo explica y `Retry-After` hasta la medianoche de la empresa. Al llegar a la 20.ª y a la 50.ª, los demás admins y los auditores de la empresa reciben un correo, y también cada vez que se activa una cuenta (nueva, reactivada o recuperada). Si una cola grande de denuncias nuevas hace llegar a un admin al tope, otro admin puede repartirla. Lo que queda en el log de la API, sin ids de denuncias:
+
+```
+EVENTO limite_lecturas_aviso: empresa=<uuid> cuenta=<uuid> lecturas=20 destinatarios=<n>
+EVENTO limite_lecturas_tope: empresa=<uuid> cuenta=<uuid> lecturas=50 destinatarios=<n>
+EVENTO aviso_sin_destinatario: tipo=<aviso_lecturas o aviso_activacion> empresa=<uuid>
+```
+
+`aviso_sin_destinatario` es normal al activar el primer admin de una empresa. En otro caso, significa que la empresa no tiene a nadie más que vigile: conviene invitar a un auditor o a un segundo admin.
+
 ### Las páginas del denunciante (8444)
 
 Formularios HTML sin JavaScript. Las genera la API bajo `/web` (`app/rutas_web.py`) con las mismas funciones que `/v1`, y Caddy las sirve en el 8444 sin el prefijo; desde el 8443, `/web` da 404.
@@ -166,7 +176,7 @@ EVENTO correo_descartado: tipo=<tipo de correo> motivo=envios_simultaneos
 
 `registro_fallido` significa que alguien recibió su 202 y no le llegará nada (por ejemplo, PostgreSQL no respondía); el mensaje del 202 le dice que lo vuelva a pedir. Hoy nadie revisa estas líneas: en producción, el log tiene que salir del anfitrión y alguien tiene que mirarlo (modelo de amenazas, 8).
 
-Sin Mailpit, el registro responde igual y cada correo deja `EVENTO correo_fallido`. La salida SMTP de producción no es parte de esta entrega; su diseño está en el modelo de amenazas (8).
+Sin Mailpit, el registro responde igual y cada correo deja `EVENTO correo_fallido`, también los avisos de lecturas y de activación (`tipo=aviso_lecturas` y `tipo=aviso_activacion`). La salida SMTP de producción no es parte de esta entrega; su diseño está en el modelo de amenazas (8).
 
 ### Origen del sitio del denunciante
 
