@@ -114,14 +114,39 @@ entre autenticar y actuar dejaría actuar a una cuenta ya dada de baja.
   mensaje final se inserta antes de cambiar el estado, en la misma
   transacción.
 
+Tope de lecturas (OWASP ASVS 5.0.0, 2.4.1: frenar las llamadas excesivas que
+llevan a sacar datos; ATT&CK T1213). Un admin puede asignarse cualquier
+denuncia y leerla: la auditoría lo registra, pero sin un límite podría
+sacarlas todas en minutos. Por eso:
+* Se cuentan las denuncias DISTINTAS que una cuenta abre en el día de la
+  empresa, en la propia auditoría (filas lectura_denuncia). El día es el de
+  la columna fecha, que no lleva hora a propósito: contar 24 horas móviles
+  exigiría guardarla. Releer una denuncia ya abierta hoy no suma, y sigue
+  permitido después del tope: quien instruye no pierde lo que ya tenía.
+* Al llegar a LECTURAS_AVISO y a LECTURAS_TOPE, una sola vez cada uno por
+  construcción (la cuenta solo pasa una vez por cada número), avisa a los
+  admins y auditores (app/avisos.py) y deja un EVENTO. Pasado el tope, una
+  denuncia nueva da LimiteLecturas (429) sin leer nada ni dejar fila.
+* Primero se escribe la fila y después se cuenta, en la misma transacción.
+  El trigger de encadenado bloquea la auditoría de la empresa hasta
+  confirmar, así que dos lecturas simultáneas de la misma cuenta se cuentan
+  una detrás de otra y nunca pasan las dos con la última plaza. Si se
+  rechaza, la transacción se deshace entera, fila incluida.
+* El mismo tope para admin e instructor: es la cuenta la que se limita.
+  Repartir las lecturas entre cuentas exige activar cuentas nuevas, y cada
+  activación también se avisa (app/avisos.py).
+
 Registro (logs): nada en el flujo normal. Las acciones quedan en la
-auditoría, que no lleva hora. Las únicas excepciones son la declaración de
-no veraz y la redacción, que registra app/rutas_personal.py: destruyen
-prueba sin vuelta atrás, y su abuso (un admin que entierra denuncias o tacha
-lo que le incrimina) debe dejar una señal fuera de la base de datos que la
-propia empresa administra. Esa señal es también el registro que permite
-volver a aplicarlas si se restaura una copia anterior (docs/threat-model.md,
-8).
+auditoría, que no lleva hora. Las excepciones las registra
+app/rutas_personal.py:
+* La declaración de no veraz y la redacción destruyen prueba sin vuelta
+  atrás, y su abuso (un admin que entierra denuncias o tacha lo que le
+  incrimina) debe dejar una señal fuera de la base de datos que la propia
+  empresa administra. Esa señal es también el registro que permite volver a
+  aplicarlas si se restaura una copia anterior (docs/threat-model.md, 8).
+* Los dos avisos del tope de lecturas, por la misma razón: son la señal de
+  una salida de datos, y no deben depender solo de la auditoría que el
+  propio admin puede leer.
 """
 import datetime
 import re
@@ -130,7 +155,7 @@ from dataclasses import dataclass
 
 import psycopg
 
-from app import bd, cripto, denuncias, personal
+from app import avisos, bd, cripto, denuncias, personal
 
 # Los estados visibles: los únicos que el listado admite como filtro.
 # 'no_veraz' no está: para la API no existe (ver la cabecera).
@@ -151,6 +176,17 @@ ACCION_LECTURA = "lectura_denuncia"
 ACCION_MENSAJE = "mensaje_personal"
 ACCION_ASIGNACION = "asignacion"
 PREFIJO_ACCION_ESTADO = "estado_"
+
+# Tope de lecturas (ver la cabecera): denuncias distintas por cuenta y día de
+# la empresa. Son criterio, no una cifra de otra aplicación: no hay datos de
+# uso con los que calibrarlos (docs/threat-model.md, 8). Quien instruye abre
+# pocas denuncias nuevas al día; 20 ya es raro y merece que alguien lo mire,
+# y 50 solo se alcanza clasificando una cola muy grande, que otro admin puede
+# repartir. Cambiarlos es cambiar estos literales y los de las pruebas.
+LECTURAS_AVISO = 20
+LECTURAS_TOPE = 50
+UMBRAL_AVISO = "aviso"
+UMBRAL_TOPE = "tope"
 
 # Filas por página. Fijas: un parámetro más sería una forma más de pedir
 # respuestas grandes.
@@ -181,6 +217,8 @@ SQLSTATE_DESTINO_NO_ASIGNABLE = "CN004"
 # Para las lecturas sin escritura (listados), en una transacción de solo
 # lectura: la comprobación y la consulta salen de la misma foto.
 SQL_ACTOR_ACTIVO = "select count(*) from canal.usuario_personal where id = %s and activo and totp_activo"
+# El email de quien lee, para el aviso del tope de lecturas (app/avisos.py).
+SQL_EMAIL_ACTOR = "select email from canal.usuario_personal where id = %s"
 
 # Cada consulta sobre una denuncia excluye 'no_veraz' en su propio WHERE: no
 # la devuelve (404) ni la bloquea. Un filtro aparte que alguien olvidara en
@@ -189,6 +227,23 @@ SQL_LEER_ASIGNADA = (
     "select fecha, estado, contenido_cifrado, version_clave from canal.denuncia "
     "where id = %s and asignada_a = %s and estado <> 'no_veraz' for share"
 )
+# Lecturas de hoy de la cuenta, después de escribir la de esta petición:
+# denuncias distintas, veces que se ha leído esta (1 si es la primera de hoy)
+# y segundos hasta el día siguiente de la empresa. El día se calcula igual
+# que canal.encadenar_auditoria (now() es el mismo en toda la transacción),
+# y la medianoche se pasa a timestamptz antes de restar: un día con cambio
+# de hora dura 23 o 25 horas, y restar horas locales fallaría por una.
+# 'lectura_denuncia' (ACCION_LECTURA) va como literal: con un parámetro,
+# PostgreSQL no podría usar el índice parcial auditoria_lecturas.
+SQL_LECTURAS_DEL_DIA = """
+    select count(distinct a.objeto_id),
+           count(*) filter (where a.objeto_id = %(denuncia)s),
+           ceil(extract(epoch from ((e.hoy + 1)::timestamp at time zone e.zona_horaria) - now()))::integer
+      from (select id, zona_horaria, (now() at time zone zona_horaria)::date as hoy from canal.empresa) e
+      left join canal.registro_auditoria a
+        on a.empresa_id = e.id and a.actor = %(actor)s and a.accion = 'lectura_denuncia' and a.fecha = e.hoy
+     group by e.zona_horaria, e.hoy
+"""
 SQL_ESCRIBIR_ASIGNADA = (
     "select estado from canal.denuncia where id = %s and asignada_a = %s and estado <> 'no_veraz' "
     "for no key update"
@@ -271,6 +326,15 @@ class MensajeNoPermitido(Exception):
     """Se declara no veraz una denuncia con un mensaje que nadie leería."""
 
 
+class LimiteLecturas(Exception):
+    """La cuenta ya ha abierto hoy LECTURAS_TOPE denuncias distintas y pide
+    otra nueva. segundos: hasta el día siguiente de la empresa."""
+
+    def __init__(self, segundos):
+        super().__init__(segundos)
+        self.segundos = segundos
+
+
 class CursorNoValido(ValueError):
     """El cursor de paginación no tiene la forma exacta."""
 
@@ -304,6 +368,18 @@ class Expediente:
     categoria: str
     texto: str
     mensajes: tuple
+
+
+@dataclass(frozen=True)
+class Lectura:
+    expediente: Expediente
+    # Denuncias distintas abiertas hoy por la cuenta, contando esta.
+    lecturas_hoy: int
+    # UMBRAL_AVISO o UMBRAL_TOPE si esta lectura acaba de llegar a uno; None si no.
+    umbral: str | None
+    # Avisos para los admins y auditores (app/avisos.py), vacío si no hay
+    # umbral o no hay a quién avisar.
+    correos: tuple
 
 
 @dataclass(frozen=True)
@@ -381,6 +457,23 @@ def _traducir(error):
     return None
 
 
+def decidir_lecturas(distintas, primera):
+    """(permitida, umbral) de una lectura, con distintas = denuncias distintas
+    de hoy contando esta y primera = si es la primera vez que se abre hoy.
+
+    Se rechaza solo por encima del tope, y eso solo puede pasar con una
+    denuncia nueva: releer no cambia distintas. El umbral sale cuando una
+    denuncia nueva hace llegar a la cuenta justo a ese número, así que cada
+    aviso sale una vez al día por cuenta sin guardar nada más."""
+    if distintas > LECTURAS_TOPE:
+        return False, None
+    if primera and distintas == LECTURAS_AVISO:
+        return True, UMBRAL_AVISO
+    if primera and distintas == LECTURAS_TOPE:
+        return True, UMBRAL_TOPE
+    return True, None
+
+
 def leer_cursor(texto):
     """(fecha, id) de un cursor, o CursorNoValido."""
     coincidencia = PATRON_CURSOR.fullmatch(texto)
@@ -448,9 +541,10 @@ def verificar_auditoria(pool, sesion):
 # ---------------------------------------------------------------------------
 
 def leer_denuncia(pool, claves, sesion, denuncia_id):
-    """Contenido y mensajes de una denuncia asignada a quien la pide. Deja
-    una fila de auditoría por lectura."""
+    """Contenido y mensajes de una denuncia asignada a quien la pide, con el
+    tope de lecturas (ver la cabecera). Deja una fila de auditoría por lectura."""
     personal.exigir_rol(sesion, personal.ROLES_INSTRUCCION)
+    correos = ()
     with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
         _bloquear_actor(conexion, sesion)
         fila = conexion.execute(SQL_LEER_ASIGNADA, [denuncia_id, sesion.usuario_id]).fetchone()
@@ -458,11 +552,25 @@ def leer_denuncia(pool, claves, sesion, denuncia_id):
             raise personal.NoEncontrado
         fecha, estado, cifrado, version = fila
         filas, envueltas = denuncias.leer_mensajes_y_claves(conexion, denuncia_id, version)
+        # La fila antes que el conteo: escribirla espera al bloqueo de la
+        # auditoría de la empresa, y el conteo ve ya las lecturas confirmadas
+        # antes (ver la cabecera).
         _auditar(conexion, sesion, ACCION_LECTURA, denuncia_id)
+        distintas, veces, segundos = conexion.execute(
+            SQL_LECTURAS_DEL_DIA, {"denuncia": denuncia_id, "actor": _actor(sesion)}).fetchone()
+        permitida, umbral = decidir_lecturas(distintas, veces == 1)
+        if not permitida:
+            # Sale de la transacción con una excepción: se deshace, fila incluida.
+            raise LimiteLecturas(segundos)
+        if umbral is not None:
+            nombre, emails = avisos.destinatarios(conexion, sesion.usuario_id)
+            cuenta = conexion.execute(SQL_EMAIL_ACTOR, [sesion.usuario_id]).fetchone()[0]
+            correos = avisos.correos_lecturas(nombre, emails, cuenta, distintas, LECTURAS_TOPE)
     contenido, mensajes = denuncias.descifrar_expediente(claves, sesion.empresa_id, denuncia_id, cifrado, version,
                                                          filas, envueltas)
-    return Expediente(denuncia_id=denuncia_id, fecha=fecha, estado=estado, categoria=contenido["categoria"],
-                      texto=contenido["texto"], mensajes=tuple(mensajes))
+    expediente = Expediente(denuncia_id=denuncia_id, fecha=fecha, estado=estado, categoria=contenido["categoria"],
+                            texto=contenido["texto"], mensajes=tuple(mensajes))
+    return Lectura(expediente=expediente, lecturas_hoy=distintas, umbral=umbral, correos=correos)
 
 
 def enviar_mensaje(pool, claves, sesion, denuncia_id, texto):

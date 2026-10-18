@@ -132,6 +132,11 @@ MENSAJE_DESTINO = "la cuenta de destino no está activa o no instruye denuncias"
 MENSAJE_FINAL = "cerrar una denuncia exige un mensaje final para el denunciante"
 MENSAJE_NO_VERAZ = "declarar una denuncia no veraz no admite mensaje"
 MENSAJE_FRAGMENTO = "el texto indicado no está en esa posición"
+# Propio y no el 429 genérico: quien lo recibe tiene que saber qué ha pasado
+# y que puede seguir con lo que ya abrió (el tope no es un secreto para quien
+# llega a él).
+MENSAJE_LECTURAS = (f"ha abierto hoy el máximo de {instruccion.LECTURAS_TOPE} denuncias distintas; "
+                    "puede seguir con las que ya abrió y abrir otras mañana")
 # Siempre el mismo, pase lo que pase con la solicitud (app/solicitudes.py).
 # Si la tarea de después de responder falla, el 202 ya ha salido: el mensaje
 # dice qué hacer si el correo no llega (app/solicitudes.py, cabecera).
@@ -465,11 +470,19 @@ def activar(datos: Activacion, peticion: Request):
 @router.post("/activacion/confirmar")
 def confirmar_activacion(datos: Confirmacion, peticion: Request):
     estado = peticion.app.state
-    token = personal.confirmar_activacion(estado.pool, estado.claves, datos.token, datos.codigo_totp)
+    activacion = personal.confirmar_activacion(estado.pool, estado.claves, datos.token, datos.codigo_totp)
+    if not activacion.correos:
+        # La activación del primer admin de una empresa no tiene a quién
+        # avisar; cualquier otra sin destinatarios es una empresa sin nadie
+        # más que vigile (app/avisos.py).
+        registro.warning("EVENTO aviso_sin_destinatario: tipo=aviso_activacion empresa=%s",
+                         activacion.empresa_id)
+    # Los avisos, después de responder: la respuesta no depende de ellos.
+    avisar = BackgroundTask(correo.enviar_todos, activacion.correos) if activacion.correos else None
     if not peticion.state.navegador:
-        return JSONResponse(content={"token_dispositivo": token})
-    respuesta = JSONResponse(content={})
-    _poner_cookie(respuesta, COOKIE_DISPOSITIVO, token, DURACION_DISPOSITIVO)
+        return JSONResponse(content={"token_dispositivo": activacion.token_dispositivo}, background=avisar)
+    respuesta = JSONResponse(content={}, background=avisar)
+    _poner_cookie(respuesta, COOKIE_DISPOSITIVO, activacion.token_dispositivo, DURACION_DISPOSITIVO)
     return respuesta
 
 
@@ -679,14 +692,25 @@ def listar_denuncias(peticion: Request, sesion: SesionPersonal,
 @router.get("/denuncias/{denuncia_id}")
 def leer_denuncia(denuncia_id: str, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
-    expediente = instruccion.leer_denuncia(estado.pool, estado.claves, sesion, _uuid(denuncia_id))
+    lectura = instruccion.leer_denuncia(estado.pool, estado.claves, sesion, _uuid(denuncia_id))
+    if lectura.umbral is not None:
+        # La señal fuera de la base de datos (app/instruccion.py, cabecera),
+        # una vez por umbral, cuenta y día. Sin ids de denuncias.
+        registro.warning("EVENTO limite_lecturas_%s: empresa=%s cuenta=%s lecturas=%d destinatarios=%d",
+                         lectura.umbral, sesion.empresa_id, sesion.usuario_id, lectura.lecturas_hoy,
+                         len(lectura.correos))
+        if not lectura.correos:
+            registro.warning("EVENTO aviso_sin_destinatario: tipo=aviso_lecturas empresa=%s", sesion.empresa_id)
+    expediente = lectura.expediente
     return JSONResponse(content={
         "denuncia_id": str(expediente.denuncia_id), "fecha": expediente.fecha.isoformat(),
         "estado": expediente.estado, "categoria": expediente.categoria, "texto": expediente.texto,
         # El personal sí ve quién del personal escribió cada mensaje.
         "mensajes": [{"secuencia": m.secuencia, "fecha": m.fecha.isoformat(), "autor": m.autor,
                       "autor_id": _opcional(m.autor_id), "texto": m.texto} for m in expediente.mensajes],
-    })
+        # Para que la SPA avise antes de llegar al tope, no después.
+        "lecturas": {"hoy": lectura.lecturas_hoy, "tope": instruccion.LECTURAS_TOPE},
+    }, background=BackgroundTask(correo.enviar_todos, lectura.correos) if lectura.correos else None)
 
 
 @router.post("/denuncias/{denuncia_id}/mensajes", status_code=201)
@@ -839,6 +863,12 @@ async def _limite_cuenta(_peticion, error):
     return _error(429, None, {"Retry-After": str(error.segundos)})
 
 
+async def _limite_lecturas(_peticion, error):
+    # Sin evento: el del tope ya salió con la lectura que llegó a él, y uno
+    # por rechazo dejaría inundar el log.
+    return _error(429, MENSAJE_LECTURAS, {"Retry-After": str(error.segundos)})
+
+
 async def _limitador_no_disponible(_peticion, error):
     # Falla cerrado, como el middleware (app/limitador.py).
     registro.error("EVENTO limitador_no_disponible: %s", error.clase)
@@ -877,4 +907,5 @@ def instalar_errores(aplicacion):
     aplicacion.add_exception_handler(instruccion.DestinoNoValido, _manejador(409, MENSAJE_DESTINO))
     aplicacion.add_exception_handler(instruccion.MensajeFinalObligatorio, _manejador(422, MENSAJE_FINAL))
     aplicacion.add_exception_handler(instruccion.MensajeNoPermitido, _manejador(422, MENSAJE_NO_VERAZ))
+    aplicacion.add_exception_handler(instruccion.LimiteLecturas, _limite_lecturas)
     aplicacion.add_exception_handler(instruccion.FragmentoNoCoincide, _manejador(409, MENSAJE_FRAGMENTO))

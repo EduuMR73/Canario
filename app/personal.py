@@ -99,7 +99,7 @@ import psycopg
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError
 
-from app import bd, cripto, denuncias, tokens
+from app import avisos, bd, cripto, denuncias, tokens
 
 registro = logging.getLogger("canario.personal")
 
@@ -331,6 +331,8 @@ SQL_ACTIVAR_CUENTA = """
            activo = true
      where id = %(usuario)s
 """
+# La cuenta recién activada, para su aviso (app/avisos.py).
+SQL_EMAIL_ROL = "select email, rol from canal.usuario_personal where id = %s"
 SQL_REVOCAR_DISPOSITIVOS = (
     "update canal.dispositivo_personal set revocado = true where usuario_id = %s and not revocado and id <> %s"
 )
@@ -462,6 +464,15 @@ class Acceso:
 class ActivacionPendiente:
     secreto_totp: str
     uri_totp: str
+
+
+@dataclass(frozen=True)
+class Activacion:
+    token_dispositivo: str
+    empresa_id: uuid.UUID
+    # Avisos de la activación para los admins y auditores, sin la propia
+    # cuenta (app/avisos.py); vacío si no hay a quién avisar.
+    correos: tuple
 
 
 @dataclass(frozen=True)
@@ -820,7 +831,10 @@ def activar(pool, claves, token, contrasena):
 def confirmar_activacion(pool, claves, token, codigo, instante=None):
     """Segundo paso: con un código válido, las credenciales pendientes pasan a
     la cuenta, se revocan las sesiones y dispositivos anteriores y se emite
-    el primer dispositivo de confianza. Devuelve su token."""
+    el primer dispositivo de confianza. Devuelve su token y los avisos para
+    los admins y auditores (app/avisos.py): cada activación, también una
+    reactivación o una recuperación, es una cuenta más que puede leer, y
+    alguien que no sea ella debe saberlo."""
     instante = time.time() if instante is None else instante
     empresa_id, huella = _empresa_de_invitacion(pool, token)
     with bd.transaccion_empresa(pool, empresa_id) as conexion:
@@ -845,7 +859,10 @@ def confirmar_activacion(pool, claves, token, codigo, instante=None):
         conexion.execute(SQL_NUEVO_DISPOSITIVO, [empresa_id, usuario_id,
                                                  cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo)])
         conexion.execute(SQL_AUDITAR, [empresa_id, _actor(usuario_id), ACCION_ACTIVACION, usuario_id])
-    return token_dispositivo
+        email, rol = conexion.execute(SQL_EMAIL_ROL, [usuario_id]).fetchone()
+        nombre, emails = avisos.destinatarios(conexion, usuario_id)
+    return Activacion(token_dispositivo=token_dispositivo, empresa_id=empresa_id,
+                      correos=avisos.correos_activacion(nombre, emails, email, rol))
 
 
 def _emitir_invitacion(conexion, empresa_id, identificador, usuario_id):

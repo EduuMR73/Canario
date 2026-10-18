@@ -392,6 +392,13 @@ CREATE TABLE canal.registro_auditoria (
     PRIMARY KEY (empresa_id, secuencia)
 );
 
+-- El tope de lecturas (app/instruccion.py, SQL_LECTURAS_DEL_DIA) cuenta en
+-- cada lectura las de hoy de una cuenta. Sin este índice recorrería toda la
+-- auditoría de la empresa, que crece sin fin porque no se puede borrar.
+-- Parcial: solo las filas de lectura, las únicas que cuenta.
+CREATE INDEX auditoria_lecturas ON canal.registro_auditoria (empresa_id, actor, fecha, objeto_id)
+    WHERE accion = 'lectura_denuncia';
+
 -- ---------------------------------------------------------------------------
 -- Row Level Security
 -- ---------------------------------------------------------------------------

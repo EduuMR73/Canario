@@ -1,7 +1,9 @@
-"""Correo saliente del registro del personal (docs/threat-model.md, 6.3).
+"""Correo saliente del personal (docs/threat-model.md, 6.3 y 6.15).
 
 Lo envía app/solicitudes.py: el enlace de verificación de una solicitud, los
-avisos al titular de un email y la invitación de una solicitud aprobada.
+avisos al titular de un email y la invitación de una solicitud aprobada. Y
+app/rutas_personal.py, los avisos de seguridad de app/avisos.py (lecturas y
+activaciones) a los admins y auditores.
 
 Por qué así:
 * Se envía DESPUÉS de responder (BackgroundTask de Starlette: en la versión
@@ -52,7 +54,7 @@ CORREOS_SIMULTANEOS = 4
 # este remitente ni suplantar un dominio real con él.
 REMITENTE = "Canario <no-responder@canario.invalid>"
 
-TIPOS = ("verificacion", "aviso_cuenta", "aviso_pendiente", "invitacion")
+TIPOS = ("verificacion", "aviso_cuenta", "aviso_pendiente", "invitacion", "aviso_lecturas", "aviso_activacion")
 
 _semaforo = threading.BoundedSemaphore(CORREOS_SIMULTANEOS)
 
@@ -97,3 +99,11 @@ def enviar(correo):
         registro.error("EVENTO correo_fallido: tipo=%s error=%s", tipo, type(error).__name__)
     finally:
         _semaforo.release()
+
+
+def enviar_todos(correos):
+    """Envía varios correos uno detrás de otro, en la misma tarea: un aviso
+    a varias personas ocupa un solo hilo del pool. Cada uno pasa por enviar,
+    con su hueco y su evento si falla: un fallo no impide los siguientes."""
+    for uno in correos:
+        enviar(uno)
