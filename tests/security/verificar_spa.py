@@ -38,11 +38,12 @@ etapa. Prueba:
   se leen los certificados públicos, nunca una clave;
 * h) las pruebas unitarias de la SPA (Vitest, spa/src/app/**/*.spec.ts) en
   la etapa de compilación, sin red (control: con red, el mismo contenedor sí
-  sale). Control positivo de las pruebas: cinco mutantes (el interceptor de
+  sale). Control positivo de las pruebas: siete mutantes (el interceptor de
   renovación sin la marca RENOVABLE y sin la renovación compartida, el guard
   de las páginas sin la comprobación del rol, el cliente de denuncias sin la
-  comprobación del uuid y "no veraz" ofrecido al instructor) hacen fallar la
-  prueba que los vigila;
+  comprobación del uuid, "no veraz" ofrecido al instructor y la auditoría
+  con un hueco en vez del id de una cuenta que no se resuelve, en quién actúa
+  y en sobre qué) hacen fallar la prueba que los vigila;
 * i) el recorrido del personal en Chromium, con los formularios rellenados por
   su etiqueta (si un campo no la tiene, la prueba falla): activación desde el
   enlace con el token en el fragmento, que sale de la URL y no queda en la
@@ -97,6 +98,21 @@ etapa. Prueba:
   nada (control: con él, sí); "no veraz" solo lo tiene el admin y pide
   confirmación; tras cerrar la sesión, "atrás" acaba en /entrar sin el
   expediente (control: antes estaba); ninguna violación de la CSP ni error de
+  JavaScript;
+* n) la auditoría en Chromium (bloque 6b-3c), con más de una página (lecturas
+  de una denuncia por la API) y una cuenta invitada por la API con un email
+  que es una carga XSS (validar_email admite cualquier ASCII imprimible): el
+  admin y un auditor nuevo tienen la entrada en el menú; el instructor no, y
+  /auditoria le lleva a /inicio y la API le da 403 (control: el auditor la
+  abre por su URL y la API le da 200); la tabla empieza por la fila más
+  reciente y dice quién y sobre qué con emails (la invitación del auditor, la
+  del primer admin por la plataforma, la asignación de m y la baja de l), sin
+  enlaces y sin ninguna acción sin traducir; "Cargar anteriores" completa la
+  tabla sin huecos hasta la fila 1 y el foco acaba en el aviso; "Actualizar"
+  trae la fila nueva y el foco sigue en el botón; la verificación dice que la
+  cadena está intacta; el email sale como texto literal sin crear elementos ni
+  ejecutar nada (control: el main-*.js de un mutante con [innerHTML] crea el
+  <img> y la CSP bloquea su carga); ninguna violación de la CSP ni error de
   JavaScript.
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
@@ -108,7 +124,9 @@ denuncias, en el navegador no prueba "Cargar más" (harían falta más de 100
 denuncias; el cursor lo prueba verificar_personal.py y la SPA lo reenvía tal
 cual), el aviso de 20 lecturas ni el 429 del tope (harían falta 20 y 51
 denuncias; el texto del aviso tiene su prueba unitaria y el tope, la suya en
-verificar_personal.py).
+verificar_personal.py). De la auditoría, el aviso de una cadena rota: romperla
+exige saltarse los triggers que la hacen inmutable; el texto tiene su prueba
+unitaria y la detección, la suya en verificar_esquema.py.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -317,6 +335,11 @@ PRUEBAS_UNITARIAS = (
     "el autor de un mensaje: denunciante, usted u otra persona del personal",
     "la categoría con su nombre, o tal cual si no se conoce",
     "la ruta de una denuncia solo casa con un uuid",
+    "cada acción de la API tiene nombre, y una desconocida se enseña tal cual",
+    "quién actúa: su email, plataforma, sistema o el id si la cuenta no se resuelve",
+    "sobre qué: la cuenta por su email, la denuncia por su id y la asignación con las dos",
+    "la verificación: intacta, o la fila donde se rompe",
+    "la primera página va sin antes, las anteriores con él",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
 # Mutantes del interceptor, del guard, del cliente de denuncias y de los
@@ -338,6 +361,12 @@ MUTANTES_UNITARIOS = (
     ("no veraz tambien para el instructor", "src/app/denuncias/textos.ts",
      "  return rol === 'admin';", "  return true;",
      "el instructor no puede declarar no veraz; el admin sí"),
+    ("un hueco en vez del id de quien actua", "src/app/auditoria/textos.ts",
+     "    return fila.actor_email ?? fila.actor.slice(PREFIJO_PERSONAL.length);", "    return fila.actor_email ?? '';",
+     "quién actúa: su email, plataforma, sistema o el id si la cuenta no se resuelve"),
+    ("un hueco en vez del id de la cuenta afectada", "src/app/auditoria/textos.ts",
+     "      return fila.cuenta_email ?? `Cuenta ${objeto}`;", "      return fila.cuenta_email ?? '';",
+     "sobre qué: la cuenta por su email, la denuncia por su id y la asignación con las dos"),
 )
 # process.exit: el agente de Node mantiene viva la conexión y el proceso no
 # terminaría solo.
@@ -400,9 +429,9 @@ MUTANTE_VARIABLE = "\n.mutante { color: var(--color-que-no-existe); }\n"
 EMAIL_INSTRUCTORA = "instructora@spa.test"
 EMAIL_AUDITOR = "auditor@spa.test"
 CONTRASENA_NUEVAS = secrets.token_urlsafe(18)
-MENU_ADMIN = ["Inicio", "Denuncias", "Cuentas", "Solicitudes", "Mi cuenta"]
+MENU_ADMIN = ["Inicio", "Denuncias", "Cuentas", "Solicitudes", "Auditoría", "Mi cuenta"]
 MENU_INSTRUCTOR = ["Inicio", "Denuncias", "Mi cuenta"]
-MENU_AUDITOR = ["Inicio", "Mi cuenta"]
+MENU_AUDITOR = ["Inicio", "Auditoría", "Mi cuenta"]
 H1_MI_CUENTA = "Mi cuenta"
 PATRON_ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
 TEXTO_SIN_ROL = f"Elija el rol de {EMAIL_REGISTRO} antes de aprobar."
@@ -449,6 +478,38 @@ FOCO_NO_VERAZ = "Confirmar: declarar no veraz"
 # Angular quita onerror, el <script> y el <svg>, pero deja el <img>.
 MUTANTE_XSS = ('<p class="texto-libre" dir="auto" id="expediente-texto">{{ expediente().texto }}</p>',
                '<p class="texto-libre" dir="auto" id="expediente-texto" [innerHTML]="expediente().texto"></p>')
+
+# n) La auditoría (spa/src/app/auditoria).
+EMAIL_AUDITOR_N = "auditor.n@spa.test"
+EMAIL_INSTRUCTOR_N = "instructor.n@spa.test"
+EMAIL_OTRA_N = "otra.n@spa.test"
+H1_AUDITORIA = "Auditoría"
+# app/instruccion.py, TAMANO_PAGINA_AUDITORIA. La auditoría de la prueba se
+# lleva por encima con lecturas, para que haya una segunda página.
+TAMANO_PAGINA_AUDITORIA = 200
+FILAS_AUDITORIA_N = TAMANO_PAGINA_AUDITORIA + 10
+# Un email que validar_email admite (ASCII imprimible sin espacios) y que es
+# HTML: sin espacios, "/" separa los atributos. Si se interpretara, pondría
+# window.canarioxss (en minúsculas: el email se guarda así).
+EMAIL_XSS = '<img/src="x"/onerror="window.canarioxss=5">@spa.test'
+TEXTO_CADENA_INTACTA = "La cadena está intacta: ninguna fila se ha cambiado, borrado ni insertado."
+TEXTO_PRINCIPIO = "Es el principio de la auditoría."
+# Los nombres de las acciones en la pantalla (spa/src/app/auditoria/textos.ts):
+# una celda "Qué" fuera de esta lista es una acción que la SPA no traduce.
+NOMBRES_ACCION = {
+    "Entrada", "Activación de la cuenta", "Cambio de contraseña", "Invitación", "Baja", "Anulación de la invitación",
+    "Invitación del primer admin", "Nueva invitación del primer admin", "Aprobación de una solicitud de registro",
+    "Rechazo de una solicitud de registro", "Lectura", "Mensaje al denunciante", "Asignación",
+    "Cambio de estado a En instrucción", "Cambio de estado a Resuelta", "Cambio de estado a Archivada",
+    "Cambio de estado a Inadmitida", "Declaración de no veraz", "Redacción del texto de la denuncia",
+    "Redacción de un mensaje", "Supresión a los tres meses sin investigar (art. 32.4)",
+    "Supresión a los diez años (art. 26.2)", "Supresión por no veraz (art. 32.3)",
+}
+PATRON_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+PATRON_DIA = re.compile(r"\d{2}/\d{2}/\d{4}")
+# El control del XSS de la auditoría: "sobre qué" con [innerHTML] en vez de
+# interpolación (spa/src/app/auditoria/auditoria.ts).
+MUTANTE_XSS_AUDITORIA = ('<td class="dato">{{ sobre(fila) }}</td>', '<td class="dato" [innerHTML]="sobre(fila)"></td>')
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -1247,9 +1308,135 @@ async def pasos_denuncias(navegador):
     # Control de la consola: una conexión a otro origen sí deja su violación.
     await admin.evaluate("fetch('https://ejemplo.invalid/').catch(() => null)")
     await asyncio.sleep(1)
+    # Para n), que vuelve a entrar como admin: un código TOTP vale una vez.
+    res["ultimo_paso_admin"] = usados[secreto_admin]
 
 
 asyncio.run(ejecutar_personal(pasos_denuncias))
+'''
+
+# n) La auditoría. Recibe el SPKI, el identificador, el email, la contraseña,
+# el secreto TOTP y el último paso usado del admin, los emails de un auditor,
+# un instructor y una tercera cuenta nuevos, su contraseña y el nombre del
+# main-*.js servido. Lee de /prueba/mutante.js el main-*.js del mutante con
+# [innerHTML]. Las filas de la tabla salen como texto: [nº, día, quién, qué,
+# sobre qué].
+NAVEGADOR_AUDITORIA = NAVEGADOR_PERSONAL + r'''
+(spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin, email_auditor, email_instructor,
+ email_otra, contrasena, principal) = sys.argv[1:12]
+with open("/prueba/mutante.js", "rb") as fichero:
+    MUTANTE = fichero.read()
+usados[secreto_admin] = int(paso_admin)
+RECIENTES = "/v1/personal/auditoria/recientes"
+FILAS = "() => [...document.querySelectorAll('main tbody tr')].map((tr) => [...tr.children].map((c) => c.textContent.trim()))"
+EMAIL_COMO_TEXTO = """() => {
+  const datos = [...document.querySelectorAll('main tbody td.dato')];
+  return {
+    celdas: datos.map((c) => c.textContent).filter((t) => t.includes('onerror')),
+    hijos: datos.reduce((n, c) => n + c.childElementCount, 0),
+    peligrosos: document.querySelectorAll('main img, main script, main svg, main iframe').length,
+    bandera: typeof window.canarioxss,
+  };
+}"""
+
+
+async def tabla(pagina):
+    await pagina.locator("main tbody tr").first.wait_for()
+    return await pagina.evaluate(FILAS)
+
+
+async def pasos_auditoria(navegador):
+    admin = await pagina_nueva(navegador, "admin")
+    await entrar(admin, email_admin, contrasena_admin, secreto_admin)
+    res["menu_admin"] = await menu(admin)
+
+    # Un auditor y un instructor nuevos: el auditor de l está de baja.
+    await ir_por_menu(admin, "Cuentas")
+    await invitar(admin, email_auditor, "auditor")
+    enlace_auditor = await esperar_texto(admin, "#cuentas-enlace")
+    await invitar(admin, email_instructor, "instructor")
+    await admin.get_by_role("heading", name="Enlace de activación para " + email_instructor).wait_for()
+    enlace_instructor = await admin.locator("#cuentas-enlace").inner_text()
+    auditor = await pagina_nueva(navegador, "auditor")
+    await entrar(auditor, email_auditor, contrasena, await activar(auditor, enlace_auditor))
+    res["menu_auditor"] = await menu(auditor)
+    instructor = await pagina_nueva(navegador, "instructor")
+    await entrar(instructor, email_instructor, contrasena, await activar(instructor, enlace_instructor))
+    res["menu_instructor"] = await menu(instructor)
+
+    # Por su URL: el instructor vuelve a /inicio y la API le da 403 (control:
+    # el auditor la abre y la API le da 200).
+    res["instructor_url"] = await abrir(instructor, "/auditoria")
+    res["api_instructor"] = await estado_api(instructor, RECIENTES)
+    res["auditor_url"] = await abrir(auditor, "/auditoria")
+    res["api_auditor"] = await estado_api(auditor, RECIENTES)
+
+    # Desde el menú: la primera página y, después, todas las anteriores.
+    await abrir(auditor, "/inicio")
+    res["h1_auditoria"] = await ir_por_menu(auditor, "Auditoría")
+    res["pagina_1"] = await tabla(auditor)
+    res["boton_anteriores"] = await auditor.get_by_role("button", name="Cargar anteriores", exact=True).count()
+    hecho, clics = None, 0
+    while clics < 5 and await auditor.get_by_role("button", name="Cargar anteriores", exact=True).count() == 1:
+        await auditor.get_by_role("button", name="Cargar anteriores", exact=True).click()
+        hecho = (await esperar_texto(auditor, "#auditoria-hecho") if hecho is None
+                 else await esperar_otro(auditor, "#auditoria-hecho", hecho))
+        clics += 1
+    res["hecho_anteriores"], res["clics"] = hecho, clics
+    try:
+        # Una función y no una expresión: la CSP sin 'unsafe-eval' bloquea eval.
+        await auditor.wait_for_function(
+            "() => document.activeElement !== null && document.activeElement.id === 'auditoria-hecho'", timeout=5000)
+    except Exception:
+        pass
+    res["foco_final"] = await foco(auditor)
+    res["todas"] = await auditor.evaluate(FILAS)
+    res["enlaces_tabla"] = await auditor.locator("main table a").count()
+    res["email_como_texto"] = await auditor.evaluate(EMAIL_COMO_TEXTO)
+    res["almacen_auditor"] = await almacenamiento(auditor)
+
+    # Actualizar: una fila nueva del admin llega arriba, y el foco sigue en el botón.
+    await ir_por_menu(admin, "Cuentas")
+    await invitar(admin, email_otra, "instructor")
+    await admin.get_by_role("heading", name="Enlace de activación para " + email_otra).wait_for()
+    await auditor.get_by_role("button", name="Actualizar", exact=True).click()
+    res["actualizada"] = await esperar_otro(auditor, "#auditoria-hecho", hecho or "")
+    res["foco_actualizar"] = await foco(auditor)
+    res["tras_actualizar"] = await auditor.evaluate(FILAS)
+
+    # Verificar la cadena.
+    await auditor.get_by_role("button", name="Verificar la cadena", exact=True).click()
+    res["cadena"] = await auditor.get_by_role("status").filter(has_text="La cadena").inner_text()
+
+    # El admin la ve igual, con su última acción arriba.
+    res["h1_admin"] = await ir_por_menu(admin, "Auditoría")
+    res["admin_primera"] = (await tabla(admin))[:1]
+    res["ultimo_paso_admin"] = usados[secreto_admin]
+
+    # Lo que sigue deja mensajes en la consola a propósito: el mutante y el
+    # control de la CSP. La comprobación de la consola mira solo hasta aquí.
+    res["consola_antes_del_control"] = len(consola)
+
+    # Control del email como texto: la misma página con el main-*.js del
+    # mutante ([innerHTML] en "sobre qué"), como en m).
+    async def servir_mutante(peticion_ruta):
+        await peticion_ruta.fulfill(status=200, content_type="text/javascript; charset=utf-8", body=MUTANTE)
+
+    await auditor.context.route(ORIGEN + "/" + principal, servir_mutante)
+    await abrir(auditor, "/auditoria")
+    await auditor.locator("main tbody tr").first.wait_for()
+    res["mutante"] = await auditor.evaluate("() => document.querySelectorAll('main tbody img').length")
+    await asyncio.sleep(1)
+    await auditor.context.unroute(ORIGEN + "/" + principal)
+    res["mutante_csp"] = [m for m in consola[res["consola_antes_del_control"]:]
+                          if "Loading the image" in m and "violates the following Content Security Policy directive" in m]
+
+    # Control de la consola: una conexión a otro origen sí deja su violación.
+    await admin.evaluate("fetch('https://ejemplo.invalid/').catch(() => null)")
+    await asyncio.sleep(1)
+
+
+asyncio.run(ejecutar_personal(pasos_auditoria))
 '''
 
 
@@ -1317,6 +1504,7 @@ IMAGEN_PROXY = ""
 IMAGEN_API = ""
 IMAGEN_MUTANTE = f"{PROYECTO}_mutante"
 IMAGEN_MUTANTE_XSS = f"{PROYECTO}_mutante_xss"
+IMAGEN_MUTANTE_XSS_AUDITORIA = f"{PROYECTO}_mutante_xss_auditoria"
 IMAGEN_PRUEBAS = f"{PROYECTO}_pruebas"
 SPKI_INTERMEDIA = ""
 SPKI_RAIZ = ""
@@ -2062,20 +2250,26 @@ def crear_denuncia(acceso, texto):
     return nuevas.pop(), seguimiento
 
 
-def main_del_mutante_xss():
-    """El main-*.js de la SPA con el texto de la denuncia en [innerHTML], de
-    una copia de spa/ (el repositorio no se toca)."""
-    copia = copia_de_spa("spa_mutante_xss")
-    fichero = copia / "src" / "app" / "denuncias" / "contenido.ts"
+def main_de_mutante(seccion, fichero_relativo, mutacion, imagen):
+    """El main-*.js de la SPA con una mutación (texto original, texto mutado)
+    en un fichero, de una copia de spa/ (el repositorio no se toca)."""
+    copia = copia_de_spa(f"spa_{imagen.removeprefix(PROYECTO + '_')}")
+    fichero = copia / fichero_relativo
     texto = fichero.read_text(encoding="utf-8")
-    if texto.count(MUTANTE_XSS[0]) != 1:
-        raise Parada("m) el mutante del XSS no encuentra el texto de la denuncia en contenido.ts")
-    fichero.write_text(texto.replace(*MUTANTE_XSS), encoding="utf-8", newline="\n")
-    compilacion(copia, IMAGEN_MUTANTE_XSS)
-    r = en_imagen(IMAGEN_MUTANTE_XSS, "cat /spa/dist/canario-spa/browser/main-*.js")
+    if texto.count(mutacion[0]) != 1:
+        raise Parada(f"{seccion}) el mutante del XSS no encuentra su texto en {fichero_relativo}")
+    fichero.write_text(texto.replace(*mutacion), encoding="utf-8", newline="\n")
+    compilacion(copia, imagen)
+    r = en_imagen(imagen, "cat /spa/dist/canario-spa/browser/main-*.js")
     if r.rc != 0 or len(r.out) < 1000:
-        raise Parada(f"m) no se pudo leer el main-*.js del mutante del XSS: {r.err.strip()[-300:]!r}")
+        raise Parada(f"{seccion}) no se pudo leer el main-*.js del mutante del XSS: {r.err.strip()[-300:]!r}")
     return r.out.encode("utf-8")
+
+
+def main_del_mutante_xss():
+    """El main-*.js de la SPA con el texto de la denuncia en [innerHTML]."""
+    return main_de_mutante("m", pathlib.Path("src", "app", "denuncias", "contenido.ts"), MUTANTE_XSS,
+                           IMAGEN_MUTANTE_XSS)
 
 
 def seccion_m():
@@ -2114,6 +2308,7 @@ def seccion_m():
     if "excepcion" in res:
         pasa(False, f"m) el recorrido se interrumpe: {res['excepcion']}")
         p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ULTIMO_PASO = res.get("ultimo_paso_admin", ULTIMO_PASO)
     ruta_d1 = f"/v1/personal/denuncias/{d1}"
 
     # Menú y listado.
@@ -2219,12 +2414,163 @@ def seccion_m():
              f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
 
 
+def ultima_secuencia(cabeceras):
+    """La secuencia más reciente de la auditoría de la empresa, por la API del
+    8443 (la primera fila de /auditoria/recientes)."""
+    codigo, _, cuerpo = peticion("GET", "/v1/personal/auditoria/recientes", puerto=PUERTO_API, cabeceras=cabeceras)
+    filas = json.loads(cuerpo)["filas"] if codigo == 200 else []
+    if not filas:
+        raise Parada(f"n) el admin no puede leer la auditoria por la API ({codigo})")
+    return filas[0]["secuencia"]
+
+
+def seccion_n():
+    global ULTIMO_PASO
+    p("=== n) auditoria en Chromium: menu por rol, emails, paginas, actualizar, verificacion y un email con HTML")
+    if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
+        sinc("n) sin el secreto TOTP del admin (i no termino) no se puede probar la auditoria")
+        return
+
+    # Preparación por la API del 8443, con el admin (Bearer): más de una
+    # página de auditoría, releyendo una denuncia que se asigna (cada lectura
+    # deja una fila y releer no cuenta para el tope), y después la cuenta con
+    # el email que es HTML, para que su fila quede en la primera página.
+    codigo_totp = codigo_tras(SECRETO_ADMIN, ULTIMO_PASO)
+    ULTIMO_PASO = int(time.time()) // 30
+    codigo, _, cuerpo = peticion("POST", RUTA_SESIONES, puerto=PUERTO_API, datos={
+        "empresa": IDENTIFICADOR, "email": EMAIL_ADMIN, "contrasena": CONTRASENA_ADMIN, "codigo_totp": codigo_totp})
+    acceso = (json.loads(cuerpo) if codigo == 201 else {}).get("token_acceso")
+    if not acceso:
+        raise Parada(f"n) el admin no pudo iniciar sesion por la API ({codigo})")
+    cabeceras = {"Authorization": f"Bearer {acceso}"}
+    codigo, _, cuerpo = peticion("GET", RUTA_YO, puerto=PUERTO_API, cabeceras=cabeceras)
+    if codigo != 200:
+        raise Parada(f"n) el admin no puede leer su cuenta por la API ({codigo})")
+    admin_id = json.loads(cuerpo)["usuario_id"]
+    denuncia, _ = crear_denuncia(acceso, "Denuncia para llenar la auditoria.")
+    ruta_denuncia = f"/v1/personal/denuncias/{denuncia}"
+    codigo, _, _ = peticion("PUT", f"{ruta_denuncia}/asignacion", puerto=PUERTO_API, cabeceras=cabeceras,
+                            datos={"usuario_id": admin_id})
+    if codigo != 204:
+        raise Parada(f"n) el admin no pudo asignarse la denuncia de relleno ({codigo})")
+    for _ in range(max(0, FILAS_AUDITORIA_N - ultima_secuencia(cabeceras))):
+        codigo, _, _ = peticion("GET", ruta_denuncia, puerto=PUERTO_API, cabeceras=cabeceras)
+        if codigo != 200:
+            raise Parada(f"n) no se pudo leer la denuncia de relleno ({codigo})")
+    codigo, _, cuerpo = peticion("POST", "/v1/personal/usuarios", puerto=PUERTO_API, cabeceras=cabeceras,
+                                 datos={"email": EMAIL_XSS, "rol": "instructor"})
+    if codigo != 201:
+        # Si la API lo rechaza, la suposición (validar_email admite este
+        # email) es falsa y la prueba no tiene sentido: se para y se dice.
+        raise Parada(f"n) la API no admite el email con HTML ({codigo}): revisar la suposicion de la prueba")
+    mutante = main_de_mutante("n", pathlib.Path("src", "app", "auditoria", "auditoria.ts"), MUTANTE_XSS_AUDITORIA,
+                              IMAGEN_MUTANTE_XSS_AUDITORIA)
+
+    res = navegador("navegador_n", NAVEGADOR_AUDITORIA,
+                    [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
+                     EMAIL_AUDITOR_N, EMAIL_INSTRUCTOR_N, EMAIL_OTRA_N, CONTRASENA_NUEVAS, MAIN],
+                    {"mutante.js": mutante})
+    if res is None:
+        sinc("n) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"n) el recorrido se interrumpe: {res['excepcion']}")
+        p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ULTIMO_PASO = res.get("ultimo_paso_admin", ULTIMO_PASO)
+
+    # Menú y guard por rol, con el auditor como control.
+    pasa(res.get("menu_admin") == MENU_ADMIN and res.get("menu_auditor") == MENU_AUDITOR,
+         f"n) el menu del admin y del auditor lleva Auditoria ({res.get('menu_admin')}, {res.get('menu_auditor')})")
+    pasa(res.get("menu_instructor") == MENU_INSTRUCTOR, f"n) el del instructor no ({res.get('menu_instructor')})")
+    control_guard = (res.get("auditor_url") == {"ruta": "/auditoria", "h1": H1_AUDITORIA}
+                     and res.get("api_auditor") == 200)
+    pasa(control_guard, f"n) control: el auditor abre /auditoria por su URL y la API le da 200 "
+                        f"({res.get('auditor_url')}, {res.get('api_auditor')})")
+    negativo(f"n) el instructor vuelve a /inicio y la API le da 403 ({res.get('instructor_url')}, "
+             f"{res.get('api_instructor')})",
+             res.get("instructor_url") == {"ruta": "/inicio", "h1": H1_INICIO} and res.get("api_instructor") == 403,
+             control_guard)
+
+    # Páginas.
+    pagina_1, todas = res.get("pagina_1") or [], res.get("todas") or []
+    numeros_1 = [int(f[0]) for f in pagina_1 if f and f[0].isdigit()]
+    numeros = [int(f[0]) for f in todas if f and f[0].isdigit()]
+    control_paginas = (len(pagina_1) == TAMANO_PAGINA_AUDITORIA == len(numeros_1) and res.get("boton_anteriores") == 1
+                       and numeros_1 == list(range(numeros_1[0], numeros_1[0] - TAMANO_PAGINA_AUDITORIA, -1)))
+    pasa(control_paginas, f"n) la primera pagina son {TAMANO_PAGINA_AUDITORIA} filas, de la mas reciente hacia atras, "
+                          f"con 'Cargar anteriores' ({len(pagina_1)}, {numeros_1[:1]})")
+    negativo(f"n) 'Cargar anteriores' completa la tabla sin huecos hasta la fila 1 ({res.get('clics')} clics, "
+             f"{len(todas)} filas)",
+             len(numeros) == len(todas) and numeros == list(range(numeros_1[0] if numeros_1 else 0, 0, -1)),
+             control_paginas)
+    hecho = res.get("hecho_anteriores") or ""
+    pasa(hecho.endswith(TEXTO_PRINCIPIO) and res.get("foco_final") == hecho,
+         f"n) al llegar al principio lo dice y el foco va al aviso ({hecho!r}, foco {res.get('foco_final')!r})")
+    pasa(all(len(f) == 5 and PATRON_DIA.fullmatch(f[1]) for f in todas),
+         "n) cada fila tiene numero, dia (dd/mm/aaaa), quien, que y sobre que")
+
+    # Quién y sobre qué, con emails.
+    triples = [f[2:] for f in todas]
+    pasa([EMAIL_ADMIN, "Invitación", EMAIL_AUDITOR_N] in triples,
+         "n) la invitacion del auditor dice quien la hizo y a quien, por su email")
+    pasa(["Plataforma", "Invitación del primer admin", EMAIL_ADMIN] in triples,
+         "n) la invitacion del primer admin la hizo la plataforma y dice a quien")
+    pasa(any(q == EMAIL_ADMIN and a == "Asignación" and s.startswith("Denuncia ") and s.endswith(f", a {EMAIL_INSTRUCTOR_M}")
+             for q, a, s in triples), "n) la asignacion de m dice la denuncia y la cuenta, por su email")
+    pasa([EMAIL_ADMIN, "Baja", EMAIL_AUDITOR] in triples, "n) la baja de l dice a quien se dio de baja, por su email")
+    sin_traducir = sorted({a for _, a, _ in triples} - NOMBRES_ACCION)
+    pasa(bool(triples) and not sin_traducir, f"n) ninguna accion sale sin traducir {sin_traducir if sin_traducir else ''}"
+         .rstrip())
+    sin_email = [q for q, _, _ in triples if not q or PATRON_UUID.fullmatch(q)]
+    pasa(bool(triples) and not sin_email, f"n) quien actua sale siempre con su email o su nombre ({sin_email[:3]})")
+    pasa(res.get("enlaces_tabla") == 0, f"n) la tabla no tiene enlaces ({res.get('enlaces_tabla')})")
+    pasa(res.get("almacen_auditor") == [0, 0], f"n) nada va al almacenamiento ({res.get('almacen_auditor')})")
+
+    # Actualizar y verificar.
+    tras = res.get("tras_actualizar") or [[""] * 5]
+    nueva = tras[0]
+    pasa(len(tras) == TAMANO_PAGINA_AUDITORIA and nueva[2:] == [EMAIL_ADMIN, "Invitación", EMAIL_OTRA_N]
+         and numeros_1 and int(nueva[0]) > numeros_1[0]
+         and res.get("actualizada") == f"Auditoría actualizada: la fila más reciente es la nº {nueva[0]}.",
+         f"n) 'Actualizar' vuelve a la primera pagina con la fila nueva arriba ({res.get('actualizada')!r}, {nueva})")
+    pasa(res.get("foco_actualizar") == "Actualizar",
+         f"n) y el foco sigue en el boton ({res.get('foco_actualizar')!r})")
+    pasa(res.get("cadena") == TEXTO_CADENA_INTACTA, f"n) la verificacion dice que la cadena esta intacta "
+                                                   f"({res.get('cadena')!r})")
+    pasa(res.get("h1_admin") == H1_AUDITORIA and (res.get("admin_primera") or [[""] * 5])[0][2:]
+         == [EMAIL_ADMIN, "Invitación", EMAIL_OTRA_N],
+         f"n) el admin la ve igual, con su ultima accion arriba ({res.get('admin_primera')})")
+
+    # El email con HTML, con el mutante como control.
+    control_xss = (res.get("mutante") or 0) >= 1 and bool(res.get("mutante_csp"))
+    pasa(control_xss, f"n) control: con [innerHTML], el email crea un <img> aunque la CSP siga puesta y bloquee su "
+                      f"carga ({res.get('mutante')}, {(res.get('mutante_csp') or [''])[0][:120]!r})")
+    como_texto = res.get("email_como_texto") or {}
+    negativo(f"n) el email sale como texto literal, sin crear ningun elemento ni ejecutar nada "
+             f"({como_texto.get('hijos')}, {como_texto.get('peligrosos')}, {como_texto.get('bandera')})",
+             como_texto.get("celdas") == [EMAIL_XSS] and como_texto.get("hijos") == 0
+             and como_texto.get("peligrosos") == 0 and como_texto.get("bandera") == "undefined", control_xss,
+             f"celdas {como_texto.get('celdas')}")
+
+    # Consola.
+    consola, errores = res.get("consola") or [], res.get("errores") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    control_csp = bool(senales_csp(consola[corte:]))
+    pasa(control_csp, f"n) control: el mutante y una conexion a otro origen dejan su violacion de la CSP "
+                      f"({consola[corte:][:1]})")
+    negativo(f"n) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
+             f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
+             not senales_csp(consola[:corte]) and not errores, control_csp,
+             f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
+
+
 # ---------------------------------------------------------------------------
 # Limpieza, precondiciones y arranque
 # ---------------------------------------------------------------------------
 def limpiar():
     unitarios = [f"{IMAGEN_MUTANTE}_unitario_{i}" for i in range(1, len(MUTANTES_UNITARIOS) + 1)]
-    ejecutar(["docker", "image", "rm", "-f", IMAGEN_MUTANTE, IMAGEN_MUTANTE_XSS, IMAGEN_PRUEBAS, *unitarios])
+    ejecutar(["docker", "image", "rm", "-f", IMAGEN_MUTANTE, IMAGEN_MUTANTE_XSS, IMAGEN_MUTANTE_XSS_AUDITORIA,
+              IMAGEN_PRUEBAS, *unitarios])
     return dc("down", "-v", "--rmi", "local")
 
 
@@ -2350,7 +2696,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m):
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n):
             seccion()
     except Parada as e:
         parada = str(e)

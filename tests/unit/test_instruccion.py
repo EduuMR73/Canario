@@ -1,8 +1,9 @@
 """Pruebas unitarias de la lógica pura de app/instruccion.py: la redacción
 (art. 32.2), el cursor del listado, la máquina de estados, quién puede qué
 (los roles, antes de tocar la base de datos, y a quién se asigna una denuncia)
-y el tope de lecturas (sus fronteras, el orden escribir y contar, y a quién
-avisa).
+el tope de lecturas (sus fronteras, el orden escribir y contar, y a quién
+avisa) y la auditoría por la API (qué acciones llevan una cuenta y dónde, y
+las páginas desde lo más reciente).
 
 La redacción es destructiva e irreversible: un error de posición dejaría a la
 vista un dato que había que suprimir, o taparía otro. Por eso los oráculos
@@ -151,6 +152,8 @@ class GuardasPreviasALaBaseDeDatos(unittest.TestCase):
     def test_auditoria_para_admin_y_auditor(self):
         llamadas = {
             "listar_auditoria": lambda s: instruccion.listar_auditoria(None, s, 1),
+            "listar_auditoria_reciente": lambda s: instruccion.listar_auditoria_reciente(None, s),
+            "listar_auditoria_reciente con antes": lambda s: instruccion.listar_auditoria_reciente(None, s, 50),
             "verificar_auditoria": lambda s: instruccion.verificar_auditoria(None, s),
         }
         for nombre, llamada in llamadas.items():
@@ -285,6 +288,80 @@ class DecidirLecturas(unittest.TestCase):
         for (distintas, primera), esperado in casos.items():
             with self.subTest(distintas=distintas, primera=primera):
                 self.assertEqual(instruccion.decidir_lecturas(distintas, primera), esperado)
+
+
+class _ConexionAuditoria:
+    """Doble de la conexión de la auditoría: la cuenta está activa y la
+    consulta devuelve las secuencias que se le digan. Registra la sentencia y
+    los parámetros."""
+
+    def __init__(self, secuencias):
+        self.secuencias = secuencias
+        self.sql = self.parametros = None
+
+    def execute(self, sql, parametros=None):
+        respuesta = mock.Mock()
+        if sql == instruccion.SQL_ACTOR_ACTIVO:
+            respuesta.fetchone.return_value = (1,)
+        else:
+            self.sql, self.parametros = sql, parametros
+            respuesta.fetchall.return_value = [
+                (s, datetime.date(2026, 10, 18), "plataforma", "invitacion_admin_plataforma", uuid.UUID(int=s), None,
+                 None, "admin@empresa.es") for s in self.secuencias]
+        return respuesta
+
+
+class Auditoria(unittest.TestCase):
+    ADMIN = types.SimpleNamespace(rol="admin", usuario_id=uuid.UUID(int=8), empresa_id=uuid.UUID(int=1))
+
+    def llamar(self, conexion, funcion, *argumentos):
+        @contextlib.contextmanager
+        def transaccion(_pool, _empresa_id, solo_lectura=False):
+            yield conexion
+
+        with mock.patch.object(instruccion.bd, "transaccion_empresa", transaccion):
+            return funcion(None, self.ADMIN, *argumentos)
+
+    def test_acciones_con_cuenta_literales(self):
+        # Oráculo literal: qué acciones llevan una cuenta y dónde. Una acción
+        # de cuenta nueva que no esté aquí sale sin email, con el id a la vista.
+        self.assertEqual(instruccion.ACCIONES_CUENTA_EN_OBJETO, {
+            "acceso", "activacion", "cambio_contrasena", "invitacion", "baja", "anulacion_invitacion",
+            "invitacion_admin_plataforma", "reinvitacion_admin_plataforma", "aprobacion_registro"})
+        self.assertEqual(instruccion.ACCIONES_CUENTA_EN_DESTINO, {"asignacion"})
+
+    def test_parametros_de_la_consulta(self):
+        conexion = _ConexionAuditoria([])
+        self.llamar(conexion, instruccion.listar_auditoria_reciente)
+        self.assertEqual(conexion.parametros, {
+            "en_objeto": ["acceso", "activacion", "anulacion_invitacion", "aprobacion_registro", "baja",
+                          "cambio_contrasena", "invitacion", "invitacion_admin_plataforma",
+                          "reinvitacion_admin_plataforma"],
+            "en_destino": ["asignacion"], "limite": 201})
+
+    def test_reciente_sin_antes_y_con_antes(self):
+        conexion = _ConexionAuditoria([])
+        self.llamar(conexion, instruccion.listar_auditoria_reciente)
+        self.assertIs(conexion.sql, instruccion.SQL_AUDITORIA_RECIENTE)
+        self.assertNotIn("antes", conexion.parametros)
+        self.llamar(conexion, instruccion.listar_auditoria_reciente, 50)
+        self.assertIs(conexion.sql, instruccion.SQL_AUDITORIA_ANTERIOR)
+        self.assertEqual(conexion.parametros["antes"], 50)
+
+    def test_anterior(self):
+        # 201 filas (300 a 100, descendentes): la página son 200 y la última
+        # es la 101, que es lo que se pasa como antes para seguir.
+        pagina = self.llamar(_ConexionAuditoria(range(300, 99, -1)), instruccion.listar_auditoria_reciente)
+        self.assertEqual((len(pagina.filas), pagina.filas[0].secuencia, pagina.anterior), (200, 300, 101))
+        # Exactamente 200: no hay más páginas.
+        pagina = self.llamar(_ConexionAuditoria(range(200, 0, -1)), instruccion.listar_auditoria_reciente, 201)
+        self.assertEqual((len(pagina.filas), pagina.anterior), (200, None))
+
+    def test_siguiente_sin_cambios(self):
+        # El listado desde el principio sigue como antes del 6b-3c.
+        pagina = self.llamar(_ConexionAuditoria(range(1, 202)), instruccion.listar_auditoria, 1)
+        self.assertEqual((len(pagina.filas), pagina.siguiente), (200, 201))
+        self.assertEqual(pagina.filas[0].cuenta_email, "admin@empresa.es")
 
 
 class _ConexionLeer:

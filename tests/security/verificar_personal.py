@@ -56,7 +56,9 @@ y 6.9). Qué prueba:
   real, dentro de la API); una baja confirmada mientras la acción espera la
   deja sin actuar; cierre y mensaje simultáneos sin interbloqueo; la
   auditoría registra cada acción, con destino en la asignación, y los admins
-  la leen por la API y verifican la cadena aparte; asignar dos veces a la
+  la leen por la API desde el principio y desde lo más reciente, con el email
+  de quien actúa y de la cuenta afectada (comparados con una consulta propia),
+  sin ver nada de otra empresa, y verifican la cadena aparte; asignar dos veces a la
   misma cuenta no deja otra fila; el listado pagina sin huecos ni
   repeticiones.
 * No veraz (art. 32.3): solo la declara un admin con la denuncia asignada,
@@ -76,8 +78,8 @@ y 6.9). Qué prueba:
   16.3.2) con la plantilla de la ruta y el id solo si es un uuid; los 409,
   los 422 y las redacciones aceptadas no dejan ninguno, y un %0A en el id no
   inyecta ninguna línea.
-* Rol auditor: un admin lo invita; lee la auditoría y verifica su cadena sin
-  dejar filas; recibe 403 al listar, leer, escribir, cambiar de estado,
+* Rol auditor: un admin lo invita; lee la auditoría por las dos rutas (y ve
+  por su email quién le invitó) y verifica su cadena sin dejar filas; recibe 403 al listar, leer, escribir, cambiar de estado,
   asignar o redactar una denuncia, y al administrar cuentas o solicitudes,
   sin cambiar nada (control: el instructor asignado lee la denuncia); y no se
   le puede asignar una denuncia (409, sin fila; control: a un instructor sí).
@@ -89,7 +91,8 @@ y 6.9). Qué prueba:
   la empresa, sin fila; releer sigue permitido y otra cuenta no se ve
   afectada; un intento de aviso por cada admin y auditor (sin Mailpit, su
   EVENTO correo_fallido). Si el día de la empresa cambia a mitad, SIN
-  CONCLUSION.
+  CONCLUSION. Con esas filas, la auditoría desde lo más reciente pagina sin
+  huecos y coincide fila a fila con la de desde el principio.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
   misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
@@ -267,7 +270,15 @@ CLAVES_MENSAJE_PERSONAL = ["autor", "autor_id", "fecha", "secuencia", "texto"]
 CLAVES_MENSAJE_SEGUIMIENTO = ["autor", "fecha", "secuencia", "texto"]
 CLAVES_AUDITORIA = ["filas", "siguiente"]
 CLAVES_VERIFICACION = ["cadena_intacta", "primera_rota"]
-CLAVES_FILA_AUDITORIA = ["accion", "actor", "destino_id", "fecha", "objeto_id", "secuencia"]
+CLAVES_AUDITORIA_RECIENTE = ["anterior", "filas"]
+CLAVES_FILA_AUDITORIA = ["accion", "actor", "actor_email", "cuenta_email", "destino_id", "fecha", "objeto_id",
+                         "secuencia"]
+TAMANO_PAGINA_AUDITORIA = 200
+# Acciones que guardan en objeto_id la cuenta sobre la que se actuó (la
+# asignación la guarda en destino_id). Literal de la batería, no importado
+# de app/instruccion.py: es el oráculo de los emails de la auditoría.
+ACCIONES_CUENTA_OBJETO = ("acceso", "activacion", "cambio_contrasena", "invitacion", "baja", "anulacion_invitacion",
+                          "invitacion_admin_plataforma", "reinvitacion_admin_plataforma", "aprobacion_registro")
 TAMANO_PAGINA_DENUNCIAS = 100
 # Textos y códigos de las denuncias de la sección k: no deben aparecer en
 # los logs ni en el volcado (sección i).
@@ -1811,6 +1822,24 @@ def acciones_desde(empresa, marca):
                  f"and secuencia > {marca} order by secuencia;").split()
 
 
+def emails_auditoria(empresa):
+    """secuencia -> (actor_email, cuenta_email) de toda la auditoría de la
+    empresa, con una consulta propia de la batería como oráculo de la API:
+    el actor se recorta en vez de concatenar el id, y las acciones salen de
+    la lista literal ACCIONES_CUENTA_OBJETO. Los emails no llevan espacios
+    (app/validacion.py), así que split() separa bien las filas."""
+    en_objeto = ", ".join(f"'{a}'" for a in ACCIONES_CUENTA_OBJETO)
+    filas = valor(
+        "select a.secuencia || '|' || coalesce(ua.email, '') || '|' || coalesce(uc.email, '') "
+        "from canal.registro_auditoria a "
+        "left join canal.usuario_personal ua on ua.empresa_id = a.empresa_id "
+        "and a.actor like 'personal:%' and ua.id::text = substr(a.actor, 10) "
+        "left join canal.usuario_personal uc on uc.empresa_id = a.empresa_id and uc.id = case "
+        f"when a.accion in ({en_objeto}) then a.objeto_id when a.accion = 'asignacion' then a.destino_id end "
+        f"where a.empresa_id = '{EMPRESAS[empresa][0]}';").split()
+    return {int(s): (a or None, c or None) for s, a, c in (f.split("|") for f in filas)}
+
+
 def auditoria_de(empresa, accion, objeto_id):
     """actor|destino_id de las filas de una acción sobre un objeto."""
     return valor(f"select actor || '|' || coalesce(destino_id::text, '') from canal.registro_auditoria "
@@ -2091,11 +2120,15 @@ def seccion_k():
 
     # k8) Auditoría por la API.
     antes = total_auditoria("A")
+    ultima = ultima_secuencia("A")
     auditoria = una(pt("GET", "/v1/personal/auditoria", token=tokens["admin2"]))
+    recientes = una(pt("GET", "/v1/personal/auditoria/recientes", token=tokens["admin2"]))
     verificacion = una(pt("GET", "/v1/personal/auditoria/verificacion", token=tokens["admin2"]))
     lista_otra = una(pt("GET", "/v1/personal/denuncias", token=tokens["admin2"]))
     datos = json_de(auditoria) or {}
     filas_aud = datos.get("filas", [])
+    datos_rec = json_de(recientes) or {}
+    filas_rec = datos_rec.get("filas", [])
     control_aud = (auditoria.get("estado") == 200 and sorted(datos) == CLAVES_AUDITORIA
                    and lista_otra.get("estado") == 200)
     pasa(control_aud and all(sorted(f) == CLAVES_FILA_AUDITORIA for f in filas_aud)
@@ -2105,27 +2138,58 @@ def seccion_k():
     pasa(verificacion.get("estado") == 200 and sorted(datos_ver) == CLAVES_VERIFICACION
          and datos_ver.get("cadena_intacta") is True and datos_ver.get("primera_rota") is None,
          f"k8) la verificacion, aparte del listado, da la cadena intacta ({datos_ver})")
-    negativo("k8) en ella se ve la autoasignacion del admin (actor y destino el mismo)",
-             any(f.get("accion") == "asignacion" and f.get("objeto_id") == den2
-                 and f.get("actor") == f"personal:{admin2.usuario_id}" and f.get("destino_id") == str(admin2.usuario_id)
-                 for f in filas_aud), control_aud)
-    negativo("k8) leer la auditoria, verificarla y el listado no dejan filas de auditoria",
+    autoasignacion = [(f.get("actor"), f.get("destino_id"), f.get("actor_email"), f.get("cuenta_email"))
+                      for f in filas_aud if f.get("accion") == "asignacion" and f.get("objeto_id") == den2]
+    negativo("k8) en ella se ve la autoasignacion del admin: actor y destino el mismo, con su email en los dos",
+             autoasignacion == [(f"personal:{admin2.usuario_id}", str(admin2.usuario_id), "admin2@alfa.test",
+                                 "admin2@alfa.test")], control_aud, f"filas: {autoasignacion}")
+    plataforma = [(f.get("actor_email"), f.get("cuenta_email")) for f in filas_aud if f.get("actor") == "plataforma"]
+    negativo("k8) las filas de plataforma no tienen email de actor y dicen a quien invitaron",
+             plataforma == [(None, "admin@alfa.test")] * 2, control_aud, f"filas: {plataforma}")
+    esperados = emails_auditoria("A")
+    distintos = [f.get("secuencia") for f in filas_aud + filas_rec
+                 if (f.get("actor_email"), f.get("cuenta_email")) != esperados.get(f.get("secuencia"))]
+    negativo("k8) en las dos rutas, cada fila trae los emails que da la consulta propia de la bateria",
+             distintos == [] and len(filas_rec) > 0, control_aud, f"secuencias distintas: {distintos[:10]}")
+    secuencias_rec = [f.get("secuencia") for f in filas_rec]
+    por_secuencia = {f.get("secuencia"): f for f in filas_aud}
+    control_rec = recientes.get("estado") == 200 and sorted(datos_rec) == CLAVES_AUDITORIA_RECIENTE
+    pasa(control_rec and all(sorted(f) == CLAVES_FILA_AUDITORIA for f in filas_rec)
+         and secuencias_rec == list(range(ultima, max(ultima - TAMANO_PAGINA_AUDITORIA, 0), -1))
+         and datos_rec.get("anterior") == (ultima - TAMANO_PAGINA_AUDITORIA + 1
+                                           if ultima > TAMANO_PAGINA_AUDITORIA else None),
+         f"k8) recientes empieza por la ultima fila ({ultima}) y baja sin huecos")
+    negativo("k8) las filas que salen en las dos rutas son iguales",
+             all(f == por_secuencia[f.get("secuencia")] for f in filas_rec if f.get("secuencia") in por_secuencia)
+             and any(f.get("secuencia") in por_secuencia for f in filas_rec), control_rec)
+    negativo("k8) leer la auditoria por las dos rutas, verificarla y el listado no dejan filas de auditoria",
              total_auditoria("A") == antes, control_aud)
     desde = json_de(una(pt("GET", "/v1/personal/auditoria?desde=3", token=tokens["admin2"]))) or {}
     negativo("k8) desde=3 empieza en la secuencia 3",
              [f.get("secuencia") for f in desde.get("filas", [])][:1] == [3], control_aud)
+    antes3 = json_de(una(pt("GET", "/v1/personal/auditoria/recientes?antes=3", token=tokens["admin2"]))) or {}
+    negativo("k8) antes=3 da las secuencias 2 y 1, y no hay anterior",
+             [f.get("secuencia") for f in antes3.get("filas", [])] == [2, 1] and antes3.get("anterior") is None,
+             control_rec, f"respuesta: {antes3}")
     malas = http([pt("GET", "/v1/personal/auditoria", token=tokens["instr"]),
+                  pt("GET", "/v1/personal/auditoria/recientes", token=tokens["instr"]),
                   pt("GET", "/v1/personal/auditoria/verificacion", token=tokens["instr"]),
                   pt("GET", "/v1/personal/auditoria?desde=0", token=tokens["admin2"]),
-                  pt("GET", "/v1/personal/auditoria?desde=x", token=tokens["admin2"])])
-    negativo("k8) un instructor recibe 403 en el listado y en la verificacion; desde=0 o no numerico da 422",
-             all(r.get("estado") == 403 and r.get("cuerpo") == CUERPO_403 for r in malas[:2])
-             and all(r.get("estado") == 422 and r.get("cuerpo") == CUERPO_422 for r in malas[2:]), control_aud,
-             f"estados: {[r.get('estado') for r in malas]}")
-    ajena = una(pt("GET", "/v1/personal/auditoria", token=tokens["admin_b"]))
-    negativo("k8) el admin de B no ve ninguna fila de A", ajena.get("estado") == 200
-             and den1.encode() not in ajena.get("cuerpo", b"") and den2.encode() not in ajena.get("cuerpo", b""),
-             control_aud)
+                  pt("GET", "/v1/personal/auditoria?desde=x", token=tokens["admin2"]),
+                  pt("GET", "/v1/personal/auditoria/recientes?antes=1", token=tokens["admin2"]),
+                  pt("GET", "/v1/personal/auditoria/recientes?antes=x", token=tokens["admin2"])])
+    negativo("k8) un instructor recibe 403 en los dos listados y en la verificacion; desde=0, antes=1 o no "
+             "numericos dan 422",
+             all(r.get("estado") == 403 and r.get("cuerpo") == CUERPO_403 for r in malas[:3])
+             and all(r.get("estado") == 422 and r.get("cuerpo") == CUERPO_422 for r in malas[3:]),
+             control_aud and control_rec, f"estados: {[r.get('estado') for r in malas]}")
+    ajenas = http([pt("GET", "/v1/personal/auditoria", token=tokens["admin_b"]),
+                   pt("GET", "/v1/personal/auditoria/recientes", token=tokens["admin_b"])])
+    negativo("k8) el admin de B no ve ninguna fila ni ningun email de A en las dos rutas",
+             all(r.get("estado") == 200 and den1.encode() not in r.get("cuerpo", b"")
+                 and den2.encode() not in r.get("cuerpo", b"") and b"@alfa.test" not in r.get("cuerpo", b"")
+                 and b"@beta.test" in r.get("cuerpo", b"") for r in ajenas),
+             control_aud, f"estados: {[r.get('estado') for r in ajenas]}")
 
     # k9) Baja de una cuenta con denuncias asignadas, y paginación.
     preparar(asignar_peticion(tokens["admin2"], den2, instr2.usuario_id), "asignar den2 a instr2")
@@ -2480,15 +2544,28 @@ def seccion_k_auditor():
     # ka2) La auditoría: la lee y verifica su cadena, sin dejar filas (como un admin).
     antes = total_auditoria("A")
     auditoria = una(pt("GET", "/v1/personal/auditoria", token=tokens["auditor"]))
+    recientes = una(pt("GET", "/v1/personal/auditoria/recientes", token=tokens["auditor"]))
     verificacion = una(pt("GET", "/v1/personal/auditoria/verificacion", token=tokens["auditor"]))
     datos, datos_ver = json_de(auditoria) or {}, json_de(verificacion) or {}
+    datos_rec = json_de(recientes) or {}
     control_aud = (auditoria.get("estado") == 200 and sorted(datos) == CLAVES_AUDITORIA
                    and len(datos.get("filas", [])) > 0)
     pasa(control_aud and all(sorted(f) == CLAVES_FILA_AUDITORIA for f in datos.get("filas", [])),
          "ka2) el auditor lee la auditoria de su empresa (200)")
+    control_rec = (recientes.get("estado") == 200 and sorted(datos_rec) == CLAVES_AUDITORIA_RECIENTE
+                   and len(datos_rec.get("filas", [])) > 0)
+    pasa(control_rec and all(sorted(f) == CLAVES_FILA_AUDITORIA for f in datos_rec.get("filas", [])),
+         "ka2) y desde lo mas reciente (200)")
+    # Su propia invitación es de las últimas filas: la ve con los dos emails,
+    # que es lo que no podía saber sin ellos (403 en /usuarios).
+    invitacion = [(f.get("actor_email"), f.get("cuenta_email")) for f in datos_rec.get("filas", [])
+                  if f.get("accion") == "invitacion" and f.get("objeto_id") == str(auditor.usuario_id)]
+    negativo("ka2) el auditor ve quien le invito y a quien, por su email",
+             invitacion == [("admin2@alfa.test", "auditor@alfa.test")], control_rec, f"filas: {invitacion}")
     pasa(verificacion.get("estado") == 200 and sorted(datos_ver) == CLAVES_VERIFICACION
          and datos_ver.get("cadena_intacta") is True, f"ka2) y verifica su cadena ({datos_ver})")
-    negativo("ka2) leerla y verificarla no deja filas de auditoria", total_auditoria("A") == antes, control_aud)
+    negativo("ka2) leerla por las dos rutas y verificarla no deja filas de auditoria",
+             total_auditoria("A") == antes, control_aud and control_rec)
 
     # ka3) Ninguna denuncia, ni nada de administración: 403 antes de tocar la
     #      base de datos. Control: el instructor asignado sí la lee.
@@ -2669,6 +2746,32 @@ def seccion_k_lecturas():
          f"kl4) un intento de aviso por vigilante en el aviso y en el tope ({intentos} de {esperados})")
     sin_destino = [l for l in lineas_log("api") if "EVENTO aviso_sin_destinatario: tipo=aviso_lecturas" in l]
     negativo("kl4) con vigilantes no sale EVENTO aviso_sin_destinatario", sin_destino == [], int(vigilantes) >= 2)
+
+    # kl5) Auditoría desde lo más reciente, por páginas. Las lecturas y
+    #      asignaciones de esta sección dejan A con más de una página; si no
+    #      la hubiera, la prueba no tendría conclusión.
+    ultima = ultima_secuencia("A")
+    if ultima <= TAMANO_PAGINA_AUDITORIA:
+        sinc(f"kl5) A solo tiene {ultima} filas de auditoria: no hay segunda pagina que probar")
+        return
+    p1 = json_de(una(pt("GET", "/v1/personal/auditoria/recientes", token=token_admin2))) or {}
+    anterior = p1.get("anterior")
+    p2 = json_de(una(pt("GET", f"/v1/personal/auditoria/recientes?antes={anterior}", token=token_admin2))) or {}
+    s1 = [f.get("secuencia") for f in p1.get("filas", [])]
+    s2 = [f.get("secuencia") for f in p2.get("filas", [])]
+    control_p1 = s1 == list(range(ultima, ultima - TAMANO_PAGINA_AUDITORIA, -1))
+    pasa(control_p1 and anterior == ultima - TAMANO_PAGINA_AUDITORIA + 1,
+         f"kl5) la primera pagina son las {TAMANO_PAGINA_AUDITORIA} filas mas recientes y anterior es la mas baja "
+         f"({anterior})")
+    resto = ultima - TAMANO_PAGINA_AUDITORIA
+    negativo("kl5) la pagina anterior sigue sin huecos ni repetidas, y anterior dice si queda otra",
+             s2 == list(range(resto, max(resto - TAMANO_PAGINA_AUDITORIA, 0), -1))
+             and p2.get("anterior") == (resto - TAMANO_PAGINA_AUDITORIA + 1 if resto > TAMANO_PAGINA_AUDITORIA
+                                        else None), control_p1, f"secuencias: {s2[:3]}...{s2[-3:]}")
+    # La misma fila por las dos rutas: desde la más baja de la segunda página.
+    desde = json_de(una(pt("GET", f"/v1/personal/auditoria?desde={s2[-1] if s2 else 1}", token=token_admin2))) or {}
+    negativo("kl5) la segunda pagina coincide fila a fila con el listado desde el principio",
+             list(reversed(p2.get("filas", []))) == desde.get("filas", [])[:len(s2)] and len(s2) > 0, control_p1)
 
 
 def seccion_l():
