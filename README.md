@@ -11,8 +11,9 @@ Las amenazas consideradas, las decisiones de diseño y sus límites están en el
 | `app/` | La API (`principal.py` y las rutas), las páginas del denunciante (`rutas_web.py` y `plantillas/`) y la herramienta de administración `gestion.py` |
 | `db/` | Imagen de PostgreSQL, `pg_hba.conf` y el esquema, que se aplica al crear la base de datos (`db/init/`) |
 | `proxy/` | Imagen y `Caddyfile` del proxy, el único punto de entrada, y los estáticos del sitio del denunciante (`proxy/estatico/`) |
+| `spa/` | La SPA del personal (Angular 22.2.2), que la imagen del proxy compila y sirve en el 8445 |
 | `scripts/generar_secretos.py` | Crea los secretos que faltan y comprueba el conjunto |
-| `tests/security/` | Las nueve baterías de pruebas de seguridad |
+| `tests/security/` | Las doce baterías de pruebas de seguridad |
 | `tests/unit/` | Las pruebas unitarias de la lógica pura de `app/` |
 | `ruff.toml` | Configuración del análisis estático (ruff) |
 | `docs/threat-model.md` | El modelo de amenazas |
@@ -57,7 +58,7 @@ Hay tres puertos publicados, todos solo en `127.0.0.1` y solo con el nombre `loc
 
 - `8443`: la API.
 - `8444`: el sitio del denunciante, en otro origen: `https://localhost:8444/` (las páginas, más abajo) y su hoja de estilos.
-- `8445`: la SPA del personal, en el suyo. De momento solo reenvía la API del personal, con la sesión en cookies (más abajo); las pantallas llegan en el bloque 6b.
+- `8445`: la SPA del personal, en el suyo: `https://localhost:8445/`. De momento es el esqueleto (una página de inicio y la de "Página no encontrada"), y reenvía la API del personal con la sesión en cookies (más abajo); las pantallas llegan en el resto del bloque 6b.
  Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
 
 Para parar sin perder datos:
@@ -99,6 +100,15 @@ La SPA del personal entra por `https://localhost:8445`, que solo reenvía `/v1/p
 - Bearer y cookie a la vez dan 401.
 
 Por el 8443 todo sigue igual: Bearer y los tokens en el cuerpo. El 8443 y el 8444 quitan las cookies en los dos sentidos, porque las cookies no se aíslan por puerto.
+
+### La SPA del personal (`spa/`)
+
+La imagen del proxy compila la SPA en una primera etapa con Node y copia solo el resultado a la imagen de Caddy, que no lleva Node (modelo de amenazas, 6.11). No hace falta Node en el anfitrión para arrancar Canario: `docker compose up -d --build` la compila. Lo que conviene saber al tocarla:
+
+- Las dependencias se instalan sin scripts (`spa/.npmrc`) y con versiones exactas. Para cambiar una versión, en PowerShell desde `spa\`: `npm install --ignore-scripts <paquete>@<versión exacta>`, con una versión publicada hace al menos 14 días, y se commitean `package.json` y `package-lock.json`.
+- Ningún componente declara estilos: todo el CSS va en `spa/src/styles.css`. Angular inyectaría los estilos de un componente con `<style>`, y la CSP lo bloquea.
+- Ninguna ruta de la SPA lleva un punto: el proxy trata como fichero cualquier ruta con extensión y, si no existe, responde 404.
+- Nada de `bypassSecurityTrust*` ni de asignar texto a `innerHTML`: Trusted Types lo bloquea en el navegador.
 
 El personal tiene tres roles: `admin` (gestiona las cuentas y asigna las denuncias), `instructor` (instruye las denuncias que tiene asignadas) y `auditor` (lee la auditoría y verifica su cadena, nunca el contenido). El contenido de una denuncia solo lo lee quien la tiene asignada, y a un auditor no se le puede asignar ninguna: lo impide la API y, por debajo, un trigger de la base de datos (modelo de amenazas, 6.15).
 
@@ -265,7 +275,7 @@ Si se restaura una copia de la base de datos, todo lo declarado no veraz o tacha
 
 ## Pruebas de seguridad
 
-Once baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
+Doce baterías, una por área. Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
 
 | Batería | Qué prueba |
 |---|---|
@@ -276,16 +286,18 @@ Once baterías, una por área. Cada prueba negativa lleva su control positivo: s
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
 | `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción y no veraz (art. 32.3) |
 | `verificar_sesion.py` | La sesión del personal en el navegador por el 8445: tokens solo en cookies con sus atributos exactos, CSRF desde otro puerto, rotación y reutilización, cierre, cookies que no salen por el 8443 y logs sin tokens |
+| `verificar_spa.py` | La SPA del personal en el 8445: cabeceras y CSP exactas, nada en línea (con un mutante), imagen sin Node, contexto de compilación aislado, rutas, y en un Chromium real la carga sin violaciones de la CSP y Trusted Types |
 | `verificar_inyeccion.py` | Inyección SQL y validación de la frontera de entrada |
 | `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo, sin base de datos antes de responder), verificación, administración de solicitudes, límites por destinatario (15 minutos y día), logs sin rastro, el origen obligatorio y el registro con PostgreSQL parado |
-| `verificar_escaneos.py` | Secretos en Git, dependencias, análisis estático, imágenes y SBOM |
+| `verificar_escaneos.py` | Secretos en Git, dependencias de Python y de npm, análisis estático, imágenes y SBOM |
 | `verificar_unitarios.py` | Las pruebas unitarias (`tests/unit/`) en la imagen de la API, y mutantes que demuestran que fallan cuando deben |
 
 Para ejecutarlas:
 
 - Docker en marcha y los secretos generados.
-- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, sesión, inyección y registro arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
+- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, sesión, SPA, inyección y registro arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`.
 - `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades.
+- Todas las que construyen la imagen del proxy necesitan internet para compilar la SPA (`npm ci`). `verificar_spa.py` descarga además la imagen de Playwright (unos 2 GB la primera vez) y el paquete `playwright` con sus hashes.
 - `verificar_unitarios.py` no necesita los secretos ni la pila parada: solo construye la imagen de la API.
 
 ```powershell
