@@ -30,7 +30,7 @@ type Estado = 'sin-enlace' | 'pendiente' | 'hecho';
           @if (error(); as texto) {
             <p class="error" role="alert">{{ texto }}</p>
           }
-          <button type="button" (click)="confirmar()" [disabled]="enviando()">
+          <button type="button" (click)="confirmar()" [attr.aria-disabled]="enviando() || null">
             {{ enviando() ? 'Confirmando...' : 'Confirmar mi email' }}
           </button>
         }
@@ -47,6 +47,9 @@ export class Verificacion {
   private readonly token = consumirToken('/registro/verificacion');
 
   readonly estado = signal<Estado>(this.token === null ? 'sin-enlace' : 'pendiente');
+  // Un envío cada vez: el token es de un solo uso. El botón lleva
+  // aria-disabled y no disabled, para no quitarle el foco (acceso/entrar): la
+  // guarda de confirmar() es la barrera.
   readonly enviando = signal(false);
   readonly error = signal<string | null>(null);
 

@@ -51,7 +51,7 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
       <p class="aviso" id="denuncias-hecho" role="status" tabindex="-1">{{ texto }}</p>
     }
     @if (errorAccion(); as texto) {
-      <p class="error" role="alert">{{ texto }}</p>
+      <p class="error" id="denuncias-error" role="alert" tabindex="-1">{{ texto }}</p>
     }
     @if (esAdmin() && errorCuentas(); as texto) {
       <p class="error" role="alert">No se han podido cargar las cuentas, así que no se puede ver ni cambiar a quién está asignada cada denuncia. {{ texto }}</p>
@@ -94,7 +94,8 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
                           <option [value]="cuenta.usuario_id">{{ cuenta.email }}</option>
                         }
                       </select>
-                      <button type="button" class="secundario" (click)="asignar(fila, destino.value)" [disabled]="ocupado()">
+                      <button type="button" class="secundario" (click)="asignar(fila, destino.value)"
+                              [attr.aria-disabled]="ocupado() || null">
                         Asignar<span class="visualmente-oculto"> la denuncia {{ fila.denuncia_id }}</span>
                       </button>
                     }
@@ -105,7 +106,7 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
           </table>
         </div>
         @if (siguiente() !== null) {
-          <button type="button" class="secundario" (click)="cargarMas()" [disabled]="ocupado()">
+          <button type="button" class="secundario" (click)="cargarMas()" [attr.aria-disabled]="ocupado() || null">
             {{ ocupado() ? 'Cargando...' : 'Cargar más' }}
           </button>
         }
@@ -140,6 +141,10 @@ export class Denuncias {
   readonly cuentas = signal<Cuenta[] | null>(null);
   readonly errorCuentas = signal<string | null>(null);
   // Una petición cada vez: un doble clic no asigna dos veces ni salta páginas.
+  // Mientras tanto los botones llevan aria-disabled y no disabled: a un botón
+  // disabled Chromium le quita el foco (pasa al <body> y no vuelve), y quien
+  // lo pulsó con el teclado no sabría dónde está (WCAG 2.2, 2.4.3). La guarda
+  // de cada acción es la que impide la segunda petición.
   readonly ocupado = signal(false);
   readonly hecho = signal<string | null>(null);
   readonly errorAccion = signal<string | null>(null);
@@ -181,8 +186,11 @@ export class Denuncias {
     this.cargar();
   }
 
-  // Añade la página siguiente. El foco se queda en el botón y el aviso dice
-  // cuántas han llegado (WCAG 2.2, 4.1.3 Status Messages).
+  // Añade la página siguiente. El foco se queda en el botón (aria-disabled,
+  // arriba) y el aviso dice cuántas han llegado (WCAG 2.2, 4.1.3 Status
+  // Messages). Con la última página el botón desaparece: el foco pasa al
+  // aviso, que lo dice, en vez de perderse en el <body> (2.4.3 Focus Order),
+  // como en la auditoría.
   cargarMas(): void {
     const cursor = this.siguiente();
     if (cursor === null || this.ocupado()) {
@@ -196,8 +204,14 @@ export class Denuncias {
         this.ocupado.set(false);
         this.filas.update((filas) => [...(filas ?? []), ...pagina.denuncias]);
         this.siguiente.set(pagina.siguiente);
-        this.hecho.set(pagina.denuncias.length === 1 ? 'Se ha cargado 1 denuncia más.'
-          : `Se han cargado ${pagina.denuncias.length} denuncias más.`);
+        const texto = pagina.denuncias.length === 1 ? 'Se ha cargado 1 denuncia más.'
+          : `Se han cargado ${pagina.denuncias.length} denuncias más.`;
+        if (pagina.siguiente === null) {
+          this.hecho.set(`${texto} Es el final de la lista.`);
+          enfocarEncabezado(this.injector, '#denuncias-hecho');
+        } else {
+          this.hecho.set(texto);
+        }
       },
       error: (error: unknown) => {
         this.ocupado.set(false);
@@ -241,6 +255,9 @@ export class Denuncias {
       error: (error: unknown) => {
         this.ocupado.set(false);
         this.errorAccion.set(textoDeError(error, { 404: TEXTO_YA_NO, 409: TEXTO_NO_ASIGNABLE }));
+        // Con la lista nueva, la fila o su botón pueden desaparecer (la
+        // denuncia ya no existe o está cerrada) y el foco con ellos: va al error.
+        enfocarEncabezado(this.injector, '#denuncias-error');
         this.cargar();
         this.cargarCuentas();
       },

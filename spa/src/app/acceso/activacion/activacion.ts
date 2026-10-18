@@ -45,7 +45,7 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
             @if (error(); as texto) {
               <p class="error" role="alert">{{ texto }}</p>
             }
-            <button type="submit" [disabled]="enviando()">{{ enviando() ? 'Guardando...' : 'Continuar' }}</button>
+            <button type="submit" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Guardando...' : 'Continuar' }}</button>
           </form>
         }
         @case ('codigo') {
@@ -70,7 +70,9 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
             @if (error(); as texto) {
               <p class="error" role="alert">{{ texto }}</p>
             }
-            <button type="submit" [disabled]="enviando()">{{ enviando() ? 'Activando...' : 'Activar la cuenta' }}</button>
+            <button type="submit" [attr.aria-disabled]="enviando() || null">
+              {{ enviando() ? 'Activando...' : 'Activar la cuenta' }}
+            </button>
           </form>
         }
         @case ('hecho') {
@@ -89,6 +91,9 @@ export class Activacion {
   private readonly token = consumirToken('/activacion');
 
   readonly paso = signal<Paso>(this.token === null ? 'sin-enlace' : 'contrasena');
+  // Un envío cada vez: un código TOTP vale una sola vez. Los botones llevan
+  // aria-disabled y no disabled, para no quitarles el foco (acceso/entrar):
+  // la guarda de cada paso es la que impide el segundo envío.
   readonly enviando = signal(false);
   readonly error = signal<string | null>(null);
   private readonly pendiente = signal<ActivacionPendiente | null>(null);

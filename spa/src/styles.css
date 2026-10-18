@@ -142,7 +142,10 @@ button.peligro {
   color: var(--color-peligro-texto);
 }
 
-/* aria-disabled: ocupado pero sin perder el foco (spa/src/app/auditoria). */
+/* Un botón ocupado lleva aria-disabled y no disabled: a uno disabled
+   Chromium le quita el foco y no se lo devuelve. Sigue recibiendo clics, y la
+   guarda de su acción los descarta (spa/src/app/denuncias/denuncias.ts). La
+   hoja no tiene :hover, así que nada lo pinta como activo. */
 button:disabled,
 button[aria-disabled="true"] {
   opacity: 0.6;

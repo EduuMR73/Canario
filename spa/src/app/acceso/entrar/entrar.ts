@@ -11,8 +11,11 @@ import { Sesion } from '../../nucleo/sesion';
 //
 // ngNativeValidate deja la validación al navegador (required, type="email"):
 // el formulario no se envía incompleto y el aviso es el nativo, accesible.
-// El botón se desactiva mientras se envía: cada intento cuenta en el bloqueo
-// de la cuenta, y un doble clic gastaría dos.
+// Un envío cada vez: cada intento cuenta en el bloqueo de la cuenta y gasta
+// el código TOTP, y un doble clic gastaría dos. La guarda de entrar() descarta
+// el segundo. Mientras se envía, el botón lleva aria-disabled y no disabled: a
+// un botón disabled Chromium le quita el foco, y tras un fallo quien usa el
+// teclado no sabría dónde está (WCAG 2.2, 2.4.3).
 @Component({
   selector: 'app-entrar',
   imports: [ReactiveFormsModule, RouterLink],
@@ -44,7 +47,7 @@ import { Sesion } from '../../nucleo/sesion';
         @if (error(); as texto) {
           <p class="error" role="alert">{{ texto }}</p>
         }
-        <button type="submit" [disabled]="enviando()">{{ enviando() ? 'Entrando...' : 'Entrar' }}</button>
+        <button type="submit" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Entrando...' : 'Entrar' }}</button>
       </form>
       <p>¿No tiene cuenta? <a routerLink="/registro">Solicitar acceso</a></p>
     </main>

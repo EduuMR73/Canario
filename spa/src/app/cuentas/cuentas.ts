@@ -51,7 +51,9 @@ interface EnlaceMostrado {
           }
         </select>
       </p>
-      <button type="submit" [disabled]="ocupado() !== null">{{ ocupado() === 'invitar' ? 'Invitando...' : 'Invitar' }}</button>
+      <button type="submit" [attr.aria-disabled]="ocupado() !== null || null">
+        {{ ocupado() === 'invitar' ? 'Invitando...' : 'Invitar' }}
+      </button>
     </form>
 
     @if (mostrado(); as invitacion) {
@@ -73,7 +75,7 @@ interface EnlaceMostrado {
       <p class="aviso" id="cuentas-hecho" role="status" tabindex="-1">{{ texto }}</p>
     }
     @if (errorAccion(); as texto) {
-      <p class="error" role="alert">{{ texto }}</p>
+      <p class="error" id="cuentas-error" role="alert" tabindex="-1">{{ texto }}</p>
     }
 
     <h2 id="cuentas-lista">Cuentas de la empresa</h2>
@@ -98,21 +100,24 @@ interface EnlaceMostrado {
                   @if (confirmando() === cuenta.usuario_id) {
                     <span>¿Dar de baja a {{ cuenta.email }}? Se cerrarán sus sesiones al momento.</span>
                     <button type="button" id="cuentas-confirmar" class="peligro" (click)="darDeBaja(cuenta)"
-                            [disabled]="ocupado() !== null">Confirmar la baja</button>
+                            [attr.aria-disabled]="ocupado() !== null || null">Confirmar la baja</button>
                     <button type="button" class="secundario" (click)="confirmando.set(null)">Cancelar</button>
                   } @else {
-                    <button type="button" class="secundario" (click)="reinvitar(cuenta)" [disabled]="ocupado() !== null">
+                    <button type="button" class="secundario" (click)="reinvitar(cuenta)"
+                            [attr.aria-disabled]="ocupado() !== null || null">
                       Reinvitar<span class="visualmente-oculto"> a {{ cuenta.email }}</span>
                     </button>
                     @if (cuenta.invitacion_pendiente) {
-                      <button type="button" class="secundario" (click)="anular(cuenta)" [disabled]="ocupado() !== null">
+                      <button type="button" class="secundario" (click)="anular(cuenta)"
+                              [attr.aria-disabled]="ocupado() !== null || null">
                         Anular la invitación<span class="visualmente-oculto"> de {{ cuenta.email }}</span>
                       </button>
                     }
                     <!-- La propia cuenta no se da de baja desde aquí: cerraría
                          la sesión de quien la pide sin vuelta atrás. -->
                     @if (cuenta.activo && cuenta.usuario_id !== propia()) {
-                      <button type="button" class="peligro" (click)="pedirBaja(cuenta)" [disabled]="ocupado() !== null">
+                      <button type="button" class="peligro" (click)="pedirBaja(cuenta)"
+                              [attr.aria-disabled]="ocupado() !== null || null">
                         Dar de baja<span class="visualmente-oculto"> a {{ cuenta.email }}</span>
                       </button>
                     }
@@ -147,6 +152,8 @@ export class Cuentas {
   readonly cuentas = signal<Cuenta[] | null>(null);
   readonly errorCarga = signal<string | null>(null);
   // Una acción cada vez: un doble clic no repite una invitación ni una baja.
+  // Los botones llevan aria-disabled y no disabled, para no quitarles el foco
+  // (denuncias.ts): la guarda de actuar() es la única barrera de la página.
   readonly ocupado = signal<string | null>(null);
   readonly confirmando = signal<string | null>(null);
   readonly hecho = signal<string | null>(null);
@@ -194,6 +201,11 @@ export class Cuentas {
   }
 
   pedirBaja(cuenta: Cuenta): void {
+    // Con una acción en marcha no se abre la confirmación: al terminar,
+    // actuar() la cerraría bajo el dedo de quien iba a confirmar.
+    if (this.ocupado() !== null) {
+      return;
+    }
     this.confirmando.set(cuenta.usuario_id);
     // El botón pulsado desaparece: el foco pasa a la confirmación.
     enfocarEncabezado(this.injector, '#cuentas-confirmar');
@@ -255,6 +267,9 @@ export class Cuentas {
         this.ocupado.set(null);
         this.confirmando.set(null);
         this.errorAccion.set(textoDeError(error, propios));
+        // El botón pulsado puede desaparecer (la confirmación se cierra, o la
+        // fila con la lista nueva) y el foco con él: va al error.
+        enfocarEncabezado(this.injector, '#cuentas-error');
         // La lista puede haber cambiado (otra persona actuó a la vez).
         this.cargar();
       },

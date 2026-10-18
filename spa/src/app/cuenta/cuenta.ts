@@ -41,7 +41,9 @@ import { enfocarEncabezado } from '../nucleo/foco';
       @if (error(); as texto) {
         <p class="error" role="alert">{{ texto }}</p>
       }
-      <button type="submit" [disabled]="enviando()">{{ enviando() ? 'Cambiando...' : 'Cambiar la contraseña' }}</button>
+      <button type="submit" [attr.aria-disabled]="enviando() || null">
+        {{ enviando() ? 'Cambiando...' : 'Cambiar la contraseña' }}
+      </button>
     </form>
     @if (hecho()) {
       <p class="aviso" id="cuenta-hecho" role="status" tabindex="-1">Contraseña cambiada. Se han cerrado sus otras sesiones y retirado los demás dispositivos de confianza.</p>
@@ -72,8 +74,10 @@ export class Cuenta {
       this.error.set('Las dos contraseñas nuevas no coinciden.');
       return;
     }
-    // El botón se desactiva mientras se envía: cada fallo cuenta en el
-    // bloqueo del dispositivo, y un doble clic gastaría dos.
+    // Un envío cada vez: cada fallo cuenta en el bloqueo del dispositivo, y
+    // un doble clic gastaría dos. La guarda de arriba descarta el segundo; el
+    // botón lleva aria-disabled y no disabled, para no quitarle el foco
+    // (acceso/entrar).
     this.enviando.set(true);
     this.error.set(null);
     this.api.cambiarContrasena({ contrasena_actual, contrasena_nueva, codigo_totp }).subscribe({

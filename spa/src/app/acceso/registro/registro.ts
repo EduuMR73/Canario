@@ -34,7 +34,9 @@ import { enfocarEncabezado } from '../../nucleo/foco';
           @if (error(); as texto) {
             <p class="error" role="alert">{{ texto }}</p>
           }
-          <button type="submit" [disabled]="enviando()">{{ enviando() ? 'Enviando...' : 'Solicitar acceso' }}</button>
+          <button type="submit" [attr.aria-disabled]="enviando() || null">
+            {{ enviando() ? 'Enviando...' : 'Solicitar acceso' }}
+          </button>
         </form>
         <p>¿Ya tiene cuenta? <a routerLink="/entrar">Entrar</a></p>
       }
@@ -46,6 +48,8 @@ export class Registro {
   private readonly injector = inject(Injector);
 
   readonly formulario = inject(NonNullableFormBuilder).group({ empresa: '', email: '' });
+  // Un envío cada vez. El botón lleva aria-disabled y no disabled, para no
+  // quitarle el foco (acceso/entrar): la guarda de solicitar() es la barrera.
   readonly enviando = signal(false);
   readonly error = signal<string | null>(null);
   readonly respuesta = signal<string | null>(null);

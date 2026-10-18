@@ -51,7 +51,7 @@ const TEXTO_NO_DISPONIBLE = 'La denuncia no existe o no la tiene asignada.';
         }
         <app-contenido [expediente]="datos" [propia]="propia()" [pendienteFinal]="pendienteFinal()" />
         <p class="acciones">
-          <button type="button" class="secundario" (click)="leer()" [disabled]="ocupado()">Volver a leer</button>
+          <button type="button" class="secundario" (click)="leer()" [attr.aria-disabled]="ocupado() || null">Volver a leer</button>
         </p>
 
         @if (cerrada(datos.estado)) {
@@ -64,7 +64,7 @@ const TEXTO_NO_DISPONIBLE = 'La denuncia no existe o no la tiene asignada.';
               <textarea id="expediente-mensaje" formControlName="texto" required maxlength="10000" rows="5"
                         dir="auto"></textarea>
             </p>
-            <button type="submit" [disabled]="ocupado()">Enviar el mensaje</button>
+            <button type="submit" [attr.aria-disabled]="ocupado() || null">Enviar el mensaje</button>
           </form>
         }
 
@@ -88,7 +88,7 @@ const TEXTO_NO_DISPONIBLE = 'La denuncia no existe o no la tiene asignada.';
                 <span id="expediente-final-ayuda" class="ayuda">Obligatorio al cerrar: el denunciante no podrá escribir más y es la única respuesta que recibirá.</span>
               </p>
             }
-            <button type="submit" [disabled]="ocupado()">Cambiar el estado</button>
+            <button type="submit" [attr.aria-disabled]="ocupado() || null">Cambiar el estado</button>
           </form>
         }
 
@@ -99,17 +99,20 @@ const TEXTO_NO_DISPONIBLE = 'La denuncia no existe o no la tiene asignada.';
             <p class="acciones">
               <span>¿Declarar no veraz la denuncia {{ id() }}?</span>
               <button type="button" id="expediente-confirmar" class="peligro" (click)="declararNoVeraz()"
-                      [disabled]="ocupado()">Confirmar: declarar no veraz</button>
+                      [attr.aria-disabled]="ocupado() || null">Confirmar: declarar no veraz</button>
               <button type="button" class="secundario" (click)="confirmando.set(false)">Cancelar</button>
             </p>
           } @else {
-            <button type="button" class="peligro" (click)="pedirNoVeraz()" [disabled]="ocupado()">Declarar no veraz</button>
+            <button type="button" class="peligro" (click)="pedirNoVeraz()"
+                    [attr.aria-disabled]="ocupado() || null">Declarar no veraz</button>
           }
         }
       </section>
     } @else if (!declarada()) {
       <p>El expediente no se abre solo: abrirlo queda registrado en la auditoría y cuenta para su límite diario de denuncias distintas. Si recarga la página, tendrá que volver a abrirlo.</p>
-      <button type="button" (click)="leer()" [disabled]="ocupado()">{{ ocupado() ? 'Abriendo...' : 'Abrir el expediente' }}</button>
+      <button type="button" (click)="leer()" [attr.aria-disabled]="ocupado() || null">
+        {{ ocupado() ? 'Abriendo...' : 'Abrir el expediente' }}
+      </button>
     }
   `,
 })
@@ -133,7 +136,9 @@ export class Expediente {
   readonly pendienteFinal = signal<string | null>(null);
   readonly declarada = signal(false);
   // Una petición cada vez: un doble clic no lee dos veces (dos filas en la
-  // auditoría) ni envía dos mensajes.
+  // auditoría) ni envía dos mensajes. Los botones llevan aria-disabled y no
+  // disabled, para no quitarles el foco (denuncias.ts): la guarda de leer() y
+  // de actuar() es la única barrera de la página, y la API, la autoridad.
   readonly ocupado = signal(false);
   readonly confirmando = signal(false);
   readonly hecho = signal<string | null>(null);
@@ -219,6 +224,11 @@ export class Expediente {
   }
 
   pedirNoVeraz(): void {
+    // Con una petición en marcha no se abre la confirmación: al terminar,
+    // actuar() la cerraría bajo el dedo de quien iba a confirmar.
+    if (this.ocupado()) {
+      return;
+    }
     this.confirmando.set(true);
     // El botón pulsado desaparece: el foco pasa a la confirmación.
     enfocarEncabezado(this.injector, '#expediente-confirmar');

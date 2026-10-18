@@ -32,7 +32,7 @@ import { nombreRol } from '../nucleo/roles';
           </ul>
         </nav>
         <p class="quien"><span class="quien-email">{{ yo.email }}</span> <span class="quien-rol">{{ nombreRol(yo.rol) }}</span></p>
-        <button type="button" class="secundario" (click)="cerrarSesion()" [disabled]="cerrando()">
+        <button type="button" class="secundario" (click)="cerrarSesion()" [attr.aria-disabled]="cerrando() || null">
           {{ cerrando() ? 'Cerrando la sesión...' : 'Cerrar la sesión' }}
         </button>
       </header>
@@ -55,6 +55,9 @@ export class Armazon {
     return yo === null ? [] : menuDe(yo.rol);
   });
   readonly error = signal<string | null>(null);
+  // Un cierre cada vez. El botón lleva aria-disabled y no disabled, para no
+  // quitarle el foco si el cierre falla (acceso/entrar): la guarda de
+  // cerrarSesion() es la barrera.
   readonly cerrando = signal(false);
   readonly nombreRol = nombreRol;
 

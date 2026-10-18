@@ -27,7 +27,7 @@ const TEXTO_YA_CERRADA = 'La solicitud ya no está abierta: la ha resuelto otra 
       <p class="aviso" id="solicitudes-hecho" role="status" tabindex="-1">{{ texto }}</p>
     }
     @if (errorAccion(); as texto) {
-      <p class="error" role="alert">{{ texto }}</p>
+      <p class="error" id="solicitudes-error" role="alert" tabindex="-1">{{ texto }}</p>
     }
 
     @if (listado(); as datos) {
@@ -57,13 +57,15 @@ const TEXTO_YA_CERRADA = 'La solicitud ya no está abierta: la ha resuelto otra 
                     @if (confirmando() === solicitud.solicitud_id) {
                       <span>¿Rechazar la solicitud de {{ solicitud.email }}?</span>
                       <button type="button" id="solicitudes-confirmar" class="peligro" (click)="rechazar(solicitud)"
-                              [disabled]="ocupado() !== null">Confirmar el rechazo</button>
+                              [attr.aria-disabled]="ocupado() !== null || null">Confirmar el rechazo</button>
                       <button type="button" class="secundario" (click)="confirmando.set(null)">Cancelar</button>
                     } @else {
-                      <button type="button" (click)="aprobar(solicitud, rol.value)" [disabled]="ocupado() !== null">
+                      <button type="button" (click)="aprobar(solicitud, rol.value)"
+                              [attr.aria-disabled]="ocupado() !== null || null">
                         Aprobar<span class="visualmente-oculto"> a {{ solicitud.email }}</span>
                       </button>
-                      <button type="button" class="peligro" (click)="pedirRechazo(solicitud)" [disabled]="ocupado() !== null">
+                      <button type="button" class="peligro" (click)="pedirRechazo(solicitud)"
+                              [attr.aria-disabled]="ocupado() !== null || null">
                         Rechazar<span class="visualmente-oculto"> a {{ solicitud.email }}</span>
                       </button>
                     }
@@ -94,6 +96,9 @@ export class Solicitudes {
 
   readonly listado = signal<ListadoSolicitudes | null>(null);
   readonly errorCarga = signal<string | null>(null);
+  // Una acción cada vez. Los botones llevan aria-disabled y no disabled, para
+  // no quitarles el foco (denuncias.ts): la guarda de actuar() es la única
+  // barrera de la página.
   readonly ocupado = signal<string | null>(null);
   readonly confirmando = signal<string | null>(null);
   readonly hecho = signal<string | null>(null);
@@ -129,6 +134,11 @@ export class Solicitudes {
   }
 
   pedirRechazo(solicitud: Solicitud): void {
+    // Con una acción en marcha no se abre la confirmación: al terminar,
+    // actuar() la cerraría bajo el dedo de quien iba a confirmar.
+    if (this.ocupado() !== null) {
+      return;
+    }
     this.confirmando.set(solicitud.solicitud_id);
     enfocarEncabezado(this.injector, '#solicitudes-confirmar');
   }
@@ -158,6 +168,9 @@ export class Solicitudes {
         this.ocupado.set(null);
         this.confirmando.set(null);
         this.errorAccion.set(textoDeError(error, propios));
+        // El botón pulsado puede desaparecer (la confirmación se cierra, o la
+        // fila con la lista nueva) y el foco con él: va al error.
+        enfocarEncabezado(this.injector, '#solicitudes-error');
         this.cargar();
       },
     });
