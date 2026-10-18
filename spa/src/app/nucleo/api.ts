@@ -1,21 +1,17 @@
-import { HttpClient, HttpContext } from '@angular/common/http';
+import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
-import { RENOVABLE } from './contexto';
+import { conSesion } from './contexto';
 
-// Cliente de la API del personal (app/rutas_personal.py). Es la única pieza
-// que conoce las rutas y la forma de los cuerpos: las páginas no llaman a
-// HttpClient. Las peticiones van al mismo origen (connect-src 'self'), así
-// que el navegador añade solo las cookies __Host- de la sesión, y también
-// Sec-Fetch-Site y Origin, que son la defensa CSRF de la API. Ningún token
-// pasa por aquí: los guarda y los envía el navegador.
+// Cliente de la API del personal (app/rutas_personal.py) para el acceso y la
+// cuenta propia. Los clientes de la API (este y api-cuentas.ts) son las
+// únicas piezas que conocen las rutas y la forma de los cuerpos: las páginas
+// no llaman a HttpClient. Las peticiones van al mismo origen (connect-src
+// 'self'), así que el navegador añade solo las cookies __Host- de la sesión,
+// y también Sec-Fetch-Site y Origin, que son la defensa CSRF de la API.
+// Ningún token de sesión pasa por aquí: los guarda y los envía el navegador.
 
-const BASE = '/v1/personal';
-
-// Las rutas que usan la sesión llevan la marca RENOVABLE (contexto.ts).
-function conSesion(): { context: HttpContext } {
-  return { context: new HttpContext().set(RENOVABLE, true) };
-}
+export const BASE = '/v1/personal';
 
 export type Rol = 'admin' | 'instructor' | 'auditor';
 
@@ -43,6 +39,13 @@ export interface ActivacionPendiente {
 // POST /v1/personal/registro
 export interface RespuestaRegistro {
   mensaje: string;
+}
+
+// POST /v1/personal/contrasena
+export interface CambioContrasena {
+  contrasena_actual: string;
+  contrasena_nueva: string;
+  codigo_totp: string;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -77,5 +80,12 @@ export class ApiPersonal {
 
   cerrarSesion(): Observable<unknown> {
     return this.http.delete(`${BASE}/sesiones/actual`, conSesion());
+  }
+
+  // Revoca todas las sesiones de la cuenta y deja una nueva en este
+  // navegador (app/personal.py, cambiar_contrasena): las cookies nuevas las
+  // pone la respuesta.
+  cambiarContrasena(datos: CambioContrasena): Observable<unknown> {
+    return this.http.post(`${BASE}/contrasena`, datos, conSesion());
   }
 }

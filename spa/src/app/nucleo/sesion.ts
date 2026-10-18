@@ -18,6 +18,13 @@ export class Sesion {
     return yo;
   }
 
+  // La cuenta ya cargada o, si no la hay, la de /yo. El rol de una cuenta no
+  // cambia nunca (app/instruccion.py, _exigir_admin), así que no hace falta
+  // volver a pedirla en cada página.
+  async cargada(): Promise<Yo> {
+    return this.cuenta() ?? this.cargar();
+  }
+
   olvidar(): void {
     this.cuenta.set(null);
   }

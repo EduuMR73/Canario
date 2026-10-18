@@ -3,6 +3,7 @@ import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 import { ApiPersonal } from '../../nucleo/api';
 import { textoDeError } from '../../nucleo/errores';
+import { Sesion } from '../../nucleo/sesion';
 
 // Login del personal: empresa, email, contraseña y código TOTP en una sola
 // petición (app/personal.py, iniciar_sesion). Cualquier fallo da el mismo
@@ -52,6 +53,7 @@ import { textoDeError } from '../../nucleo/errores';
 export class Entrar {
   private readonly api = inject(ApiPersonal);
   private readonly router = inject(Router);
+  private readonly sesion = inject(Sesion);
 
   readonly formulario = inject(NonNullableFormBuilder).group({
     empresa: '',
@@ -70,7 +72,12 @@ export class Entrar {
     this.error.set(null);
     this.api.iniciarSesion(this.formulario.getRawValue()).subscribe({
       // enviando sigue en true hasta salir de la página: nada que repetir.
-      next: () => void this.router.navigateByUrl('/inicio'),
+      // La cuenta de una sesión anterior en esta pestaña ya no es la de esta:
+      // se olvida y el armazón pide /yo de nuevo (nucleo/permisos.ts).
+      next: () => {
+        this.sesion.olvidar();
+        void this.router.navigateByUrl('/inicio');
+      },
       error: (error: unknown) => {
         this.enviando.set(false);
         // El código cambia cada 30 segundos y uno usado no vuelve a valer.

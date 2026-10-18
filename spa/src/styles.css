@@ -1,8 +1,48 @@
 /* Estilos globales de la SPA del personal. Todo el CSS vive aquí y sale en un
    fichero propio: los componentes no declaran estilos, porque Angular los
    inyecta con elementos <style> en línea, que la CSP (style-src 'self',
-   proxy/Caddyfile) bloquea. El aspecto llega en el bloque 6b-4: esto es lo
-   mínimo para que los formularios se lean y se usen bien. */
+   proxy/Caddyfile) bloquea.
+
+   Base visual (bloque 6b-3): los colores solo se escriben en :root, como
+   variables, y el resto del fichero los usa con var(). Así un cambio de
+   color se hace en un sitio, y tests/security/verificar_spa.py comprueba el
+   contraste de cada pareja de texto y fondo (WCAG 2.2, 1.4.3: 4,5:1) y de
+   bordes y foco (1.4.11: 3:1), que no hay colores fuera de :root y que toda
+   variable usada existe. Si se añade una pareja nueva, se añade también
+   allí. Fuente del sistema: ningún fichero que descargar, y la CSP no tiene
+   font-src. La fuente propia y el modo oscuro llegan en el 6b-4. */
+
+:root {
+  /* Solo claro hasta el 6b-4: el navegador no pinta oscuros los controles
+     de formulario sobre un fondo claro. */
+  color-scheme: light;
+
+  --color-texto: #1a1a1a;
+  --color-texto-suave: #4a4a4a;
+  --color-fondo: #ffffff;
+  --color-superficie: #f4f4f5;
+  --color-borde: #6b6b6b;
+  --color-separador: #d4d4d8;
+  --color-acento: #1d4ed8;
+  --color-boton: #1a1a1a;
+  --color-boton-texto: #ffffff;
+  --color-peligro: #b91c1c;
+  --color-peligro-texto: #ffffff;
+  --color-error-texto: #7f1d1d;
+  --color-error-fondo: #fef2f2;
+  --color-aviso-fondo: #eff6ff;
+  --color-etiqueta-fondo: #fef3c7;
+  --color-etiqueta-texto: #78350f;
+
+  --espacio-1: 0.25rem;
+  --espacio-2: 0.5rem;
+  --espacio-3: 0.75rem;
+  --espacio-4: 1rem;
+  --espacio-6: 1.5rem;
+  --radio: 0.25rem;
+  --ancho-formulario: 34rem;
+  --ancho-pagina: 64rem;
+}
 
 *,
 *::before,
@@ -14,58 +54,90 @@ body {
   margin: 0;
   font-family: system-ui, sans-serif;
   line-height: 1.5;
-  color: #1a1a1a;
-  background: #ffffff;
+  color: var(--color-texto);
+  background: var(--color-fondo);
 }
 
 main {
-  max-width: 34rem;
+  max-width: var(--ancho-formulario);
   margin: 0 auto;
-  padding: 1.5rem 1rem 3rem;
+  padding: var(--espacio-6) var(--espacio-4) 3rem;
+}
+
+/* Las páginas del armazón tienen tablas: más anchas que un formulario. */
+main.ancho {
+  max-width: var(--ancho-pagina);
+}
+
+.formulario {
+  max-width: var(--ancho-formulario);
 }
 
 /* Los encabezados con tabindex="-1" reciben el foco por código al cambiar
    de página o de paso (app/nucleo/foco.ts): sin contorno, porque no se
    pueden alcanzar con el tabulador y el contorno solo despistaría. */
 h1:focus,
-h2:focus {
+h2:focus,
+[role="status"]:focus {
   outline: none;
+}
+
+a {
+  color: var(--color-acento);
 }
 
 .campo {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  margin: 0 0 1rem;
+  gap: var(--espacio-1);
+  margin: 0 0 var(--espacio-4);
 }
 
 label {
   font-weight: 600;
 }
 
-input {
+input,
+select {
   font: inherit;
-  padding: 0.5rem 0.625rem;
-  border: 1px solid #6b6b6b;
-  border-radius: 0.25rem;
+  color: var(--color-texto);
+  background: var(--color-fondo);
+  padding: var(--espacio-2) 0.625rem;
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio);
   /* Nunca más ancho que la pantalla, también a 320 px. */
   max-width: 100%;
 }
 
 .ayuda {
   font-size: 0.875rem;
-  color: #4a4a4a;
+  color: var(--color-texto-suave);
 }
 
 button {
   font: inherit;
   font-weight: 600;
-  padding: 0.5rem 1rem;
-  border: 1px solid #1a1a1a;
-  border-radius: 0.25rem;
-  background: #1a1a1a;
-  color: #ffffff;
+  padding: var(--espacio-2) var(--espacio-4);
+  border: 1px solid var(--color-boton);
+  border-radius: var(--radio);
+  background: var(--color-boton);
+  color: var(--color-boton-texto);
   cursor: pointer;
+}
+
+/* Acciones de menos peso: mismo texto, sin relleno. */
+button.secundario {
+  background: var(--color-fondo);
+  color: var(--color-texto);
+  border-color: var(--color-borde);
+}
+
+/* Lo que no tiene vuelta atrás inmediata (dar de baja, rechazar). El color
+   no es la única señal: el texto del botón lo dice, y pide confirmación. */
+button.peligro {
+  background: var(--color-peligro);
+  border-color: var(--color-peligro);
+  color: var(--color-peligro-texto);
 }
 
 button:disabled {
@@ -75,32 +147,46 @@ button:disabled {
 
 /* Foco siempre visible con teclado (WCAG 2.2, 2.4.7). */
 :focus-visible {
-  outline: 3px solid #1d4ed8;
+  outline: 3px solid var(--color-acento);
   outline-offset: 2px;
 }
 
 /* El error no depende solo del color: lleva borde y va en role="alert". */
 .error {
-  border-left: 4px solid #b91c1c;
-  padding: 0.5rem 0.75rem;
-  background: #fef2f2;
-  color: #7f1d1d;
+  border-left: 4px solid var(--color-peligro);
+  padding: var(--espacio-2) var(--espacio-3);
+  background: var(--color-error-fondo);
+  color: var(--color-error-texto);
 }
 
 .aviso {
-  border-left: 4px solid #1d4ed8;
-  padding: 0.5rem 0.75rem;
-  background: #eff6ff;
+  border-left: 4px solid var(--color-acento);
+  padding: var(--espacio-2) var(--espacio-3);
+  background: var(--color-aviso-fondo);
 }
 
-/* El QR siempre negro sobre blanco, también en modo oscuro: los lectores
-   necesitan ese contraste. */
+/* Oculto a la vista pero leído por los lectores de pantalla (el email en los
+   botones de cada fila, la etiqueta del rol de una solicitud). */
+.visualmente-oculto {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* El QR siempre negro sobre blanco: los lectores necesitan ese contraste. Sus
+   colores van en el propio SVG (acceso/activacion). */
 .qr {
   display: block;
   width: 12rem;
   height: 12rem;
   max-width: 100%;
-  background: #ffffff;
+  background: var(--color-fondo);
 }
 
 .secreto {
@@ -114,6 +200,116 @@ button:disabled {
 }
 
 .cuenta dd {
-  margin: 0 0 0.75rem;
+  margin: 0 0 var(--espacio-3);
   overflow-wrap: anywhere;
+}
+
+/* Armazón: la barra con la marca, el menú del rol, la cuenta y el cierre.
+   Se parte en líneas en pantallas estrechas, sin desbordar a 320 px. */
+.barra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--espacio-2) var(--espacio-6);
+  padding: var(--espacio-3) var(--espacio-4);
+  background: var(--color-superficie);
+  border-bottom: 1px solid var(--color-separador);
+}
+
+.barra p {
+  margin: 0;
+}
+
+.marca {
+  font-weight: 700;
+}
+
+.menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--espacio-2) var(--espacio-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* La página actual no se distingue solo por el color: va en negrita y sin
+   subrayado, y lleva aria-current="page". */
+.menu a[aria-current="page"] {
+  font-weight: 700;
+  text-decoration: none;
+  color: var(--color-texto);
+}
+
+.quien {
+  margin-left: auto;
+  overflow-wrap: anywhere;
+}
+
+.quien-rol {
+  color: var(--color-texto-suave);
+}
+
+.barra-error {
+  margin: 0;
+}
+
+/* Tablas: a 320 px se desplazan en horizontal dentro de su región, que se
+   alcanza con el tabulador para moverla con el teclado. Una tabla de datos
+   es contenido bidimensional y queda fuera de la regla del reajuste (WCAG
+   2.2, 1.4.10, nota 2). */
+.tabla {
+  overflow-x: auto;
+  margin: 0 0 var(--espacio-4);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  padding: var(--espacio-2) var(--espacio-3);
+  border-bottom: 1px solid var(--color-separador);
+  text-align: start;
+  vertical-align: top;
+}
+
+thead th {
+  border-bottom-color: var(--color-borde);
+}
+
+/* Emails e ids: largos y sin espacios, se parten donde haga falta. */
+.dato {
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+/* Botones de una fila o de un aviso: se parten en líneas si no caben. En
+   una celda, con márgenes y no con flex, para que siga siendo una celda. */
+p.acciones {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--espacio-2);
+}
+
+td.acciones > * {
+  margin: 0 var(--espacio-2) var(--espacio-2) 0;
+}
+
+.etiqueta {
+  display: inline-block;
+  margin: var(--espacio-1) var(--espacio-1) 0 0;
+  padding: 0 var(--espacio-2);
+  border-radius: var(--radio);
+  background: var(--color-etiqueta-fondo);
+  color: var(--color-etiqueta-texto);
+  font-size: 0.875rem;
+}
+
+/* El enlace de una invitación: largo y sin espacios. */
+.enlace {
+  word-break: break-all;
 }
