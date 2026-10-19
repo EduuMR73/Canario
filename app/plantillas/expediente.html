@@ -4,7 +4,7 @@
 {% block contenido %}
 <h1>Su denuncia</h1>
 {% if aviso %}<p class="aviso" role="status">{{ aviso }}</p>{% endif %}
-<dl>
+<dl class="ficha">
 <dt>Estado</dt><dd>{{ estado }}</dd>
 <dt>Fecha</dt><dd><time datetime="{{ fecha.isoformat() }}">{{ fecha.strftime("%d/%m/%Y") }}</time></dd>
 <dt>Categoría</dt><dd>{{ categoria }}</dd>
@@ -16,7 +16,7 @@
 <ol class="mensajes">
 {% for mensaje in mensajes %}
 <li>
-<p><strong>{{ mensaje.autor }}</strong>, <time datetime="{{ mensaje.fecha.isoformat() }}">{{ mensaje.fecha.strftime("%d/%m/%Y") }}</time></p>
+<p class="mensaje-cabecera"><strong>{{ mensaje.autor }}</strong>, <time datetime="{{ mensaje.fecha.isoformat() }}">{{ mensaje.fecha.strftime("%d/%m/%Y") }}</time></p>
 <div class="texto">{{ mensaje.texto }}</div>
 </li>
 {% endfor %}

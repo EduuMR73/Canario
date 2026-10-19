@@ -1,29 +1,97 @@
 /*
- * Hoja de estilos base del sitio del denunciante (puerto 8444).
+ * Hoja de estilos del sitio del denunciante (puerto 8444).
  *
- * Solo maquetación y tipografía del sistema. Sin fuentes externas, sin imágenes
- * y sin url(): la CSP del sitio ("default-src 'none'; style-src 'self'") los
- * bloquearía, y cada recurso externo sería una petición más que deja rastro de
- * la visita. El aspecto definitivo llega con la web de referencia.
+ * El mismo aspecto que la SPA del personal (spa/src/styles.css): sus colores,
+ * su tarjeta, sus botones y su select. Las variables se llaman igual y valen
+ * lo mismo, y tests/security/verificar_spa.py (k) comprueba que toda variable
+ * de aquí existe allí con el mismo valor en los dos temas: si se cambia un
+ * color en la SPA y no aquí, la batería salta. También comprueba aquí el
+ * contraste de cada pareja, que el oscuro redefine todos los colores, que no
+ * hay colores fuera de los dos :root y que no hay url().
+ *
+ * Sin fuentes propias: la del sistema y no la Geist de la SPA, por tres
+ * motivos.
+ * - Estas páginas van con Cache-Control: no-store (proxy/Caddyfile), así que
+ *   la fuente (69.652 bytes) se bajaría en cada página y la letra saltaría
+ *   con cada carga.
+ * - Tor Browser desactiva algunas fuentes en los niveles Safer y Safest
+ *   (support.torproject.org/security-settings): quien más cuida su anonimato
+ *   puede no verla de todos modos.
+ * - Un intérprete de fuentes es superficie de ataque al visitar una página
+ *   (ATT&CK T1189), y aquí no hace falta.
+ * Sin imágenes ni url(): la CSP del sitio ("default-src 'none'; style-src
+ * 'self'") los bloquearía, y cada recurso sería una petición más que deja
+ * rastro de la visita. El canario va en SVG dentro de la plantilla
+ * (app/plantillas/base.html) y la flecha del select, con gradientes.
  */
 
 :root {
+  /* Los controles de formulario y las barras de desplazamiento del navegador
+     siguen al tema. */
   color-scheme: light dark;
-  --texto: #1b1b1b;
-  --fondo: #ffffff;
-  --borde: #b1b4b6;
-  --enlace: #1d4f91;
-  --foco: #ffbf47;
-  --error: #b10e1e;
+
+  --color-texto: #1f2328;
+  --color-texto-suave: #59636e;
+  --color-fondo: #ffffff;
+  --color-superficie: #f6f8fa;
+  --color-borde: #6e7781;
+  --color-separador: #d1d9e0;
+  --color-acento: #0b57d0;
+  --color-boton: #facc15;
+  --color-boton-texto: #1a1a1a;
+  --color-boton-borde: #a16207;
+  --color-boton-encima: #eab308;
+  --color-peligro: #b91c1c;
+  --color-error-texto: #7f1d1d;
+  --color-error-fondo: #fef2f2;
+  --color-aviso-fondo: #eff6ff;
+  --color-barra: #1f2328;
+  --color-barra-texto: #f0f3f6;
+  --color-barra-texto-suave: #d1d7e0;
+  --color-foco-barra: #facc15;
+  --color-canario: #facc15;
+  --color-canario-ala: #eab308;
+  --color-canario-pico: #f97316;
+  --color-canario-contorno: #1a1a1a;
+
+  --espacio-1: 0.25rem;
+  --espacio-2: 0.5rem;
+  --espacio-3: 0.75rem;
+  --espacio-4: 1rem;
+  --espacio-5: 1.25rem;
+  --espacio-6: 1.5rem;
+  --radio: 0.375rem;
+  --ancho-formulario: 34rem;
 }
 
+/* Tema oscuro: los mismos nombres, todos, también los que no cambian (la
+   batería exige que el oscuro los redefina, para que ninguno herede el claro
+   por olvido). */
 @media (prefers-color-scheme: dark) {
   :root {
-    --texto: #f3f2f1;
-    --fondo: #161616;
-    --borde: #6f777b;
-    --enlace: #8fb8ff;
-    --error: #ff8a8a;
+    --color-texto: #e6edf3;
+    --color-texto-suave: #9198a1;
+    --color-fondo: #0b0d10;
+    --color-superficie: #151a21;
+    --color-borde: #7d8590;
+    --color-separador: #2d333b;
+    --color-acento: #6cb6ff;
+    --color-boton: #facc15;
+    --color-boton-texto: #1a1a1a;
+    --color-boton-borde: #facc15;
+    --color-boton-encima: #eab308;
+    --color-peligro: #f87171;
+    --color-error-texto: #fecaca;
+    --color-error-fondo: #2a1212;
+    --color-aviso-fondo: #0f1d33;
+    --color-barra: #151a21;
+    --color-barra-texto: #f0f3f6;
+    --color-barra-texto-suave: #d1d7e0;
+    --color-foco-barra: #facc15;
+    --color-canario: #facc15;
+    --color-canario-ala: #eab308;
+    --color-canario-pico: #f97316;
+    --color-canario-contorno: #1a1a1a;
   }
 }
 
@@ -34,33 +102,304 @@
 }
 
 html {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size: 100%;
-  line-height: 1.5;
-  color: var(--texto);
-  background: var(--fondo);
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
 
 body {
   margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  line-height: 1.5;
+  color: var(--color-texto);
+  background: var(--color-fondo);
 }
 
 main {
-  max-width: 40rem;
+  max-width: var(--ancho-formulario);
   margin: 0 auto;
-  padding: 2rem 1rem;
+  padding: var(--espacio-6) var(--espacio-4) 3rem;
+}
+
+/* La escala de los títulos de la SPA, explícita: sin ella, h2 toma el
+   tamaño y la negrita del navegador. Un título largo se parte en vez de
+   desbordar a 320 px. */
+h1,
+h2 {
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 h1 {
-  font-size: 2rem;
-  line-height: 1.2;
-  margin: 0 0 1.5rem;
+  margin: 0 0 var(--espacio-4);
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
 }
 
+h2 {
+  margin: var(--espacio-6) 0 var(--espacio-3);
+  font-size: 1.25rem;
+}
+
+/* Los enlaces del texto siguen subrayados: con solo el color, quien no
+   distingue el azul no los vería (WCAG 2.2, 1.4.1). */
 a {
-  color: var(--enlace);
+  color: var(--color-acento);
+}
+
+/* La barra de arriba, oscura en los dos temas como la de la SPA: el canario
+   y el nombre, que llevan al inicio, y qué es el sitio. Se parte en líneas
+   en pantallas estrechas. */
+.barra {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--espacio-2) var(--espacio-5);
+  padding: var(--espacio-3) var(--espacio-6);
+  background: var(--color-barra);
+  color: var(--color-barra-texto);
+  border-bottom: 1px solid var(--color-separador);
+}
+
+/* El foco amarillo: el azul del acento sobre la barra no llega a 3:1
+   (WCAG 2.2, 1.4.11). */
+.barra :focus-visible {
+  outline-color: var(--color-foco-barra);
+}
+
+.marca {
+  display: flex;
+  align-items: center;
+  gap: var(--espacio-2);
+  font-weight: 600;
+  color: var(--color-barra-texto);
+  text-decoration: none;
+}
+
+.lema {
+  margin: 0;
+  color: var(--color-barra-texto-suave);
+}
+
+/* El canario de la barra. Decorativo: sin él, la página se entiende igual
+   (Tor Browser en Safest puede no pintar SVG). Los colores van aquí y no en
+   el SVG, para que sigan al tema. */
+.canario {
+  display: block;
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.canario-trazo {
+  stroke: var(--color-canario-contorno);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.canario-cuerpo {
+  fill: var(--color-canario);
+}
+
+.canario-ala {
+  fill: var(--color-canario-ala);
+}
+
+.canario-pico {
+  fill: var(--color-canario-pico);
+}
+
+.canario-ojo {
+  fill: var(--color-canario-contorno);
+}
+
+/* Las patas van sobre la barra y no sobre el amarillo: toman el color del
+   texto que las rodea, como en la SPA. Va después de .canario-trazo, que
+   también fija stroke, para ganarle. */
+.canario-patas {
+  fill: none;
+  stroke: currentColor;
+}
+
+/* Cada campo: la etiqueta, el control y su error, uno debajo de otro. */
+.campo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--espacio-1);
+  margin: 0 0 var(--espacio-4);
+}
+
+label {
+  font-weight: 600;
+}
+
+/* Aquí los formularios son la página: los controles ocupan todo el ancho de
+   main. */
+input,
+select,
+textarea {
+  width: 100%;
+  font: inherit;
+  color: var(--color-texto);
+  background: var(--color-fondo);
+  padding: var(--espacio-2) var(--espacio-3);
+  border: 1px solid var(--color-borde);
+  border-radius: var(--radio);
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  padding: var(--espacio-2) var(--espacio-4);
+  border: 1px solid var(--color-boton-borde);
+  border-radius: var(--radio);
+  background: var(--color-boton);
+  color: var(--color-boton-texto);
+  cursor: pointer;
+}
+
+/* Los controles de una línea miden 38 px, como en la SPA: 20 de línea, 8 de
+   relleno arriba y abajo y el borde. Sin una altura fija: si quien lee sube
+   el interlineado o el tamaño, el control crece con él (WCAG 2.2, 1.4.12).
+   El textarea conserva el 1.5 del cuerpo. Va DESPUÉS de las reglas de
+   input y de button: su "font: inherit" también fija el interlineado. */
+input,
+select,
+button {
+  line-height: 1.25;
+}
+
+/* El select sin la apariencia nativa, como en la SPA (pulido 2c): con ella,
+   Chromium le fuerza line-height: normal y dibuja la flecha pegada al
+   borde. Sigue siendo un <select>: el teclado, el lector de pantalla y el
+   selector del sistema en el móvil no cambian. La flecha es un chevron de
+   dos gradientes, porque la CSP no deja cargar imágenes. */
+select {
+  appearance: none;
+  padding-inline-end: calc(var(--espacio-3) + 0.75rem + var(--espacio-2));
+  background-image:
+    linear-gradient(45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+                    currentColor calc(50% + 0.75px), transparent calc(50% + 0.75px)),
+    linear-gradient(-45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+                    currentColor calc(50% + 0.75px), transparent calc(50% + 0.75px));
+  background-size: 0.375rem 0.375rem;
+  background-repeat: no-repeat;
+  background-position:
+    right calc(var(--espacio-3) + 0.375rem) center,
+    right var(--espacio-3) center;
+}
+
+/* En los colores forzados de Windows los gradientes no se pintan: vuelve el
+   select nativo, con su flecha en los colores del sistema. */
+@media (forced-colors: active) {
+  select {
+    appearance: auto;
+    background-image: none;
+    padding-inline-end: var(--espacio-3);
+  }
+}
+
+/* :hover solo con un puntero que puede quedarse encima: en una pantalla
+   táctil se quedaría pegado tras tocar. */
+@media (hover: hover) {
+  button:hover {
+    background: var(--color-boton-encima);
+  }
+}
+
+/* Foco siempre visible con teclado (WCAG 2.2, 2.4.7). */
+:focus-visible {
+  outline: 3px solid var(--color-acento);
+  outline-offset: 2px;
+}
+
+/* Avisos y errores en una caja. El error no depende solo del color: lleva
+   borde, un título y va en role="alert". */
+.aviso,
+.errores {
+  padding: var(--espacio-3) var(--espacio-4);
+  border-radius: var(--radio);
+  margin: 0 0 var(--espacio-4);
+}
+
+.aviso {
+  border: 1px solid var(--color-acento);
+  background: var(--color-aviso-fondo);
+}
+
+/* Los consejos de anonimato (app/plantillas/macros.html) son una caja con
+   párrafos y una lista: sin el margen de fuera del primero y del último, la
+   caja tendría más aire arriba y abajo que a los lados. */
+.aviso > :first-child {
+  margin-top: 0;
+}
+
+.aviso > :last-child {
+  margin-bottom: 0;
+}
+
+.aviso ul {
+  margin: var(--espacio-2) 0;
+  padding-left: var(--espacio-5);
+}
+
+.errores {
+  border: 1px solid var(--color-peligro);
+  background: var(--color-error-fondo);
+  color: var(--color-error-texto);
+}
+
+.errores h2 {
+  margin: 0 0 var(--espacio-2);
+  font-size: 1.125rem;
+}
+
+.errores ul {
+  margin: 0;
+  padding-left: var(--espacio-5);
+}
+
+/* En la caja de errores, los enlaces a cada campo van en el color del texto
+   de la caja: el azul del acento sobre el fondo rojo no está entre las
+   parejas comprobadas. Siguen subrayados. */
+.errores a {
+  color: inherit;
+}
+
+/* El error de cada campo, debajo del control: lo dice el texto y el campo
+   lleva aria-invalid, no solo el color. */
+.error {
+  font-weight: 600;
+  color: var(--color-peligro);
+}
+
+/* El código de seguimiento: en una caja, para que se vea qué hay que
+   guardar, y partido si no cabe a 320 px. */
+.codigo code {
+  display: block;
+  padding: var(--espacio-3) var(--espacio-4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.25rem;
+  overflow-wrap: anywhere;
+  background: var(--color-superficie);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
+}
+
+/* Los datos de la denuncia: término y valor en la misma línea. */
+.ficha {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--espacio-1) var(--espacio-4);
+}
+
+.ficha dt {
+  font-weight: 600;
+}
+
+.ficha dd {
+  margin: 0;
 }
 
 /*
@@ -72,53 +411,40 @@ a {
 .texto {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  padding: var(--espacio-3) var(--espacio-4);
+  background: var(--color-superficie);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
 }
 
-label {
-  display: block;
-  font-weight: 600;
+/* Los mensajes como línea de tiempo, como en el expediente de la SPA: una
+   raya a la izquierda y cada mensaje en una caja con su cabecera. */
+.mensajes {
+  margin: 0 0 var(--espacio-4) var(--espacio-3);
+  padding: 0 0 0 var(--espacio-5);
+  border-left: 2px solid var(--color-separador);
+  list-style: none;
 }
 
-input[type="text"],
-select,
-textarea {
-  display: block;
-  width: 100%;
-  font: inherit;
-  color: inherit;
-  background: var(--fondo);
-  border: 2px solid var(--borde);
-  padding: 0.5rem;
+.mensajes > li {
+  margin: 0 0 var(--espacio-4);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
+  overflow: hidden;
 }
 
-button {
-  font: inherit;
-  padding: 0.5rem 1rem;
+.mensaje-cabecera {
+  margin: 0;
+  padding: var(--espacio-2) var(--espacio-4);
+  background: var(--color-superficie);
+  border-bottom: 1px solid var(--color-separador);
+  color: var(--color-texto-suave);
+  font-size: 0.875rem;
 }
 
-.codigo code {
-  font-size: 1.25rem;
-  overflow-wrap: anywhere;
-}
-
-.errores,
-.error {
-  color: var(--error);
-}
-
-.errores {
-  border: 3px solid var(--error);
-  padding: 0 1rem;
-  margin-bottom: 1.5rem;
-}
-
-.error {
-  display: block;
-  font-weight: 600;
-}
-
-/* Foco siempre visible al navegar con teclado (WCAG 2.2, 2.4.7). */
-:focus-visible {
-  outline: 3px solid var(--foco);
-  outline-offset: 2px;
+.mensajes .texto {
+  margin: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
 }

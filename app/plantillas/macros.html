@@ -3,6 +3,26 @@
     cada campo; cada campo con error lo marca aria-invalid y lo describe su
     mensaje (aria-describedby). -#}
 
+{#- Los consejos de anonimato, en el inicio y en el formulario: el mayor
+    riesgo no está en el canal, sino en entrar desde un equipo o una red de
+    la empresa, que puede registrar la visita (su proxy, su DNS o el software
+    de sus equipos), y en escribir datos que identifiquen. Una lista, un
+    consejo por línea, y el porqué al final. Un solo texto, para que las dos
+    páginas digan lo mismo. Tor sin enlace: lo que se aconseja es volver
+    desde otro dispositivo, no seguir un enlace desde este. -#}
+{% macro aviso_dispositivo() -%}
+<div class="aviso">
+<p><strong>Para proteger su anonimato:</strong></p>
+<ul>
+<li>Use su móvil personal u otro dispositivo que no sea de la empresa.</li>
+<li>Conéctese con datos móviles o desde casa, no con la wifi del trabajo.</li>
+<li>Si puede, use Tor Browser (torproject.org), que oculta desde dónde se conecta.</li>
+<li>No escriba en la denuncia datos que le identifiquen.</li>
+</ul>
+<p>Desde un equipo o una red de la empresa se puede saber que alguien ha entrado en este canal, y cuándo.</p>
+</div>
+{%- endmacro %}
+
 {% macro resumen_errores(errores) -%}
 {% if errores %}
 <div class="errores" role="alert">
@@ -30,7 +50,7 @@
     mejorado de algunos navegadores envía lo que se escribe a un servicio
     externo. -#}
 {% macro area_texto(campo, etiqueta, texto, errores, longitud_maxima) -%}
-<p>
+<p class="campo">
 <label for="{{ campo }}">{{ etiqueta }}</label>
 <textarea id="{{ campo }}" name="{{ campo }}" rows="12" maxlength="{{ longitud_maxima }}" required spellcheck="false"{{ atributos_error(campo, errores) }}>
 {{ texto }}</textarea>

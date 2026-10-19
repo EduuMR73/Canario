@@ -7,7 +7,7 @@
 {#- El código va en el cuerpo de un POST, nunca en la URL: así no queda en el
     historial ni en ningún registro de rutas. -#}
 <form method="post" action="/seguimiento/consulta" autocomplete="off">
-<p>
+<p class="campo">
 <label for="codigo">Código de seguimiento</label>
 <input id="codigo" name="codigo" type="text" required autocapitalize="off" spellcheck="false"{{ atributos_error("codigo", errores) }}>
 {{ mensaje_error("codigo", errores) }}
