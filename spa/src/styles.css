@@ -97,6 +97,12 @@
   --color-leila-rosa: #e8a0a0;
   --color-leila-contorno: #1a1a1a;
   --color-leila-cojin: #eaeef2;
+  --color-leila-trazo: #1a1a1a;
+  --color-leila-blanco-ojo: #fffaf0;
+  --color-leila-nariz: #e88b8b;
+  --color-leila-collar: #f29bbb;
+  --color-leila-chapa: #e0628f;
+  --color-leila-anilla: #8b949e;
 
   --espacio-1: 0.25rem;
   --espacio-2: 0.5rem;
@@ -161,6 +167,14 @@
        claro y un cojín más claro, media gata desaparecería. */
     --color-leila-contorno: #c9d1d9;
     --color-leila-cojin: #2d333b;
+    /* Las líneas de la cara, el borde del collar y la chapa van sobre la
+       crema y el rosa, no sobre el fondo: siguen oscuras. */
+    --color-leila-trazo: #1a1a1a;
+    --color-leila-blanco-ojo: #fffaf0;
+    --color-leila-nariz: #e88b8b;
+    --color-leila-collar: #f29bbb;
+    --color-leila-chapa: #e0628f;
+    --color-leila-anilla: #8b949e;
   }
 }
 
@@ -813,7 +827,14 @@ td.acciones > * {
 /* El contorno de la silueta, que en el oscuro se aclara. */
 .leila-borde {
   stroke: var(--color-leila-contorno);
-  stroke-width: 3;
+  stroke-width: 2.8;
+  stroke-linejoin: round;
+}
+
+/* El mismo contorno, más fino, en las piezas pequeñas (pechera y patas). */
+.leila-borde-fino {
+  stroke: var(--color-leila-contorno);
+  stroke-width: 2.2;
   stroke-linejoin: round;
 }
 
@@ -821,20 +842,63 @@ td.acciones > * {
   fill: none;
 }
 
-/* Los detalles de la cara van sobre la crema: en el color del pelo, que se
-   ve en los dos temas. */
-.leila-detalle {
-  stroke: var(--color-leila-pelo);
-  stroke-width: 1.5;
-  stroke-linejoin: round;
-  stroke-linecap: round;
+/* La cara va sobre la crema: sus líneas, en un trazo oscuro que se ve en los
+   dos temas. */
+.leila-ojo-fondo {
+  fill: var(--color-leila-blanco-ojo);
+  stroke: var(--color-leila-trazo);
+  stroke-width: 1.8;
 }
 
 .leila-ojo {
   fill: none;
-  stroke: var(--color-leila-pelo);
-  stroke-width: 2.5;
+  stroke: var(--color-leila-trazo);
+  stroke-width: 2.2;
   stroke-linecap: round;
+}
+
+.leila-nariz {
+  fill: var(--color-leila-nariz);
+  stroke: var(--color-leila-trazo);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+
+.leila-boca {
+  fill: none;
+  stroke: var(--color-leila-trazo);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+/* El collar son dos trazos sobre la misma curva: uno oscuro y ancho debajo,
+   que hace de borde, y el rosa encima. Las puntas caen sobre el contorno de
+   la cabeza: dentro de la cara parecería una sonrisa. */
+.leila-collar-borde {
+  fill: none;
+  stroke: var(--color-leila-trazo);
+  stroke-width: 6.4;
+  stroke-linecap: round;
+}
+
+.leila-collar {
+  fill: none;
+  stroke: var(--color-leila-collar);
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+.leila-anilla {
+  fill: none;
+  stroke: var(--color-leila-anilla);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.leila-chapa {
+  fill: var(--color-leila-chapa);
+  stroke: var(--color-leila-trazo);
+  stroke-width: 1.3;
 }
 
 .leila-z {
