@@ -135,11 +135,11 @@ etapa. Prueba:
 * p) la fuente y el tema oscuro en Chromium (bloque 6b-4a): Geist es la única
   fuente de la página y está cargada; con el sistema en oscuro el fondo es el
   del tema oscuro (control: en claro, el del claro); a 320 px de ancho (WCAG
-  2.2, 1.4.10) ni la entrada ni las páginas del admin desbordan en
+  2.2, 1.4.10) ni la entrada ni las páginas del admin ni la 404 desbordan en
   horizontal (control: un elemento de 400 px sí desborda); la barra separa el
   email del rol con un espacio; con las solicitudes vacías (bloque 6b-4b),
-  Leila sale con aria-hidden (si la lista no está vacía, SIN CONCLUSION);
-  ninguna violación
+  Leila sale con aria-hidden (si la lista no está vacía, SIN CONCLUSION), y
+  también en la 404 (si la ruta no da la 404, SIN CONCLUSION); ninguna violación
   de la CSP ni error de JavaScript (control: una fuente de otro origen sí
   deja su violación de font-src).
 
@@ -343,6 +343,8 @@ TITULO_ENTRAR = "Entrar - Canario"
 H1_NO_ENCONTRADA = "Página no encontrada"
 TITULO_NO_ENCONTRADA = "Página no encontrada - Canario"
 RUTA_PROFUNDA = "/denuncias/abc/def"
+# p) Una ruta que no existe: la 404, con Leila.
+RUTA_SIN_PAGINA = "/no-existe-esta-pagina"
 ERROR_TLS = "net::ERR_CERT_AUTHORITY_INVALID"
 ERROR_TRUSTED_HTML = "This document requires 'TrustedHTML' assignment"
 ERROR_POLITICA = "Policy \"angular#unsafe-bypass\" disallowed"
@@ -390,6 +392,7 @@ PRUEBAS_UNITARIAS = (
     "sobre qué: la cuenta por su email, la denuncia por su id y la asignación con las dos",
     "la verificación: intacta, o la fila donde se rompe",
     "la primera página va sin antes, las anteriores con él",
+    "lleva a Leila decorativa y conserva el aviso y el botón de reintentar",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
 # Mutantes del interceptor, del guard, del cliente de denuncias y de los
@@ -1702,6 +1705,7 @@ asyncio.run(ejecutar_personal(pasos_botones))
 NAVEGADOR_ESTETICA = NAVEGADOR_PERSONAL + r'''
 spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin = sys.argv[1:7]
 rutas_ancho = json.loads(sys.argv[7])
+ruta_sin_pagina = sys.argv[8]
 usados[secreto_admin] = int(paso_admin)
 # La familia sin comillas, las ponga Chromium o no.
 FUENTES = "() => [...document.fonts].map((f) => [f.family.replace(/[\"']/g, ''), f.status])"
@@ -1713,6 +1717,12 @@ VACIO = ("() => { const v = document.querySelector('main .vacio'); if (v === nul
          "return {titulo: t === null ? null : t.textContent.trim(), "
          "svg: [...v.querySelectorAll('svg')].map((e) => [e.getAttribute('class'), e.getAttribute('aria-hidden')]), "
          "alto: s === null ? 0 : s.getBoundingClientRect().height}; }")
+# Una página suelta (la 404): su h1 y cada SVG de main con su clase y su
+# aria-hidden.
+SUELTA = ("() => { const h = document.querySelector('main h1'); const s = document.querySelector('main svg'); "
+          "return {h1: h === null ? null : h.textContent.trim(), "
+          "svg: [...document.querySelectorAll('main svg')].map((e) => [e.getAttribute('class'), e.getAttribute('aria-hidden')]), "
+          "alto: s === null ? 0 : s.getBoundingClientRect().height}; }")
 
 
 async def pagina_con(navegador, nombre, tema):
@@ -1741,6 +1751,9 @@ async def pasos_estetica(navegador):
         # abrir() espera a que la red se calme: la lista ya está pintada.
         if ruta_pedida == "/solicitudes":
             res["solicitudes_vacia"] = await claro.evaluate(VACIO)
+    await abrir(claro, ruta_sin_pagina)
+    anchos[ruta_sin_pagina] = await claro.evaluate(ANCHO)
+    res["sin_pagina"] = await claro.evaluate(SUELTA)
     res["anchos"] = anchos
     res["ultimo_paso_admin"] = usados[secreto_admin]
 
@@ -3102,7 +3115,7 @@ def seccion_p():
         return
     res = navegador("navegador_p", NAVEGADOR_ESTETICA,
                     [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
-                     json.dumps(RUTAS_ANCHO)])
+                     json.dumps(RUTAS_ANCHO), RUTA_SIN_PAGINA])
     if res is None:
         sinc("p) no se pudo ejecutar el navegador")
         return
@@ -3131,7 +3144,7 @@ def seccion_p():
     pasa(control_ancho, f"p) control: un elemento de 400 px desborda a 320 px ({ancho_control})")
     anchos = res.get("anchos") or {}
     anchas = {r: a for r, a in anchos.items() if not 0 < a[0] <= a[1]}
-    mirar = ["/entrar", *RUTAS_ANCHO]
+    mirar = ["/entrar", *RUTAS_ANCHO, RUTA_SIN_PAGINA]
     negativo(f"p) a 320 px ninguna pagina desborda en horizontal ({len(anchos)} de {len(mirar)}) "
              f"{anchas if anchas else ''}".rstrip(),
              sorted(anchos) == sorted(mirar) and not anchas, control_ancho, f"{anchos}")
@@ -3144,6 +3157,15 @@ def seccion_p():
     else:
         pasa(vacia.get("svg") == [["leila", "true"]] and vacia.get("alto", 0) > 0,
              f"p) con las solicitudes vacias, Leila sale decorativa (aria-hidden) y se ve ({vacia})")
+
+    # Leila en la 404, que está fuera del armazón. Solo se puede mirar si la
+    # página que sale es de verdad la 404.
+    suelta = res.get("sin_pagina")
+    if not suelta or suelta.get("h1") != H1_NO_ENCONTRADA:
+        sinc(f"p) {RUTA_SIN_PAGINA} no da la pagina no encontrada ({suelta}): no se puede mirar a Leila")
+    else:
+        pasa(suelta.get("svg") == [["leila", "true"]] and suelta.get("alto", 0) > 0,
+             f"p) en la pagina no encontrada, Leila sale decorativa (aria-hidden) y se ve ({suelta})")
 
     # Consola.
     consola, errores = res.get("consola") or [], res.get("errores") or []
