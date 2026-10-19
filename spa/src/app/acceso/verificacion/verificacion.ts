@@ -1,5 +1,6 @@
 import { Component, Injector, inject, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
+import { Canario } from '../../marca/canario';
 import { ApiPersonal } from '../../nucleo/api';
 import { textoDeError } from '../../nucleo/errores';
 import { enfocarEncabezado } from '../../nucleo/foco';
@@ -16,28 +17,31 @@ type Estado = 'sin-enlace' | 'pendiente' | 'hecho';
 
 @Component({
   selector: 'app-verificacion',
-  imports: [RouterLink],
+  imports: [Canario, RouterLink],
   template: `
-    <main>
+    <main class="acceso">
+      <app-canario />
       <h1 tabindex="-1">Confirmar el email</h1>
-      @switch (estado()) {
-        @case ('sin-enlace') {
-          <p>Para confirmar su email, abra el enlace del correo que le enviamos.</p>
-          <p><a routerLink="/registro">Solicitar acceso</a></p>
-        }
-        @case ('pendiente') {
-          <p>Pulse el botón para confirmar que este email es suyo.</p>
-          @if (error(); as texto) {
-            <p class="error" role="alert">{{ texto }}</p>
+      <div class="tarjeta">
+        @switch (estado()) {
+          @case ('sin-enlace') {
+            <p>Para confirmar su email, abra el enlace del correo que le enviamos.</p>
+            <p><a routerLink="/registro">Solicitar acceso</a></p>
           }
-          <button type="button" (click)="confirmar()" [attr.aria-disabled]="enviando() || null">
-            {{ enviando() ? 'Confirmando...' : 'Confirmar mi email' }}
-          </button>
+          @case ('pendiente') {
+            <p>Pulse el botón para confirmar que este email es suyo.</p>
+            @if (error(); as texto) {
+              <p class="error" role="alert">{{ texto }}</p>
+            }
+            <button type="button" (click)="confirmar()" [attr.aria-disabled]="enviando() || null">
+              {{ enviando() ? 'Confirmando...' : 'Confirmar mi email' }}
+            </button>
+          }
+          @case ('hecho') {
+            <p class="aviso" role="status">Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá otro correo para activar la cuenta.</p>
+          }
         }
-        @case ('hecho') {
-          <p class="aviso" role="status">Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá otro correo para activar la cuenta.</p>
-        }
-      }
+      </div>
     </main>
   `,
 })

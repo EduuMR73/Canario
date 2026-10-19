@@ -9,13 +9,19 @@
    contraste de cada pareja de texto y fondo (WCAG 2.2, 1.4.3: 4,5:1) y de
    bordes y foco (1.4.11: 3:1), que no hay colores fuera de :root y que toda
    variable usada existe. Si se añade una pareja nueva, se añade también
-   allí.
+   allí. Las plantillas tampoco escriben colores (los SVG usan clases de
+   aquí); la única excepción es el QR, y la batería lleva la cuenta.
 
    Modo oscuro (bloque 6b-4a): sigue la preferencia del sistema
    (prefers-color-scheme), sin botón ni nada guardado en el navegador. El
    segundo bloque :root redefine todos los colores, y la batería comprueba las
    parejas en los dos temas y que el oscuro no se deja ninguno: uno olvidado
-   heredaría el claro sin que nadie lo viera. */
+   heredaría el claro sin que nadie lo viera.
+
+   Aspecto (bloque 6b-4b): el de github.com como referencia (Primer, MIT), sin
+   copiar su código, sus iconos ni su marca: los patrones están escritos aquí
+   a mano. El amarillo del canario es la marca y el botón principal; los
+   enlaces y el foco son azules en los dos temas. */
 
 /* Geist (Vercel), versión 1.7.2, la variable de pesos 100 a 900, autoalojada:
    la sirve el mismo origen, así que la CSP solo necesita font-src 'self' y
@@ -39,15 +45,19 @@
      navegador siguen al tema. */
   color-scheme: light dark;
 
-  --color-texto: #1a1a1a;
-  --color-texto-suave: #4a4a4a;
+  --color-texto: #1f2328;
+  --color-texto-suave: #59636e;
   --color-fondo: #ffffff;
-  --color-superficie: #f4f4f5;
-  --color-borde: #6b6b6b;
-  --color-separador: #d4d4d8;
-  --color-acento: #1d4ed8;
-  --color-boton: #1a1a1a;
-  --color-boton-texto: #ffffff;
+  --color-superficie: #f6f8fa;
+  --color-borde: #6e7781;
+  --color-separador: #d1d9e0;
+  --color-acento: #0b57d0;
+  /* El botón principal: el amarillo del canario con texto casi negro. */
+  --color-boton: #facc15;
+  --color-boton-texto: #1a1a1a;
+  --color-boton-borde: #a16207;
+  --color-boton-encima: #eab308;
+  --color-secundario-encima: #eaeef2;
   --color-peligro: #b91c1c;
   --color-peligro-texto: #ffffff;
   --color-error-texto: #7f1d1d;
@@ -56,36 +66,101 @@
   --color-etiqueta-fondo: #fef3c7;
   --color-etiqueta-texto: #78350f;
 
+  /* La barra es oscura en los dos temas. Su foco es amarillo: el azul del
+     acento sobre ella no llega a 3:1 (WCAG 2.2, 1.4.11). */
+  --color-barra: #1f2328;
+  --color-barra-texto: #f0f3f6;
+  --color-barra-texto-suave: #d1d7e0;
+  --color-barra-activo: #3d444d;
+  --color-foco-barra: #facc15;
+
+  /* Cada estado de una denuncia, como texto sobre el fondo de la tabla. El
+     color no es la única señal: la etiqueta dice el estado y lleva un icono
+     distinto. */
+  --color-estado-nueva: #8a5a00;
+  --color-estado-en-instruccion: #0550ae;
+  --color-estado-resuelta: #6639ba;
+  --color-estado-archivada: #59636e;
+  --color-estado-inadmitida: #b42318;
+
+  /* Las ilustraciones (marca/): el canario y Leila, una gata carey. Son
+     decorativas y no entran en las parejas de contraste; están aquí para que
+     ningún color se escriba fuera de :root. */
+  --color-canario: #facc15;
+  --color-canario-ala: #eab308;
+  --color-canario-pico: #f97316;
+  --color-canario-contorno: #1a1a1a;
+  --color-leila-pelo: #2b211d;
+  --color-leila-naranja: #d9822b;
+  --color-leila-canela: #b5621f;
+  --color-leila-crema: #f3e6c8;
+  --color-leila-rosa: #e8a0a0;
+  --color-leila-contorno: #1a1a1a;
+  --color-leila-cojin: #eaeef2;
+
   --espacio-1: 0.25rem;
   --espacio-2: 0.5rem;
   --espacio-3: 0.75rem;
   --espacio-4: 1rem;
+  --espacio-5: 1.25rem;
   --espacio-6: 1.5rem;
-  --radio: 0.25rem;
+  --radio: 0.375rem;
+  --ancho-tarjeta: 21.25rem;
   --ancho-formulario: 34rem;
   --ancho-pagina: 64rem;
 }
 
-/* Tema oscuro: los mismos nombres, todos. Fondo casi negro y el amarillo del
-   canario como acento. */
+/* Tema oscuro: los mismos nombres, todos, también los que no cambian (la
+   batería exige que el oscuro los redefina, para que ninguno herede el claro
+   por olvido). Fondo casi negro, superficies azuladas y los enlaces en azul
+   claro. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --color-texto: #ededed;
-    --color-texto-suave: #a1a1a1;
-    --color-fondo: #0a0a0a;
-    --color-superficie: #1a1a1a;
-    --color-borde: #8f8f8f;
-    --color-separador: #2e2e2e;
-    --color-acento: #facc15;
-    --color-boton: #ededed;
-    --color-boton-texto: #0a0a0a;
+    --color-texto: #e6edf3;
+    --color-texto-suave: #9198a1;
+    --color-fondo: #0b0d10;
+    --color-superficie: #151a21;
+    --color-borde: #7d8590;
+    --color-separador: #2d333b;
+    --color-acento: #6cb6ff;
+    --color-boton: #facc15;
+    --color-boton-texto: #1a1a1a;
+    --color-boton-borde: #facc15;
+    --color-boton-encima: #eab308;
+    --color-secundario-encima: #21262d;
     --color-peligro: #f87171;
     --color-peligro-texto: #0a0a0a;
     --color-error-texto: #fecaca;
     --color-error-fondo: #2a1212;
-    --color-aviso-fondo: #262005;
+    --color-aviso-fondo: #0f1d33;
     --color-etiqueta-fondo: #3d2e05;
     --color-etiqueta-texto: #fde68a;
+
+    --color-barra: #151a21;
+    --color-barra-texto: #f0f3f6;
+    --color-barra-texto-suave: #d1d7e0;
+    --color-barra-activo: #2d333b;
+    --color-foco-barra: #facc15;
+
+    --color-estado-nueva: #e3b341;
+    --color-estado-en-instruccion: #6cb6ff;
+    --color-estado-resuelta: #b083f0;
+    --color-estado-archivada: #9198a1;
+    --color-estado-inadmitida: #f47067;
+
+    --color-canario: #facc15;
+    --color-canario-ala: #eab308;
+    --color-canario-pico: #f97316;
+    --color-canario-contorno: #1a1a1a;
+    --color-leila-pelo: #2b211d;
+    --color-leila-naranja: #d9822b;
+    --color-leila-canela: #b5621f;
+    --color-leila-crema: #f3e6c8;
+    --color-leila-rosa: #e8a0a0;
+    /* Su pelo oscuro sobre el fondo casi negro da 1,2:1: sin un contorno
+       claro y un cojín más claro, media gata desaparecería. */
+    --color-leila-contorno: #c9d1d9;
+    --color-leila-cojin: #2d333b;
   }
 }
 
@@ -113,6 +188,13 @@ main {
 /* Las páginas del armazón tienen tablas: más anchas que un formulario. */
 main.ancho {
   max-width: var(--ancho-pagina);
+  padding-top: 2rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .formulario {
@@ -129,6 +211,8 @@ h2:focus,
   outline: none;
 }
 
+/* Los enlaces del texto siguen subrayados: con solo el color, quien no
+   distingue el azul no los vería (WCAG 2.2, 1.4.1). */
 a {
   color: var(--color-acento);
 }
@@ -150,7 +234,7 @@ textarea {
   font: inherit;
   color: var(--color-texto);
   background: var(--color-fondo);
-  padding: var(--espacio-2) 0.625rem;
+  padding: var(--espacio-2) var(--espacio-3);
   border: 1px solid var(--color-borde);
   border-radius: var(--radio);
   /* Nunca más ancho que la pantalla, también a 320 px. */
@@ -166,16 +250,16 @@ button {
   font: inherit;
   font-weight: 600;
   padding: var(--espacio-2) var(--espacio-4);
-  border: 1px solid var(--color-boton);
+  border: 1px solid var(--color-boton-borde);
   border-radius: var(--radio);
   background: var(--color-boton);
   color: var(--color-boton-texto);
   cursor: pointer;
 }
 
-/* Acciones de menos peso: mismo texto, sin relleno. */
+/* Acciones de menos peso: mismo texto, sobre la superficie. */
 button.secundario {
-  background: var(--color-fondo);
+  background: var(--color-superficie);
   color: var(--color-texto);
   border-color: var(--color-borde);
 }
@@ -190,12 +274,29 @@ button.peligro {
 
 /* Un botón ocupado lleva aria-disabled y no disabled: a uno disabled
    Chromium le quita el foco y no se lo devuelve. Sigue recibiendo clics, y la
-   guarda de su acción los descarta (spa/src/app/denuncias/denuncias.ts). La
-   hoja no tiene :hover, así que nada lo pinta como activo. */
+   guarda de su acción los descarta (spa/src/app/denuncias/denuncias.ts). El
+   :hover de abajo lo excluye, así que nada lo pinta como activo. */
 button:disabled,
 button[aria-disabled="true"] {
   opacity: 0.6;
   cursor: progress;
+}
+
+/* :hover solo con un puntero que puede quedarse encima: en una pantalla
+   táctil se quedaría pegado tras tocar. Nunca en un botón ocupado. */
+@media (hover: hover) {
+  button:not([aria-disabled="true"]):hover {
+    background: var(--color-boton-encima);
+  }
+
+  button.secundario:not([aria-disabled="true"]):hover {
+    background: var(--color-secundario-encima);
+  }
+
+  button.peligro:not([aria-disabled="true"]):hover {
+    background: var(--color-peligro);
+    filter: brightness(0.9);
+  }
 }
 
 /* Foco siempre visible con teclado (WCAG 2.2, 2.4.7). */
@@ -204,17 +305,22 @@ button[aria-disabled="true"] {
   outline-offset: 2px;
 }
 
-/* El error no depende solo del color: lleva borde y va en role="alert". */
+/* Avisos y errores en una caja. El error no depende solo del color: lleva
+   borde y va en role="alert". */
+.error,
+.aviso {
+  padding: var(--espacio-3) var(--espacio-4);
+  border-radius: var(--radio);
+}
+
 .error {
-  border-left: 4px solid var(--color-peligro);
-  padding: var(--espacio-2) var(--espacio-3);
+  border: 1px solid var(--color-peligro);
   background: var(--color-error-fondo);
   color: var(--color-error-texto);
 }
 
 .aviso {
-  border-left: 4px solid var(--color-acento);
-  padding: var(--espacio-2) var(--espacio-3);
+  border: 1px solid var(--color-acento);
   background: var(--color-aviso-fondo);
 }
 
@@ -257,15 +363,70 @@ button[aria-disabled="true"] {
   overflow-wrap: anywhere;
 }
 
+/* Las páginas de acceso (entrar, activar, solicitar y confirmar): el
+   canario, el título y una tarjeta estrecha, como la entrada de GitHub. La
+   activación lleva el QR y la clave, y usa una más ancha. */
+main.acceso {
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 3.5rem;
+}
+
+.acceso > h1 {
+  margin: var(--espacio-4) 0 var(--espacio-5);
+  font-weight: 300;
+  text-align: center;
+}
+
+.tarjeta,
+.tarjeta-pie {
+  width: 100%;
+  max-width: var(--ancho-tarjeta);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
+}
+
+.acceso.ancha .tarjeta,
+.acceso.ancha .tarjeta-pie {
+  max-width: var(--ancho-formulario);
+}
+
+.tarjeta {
+  padding: var(--espacio-5);
+  background: var(--color-superficie);
+}
+
+.tarjeta > :first-child {
+  margin-top: 0;
+}
+
+.tarjeta > :last-child {
+  margin-bottom: 0;
+}
+
+.tarjeta button[type="submit"] {
+  width: 100%;
+}
+
+.tarjeta-pie {
+  margin: var(--espacio-4) 0 0;
+  padding: var(--espacio-4);
+  text-align: center;
+}
+
 /* Armazón: la barra con la marca, el menú del rol, la cuenta y el cierre.
-   Se parte en líneas en pantallas estrechas, sin desbordar a 320 px. */
+   Oscura en los dos temas. Se parte en líneas en pantallas estrechas, sin
+   desbordar a 320 px. */
 .barra {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--espacio-2) var(--espacio-6);
-  padding: var(--espacio-3) var(--espacio-4);
-  background: var(--color-superficie);
+  gap: var(--espacio-2) var(--espacio-5);
+  padding: var(--espacio-3) var(--espacio-6);
+  background: var(--color-barra);
+  color: var(--color-barra-texto);
   border-bottom: 1px solid var(--color-separador);
 }
 
@@ -273,44 +434,89 @@ button[aria-disabled="true"] {
   margin: 0;
 }
 
+.barra :focus-visible {
+  outline-color: var(--color-foco-barra);
+}
+
 .marca {
-  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: var(--espacio-2);
+  font-weight: 600;
 }
 
 .menu {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--espacio-2) var(--espacio-4);
+  gap: var(--espacio-1);
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-/* La página actual no se distingue solo por el color: va en negrita y sin
-   subrayado, y lleva aria-current="page". */
-.menu a[aria-current="page"] {
-  font-weight: 700;
+.menu a {
+  display: block;
+  padding: 0.375rem 0.625rem;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radio) var(--radio) 0 0;
+  color: var(--color-barra-texto);
   text-decoration: none;
-  color: var(--color-texto);
+}
+
+/* La página actual no se distingue solo por el color: va en negrita, con
+   una raya debajo y aria-current="page". Raya con border y no con
+   box-shadow: en los colores forzados de Windows el navegador quita las
+   sombras (CSS Color Adjustment, 3.1). */
+.menu a[aria-current="page"] {
+  font-weight: 600;
+  background: var(--color-barra-activo);
+  border-bottom-color: var(--color-foco-barra);
 }
 
 .quien {
   margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--espacio-2);
   overflow-wrap: anywhere;
 }
 
+.quien-email {
+  color: var(--color-barra-texto-suave);
+}
+
 .quien-rol {
-  color: var(--color-texto-suave);
+  padding: 0 var(--espacio-2);
+  border: 1px solid var(--color-barra-texto-suave);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+
+.barra button {
+  background: transparent;
+  color: var(--color-barra-texto);
+  border-color: var(--color-barra-texto-suave);
+}
+
+@media (hover: hover) {
+  .menu a:hover,
+  .barra button:not([aria-disabled="true"]):hover {
+    background: var(--color-barra-activo);
+  }
 }
 
 .barra-error {
   margin: 0;
 }
 
-/* Tablas: a 320 px se desplazan en horizontal dentro de su región, que se
-   alcanza con el tabulador para moverla con el teclado. Una tabla de datos
-   es contenido bidimensional y queda fuera de la regla del reajuste (WCAG
-   2.2, 1.4.10, nota 2).
+/* Tablas, en una caja con borde como las listas de GitHub, pero tablas: son
+   datos que se comparan por columnas. A 320 px se desplazan en horizontal
+   dentro de su región, que se alcanza con el tabulador para moverla con el
+   teclado. Una tabla de datos es contenido bidimensional y queda fuera de la
+   regla del reajuste (WCAG 2.2, 1.4.10, nota 2).
    position: relative la hace bloque contenedor de los .visualmente-oculto de
    sus celdas, que son absolute: sin ella, su referencia es la página, el
    scroll de la región no los recorta y estiran la página entera en
@@ -320,6 +526,8 @@ button[aria-disabled="true"] {
   position: relative;
   overflow-x: auto;
   margin: 0 0 var(--espacio-4);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
 }
 
 table {
@@ -329,20 +537,33 @@ table {
 
 th,
 td {
-  padding: var(--espacio-2) var(--espacio-3);
+  padding: var(--espacio-3) var(--espacio-4);
   border-bottom: 1px solid var(--color-separador);
   text-align: start;
   vertical-align: top;
 }
 
+tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
 thead th {
-  border-bottom-color: var(--color-borde);
+  background: var(--color-superficie);
+  color: var(--color-texto-suave);
+  font-size: 0.875rem;
 }
 
 /* Emails e ids: largos y sin espacios, se parten donde haga falta. */
 .dato {
   font-weight: 400;
   overflow-wrap: anywhere;
+}
+
+/* Las referencias de las denuncias, en letra de ancho fijo para leerlas y
+   compararlas cifra a cifra. Del sistema: no hace falta otra fuente. */
+.mono {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.875rem;
 }
 
 /* Botones de una fila o de un aviso: se parten en líneas si no caben. En
@@ -368,6 +589,47 @@ td.acciones > * {
   font-size: 0.875rem;
 }
 
+/* El estado de una denuncia: etiqueta redonda con un icono por estado. El
+   icono es decorativo; el borde y el icono toman el color del texto. */
+.estado {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--espacio-1);
+  padding: 0 var(--espacio-2);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.375rem;
+  white-space: nowrap;
+}
+
+.estado svg {
+  flex: none;
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.estado-nueva {
+  color: var(--color-estado-nueva);
+}
+
+.estado-en-instruccion {
+  color: var(--color-estado-en-instruccion);
+}
+
+.estado-resuelta {
+  color: var(--color-estado-resuelta);
+}
+
+.estado-archivada {
+  color: var(--color-estado-archivada);
+}
+
+.estado-inadmitida {
+  color: var(--color-estado-inadmitida);
+}
+
 /* El enlace de una invitación: largo y sin espacios. */
 .enlace {
   word-break: break-all;
@@ -385,6 +647,35 @@ td.acciones > * {
 
 .filtro .campo {
   margin: 0;
+}
+
+/* Una lista vacía: Leila dormida, lo que pasa y qué esperar. */
+.vacio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--espacio-1);
+  margin: 0 0 var(--espacio-4);
+  padding: 3rem var(--espacio-6) 3.5rem;
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
+  text-align: center;
+}
+
+.vacio .leila {
+  margin-bottom: var(--espacio-4);
+}
+
+.vacio-titulo {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.vacio-texto {
+  margin: 0;
+  max-width: 26rem;
+  color: var(--color-texto-suave);
 }
 
 /* Los datos de una denuncia: término y valor en la misma línea. */
@@ -408,22 +699,145 @@ td.acciones > * {
 .texto-libre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  padding: var(--espacio-2) var(--espacio-3);
+  padding: var(--espacio-3) var(--espacio-4);
   background: var(--color-superficie);
+  border: 1px solid var(--color-separador);
   border-radius: var(--radio);
 }
 
+/* Los mensajes como línea de tiempo: una raya a la izquierda y cada mensaje
+   en una caja con su cabecera, como los comentarios de una incidencia. */
 .mensajes {
-  padding-left: 0;
+  margin: 0 0 var(--espacio-4) var(--espacio-3);
+  padding: 0 0 0 var(--espacio-5);
+  border-left: 2px solid var(--color-separador);
   list-style: none;
 }
 
 .mensajes > li {
   margin: 0 0 var(--espacio-4);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
+  overflow: hidden;
 }
 
 .mensaje-cabecera {
-  margin: 0 0 var(--espacio-1);
+  margin: 0;
+  padding: var(--espacio-2) var(--espacio-4);
+  background: var(--color-superficie);
+  border-bottom: 1px solid var(--color-separador);
   color: var(--color-texto-suave);
   font-size: 0.875rem;
+}
+
+.mensajes .texto-libre {
+  margin: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+
+/* Las ilustraciones (spa/src/app/marca). Los colores van aquí y no en el
+   SVG, para que sigan al tema. */
+.canario {
+  display: block;
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.acceso .canario {
+  width: 3.5rem;
+  height: 3.5rem;
+}
+
+.canario-trazo {
+  stroke: var(--color-canario-contorno);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.canario-cuerpo {
+  fill: var(--color-canario);
+}
+
+.canario-ala {
+  fill: var(--color-canario-ala);
+}
+
+.canario-pico {
+  fill: var(--color-canario-pico);
+}
+
+.canario-ojo {
+  fill: var(--color-canario-contorno);
+}
+
+.canario-patas {
+  fill: none;
+}
+
+/* Leila: con width y height en el SVG reserva su sitio al cargar; aquí no
+   pasa nunca del ancho disponible, también a 320 px. */
+.leila {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.leila-cojin {
+  fill: var(--color-leila-cojin);
+}
+
+.leila-pelo {
+  fill: var(--color-leila-pelo);
+}
+
+.leila-naranja {
+  fill: var(--color-leila-naranja);
+}
+
+.leila-canela {
+  fill: var(--color-leila-canela);
+}
+
+.leila-crema {
+  fill: var(--color-leila-crema);
+}
+
+.leila-rosa {
+  fill: var(--color-leila-rosa);
+}
+
+/* El contorno de la silueta, que en el oscuro se aclara. */
+.leila-borde {
+  stroke: var(--color-leila-contorno);
+  stroke-width: 3;
+  stroke-linejoin: round;
+}
+
+.leila-sin-relleno {
+  fill: none;
+}
+
+/* Los detalles de la cara van sobre la crema: en el color del pelo, que se
+   ve en los dos temas. */
+.leila-detalle {
+  stroke: var(--color-leila-pelo);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.leila-ojo {
+  fill: none;
+  stroke: var(--color-leila-pelo);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.leila-z {
+  fill: var(--color-texto-suave);
+  font-weight: 600;
 }

@@ -1,12 +1,13 @@
 import { Component, Injector, computed, inject, signal } from '@angular/core';
 import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
+import { Leila } from '../marca/leila';
 import { ApiCuentas, Cuenta } from '../nucleo/api-cuentas';
 import { ApiDenuncias, Estado, FilaDenuncia } from '../nucleo/api-denuncias';
 import { textoDeError } from '../nucleo/errores';
 import { enfocarEncabezado } from '../nucleo/foco';
 import { Sesion } from '../nucleo/sesion';
-import { ESTADOS, NOMBRES_ESTADO, esCerrado, fechaLegible } from './textos';
+import { CLASES_ESTADO, ESTADOS, ICONOS_ESTADO, NOMBRES_ESTADO, esCerrado, fechaLegible } from './textos';
 
 // Listado de denuncias (app/instruccion.py, listar_denuncias): fecha, estado
 // y asignación, nunca contenido. Un admin ve todas y asigna; un instructor
@@ -23,7 +24,7 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
 
 @Component({
   selector: 'app-denuncias',
-  imports: [ReactiveFormsModule, RouterLink],
+  imports: [Leila, ReactiveFormsModule, RouterLink],
   template: `
     <h1 tabindex="-1">Denuncias</h1>
     <p>
@@ -59,7 +60,11 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
 
     @if (filas(); as lista) {
       @if (lista.length === 0) {
-        <p>{{ filtrado() === null ? 'No hay denuncias.' : 'No hay denuncias en ese estado.' }}</p>
+        <div class="vacio">
+          <app-leila />
+          <p class="vacio-titulo">{{ filtrado() === null ? 'No hay denuncias.' : 'No hay denuncias en ese estado.' }}</p>
+          <p class="vacio-texto">{{ textoVacio() }}</p>
+        </div>
       } @else {
         <h2 id="denuncias-lista">{{ filtrado() === null ? 'Todas' : nombreEstado[filtrado()!] }}</h2>
         <div class="tabla" role="region" aria-labelledby="denuncias-lista" tabindex="0">
@@ -76,9 +81,41 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
             <tbody>
               @for (fila of lista; track fila.denuncia_id) {
                 <tr>
-                  <th scope="row" class="dato">{{ fila.denuncia_id }}</th>
+                  <th scope="row" class="dato mono">{{ fila.denuncia_id }}</th>
                   <td><time [attr.datetime]="fila.fecha">{{ fecha(fila.fecha) }}</time></td>
-                  <td>{{ nombreEstado[fila.estado] }}</td>
+                  <td>
+                    <span [class]="claseEstado[fila.estado]">
+                      @switch (iconoEstado[fila.estado]) {
+                        @case ('abierta') {
+                          <svg aria-hidden="true" focusable="false" viewBox="0 0 16 16">
+                            <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+                            <circle cx="8" cy="8" r="2" fill="currentColor" />
+                          </svg>
+                        }
+                        @case ('resuelta') {
+                          <svg aria-hidden="true" focusable="false" viewBox="0 0 16 16">
+                            <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+                            <path d="M5 8.2 L7.2 10.4 L11 6" fill="none" stroke="currentColor" stroke-width="1.5"
+                                  stroke-linecap="round" stroke-linejoin="round" />
+                          </svg>
+                        }
+                        @case ('archivada') {
+                          <svg aria-hidden="true" focusable="false" viewBox="0 0 16 16">
+                            <rect x="1.75" y="2.5" width="12.5" height="3.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" />
+                            <path d="M3 6 V12.5 A1 1 0 0 0 4 13.5 H12 A1 1 0 0 0 13 12.5 V6 M6.5 8.75 H9.5" fill="none"
+                                  stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                          </svg>
+                        }
+                        @case ('inadmitida') {
+                          <svg aria-hidden="true" focusable="false" viewBox="0 0 16 16">
+                            <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+                            <path d="M3.5 12.5 L12.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+                          </svg>
+                        }
+                      }
+                      {{ nombreEstado[fila.estado] }}
+                    </span>
+                  </td>
                   @if (esAdmin()) {
                     <td class="dato">{{ asignacion(fila) }}</td>
                   }
@@ -127,6 +164,8 @@ export class Denuncias {
 
   readonly estados = ESTADOS;
   readonly nombreEstado = NOMBRES_ESTADO;
+  readonly claseEstado = CLASES_ESTADO;
+  readonly iconoEstado = ICONOS_ESTADO;
   readonly fecha = fechaLegible;
   readonly cerrada = esCerrado;
   readonly propia = computed(() => this.sesion.yo()?.usuario_id);
@@ -153,6 +192,16 @@ export class Denuncias {
   // que instruye (app/personal.py, ROLES_INSTRUCCION). null si no se pudieron
   // cargar: entonces no se ofrece asignar.
   readonly destinos = computed(() => this.cuentas()?.filter((c) => c.activo && c.activado && c.rol !== 'auditor') ?? null);
+
+  // Qué esperar cuando la lista está vacía: depende del filtro y de quién
+  // mira, porque al instructor solo le llegan las que le asignan.
+  readonly textoVacio = computed(() => {
+    if (this.filtrado() !== null) {
+      return 'Pruebe con otro estado.';
+    }
+    return this.esAdmin() ? 'Cuando alguien presente una denuncia, aparecerá aquí.'
+      : 'Cuando un admin le asigne una, aparecerá aquí.';
+  });
 
   constructor() {
     this.cargar();

@@ -1,6 +1,7 @@
 import { Component, Injector, computed, inject, signal } from '@angular/core';
 import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
+import { Canario } from '../../marca/canario';
 import { ActivacionPendiente, ApiPersonal } from '../../nucleo/api';
 import { detalleDe, textoDeError } from '../../nucleo/errores';
 import { enfocarEncabezado } from '../../nucleo/foco';
@@ -19,68 +20,71 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
 
 @Component({
   selector: 'app-activacion',
-  imports: [ReactiveFormsModule, RouterLink],
+  imports: [Canario, ReactiveFormsModule, RouterLink],
   template: `
-    <main>
+    <main class="acceso ancha">
+      <app-canario />
       <h1 tabindex="-1">Activar la cuenta</h1>
-      @switch (paso()) {
-        @case ('sin-enlace') {
-          <p>Para activar su cuenta, abra el enlace del correo de invitación.</p>
-          <p>Si ha recargado la página, vuelva a abrir el enlace: sigue valiendo hasta que active la cuenta.</p>
-        }
-        @case ('contrasena') {
-          <h2 class="paso" tabindex="-1">Paso 1 de 2: elija su contraseña</h2>
-          <form [formGroup]="contrasenas" (ngSubmit)="fijarContrasena()" ngNativeValidate>
-            <p class="campo">
-              <label for="activacion-contrasena">Contraseña nueva</label>
-              <input id="activacion-contrasena" type="password" formControlName="contrasena" required
-                     autocomplete="new-password" aria-describedby="activacion-contrasena-ayuda">
-              <span id="activacion-contrasena-ayuda" class="ayuda">Entre 12 y 128 caracteres. Una frase larga es más fácil de recordar.</span>
-            </p>
-            <p class="campo">
-              <label for="activacion-repetir">Repita la contraseña</label>
-              <input id="activacion-repetir" type="password" formControlName="repetir" required
-                     autocomplete="new-password">
-            </p>
-            @if (error(); as texto) {
-              <p class="error" role="alert">{{ texto }}</p>
-            }
-            <button type="submit" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Guardando...' : 'Continuar' }}</button>
-          </form>
-        }
-        @case ('codigo') {
-          <h2 class="paso" tabindex="-1">Paso 2 de 2: configure la aplicación de autenticación</h2>
-          <p>Escanee este código con su aplicación de autenticación (por ejemplo, la de su móvil).</p>
-          @if (qr(); as codigo) {
-            <svg class="qr" role="img" aria-label="Código QR para la aplicación de autenticación"
-                 [attr.viewBox]="'0 0 ' + codigo.lado + ' ' + codigo.lado" shape-rendering="crispEdges">
-              <rect width="100%" height="100%" fill="#ffffff" />
-              <path [attr.d]="codigo.ruta" fill="#000000" />
-            </svg>
+      <div class="tarjeta">
+        @switch (paso()) {
+          @case ('sin-enlace') {
+            <p>Para activar su cuenta, abra el enlace del correo de invitación.</p>
+            <p>Si ha recargado la página, vuelva a abrir el enlace: sigue valiendo hasta que active la cuenta.</p>
           }
-          <p>Si no puede escanearlo, escriba esta clave en la aplicación:</p>
-          <p><code class="secreto" id="activacion-secreto">{{ secretoAgrupado() }}</code></p>
-          <form [formGroup]="confirmacion" (ngSubmit)="confirmar()" ngNativeValidate>
-            <p class="campo">
-              <label for="activacion-codigo">Código de la aplicación de autenticación</label>
-              <input id="activacion-codigo" formControlName="codigo_totp" required inputmode="numeric"
-                     autocomplete="one-time-code" aria-describedby="activacion-codigo-ayuda">
-              <span id="activacion-codigo-ayuda" class="ayuda">Las 6 cifras que muestra ahora la aplicación.</span>
-            </p>
-            @if (error(); as texto) {
-              <p class="error" role="alert">{{ texto }}</p>
+          @case ('contrasena') {
+            <h2 class="paso" tabindex="-1">Paso 1 de 2: elija su contraseña</h2>
+            <form [formGroup]="contrasenas" (ngSubmit)="fijarContrasena()" ngNativeValidate>
+              <p class="campo">
+                <label for="activacion-contrasena">Contraseña nueva</label>
+                <input id="activacion-contrasena" type="password" formControlName="contrasena" required
+                       autocomplete="new-password" aria-describedby="activacion-contrasena-ayuda">
+                <span id="activacion-contrasena-ayuda" class="ayuda">Entre 12 y 128 caracteres. Una frase larga es más fácil de recordar.</span>
+              </p>
+              <p class="campo">
+                <label for="activacion-repetir">Repita la contraseña</label>
+                <input id="activacion-repetir" type="password" formControlName="repetir" required
+                       autocomplete="new-password">
+              </p>
+              @if (error(); as texto) {
+                <p class="error" role="alert">{{ texto }}</p>
+              }
+              <button type="submit" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Guardando...' : 'Continuar' }}</button>
+            </form>
+          }
+          @case ('codigo') {
+            <h2 class="paso" tabindex="-1">Paso 2 de 2: configure la aplicación de autenticación</h2>
+            <p>Escanee este código con su aplicación de autenticación (por ejemplo, la de su móvil).</p>
+            @if (qr(); as codigo) {
+              <svg class="qr" role="img" aria-label="Código QR para la aplicación de autenticación"
+                   [attr.viewBox]="'0 0 ' + codigo.lado + ' ' + codigo.lado" shape-rendering="crispEdges">
+                <rect width="100%" height="100%" fill="#ffffff" />
+                <path [attr.d]="codigo.ruta" fill="#000000" />
+              </svg>
             }
-            <button type="submit" [attr.aria-disabled]="enviando() || null">
-              {{ enviando() ? 'Activando...' : 'Activar la cuenta' }}
-            </button>
-          </form>
+            <p>Si no puede escanearlo, escriba esta clave en la aplicación:</p>
+            <p><code class="secreto" id="activacion-secreto">{{ secretoAgrupado() }}</code></p>
+            <form [formGroup]="confirmacion" (ngSubmit)="confirmar()" ngNativeValidate>
+              <p class="campo">
+                <label for="activacion-codigo">Código de la aplicación de autenticación</label>
+                <input id="activacion-codigo" formControlName="codigo_totp" required inputmode="numeric"
+                       autocomplete="one-time-code" aria-describedby="activacion-codigo-ayuda">
+                <span id="activacion-codigo-ayuda" class="ayuda">Las 6 cifras que muestra ahora la aplicación.</span>
+              </p>
+              @if (error(); as texto) {
+                <p class="error" role="alert">{{ texto }}</p>
+              }
+              <button type="submit" [attr.aria-disabled]="enviando() || null">
+                {{ enviando() ? 'Activando...' : 'Activar la cuenta' }}
+              </button>
+            </form>
+          }
+          @case ('hecho') {
+            <h2 class="paso" tabindex="-1">Cuenta activada</h2>
+            <p>Este navegador queda como dispositivo de confianza durante 90 días.</p>
+            <p><a routerLink="/entrar">Entrar</a></p>
+          }
         }
-        @case ('hecho') {
-          <h2 class="paso" tabindex="-1">Cuenta activada</h2>
-          <p>Este navegador queda como dispositivo de confianza durante 90 días.</p>
-          <p><a routerLink="/entrar">Entrar</a></p>
-        }
-      }
+      </div>
     </main>
   `,
 })

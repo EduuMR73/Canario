@@ -17,6 +17,29 @@ export const NOMBRES_ESTADO: Record<Estado, string> = {
 
 export const ESTADOS = Object.keys(NOMBRES_ESTADO) as Estado[];
 
+// La clase de styles.css que da su color a cada estado, de un mapa fijo y no
+// compuesta con el valor de la API: un estado que la SPA no conoce se queda
+// sin color en vez de inventarse una clase.
+export const CLASES_ESTADO: Record<Estado, string> = {
+  nueva: 'estado estado-nueva',
+  en_instruccion: 'estado estado-en-instruccion',
+  resuelta: 'estado estado-resuelta',
+  archivada: 'estado estado-archivada',
+  inadmitida: 'estado estado-inadmitida',
+};
+
+// El icono de cada estado: el color no es la única señal (WCAG 2.2, 1.4.1),
+// y abiertas, resuelta, archivada e inadmitida tienen formas distintas.
+export type IconoEstado = 'abierta' | 'resuelta' | 'archivada' | 'inadmitida';
+
+export const ICONOS_ESTADO: Record<Estado, IconoEstado> = {
+  nueva: 'abierta',
+  en_instruccion: 'abierta',
+  resuelta: 'resuelta',
+  archivada: 'archivada',
+  inadmitida: 'inadmitida',
+};
+
 // app/denuncias.py, CATEGORIAS.
 const NOMBRES_CATEGORIA: Record<string, string> = {
   acoso: 'Acoso',

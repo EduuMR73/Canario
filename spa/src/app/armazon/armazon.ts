@@ -1,6 +1,7 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Component, computed, inject, signal } from '@angular/core';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { Canario } from '../marca/canario';
 import { ApiPersonal } from '../nucleo/api';
 import { textoDeError } from '../nucleo/errores';
 import { menuDe } from '../nucleo/permisos';
@@ -24,11 +25,11 @@ import { nombreRol } from '../nucleo/roles';
 // &ngsp; es su forma de conservar un espacio.
 @Component({
   selector: 'app-armazon',
-  imports: [RouterLink, RouterLinkActive, RouterOutlet],
+  imports: [Canario, RouterLink, RouterLinkActive, RouterOutlet],
   template: `
     @if (sesion.yo(); as yo) {
       <header class="barra">
-        <p class="marca">Canario</p>
+        <p class="marca"><app-canario />Canario</p>
         <nav aria-label="Principal">
           <ul class="menu">
             @for (entrada of menu(); track entrada.ruta) {

@@ -1,5 +1,6 @@
 import { Component, Injector, inject, signal } from '@angular/core';
 import { Observable } from 'rxjs';
+import { Leila } from '../marca/leila';
 import { Rol } from '../nucleo/api';
 import { ApiCuentas, ListadoSolicitudes, Solicitud } from '../nucleo/api-cuentas';
 import { textoDeError } from '../nucleo/errores';
@@ -19,6 +20,7 @@ const TEXTO_YA_CERRADA = 'La solicitud ya no está abierta: la ha resuelto otra 
 
 @Component({
   selector: 'app-solicitudes',
+  imports: [Leila],
   template: `
     <h1 tabindex="-1">Solicitudes de registro</h1>
     <p>Personas que han pedido acceso y han confirmado su email. Si aprueba una, recibirá por correo el enlace para activar su cuenta.</p>
@@ -32,7 +34,11 @@ const TEXTO_YA_CERRADA = 'La solicitud ya no está abierta: la ha resuelto otra 
 
     @if (listado(); as datos) {
       @if (datos.solicitudes.length === 0) {
-        <p>No hay solicitudes pendientes.</p>
+        <div class="vacio">
+          <app-leila />
+          <p class="vacio-titulo">No hay solicitudes pendientes.</p>
+          <p class="vacio-texto">Cuando alguien pida acceso y confirme su email, aparecerá aquí.</p>
+        </div>
       } @else {
         <h2 id="solicitudes-lista">Pendientes</h2>
         <div class="tabla" role="region" aria-labelledby="solicitudes-lista" tabindex="0">

@@ -1,6 +1,7 @@
 import { Component, Injector, inject, signal } from '@angular/core';
 import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
+import { Canario } from '../../marca/canario';
 import { ApiPersonal } from '../../nucleo/api';
 import { textoDeError } from '../../nucleo/errores';
 import { enfocarEncabezado } from '../../nucleo/foco';
@@ -11,16 +12,19 @@ import { enfocarEncabezado } from '../../nucleo/foco';
 // distinguir los casos. El rol lo elige un admin al aprobar.
 @Component({
   selector: 'app-registro',
-  imports: [ReactiveFormsModule, RouterLink],
+  imports: [Canario, ReactiveFormsModule, RouterLink],
   template: `
-    <main>
+    <main class="acceso">
+      <app-canario />
       <h1 tabindex="-1">Solicitar acceso</h1>
       @if (respuesta(); as mensaje) {
-        <p class="aviso" role="status">{{ mensaje }}</p>
-        <p><a routerLink="/entrar">Volver a la entrada</a></p>
+        <div class="tarjeta">
+          <p class="aviso" role="status">{{ mensaje }}</p>
+        </div>
+        <p class="tarjeta-pie"><a routerLink="/entrar">Volver a la entrada</a></p>
       } @else {
-        <p>Le enviaremos un correo para confirmar que el email es suyo. Después, un admin de su empresa revisará la solicitud.</p>
-        <form [formGroup]="formulario" (ngSubmit)="solicitar()" ngNativeValidate>
+        <form class="tarjeta" [formGroup]="formulario" (ngSubmit)="solicitar()" ngNativeValidate>
+          <p>Le enviaremos un correo para confirmar que el email es suyo. Después, un admin de su empresa revisará la solicitud.</p>
           <p class="campo">
             <label for="registro-empresa">Empresa</label>
             <input id="registro-empresa" formControlName="empresa" required autocomplete="organization"
@@ -38,7 +42,7 @@ import { enfocarEncabezado } from '../../nucleo/foco';
             {{ enviando() ? 'Enviando...' : 'Solicitar acceso' }}
           </button>
         </form>
-        <p>¿Ya tiene cuenta? <a routerLink="/entrar">Entrar</a></p>
+        <p class="tarjeta-pie">¿Ya tiene cuenta? <a routerLink="/entrar">Entrar</a></p>
       }
     </main>
   `,

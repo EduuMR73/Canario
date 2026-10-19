@@ -1,6 +1,7 @@
 import { Component, inject, signal } from '@angular/core';
 import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
+import { Canario } from '../../marca/canario';
 import { ApiPersonal } from '../../nucleo/api';
 import { textoDeError } from '../../nucleo/errores';
 import { Sesion } from '../../nucleo/sesion';
@@ -18,11 +19,12 @@ import { Sesion } from '../../nucleo/sesion';
 // teclado no sabría dónde está (WCAG 2.2, 2.4.3).
 @Component({
   selector: 'app-entrar',
-  imports: [ReactiveFormsModule, RouterLink],
+  imports: [Canario, ReactiveFormsModule, RouterLink],
   template: `
-    <main>
+    <main class="acceso">
+      <app-canario />
       <h1 tabindex="-1">Entrar</h1>
-      <form [formGroup]="formulario" (ngSubmit)="entrar()" ngNativeValidate>
+      <form class="tarjeta" [formGroup]="formulario" (ngSubmit)="entrar()" ngNativeValidate>
         <p class="campo">
           <label for="entrar-empresa">Empresa</label>
           <input id="entrar-empresa" formControlName="empresa" required autocomplete="organization"
@@ -49,7 +51,7 @@ import { Sesion } from '../../nucleo/sesion';
         }
         <button type="submit" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Entrando...' : 'Entrar' }}</button>
       </form>
-      <p>¿No tiene cuenta? <a routerLink="/registro">Solicitar acceso</a></p>
+      <p class="tarjeta-pie">¿No tiene cuenta? <a routerLink="/registro">Solicitar acceso</a></p>
     </main>
   `,
 })
