@@ -71,7 +71,11 @@ etapa. Prueba:
   una variable que no existe) hacen saltar cada comprobación. Y en
   spa/src/app, también sin Docker, que ningún botón lleva
   disabled ligado y que cada fichero lleva los aria-disabled de su
-  inventario (control: entrar.ts con disabled hace saltar las dos);
+  inventario (control: entrar.ts con disabled hace saltar las dos); que las
+  plantillas no escriben colores salvo los dos del QR, de su inventario
+  (control: un fill="#000000" en marca/leila.ts salta), y que todo SVG es
+  decorativo (aria-hidden) o tiene nombre (role="img" con aria-label)
+  (control: Leila sin aria-hidden salta);
 * l) las pantallas por rol en Chromium (bloque 6b-3a): el menú de cada rol;
   una página de otro rol abierta por su URL lleva a /inicio (control: la del
   propio rol se abre) y la API responde 403 aunque la SPA se saltara
@@ -133,7 +137,9 @@ etapa. Prueba:
   del tema oscuro (control: en claro, el del claro); a 320 px de ancho (WCAG
   2.2, 1.4.10) ni la entrada ni las páginas del admin desbordan en
   horizontal (control: un elemento de 400 px sí desborda); la barra separa el
-  email del rol con un espacio; ninguna violación
+  email del rol con un espacio; con las solicitudes vacías (bloque 6b-4b),
+  Leila sale con aria-hidden (si la lista no está vacía, SIN CONCLUSION);
+  ninguna violación
   de la CSP ni error de JavaScript (control: una fuente de otro origen sí
   deja su violación de font-src).
 
@@ -465,13 +471,29 @@ PAREJAS_CONTRASTE = (
     ("--color-borde", "--color-fondo", 3.0),
     ("--color-acento", "--color-aviso-fondo", 3.0),
     ("--color-peligro", "--color-error-fondo", 3.0),
+    # Bloque 6b-4b: el botón principal amarillo y su :hover, el secundario
+    # bajo el puntero, la barra oscura (texto, email, pestaña actual y foco)
+    # y la etiqueta de cada estado sobre la tabla.
+    ("--color-boton-texto", "--color-boton-encima", 4.5),
+    ("--color-texto", "--color-secundario-encima", 4.5),
+    ("--color-barra-texto", "--color-barra", 4.5),
+    ("--color-barra-texto-suave", "--color-barra", 4.5),
+    ("--color-barra-texto", "--color-barra-activo", 4.5),
+    ("--color-estado-nueva", "--color-fondo", 4.5),
+    ("--color-estado-en-instruccion", "--color-fondo", 4.5),
+    ("--color-estado-resuelta", "--color-fondo", 4.5),
+    ("--color-estado-archivada", "--color-fondo", 4.5),
+    ("--color-estado-inadmitida", "--color-fondo", 4.5),
+    ("--color-boton-borde", "--color-fondo", 3.0),
+    ("--color-foco-barra", "--color-barra", 3.0),
+    ("--color-foco-barra", "--color-barra-activo", 3.0),
 )
 # Mutantes de la hoja para los controles de k).
-MUTANTE_GRIS = ("--color-texto-suave: #4a4a4a;", "--color-texto-suave: #8a8a8a;")
+MUTANTE_GRIS = ("--color-texto-suave: #59636e;", "--color-texto-suave: #8a8a8a;")
 # En el oscuro: el gris suave del claro sobre el fondo casi negro, y un color
 # que se le olvida (heredaría el del claro).
-MUTANTE_GRIS_OSCURO = ("    --color-texto-suave: #a1a1a1;", "    --color-texto-suave: #4a4a4a;")
-MUTANTE_OLVIDADO = ("    --color-separador: #2e2e2e;\n", "")
+MUTANTE_GRIS_OSCURO = ("    --color-texto-suave: #9198a1;", "    --color-texto-suave: #59636e;")
+MUTANTE_OLVIDADO = ("    --color-separador: #2d333b;\n", "")
 PATRON_TEMA_OSCURO = re.compile(r"@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)\s*\{\s*:root\s*\{(.*?)\}\s*\}",
                                 re.DOTALL)
 MUTANTE_COLOR_SUELTO = "\n.mutante { color: #000000; }\n"
@@ -500,6 +522,20 @@ PATRON_ARIA_DISABLED = re.compile(r"\[attr\.aria-disabled\]")
 # k), sobre el texto, y o), compilado.
 FICHERO_ENTRAR = "acceso/entrar/entrar.ts"
 MUTANTE_DISABLED = ('[attr.aria-disabled]="enviando() || null"', '[disabled]="enviando()"')
+# k) Colores escritos en las plantillas (bloque 6b-4b): cualquier fill,
+# stroke o stop-color, atributo o [attr.], que no sea none ni currentColor,
+# también un nombre de color o un rgb(). Se escapan de :root, del tema oscuro
+# y del contraste. Solo el QR los lleva, negro sobre blanco en los dos temas.
+COLORES_EN_PLANTILLAS = {"acceso/activacion/activacion.ts": 2}
+PATRON_COLOR_PLANTILLA = re.compile(r'\b(?:fill|stroke|stop-color)\]?\s*=\s*"(?!none"|currentColor")')
+# Todo <svg> es decorativo (aria-hidden="true") o tiene nombre (role="img" con
+# aria-label): uno sin nada lo leería un lector de pantalla como una imagen
+# sin nombre o lo recorrería por dentro.
+PATRON_SVG = re.compile(r"<svg\b[^>]*>")
+FICHERO_LEILA = "marca/leila.ts"
+ANCLA_LEILA = '<svg class="leila" aria-hidden="true"'
+MUTANTE_COLOR_PLANTILLA = (ANCLA_LEILA, ANCLA_LEILA + ' fill="#000000"')
+MUTANTE_SVG_SIN_NOMBRE = (ANCLA_LEILA, '<svg class="leila"')
 
 # l) Las pantallas por rol (spa/src/app).
 EMAIL_INSTRUCTORA = "instructora@spa.test"
@@ -603,7 +639,7 @@ TEXTO_FINAL_LISTA = "Es el final de la lista."
 # p) La fuente y el tema oscuro. El fondo de la página en cada tema
 # (spa/src/styles.css, --color-fondo), como lo da getComputedStyle.
 FONDO_CLARO = "rgb(255, 255, 255)"
-FONDO_OSCURO = "rgb(10, 10, 10)"
+FONDO_OSCURO = "rgb(11, 13, 16)"
 FUENTES_ESPERADAS = [["Geist", "loaded"]]
 # Las páginas del admin que se miran a 320 px, además de /entrar.
 RUTAS_ANCHO = ["/inicio", "/denuncias", "/cuentas", "/solicitudes", "/auditoria", "/cuenta"]
@@ -1671,6 +1707,12 @@ usados[secreto_admin] = int(paso_admin)
 FUENTES = "() => [...document.fonts].map((f) => [f.family.replace(/[\"']/g, ''), f.status])"
 FONDO = "() => getComputedStyle(document.body).backgroundColor"
 ANCHO = "() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]"
+# La lista vacía: su título y cada SVG con su clase y su aria-hidden.
+VACIO = ("() => { const v = document.querySelector('main .vacio'); if (v === null) return null; "
+         "const t = v.querySelector('.vacio-titulo'); const s = v.querySelector('svg'); "
+         "return {titulo: t === null ? null : t.textContent.trim(), "
+         "svg: [...v.querySelectorAll('svg')].map((e) => [e.getAttribute('class'), e.getAttribute('aria-hidden')]), "
+         "alto: s === null ? 0 : s.getBoundingClientRect().height}; }")
 
 
 async def pagina_con(navegador, nombre, tema):
@@ -1696,6 +1738,9 @@ async def pasos_estetica(navegador):
     for ruta_pedida in rutas_ancho:
         await abrir(claro, ruta_pedida)
         anchos[ruta_pedida] = await claro.evaluate(ANCHO)
+        # abrir() espera a que la red se calme: la lista ya está pintada.
+        if ruta_pedida == "/solicitudes":
+            res["solicitudes_vacia"] = await claro.evaluate(VACIO)
     res["anchos"] = anchos
     res["ultimo_paso_admin"] = usados[secreto_admin]
 
@@ -2426,6 +2471,18 @@ def revisar_botones(textos):
     return con_disabled, distintos
 
 
+def revisar_plantillas(textos):
+    """Lo que k) comprueba de los dibujos de las plantillas ({ruta relativa:
+    texto}): (ficheros cuyo número de colores escritos no es el de
+    COLORES_EN_PLANTILLAS, ficheros con un <svg> sin aria-hidden ni nombre)."""
+    cuentas = {f: len(PATRON_COLOR_PLANTILLA.findall(texto)) for f, texto in textos.items()}
+    distintos = sorted(f for f in set(cuentas) | set(COLORES_EN_PLANTILLAS)
+                       if cuentas.get(f, 0) != COLORES_EN_PLANTILLAS.get(f, 0))
+    sin_nombre = sorted(f for f, texto in textos.items() for svg in PATRON_SVG.findall(texto)
+                        if 'aria-hidden="true"' not in svg and not ('role="img"' in svg and "aria-label=" in svg))
+    return distintos, sin_nombre
+
+
 def seccion_k():
     p("=== k) base visual: contraste de los colores en los dos temas, sin colores sueltos y sin variables que no existen; "
       "botones ocupados con aria-disabled")
@@ -2469,6 +2526,23 @@ def seccion_k():
     negativo(f"k) cada fichero lleva los aria-disabled de su inventario "
              f"({sum(BOTONES_OCUPADOS.values())} en {len(BOTONES_OCUPADOS)}) {distintos}".rstrip(),
              not distintos, control_botones, "control: entrar.ts sin aria-disabled no se detecta")
+
+    # Los dibujos: colores escritos y SVG sin nombre, con dos mutantes de
+    # Leila como control.
+    colores, sin_nombre = revisar_plantillas(textos)
+    if textos.get(FICHERO_LEILA, "").count(ANCLA_LEILA) != 1:
+        sinc(f"k) los mutantes de los dibujos no encuentran su texto en {FICHERO_LEILA}")
+        control_colores = control_svg = False
+    else:
+        con_color = {**textos, FICHERO_LEILA: textos[FICHERO_LEILA].replace(*MUTANTE_COLOR_PLANTILLA)}
+        control_colores = FICHERO_LEILA in revisar_plantillas(con_color)[0]
+        sin_aria = {**textos, FICHERO_LEILA: textos[FICHERO_LEILA].replace(*MUTANTE_SVG_SIN_NOMBRE)}
+        control_svg = FICHERO_LEILA in revisar_plantillas(sin_aria)[1]
+    negativo(f"k) las plantillas solo escriben los colores de su inventario "
+             f"({sum(COLORES_EN_PLANTILLAS.values())}, los del QR) {colores}".rstrip(),
+             not colores, control_colores, 'control: un fill="#000000" en Leila no se detecta')
+    negativo(f"k) todo SVG de las plantillas es decorativo o tiene nombre {sin_nombre}".rstrip(),
+             not sin_nombre, control_svg, "control: Leila sin aria-hidden no se detecta")
 
 
 def seccion_l():
@@ -3061,6 +3135,15 @@ def seccion_p():
     negativo(f"p) a 320 px ninguna pagina desborda en horizontal ({len(anchos)} de {len(mirar)}) "
              f"{anchas if anchas else ''}".rstrip(),
              sorted(anchos) == sorted(mirar) and not anchas, control_ancho, f"{anchos}")
+
+    # Leila en la lista vacía: decorativa (aria-hidden) y a la vista. Solo
+    # se puede mirar si la lista de solicitudes está vacía de verdad.
+    vacia = res.get("solicitudes_vacia")
+    if not vacia or vacia.get("titulo") != TEXTO_SIN_SOLICITUDES:
+        sinc(f"p) la lista de solicitudes no esta vacia ({vacia}): no se puede mirar a Leila")
+    else:
+        pasa(vacia.get("svg") == [["leila", "true"]] and vacia.get("alto", 0) > 0,
+             f"p) con las solicitudes vacias, Leila sale decorativa (aria-hidden) y se ve ({vacia})")
 
     # Consola.
     consola, errores = res.get("consola") or [], res.get("errores") or []
