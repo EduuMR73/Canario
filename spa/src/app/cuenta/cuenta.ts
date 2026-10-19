@@ -3,6 +3,7 @@ import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { ApiPersonal } from '../nucleo/api';
 import { detalleDe, textoDeError } from '../nucleo/errores';
 import { enfocarEncabezado } from '../nucleo/foco';
+import { MostrarContrasena } from '../nucleo/mostrar-contrasena';
 
 // Mi cuenta: cambiar la contraseña (app/personal.py, cambiar_contrasena). Pide
 // la actual y un código TOTP, y cierra todas las demás sesiones y
@@ -11,7 +12,7 @@ import { enfocarEncabezado } from '../nucleo/foco';
 // nueva que ponen las cookies de la respuesta.
 @Component({
   selector: 'app-cuenta',
-  imports: [ReactiveFormsModule],
+  imports: [MostrarContrasena, ReactiveFormsModule],
   template: `
     <h1 tabindex="-1">Mi cuenta</h1>
     <h2>Cambiar la contraseña</h2>
@@ -19,18 +20,28 @@ import { enfocarEncabezado } from '../nucleo/foco';
     <form class="formulario" [formGroup]="formulario" (ngSubmit)="cambiar()" ngNativeValidate>
       <p class="campo">
         <label for="cuenta-actual">Contraseña actual</label>
-        <input id="cuenta-actual" type="password" formControlName="contrasena_actual" required
-               autocomplete="current-password">
+        <span class="con-mostrar">
+          <input #campoActual id="cuenta-actual" type="password" formControlName="contrasena_actual" required
+                 autocomplete="current-password">
+          <button class="mostrar" [appMostrarContrasena]="campoActual" nombre="Mostrar la contraseña actual"></button>
+        </span>
       </p>
       <p class="campo">
         <label for="cuenta-nueva">Contraseña nueva</label>
-        <input id="cuenta-nueva" type="password" formControlName="contrasena_nueva" required
-               autocomplete="new-password" aria-describedby="cuenta-nueva-ayuda">
+        <span class="con-mostrar">
+          <input #campoNueva id="cuenta-nueva" type="password" formControlName="contrasena_nueva" required
+                 autocomplete="new-password" aria-describedby="cuenta-nueva-ayuda">
+          <button class="mostrar" [appMostrarContrasena]="campoNueva" nombre="Mostrar la contraseña nueva"></button>
+        </span>
         <span id="cuenta-nueva-ayuda" class="ayuda">Entre 12 y 128 caracteres. Una frase larga es más fácil de recordar.</span>
       </p>
       <p class="campo">
         <label for="cuenta-repetir">Repita la contraseña nueva</label>
-        <input id="cuenta-repetir" type="password" formControlName="repetir" required autocomplete="new-password">
+        <span class="con-mostrar">
+          <input #campoRepetir id="cuenta-repetir" type="password" formControlName="repetir" required
+                 autocomplete="new-password">
+          <button class="mostrar" [appMostrarContrasena]="campoRepetir" nombre="Mostrar la contraseña nueva repetida"></button>
+        </span>
       </p>
       <p class="campo">
         <label for="cuenta-codigo">Código de autenticación</label>

@@ -328,11 +328,7 @@ a.boton {
    fija: si quien lee sube el interlineado o el tamaño, el control crece
    con él (WCAG 2.2, 1.4.12). El textarea no está: es texto de varias
    líneas y conserva el 1.5 del cuerpo.
-   El select nativo de Chromium no lo respeta (fuerza line-height: normal
-   y mide 40): se queda nativo a propósito, con el selector del sistema en
-   el móvil y los colores forzados del sistema; appearance: base-select lo
-   igualaría, pero su ancho sigue a la opción elegida y movería el resto
-   de la fila al cambiarla. Firefox sí lo respeta.
+   El select lo respeta porque no lleva la apariencia nativa (abajo).
    Va DESPUÉS de las reglas de input y de button: su "font: inherit" es un
    atajo que también fija el interlineado (el 1.5 del cuerpo), y con la
    misma especificidad gana la última regla. */
@@ -341,6 +337,47 @@ select,
 button,
 a.boton {
   line-height: 1.25;
+}
+
+/* El select sin la apariencia nativa (pulido 2c). Con ella, Chromium le
+   fuerza line-height: normal (medía 40 y no 38) y dibuja su flecha pegada
+   al borde derecho, sin hacer caso del relleno: el texto tenía 12 px de
+   aire a la izquierda y la flecha casi ninguno. Sin ella respeta el
+   interlineado y el relleno, y su ancho sigue siendo el de la opción más
+   larga, no el de la elegida (appearance: base-select sí lo cambiaba, y
+   movía el resto de la fila). Sigue siendo un <select>: el teclado, el
+   lector de pantalla y el selector del sistema en el móvil no cambian
+   (MDN, appearance: "maintaining the widget's native functionality").
+   La flecha es un chevron hecho con dos gradientes, uno por trazo, porque
+   la CSP no tiene img-src (ni SVG ni data:): cada gradiente es un cuadrado
+   de 0.375rem con una diagonal de 1,75 px del color del texto. Queda a
+   var(--espacio-3) del borde, el mismo aire que el texto a la izquierda, y
+   el relleno derecho le deja ese aire, su ancho (dos cuadrados) y un hueco
+   de var(--espacio-2) hasta el texto. */
+select {
+  appearance: none;
+  padding-inline-end: calc(var(--espacio-3) + 0.75rem + var(--espacio-2));
+  background-image:
+    linear-gradient(45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+                    currentColor calc(50% + 0.75px), transparent calc(50% + 0.75px)),
+    linear-gradient(-45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px),
+                    currentColor calc(50% + 0.75px), transparent calc(50% + 0.75px));
+  background-size: 0.375rem 0.375rem;
+  background-repeat: no-repeat;
+  background-position:
+    right calc(var(--espacio-3) + 0.375rem) center,
+    right var(--espacio-3) center;
+}
+
+/* En los colores forzados de Windows los gradientes no se pintan y el
+   select se quedaría sin flecha: ahí vuelve el nativo, con la suya en los
+   colores del sistema. */
+@media (forced-colors: active) {
+  select {
+    appearance: auto;
+    background-image: none;
+    padding-inline-end: var(--espacio-3);
+  }
 }
 
 /* Acciones de menos peso: mismo texto, sobre la superficie. */
@@ -768,10 +805,16 @@ td {
 /* Los controles de una fila, más bajos: 30 px, por encima de los 24 del
    tamaño mínimo de un objetivo (WCAG 2.2, 2.5.8). Solo baja el relleno: la
    letra sigue a 1rem, porque Safari en iOS amplía la página al tocar un
-   campo o un select con la letra por debajo de 16 px. */
-td button,
-td select {
+   campo o un select con la letra por debajo de 16 px. El select solo baja
+   el de arriba y abajo: el atajo padding también fijaría el de la derecha,
+   ganaría a la regla de select por especificidad y el texto acabaría
+   debajo de la flecha. */
+td button {
   padding: var(--espacio-1) var(--espacio-3);
+}
+
+td select {
+  padding-block: var(--espacio-1);
 }
 
 tbody tr:last-child > * {
@@ -879,18 +922,85 @@ td.acciones > .pregunta {
   word-break: break-all;
 }
 
-/* Filtro del listado de denuncias: el campo y su botón en una línea, que se
-   parte si no cabe. */
+/* Filtro del listado de denuncias: la etiqueta encima y, debajo, el select y
+   su botón en una fila, que se parte si no cabe. Los dos miden 38 (la
+   regla del select); la fila, con align-items: stretch por defecto, los
+   igualaría si uno creciera. */
 .filtro {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--espacio-2) var(--espacio-4);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--espacio-1);
   margin: 0 0 var(--espacio-4);
 }
 
-.filtro .campo {
+.filtro .fila {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--espacio-2);
+}
+
+/* Invitar a una persona (cuentas): el email, el rol y el botón en una
+   fila, como el filtro: la acción junto a los datos que envía. Cada campo
+   lleva su etiqueta encima y los controles se alinean por abajo (miden lo
+   mismo, 38). El email conserva el ancho de un formulario y encoge si no
+   cabe; el rol mide lo que su opción más larga. Si no caben los tres, el
+   rol y el botón bajan a la línea siguiente, también a 320 px. */
+.invitar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--espacio-3);
+  margin: 0 0 var(--espacio-4);
+}
+
+.invitar .campo {
   margin: 0;
+}
+
+.invitar .campo:first-child {
+  flex: 0 1 var(--ancho-formulario);
+}
+
+/* Un campo de contraseña con su botón "Mostrar" pegado a la derecha
+   (nucleo/mostrar-contrasena.ts). El botón se estira al alto del campo y
+   comparte su borde; el campo ocupa el resto, también a 320 px. */
+.con-mostrar {
+  display: flex;
+}
+
+.con-mostrar input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+button.mostrar {
+  display: flex;
+  align-items: center;
+  margin-inline-start: -1px;
+  padding: var(--espacio-2);
+  background: var(--color-superficie);
+  color: var(--color-texto);
+  border-color: var(--color-borde);
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+}
+
+@media (hover: hover) {
+  button.mostrar:hover {
+    background: var(--color-secundario-encima);
+  }
+}
+
+/* El ojo, del color del texto del botón (también en los colores forzados);
+   pulsado, lleva además la raya que lo tacha. */
+.mostrar-ojo {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
 }
 
 /* Una lista vacía: Leila dormida, lo que pasa y qué esperar. */

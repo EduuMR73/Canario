@@ -36,7 +36,7 @@ interface EnlaceMostrado {
     <h1 tabindex="-1">Cuentas</h1>
 
     <h2>Invitar a una persona</h2>
-    <form class="formulario" [formGroup]="formulario" (ngSubmit)="invitar()" ngNativeValidate>
+    <form class="invitar" [formGroup]="formulario" (ngSubmit)="invitar()" ngNativeValidate>
       <p class="campo">
         <label for="cuentas-email">Email</label>
         <input id="cuentas-email" type="email" formControlName="email" required autocomplete="off"

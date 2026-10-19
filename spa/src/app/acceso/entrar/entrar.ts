@@ -4,6 +4,7 @@ import { Router, RouterLink } from '@angular/router';
 import { Canario } from '../../marca/canario';
 import { ApiPersonal } from '../../nucleo/api';
 import { textoDeError } from '../../nucleo/errores';
+import { MostrarContrasena } from '../../nucleo/mostrar-contrasena';
 import { Sesion } from '../../nucleo/sesion';
 
 // Login del personal: empresa, email, contraseña y código TOTP en una sola
@@ -19,7 +20,7 @@ import { Sesion } from '../../nucleo/sesion';
 // teclado no sabría dónde está (WCAG 2.2, 2.4.3).
 @Component({
   selector: 'app-entrar',
-  imports: [Canario, ReactiveFormsModule, RouterLink],
+  imports: [Canario, MostrarContrasena, ReactiveFormsModule, RouterLink],
   template: `
     <main class="acceso">
       <app-canario />
@@ -37,8 +38,11 @@ import { Sesion } from '../../nucleo/sesion';
         </p>
         <p class="campo">
           <label for="entrar-contrasena">Contraseña</label>
-          <input id="entrar-contrasena" type="password" formControlName="contrasena" required
-                 autocomplete="current-password">
+          <span class="con-mostrar">
+            <input #campoContrasena id="entrar-contrasena" type="password" formControlName="contrasena" required
+                   autocomplete="current-password">
+            <button class="mostrar" [appMostrarContrasena]="campoContrasena" nombre="Mostrar la contraseña"></button>
+          </span>
         </p>
         <p class="campo">
           <label for="entrar-codigo">Código de autenticación</label>

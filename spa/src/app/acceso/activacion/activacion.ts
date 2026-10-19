@@ -6,6 +6,7 @@ import { ActivacionPendiente, ApiPersonal } from '../../nucleo/api';
 import { detalleDe, textoDeError } from '../../nucleo/errores';
 import { enfocarEncabezado } from '../../nucleo/foco';
 import { consumirToken } from '../../nucleo/fragmento';
+import { MostrarContrasena } from '../../nucleo/mostrar-contrasena';
 import { qrDe } from '../../nucleo/qr';
 
 // Activación de una cuenta invitada (app/personal.py, activar y
@@ -27,7 +28,7 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
 
 @Component({
   selector: 'app-activacion',
-  imports: [Canario, ReactiveFormsModule, RouterLink],
+  imports: [Canario, MostrarContrasena, ReactiveFormsModule, RouterLink],
   template: `
     <main class="acceso ancha">
       <app-canario />
@@ -43,14 +44,20 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
             <form [formGroup]="contrasenas" (ngSubmit)="fijarContrasena()" ngNativeValidate>
               <p class="campo">
                 <label for="activacion-contrasena">Contraseña</label>
-                <input id="activacion-contrasena" type="password" formControlName="contrasena" required
-                       autocomplete="new-password" aria-describedby="activacion-contrasena-ayuda">
+                <span class="con-mostrar">
+                  <input #campoContrasena id="activacion-contrasena" type="password" formControlName="contrasena" required
+                         autocomplete="new-password" aria-describedby="activacion-contrasena-ayuda">
+                  <button class="mostrar" [appMostrarContrasena]="campoContrasena" nombre="Mostrar la contraseña"></button>
+                </span>
                 <span id="activacion-contrasena-ayuda" class="ayuda">Entre 12 y 128 caracteres. Una frase larga es más fácil de recordar.</span>
               </p>
               <p class="campo">
                 <label for="activacion-repetir">Repita la contraseña</label>
-                <input id="activacion-repetir" type="password" formControlName="repetir" required
-                       autocomplete="new-password">
+                <span class="con-mostrar">
+                  <input #campoRepetir id="activacion-repetir" type="password" formControlName="repetir" required
+                         autocomplete="new-password">
+                  <button class="mostrar" [appMostrarContrasena]="campoRepetir" nombre="Mostrar la contraseña repetida"></button>
+                </span>
               </p>
               @if (error(); as texto) {
                 <p class="error" role="alert">{{ texto }}</p>

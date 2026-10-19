@@ -36,16 +36,16 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
     </p>
 
     <form class="filtro" [formGroup]="filtro" (ngSubmit)="filtrar()">
-      <p class="campo">
-        <label for="denuncias-estado">Estado</label>
+      <label for="denuncias-estado">Estado</label>
+      <div class="fila">
         <select id="denuncias-estado" formControlName="estado">
           <option value="">Todos</option>
           @for (estado of estados; track estado) {
             <option [value]="estado">{{ nombreEstado[estado] }}</option>
           }
         </select>
-      </p>
-      <button type="submit" class="secundario">Filtrar</button>
+        <button type="submit" class="secundario">Filtrar</button>
+      </div>
     </form>
 
     @if (hecho(); as texto) {
