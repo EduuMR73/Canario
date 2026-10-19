@@ -58,7 +58,13 @@ etapa. Prueba:
   acceso caducado, /yo sí renueva), y su error va dentro de la tarjeta sin
   caja propia, con la barra roja (control: con la caja de antes, fondo); un
   código de 5 cifras no sale de la página (control: el de 6 sí hace la
-  petición); dos pestañas con el acceso caducado
+  petición); en el pulido 2c, cada campo de contraseña de la activación y de
+  /entrar tiene su botón "Mostrar" (type="button", sin pulsar, con su
+  nombre), y al enviar el login con la contraseña a la vista el campo vuelve
+  a type="password" (control: pulsado, el campo es de texto); el login
+  fallido se envía así, con lo que su "una sola petición" prueba también que
+  el botón no envía el formulario. Lo que hace el gestor de contraseñas de
+  Chrome por dentro no se ve desde aquí; dos pestañas con el acceso caducado
   renuevan de una en una y la sesión sigue viva (control: dos renovaciones a
   la vez sí la cierran); cerrar la sesión borra sus cookies y deja la del
   dispositivo; la solicitud de registro muestra el texto fijo de la SPA; ninguna
@@ -96,7 +102,9 @@ etapa. Prueba:
   enlaces se activan una instructora y un auditor; reinvitar avisa al titular
   en /inicio, anular quita el aviso, la baja pide confirmación y cierra la
   sesión del auditor (control: antes de la baja entraba) y la propia cuenta
-  no tiene botón de baja; cambiar la contraseña con la actual mal da su
+  no tiene botón de baja; los tres campos de contraseña de /cuenta tienen
+  su botón "Mostrar" (pulido 2c; control: la instructora abre /cuenta);
+  cambiar la contraseña con la actual mal da su
   aviso sin renovar la sesión, y con la buena la sesión sigue viva; ninguna
   violación de la CSP ni error de JavaScript;
 * m) las denuncias en Chromium (bloque 6b-3b), con dos denuncias creadas por
@@ -154,10 +162,15 @@ etapa. Prueba:
   h1, h2 y h3 miden 24, 20 y 18 px, a 600 (control: con el h2 del navegador,
   no); las patas del canario contrastan al menos 3:1 con la barra y con el
   fondo de /entrar en los dos temas (control: con el contorno casi negro, en
-  la barra no); en el pulido 2a, el campo y el botón de /entrar y el botón
-  del filtro de /denuncias miden 38 px (control: con el interlineado del
-  cuerpo, no; el select nativo no: Chromium le fuerza line-height: normal y
-  se queda nativo a propósito), el h1 de /entrar va a 600 (control: con el
+  la barra no); en el pulido 2a, los campos del email y la contraseña de
+  /entrar, el botón "Mostrar" y el de enviar miden 38 px (control: con el
+  interlineado del cuerpo, no); en el pulido 2c, el select del filtro de
+  /denuncias y su botón miden 38 px (control: con la apariencia nativa, a la
+  que Chromium fuerza line-height: normal, el select mide más), en los
+  colores forzados el select vuelve a la apariencia nativa (control: sin
+  ellos, no), un select de tabla deja a la derecha sitio para su flecha
+  (control: con el atajo de relleno de antes, no), y en /cuentas el email,
+  el rol e Invitar van en una fila de 38 px (control: apilados, no), el h1 de /entrar va a 600 (control: con el
   300 de antes, no), el canario de la barra está centrado con las
   mayúsculas de "Canario" (control: con el viewBox de antes, no), el h1 de
   /cuentas empieza 24 px por debajo del borde de
@@ -492,6 +505,15 @@ TEXTO_REGISTRO = ("Si los datos son correctos, recibirá un correo en unos minut
 # fondo], con el amarillo del botón principal (#facc15). La salida de la
 # verificación confirmada.
 ERROR_EN_TARJETA = [True, "rgba(0, 0, 0, 0)", "3px", "0px"]
+# Pulido 2c. Cada campo de contraseña con su botón "Mostrar", como lo
+# devuelve MOSTRAR: [id, tipo, [tipo del botón, aria-pressed, nombre]].
+MOSTRAR_ACTIVACION = [["activacion-contrasena", "password", ["button", "false", "Mostrar la contraseña"]],
+                      ["activacion-repetir", "password", ["button", "false", "Mostrar la contraseña repetida"]]]
+MOSTRAR_ENTRAR = [["entrar-contrasena", "password", ["button", "false", "Mostrar la contraseña"]]]
+MOSTRAR_ENTRAR_PULSADO = [["entrar-contrasena", "text", ["button", "true", "Mostrar la contraseña"]]]
+MOSTRAR_CUENTA = [["cuenta-actual", "password", ["button", "false", "Mostrar la contraseña actual"]],
+                  ["cuenta-nueva", "password", ["button", "false", "Mostrar la contraseña nueva"]],
+                  ["cuenta-repetir", "password", ["button", "false", "Mostrar la contraseña nueva repetida"]]]
 SALIDA_ACTIVADA = ["A", "/entrar", "rgb(250, 204, 21)"]
 SALIDA_VERIFICADA = "/entrar"
 TEXTO_VERIFICADO = ("Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá "
@@ -720,6 +742,11 @@ CONTRASTE_PATAS = 3.0
 # el centro del dibujo del canario de la barra y el de las mayúsculas de
 # "Canario", y el viewBox de antes, que lo dejaba unos 2 px más bajo.
 ALTO_CONTROL = 38
+# Pulido 2c: el relleno [izquierda, derecha] de un select de tabla, en px:
+# 12 de aire y, a la derecha, 12 de aire, 12 del chevron y 8 de hueco. La
+# apariencia del select sin y con colores forzados.
+RELLENO_SELECT_TABLA = [12, 32]
+APARIENCIA_SELECT = ["none", "auto"]
 PESO_H1_ACCESO = "600"
 HUECO_H1 = 24
 DESCUADRE_FILA = 1
@@ -802,6 +829,13 @@ from playwright.async_api import async_playwright
 ORIGEN = "https://localhost:8445"
 CODIGO = "Código de autenticación"
 CLAVE_OCULTA = "¿No puede escanear el código QR?"
+# Pulido 2c. Cada campo de main que es de contraseña o tiene un botón que
+# lo controla (aria-controls): [id, tipo, [tipo del botón, aria-pressed,
+# su texto]], o None en vez del botón si no lo tiene.
+MOSTRAR = ("() => [...document.querySelectorAll('main input')].map((c) => "
+           "[c, document.querySelector('main button[aria-controls=\"' + c.id + '\"]')])"
+           ".filter(([c, b]) => c.type === 'password' || b !== null).map(([c, b]) => "
+           "[c.id, c.type, b === null ? null : [b.type, b.getAttribute('aria-pressed'), b.textContent.trim()]])")
 res = {}
 eventos, consola, errores = [], [], []
 ultimo = {"paso": -1}
@@ -887,12 +921,28 @@ ERROR_TARJETA = ("(regla) => { const h = [...document.styleSheets].find((s) => s
 MUTANTE_ERROR_TARJETA = ".tarjeta .error { background: var(--color-error-fondo); border: 1px solid var(--color-peligro); }"
 
 
-async def entrar(pagina, clave, codigo):
+async def entrar(pagina, clave, codigo, mostrar=False):
     await pagina.goto(ORIGEN + "/entrar")
     await pagina.get_by_label("Empresa").fill(identificador)
     await pagina.get_by_label("Email").fill(email)
     await pagina.get_by_label("Contraseña", exact=True).fill(clave)
     await pagina.get_by_label(CODIGO).fill(codigo)
+    if mostrar:
+        # Pulido 2c: el botón del campo, antes de pulsarlo y pulsado, como
+        # haría quien quiere ver lo que ha escrito antes de enviarlo.
+        res["mostrar_entrar"] = await pagina.evaluate(MOSTRAR)
+        await pagina.get_by_role("button", name="Mostrar la contraseña", exact=True).click()
+        # La SPA va sin zone.js: aria-pressed sale en el siguiente repintado,
+        # no en el mismo instante del clic. Se espera a que la página lo
+        # muestre, como mucho 5 s; si no llega, la lectura de abajo lo deja
+        # a la vista y el control falla.
+        try:
+            await pagina.wait_for_function(
+                "() => document.querySelector('main button[aria-controls=\"entrar-contrasena\"]')"
+                "?.getAttribute('aria-pressed') === 'true'", timeout=5000)
+        except Exception:
+            pass
+        res["mostrar_pulsado"] = await pagina.evaluate(MOSTRAR)
     await pagina.get_by_role("button", name="Entrar", exact=True).click()
 
 
@@ -927,6 +977,7 @@ async def pasos(contexto):
     res["token_en_pagina"] = await pagina.evaluate(
         "document.documentElement.outerHTML.includes(" + json.dumps(invitacion) + ")")
     res["almacen_activacion"] = await almacenamiento(pagina)
+    res["mostrar_activacion"] = await pagina.evaluate(MOSTRAR)
     await pagina.get_by_label("Contraseña", exact=True).fill(contrasena)
     await pagina.get_by_label("Repita la contraseña").fill(contrasena)
     await pagina.get_by_role("button", name="Continuar", exact=True).click()
@@ -950,13 +1001,16 @@ async def pasos(contexto):
         ".find((x) => x.textContent.trim() === 'Entrar'); "
         "return e === undefined ? null : [e.tagName, e.getAttribute('href'), getComputedStyle(e).backgroundColor]; }")
 
-    # Login fallido: una sola petición y ninguna renovación.
+    # Login fallido: una sola petición y ninguna renovación, también con la
+    # contraseña a la vista (el botón no envía nada). Al enviar, el campo
+    # vuelve a ser de contraseña.
     marca = len(eventos)
-    await entrar(pagina, contrasena + "-mal", "000000")
+    await entrar(pagina, contrasena + "-mal", "000000", mostrar=True)
     alerta = pagina.get_by_role("alert")
     await alerta.wait_for()
     await asyncio.sleep(1)
     res["login_fallido"] = {"alerta": await alerta.inner_text(), "api": api_desde(marca)}
+    res["mostrar_enviado"] = await pagina.evaluate(MOSTRAR)
     # Pulido 2b: el error dentro de la tarjeta, sin caja propia; el control
     # le devuelve la caja de antes con una regla añadida con el CSSOM.
     res["error_tarjeta"] = await pagina.evaluate(ERROR_TARJETA, None)
@@ -1288,6 +1342,7 @@ async def pasos_roles(navegador):
     res["instructora_cuentas"] = await abrir(instructora, "/cuentas")
     res["instructora_solicitudes"] = await abrir(instructora, "/solicitudes")
     res["instructora_cuenta"] = await abrir(instructora, "/cuenta")
+    res["mostrar_cuenta"] = await instructora.evaluate(MOSTRAR)
     res["usuarios_instructora"] = await estado_api(instructora, USUARIOS)
 
     # Auditor: igual.
@@ -1942,6 +1997,23 @@ MARCA = ("(caja) => { const svg = document.querySelector('.marca svg'); const an
          "return Math.round(Math.abs(dibujo - (base - alto / 2)) * 100) / 100; "
          "} finally { svg.setAttribute('viewBox', antes); } }")
 MUTANTE_ALTO = "input, select, button { line-height: 1.5; }"
+MUTANTE_SELECT_NATIVO = "select { appearance: auto; }"
+# Un select dentro de una celda, puesto en main y quitado enseguida (las
+# tablas con select solo salen con datos): su relleno [izquierda, derecha].
+# Con createElement y no con innerHTML: Trusted Types lo bloquearía.
+SELECT_TABLA = ("() => { const t = document.createElement('table'); const s = document.createElement('select'); "
+                "t.append(document.createElement('tr')); t.firstChild.append(document.createElement('td')); "
+                "t.firstChild.firstChild.append(s); document.querySelector('main').append(t); "
+                "const c = getComputedStyle(s); "
+                "const r = [parseFloat(c.paddingInlineStart), parseFloat(c.paddingInlineEnd)]; t.remove(); return r; }")
+MUTANTE_SELECT_TABLA = "td select { padding: var(--espacio-1) var(--espacio-3); }"
+APARIENCIA = "() => getComputedStyle(document.querySelector('main select')).appearance"
+# El formulario de invitar: el borde de arriba y el alto del email, del rol
+# y del botón.
+INVITAR = ("() => ['#cuentas-email', '#cuentas-rol', 'form.invitar button[type=submit]'].map((s) => { "
+           "const r = document.querySelector(s).getBoundingClientRect(); "
+           "return [Math.round(r.top * 100) / 100, Math.round(r.height * 100) / 100]; })")
+MUTANTE_INVITAR = ".invitar { display: block; }"
 MUTANTE_PESO_H1 = ".acceso > h1 { font-weight: 300; }"
 MUTANTE_HUECO_H1 = "h1 { margin-top: 0.67em; }"
 MUTANTE_FILA = "th, td { vertical-align: top; }"
@@ -1986,8 +2058,11 @@ async def pasos_estetica(navegador):
     res["fuentes"] = await claro.evaluate(FUENTES)
     res["fondo_claro"] = await claro.evaluate(FONDO)
     res["patas_entrar_claro"] = await claro.evaluate(PATAS, "body")
-    # Pulido 2a: el alto no depende del ancho de la pantalla.
-    controles_entrar = ["#entrar-email", "main form button"]
+    # Pulido 2a: el alto no depende del ancho de la pantalla. Pulido 2c: el
+    # campo de la contraseña y su botón "Mostrar" también; el botón de
+    # enviar, por su tipo, porque ya no es el primero del formulario.
+    controles_entrar = ["#entrar-email", "#entrar-contrasena", "main form button.mostrar",
+                        "main form button[type=submit]"]
     res["altos_entrar"] = await claro.evaluate(ALTOS, controles_entrar)
     res["altos_entrar_mutante"] = await con_regla(claro, MUTANTE_ALTO, ALTOS, controles_entrar)
     res["peso_h1"] = await claro.evaluate(PESO_H1)
@@ -2003,11 +2078,19 @@ async def pasos_estetica(navegador):
         if ruta_pedida == "/solicitudes":
             res["solicitudes_vacia"] = await claro.evaluate(VACIO)
         if ruta_pedida == "/denuncias":
-            # Solo el botón: al select nativo Chromium le fuerza
-            # line-height: normal (mide 40) y se queda nativo a propósito.
-            controles_filtro = [".filtro button"]
+            # Pulido 2c: el select y su botón, a 38 como los demás
+            # controles; con la apariencia nativa, Chromium le fuerza
+            # line-height: normal. En los colores forzados vuelve la nativa,
+            # con su flecha: el chevron de gradientes no se pintaría.
+            controles_filtro = [".filtro select", ".filtro button"]
             res["altos_filtro"] = await claro.evaluate(ALTOS, controles_filtro)
-            res["altos_filtro_mutante"] = await con_regla(claro, MUTANTE_ALTO, ALTOS, controles_filtro)
+            res["altos_filtro_mutante"] = await con_regla(claro, MUTANTE_SELECT_NATIVO, ALTOS, controles_filtro)
+            res["apariencia"] = [await claro.evaluate(APARIENCIA)]
+            await claro.emulate_media(forced_colors="active")
+            res["apariencia"].append(await claro.evaluate(APARIENCIA))
+            await claro.emulate_media(forced_colors="none")
+            res["select_tabla"] = await claro.evaluate(SELECT_TABLA)
+            res["select_tabla_mutante"] = await con_regla(claro, MUTANTE_SELECT_TABLA, SELECT_TABLA)
     await abrir(claro, ruta_sin_pagina)
     anchos[ruta_sin_pagina] = await claro.evaluate(ANCHO)
     res["sin_pagina"] = await claro.evaluate(SUELTA)
@@ -2024,6 +2107,9 @@ async def pasos_estetica(navegador):
     res["hueco_barra_mutante"] = await con_regla(claro, MUTANTE_BARRA, BARRA)
     res["titulos_mutante"] = await con_regla(claro, MUTANTE_H2, TITULOS)
     res["patas_barra_mutante"] = await con_regla(claro, MUTANTE_PATAS, PATAS, ".barra")
+    # Pulido 2c: el email, el rol y su botón en una fila.
+    res["invitar"] = await claro.evaluate(INVITAR)
+    res["invitar_mutante"] = await con_regla(claro, MUTANTE_INVITAR, INVITAR)
     # Pulido 2a, en la misma página: el hueco sobre el h1, la fila de otra
     # cuenta y su "Dar de baja", en reposo y con el puntero encima.
     res["marca"] = await claro.evaluate(MARCA, None)
@@ -2632,6 +2718,20 @@ def seccion_i():
              respuestas(api_fallido) == [("POST", RUTA_SESIONES, 401)]
              and not any(e["ruta"] == RUTA_RENOVACION for e in api_fallido), control_renovacion)
     pasa(fallido.get("alerta") == ALERTA_LOGIN, f"i) el login fallido se anuncia con role=alert ({fallido.get('alerta')!r})")
+
+    # Pulido 2c: "Mostrar la contraseña". El login fallido de arriba se envió
+    # con la contraseña a la vista, así que su "una sola peticion" prueba
+    # también que el botón no envía el formulario.
+    pasa(res.get("mostrar_activacion") == MOSTRAR_ACTIVACION,
+         f"i) en la activacion, cada campo de contrasena tiene su boton Mostrar, sin pulsar ({res.get('mostrar_activacion')})")
+    pasa(res.get("mostrar_entrar") == MOSTRAR_ENTRAR,
+         f"i) en /entrar, el campo de contrasena tiene su boton Mostrar, sin pulsar ({res.get('mostrar_entrar')})")
+    control_mostrar = res.get("mostrar_pulsado") == MOSTRAR_ENTRAR_PULSADO
+    pasa(control_mostrar, f"i) control: al pulsarlo, la contrasena se ve y el boton queda pulsado "
+                          f"({res.get('mostrar_pulsado')})")
+    negativo(f"i) al enviar el login, el campo vuelve a ser de contrasena y el boton a sin pulsar "
+             f"({res.get('mostrar_enviado')})",
+             res.get("mostrar_enviado") == MOSTRAR_ENTRAR, control_mostrar)
     error_tarjeta, error_mutante = res.get("error_tarjeta"), res.get("error_tarjeta_mutante")
     negativo(f"i) el error va dentro de la tarjeta, sin caja propia y con la barra roja "
              f"([en la tarjeta, fondo, barra, borde] {error_tarjeta})",
@@ -2930,6 +3030,8 @@ def seccion_l():
     propia = res.get("instructora_cuenta") or {}
     control_guard = propia == {"ruta": "/cuenta", "h1": H1_MI_CUENTA}
     pasa(control_guard, f"l) control: la instructora abre /cuenta por su URL ({propia})")
+    negativo(f"l) en /cuenta, cada campo de contrasena tiene su boton Mostrar, sin pulsar ({res.get('mostrar_cuenta')})",
+             res.get("mostrar_cuenta") == MOSTRAR_CUENTA, control_guard)
     for clave, ruta_pedida in (("instructora_cuentas", "/cuentas"), ("instructora_solicitudes", "/solicitudes"),
                                ("auditor_cuentas", "/cuentas")):
         negativo(f"l) {clave.split('_')[0]} pide {ruta_pedida} por su URL y vuelve a /inicio ({res.get(clave)})",
@@ -3542,14 +3644,38 @@ def seccion_p():
                  f"control: con el contorno casi negro, en la barra da {patas_mutante}")
 
     # Pulido 2a, cada medida con la regla de antes como control.
-    for sitio, clave, cuantos in (("/entrar (email y Entrar)", "altos_entrar", 2),
-                                  ("el boton del filtro de /denuncias", "altos_filtro", 1)):
-        altos, altos_mutante = res.get(clave), res.get(f"{clave}_mutante")
-        negativo(f"p) los controles de {sitio} miden {ALTO_CONTROL} px ({altos})",
-                 altos == [ALTO_CONTROL] * cuantos,
-                 isinstance(altos_mutante, list) and None not in altos_mutante
-                 and all(a > ALTO_CONTROL for a in altos_mutante),
-                 f"control: con el interlineado del cuerpo miden {altos_mutante}")
+    altos, altos_mutante = res.get("altos_entrar"), res.get("altos_entrar_mutante")
+    negativo(f"p) los controles de /entrar (email, contrasena, Mostrar y Entrar) miden {ALTO_CONTROL} px ({altos})",
+             altos == [ALTO_CONTROL] * 4,
+             isinstance(altos_mutante, list) and None not in altos_mutante
+             and all(a > ALTO_CONTROL for a in altos_mutante),
+             f"control: con el interlineado del cuerpo miden {altos_mutante}")
+    # Pulido 2c: el select sin la apariencia nativa, cada medida con su
+    # control.
+    altos, altos_mutante = res.get("altos_filtro"), res.get("altos_filtro_mutante")
+    negativo(f"p) el select del filtro de /denuncias y su boton miden {ALTO_CONTROL} px ({altos})",
+             altos == [ALTO_CONTROL] * 2,
+             isinstance(altos_mutante, list) and None not in altos_mutante
+             and altos_mutante[0] > ALTO_CONTROL,
+             f"control: con la apariencia nativa, a la que Chromium fuerza line-height: normal, "
+             f"el select mide {altos_mutante}")
+    apariencia = res.get("apariencia")
+    negativo(f"p) en los colores forzados el select vuelve a la apariencia nativa ([sin, con] {apariencia})",
+             apariencia == APARIENCIA_SELECT,
+             isinstance(apariencia, list) and len(apariencia) == 2 and apariencia[0] != apariencia[1],
+             "control: sin colores forzados la apariencia no es la misma")
+    tabla, tabla_mutante = res.get("select_tabla"), res.get("select_tabla_mutante")
+    negativo(f"p) un select de tabla deja a la derecha sitio para su flecha ([izquierda, derecha] {tabla})",
+             tabla == RELLENO_SELECT_TABLA,
+             isinstance(tabla_mutante, list) and tabla_mutante != RELLENO_SELECT_TABLA,
+             f"control: con el atajo de antes el relleno es {tabla_mutante}")
+    invitar, invitar_mutante = res.get("invitar"), res.get("invitar_mutante")
+    en_fila = (isinstance(invitar, list) and len({t for t, _ in invitar}) == 1
+               and all(a == ALTO_CONTROL for _, a in invitar))
+    negativo(f"p) en /cuentas, el email, el rol e Invitar van en una fila y miden {ALTO_CONTROL} px "
+             f"([arriba, alto] {invitar})", en_fila,
+             isinstance(invitar_mutante, list) and len({t for t, _ in invitar_mutante}) == 3,
+             f"control: apilados, {invitar_mutante}")
     peso, peso_mutante = res.get("peso_h1"), res.get("peso_h1_mutante")
     negativo(f"p) el h1 de /entrar va a {PESO_H1_ACCESO} ({peso!r})", peso == PESO_H1_ACCESO,
              peso_mutante is not None and peso_mutante != PESO_H1_ACCESO,
