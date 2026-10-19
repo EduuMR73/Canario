@@ -26,9 +26,10 @@ Redis, una empresa dada de alta con gestion y peticiones como las de un
 navegador. Prueba:
 
 * i) que la API arranca con el origen del sitio en el log;
-* j) la página de inicio, con las cabeceras del sitio;
-* k) el formulario de una empresa, y el mismo 404 para una empresa que no
-  existe que para una ruta que no existe;
+* j) la página de inicio, con las cabeceras del sitio y el aviso del
+  dispositivo y la red;
+* k) el formulario de una empresa, con el mismo aviso, y el mismo 404 para
+  una empresa que no existe que para una ruta que no existe;
 * l) que una denuncia por formulario se crea, que el código sale una sola vez
   y que se guarda lo mismo que guardaría la API JSON (CRLF -> LF), leyéndola
   por /v1 en el 8443;
@@ -166,6 +167,19 @@ FORMULARIO = "application/x-www-form-urlencoded"
 CABECERAS_NAVEGADOR = {"Origin": ORIGEN_WEB, "Sec-Fetch-Site": "same-origin", "Content-Type": FORMULARIO}
 PATRON_ALTA = re.compile(r"empresa creada: empresa_id=([0-9a-f-]{36}) identificador_publico=([0-9a-f]{32})")
 PATRON_CODIGO = re.compile(rb'<p class="codigo"><code>([^<]+)</code></p>')
+# j) y k) Los consejos de anonimato (app/plantillas/macros.html), tal cual
+# los sirve la API, escritos aquí a mano.
+AVISO_DISPOSITIVO = ('<div class="aviso">\n'
+                     "<p><strong>Para proteger su anonimato:</strong></p>\n"
+                     "<ul>\n"
+                     "<li>Use su móvil personal u otro dispositivo que no sea de la empresa.</li>\n"
+                     "<li>Conéctese con datos móviles o desde casa, no con la wifi del trabajo.</li>\n"
+                     "<li>Si puede, use Tor Browser (torproject.org), que oculta desde dónde se conecta.</li>\n"
+                     "<li>No escriba en la denuncia datos que le identifiquen.</li>\n"
+                     "</ul>\n"
+                     "<p>Desde un equipo o una red de la empresa se puede saber que alguien ha entrado en este canal, "
+                     "y cuándo.</p>\n"
+                     "</div>").encode()
 # Un texto con HTML y un salto de línea, enviado como lo codifica un navegador
 # (el salto, como CRLF: %0D%0A).
 TEXTO_HTML = "<script>alert(1)</script> & \"comillas\""
@@ -590,9 +604,10 @@ def seccion_i():
 def seccion_j():
     p("=== j) pagina de inicio")
     respuesta = peticion("GET", "/")
-    pasa(pagina_api(respuesta, 200) and "<h1>Canal de denuncias anónimo</h1>".encode() in respuesta[2],
-         f"j) GET / -> 200, la pagina de inicio de la API ({respuesta[0]})")
+    control = pagina_api(respuesta, 200) and "<h1>Canal de denuncias anónimo</h1>".encode() in respuesta[2]
+    pasa(control, f"j) GET / -> 200, la pagina de inicio de la API ({respuesta[0]})")
     cabeceras_exactas("j) pagina de inicio", respuesta[1], CABECERAS_HTML)
+    negativo("j) el inicio lleva los consejos de anonimato", AVISO_DISPOSITIVO in respuesta[2], control)
 
 
 def seccion_k():
@@ -601,6 +616,7 @@ def seccion_k():
     accion = f'action="/empresas/{IDENTIFICADOR}/denuncias"'.encode()
     control = pagina_api(respuesta, 200) and accion in respuesta[2]
     pasa(control, f"k) GET /empresas/<empresa> -> 200 con el formulario que envia a su ruta ({respuesta[0]})")
+    negativo("k) el formulario lleva los consejos de anonimato", AVISO_DISPOSITIVO in respuesta[2], control)
     no_existe = peticion("GET", "/no-existe")
     for ruta in (f"/empresas/{EMPRESA_INEXISTENTE}", f"/empresas/{IDENTIFICADOR.upper()}", "/empresas/x"):
         otra = peticion("GET", ruta)

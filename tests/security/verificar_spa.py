@@ -83,7 +83,13 @@ etapa. Prueba:
   que toda variable usada existe. Control: la fórmula da 4,54:1 y 4,48:1 con
   los grises #767676 y #777777 sobre blanco, y cinco mutantes de la hoja (un
   gris claro en cada tema, un color que falta en el oscuro, un color suelto y
-  una variable que no existe) hacen saltar cada comprobación. Y en
+  una variable que no existe) hacen saltar cada comprobación. Lo mismo, con
+  los mismos mutantes, sobre la hoja del 8444 (proxy/estatico/canario.css),
+  y además que cada variable suya existe en la de la SPA con el mismo valor
+  en los dos temas (control: un azul distinto en el 8444 salta) y que no
+  tiene url() (control: una añadida salta); que las plantillas del 8444 no
+  escriben colores y que su SVG es decorativo (control: el canario con un
+  fill o sin aria-hidden salta). Y en
   spa/src/app, también sin Docker, que ningún botón lleva
   disabled ligado y que cada fichero lleva los aria-disabled de su
   inventario (control: entrar.ts con disabled hace saltar las dos); que las
@@ -190,9 +196,23 @@ etapa. Prueba:
   ni error de JavaScript (control: una fuente de otro origen sí deja su
   violación de font-src). Los controles del pulido añaden su regla a la hoja
   con el CSSOM, que la CSP no limita.
+* q) el sitio del denunciante (8444) en Chromium, a 320 px: el recorrido
+  entero por sus cinco páginas (inicio, formulario, enviada, consulta y
+  expediente), con una denuncia enviada por el formulario que se lee en el
+  expediente; el inicio y el formulario llevan el aviso del dispositivo y la
+  red, con su texto escrito aquí a mano; los fondos de los dos temas son los
+  de la SPA (control: en claro, el del claro); la letra es la del sistema y
+  la página no declara ninguna fuente (control: una añadida a mano se
+  cuenta); el canario de la barra es decorativo y se ve; el select, el campo
+  y los botones miden 38 px, como en la SPA (control: con la apariencia
+  nativa o el interlineado del cuerpo, más), y en los colores forzados el
+  select vuelve al nativo; ninguna página desborda (control: un bloque de
+  400 px sí); ninguna violación de la CSP (control: una imagen de otro
+  origen sí la deja).
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
-misma forma (docs/threat-model.md, 8); Web Locks y las cookies en otros
+misma forma (docs/threat-model.md, 8); el 8444 en Tor Browser, que en el
+nivel Safest puede no pintar el canario (es decorativo) ni algunas fuentes; Web Locks y las cookies en otros
 navegadores que no sean Chromium; accesibilidad completa (axe, bloque 6b-5);
 el botón "Copiar el enlace", porque el portapapeles de Chromium sin pantalla
 necesita permisos que la prueba tendría que conceder a mano. De las
@@ -577,6 +597,38 @@ PATRON_TEMA_OSCURO = re.compile(r"@media\s*\(\s*prefers-color-scheme\s*:\s*dark\
                                 re.DOTALL)
 MUTANTE_COLOR_SUELTO = "\n.mutante { color: #000000; }\n"
 MUTANTE_VARIABLE = "\n.mutante { color: var(--color-que-no-existe); }\n"
+# k) La hoja del sitio del denunciante (8444), con las mismas comprobaciones y
+# los mismos mutantes (sus textos están igual en las dos hojas), más dos
+# propias: toda variable suya existe en la de la SPA con el mismo valor en
+# los dos temas (el aspecto es el mismo, y así no se separan sin que se
+# vea), y ninguna url(), que la CSP del 8444 bloquearía.
+ESTILOS_8444 = RAIZ / "proxy" / "estatico" / "canario.css"
+PAREJAS_8444 = (
+    ("--color-texto", "--color-fondo", 4.5),
+    ("--color-texto", "--color-superficie", 4.5),
+    ("--color-texto", "--color-aviso-fondo", 4.5),
+    ("--color-texto-suave", "--color-superficie", 4.5),
+    ("--color-acento", "--color-fondo", 4.5),
+    ("--color-boton-texto", "--color-boton", 4.5),
+    ("--color-boton-texto", "--color-boton-encima", 4.5),
+    ("--color-error-texto", "--color-error-fondo", 4.5),
+    ("--color-peligro", "--color-fondo", 4.5),
+    ("--color-barra-texto", "--color-barra", 4.5),
+    ("--color-barra-texto-suave", "--color-barra", 4.5),
+    ("--color-borde", "--color-fondo", 3.0),
+    ("--color-boton-borde", "--color-fondo", 3.0),
+    ("--color-acento", "--color-aviso-fondo", 3.0),
+    ("--color-peligro", "--color-error-fondo", 3.0),
+    ("--color-foco-barra", "--color-barra", 3.0),
+)
+MUTANTE_8444_DISTINTO = ("  --color-acento: #0b57d0;", "  --color-acento: #0b57d1;")
+MUTANTE_URL = '\n.mutante { background: url("x.png"); }\n'
+# Las plantillas del 8444 (app/plantillas): sin colores escritos y con todo
+# SVG decorativo o con nombre, como las de la SPA. El canario de la barra,
+# en base.html, es el ancla de sus mutantes.
+PLANTILLAS_8444 = RAIZ / "app" / "plantillas"
+FICHERO_BASE_8444 = "base.html"
+ANCLA_CANARIO_8444 = '<svg class="canario" aria-hidden="true"'
 # k) Los botones ocupados (spa/src/app): cuántos llevan aria-disabled en cada
 # fichero, contados a mano en el bloque 6b-3d. Ninguno lleva disabled ligado:
 # a un botón disabled Chromium le quita el foco y no se lo devuelve
@@ -760,6 +812,25 @@ LINEAS_EMAIL = 1
 PREGUNTA_BAJA = "¿Dar de baja a {}? Se cerrarán sus sesiones."
 DESCUADRE_MARCA = 1
 VIEWBOX_ANTERIOR = "0 0 48 48"
+
+# q) El sitio del denunciante (8444) en Chromium. El h1 de cada página que
+# recorre, los consejos de anonimato (app/plantillas/macros.html), cada
+# párrafo y cada punto escrito aquí a mano, y el texto de la denuncia que
+# envía.
+H1_WEB = {"inicio": "Canal de denuncias anónimo", "formulario": "Nueva denuncia", "creada": "Denuncia enviada",
+          "seguimiento": "Consultar una denuncia", "expediente": "Su denuncia"}
+AVISO_DISPOSITIVO = [
+    "Para proteger su anonimato:",
+    "Use su móvil personal u otro dispositivo que no sea de la empresa.",
+    "Conéctese con datos móviles o desde casa, no con la wifi del trabajo.",
+    "Si puede, use Tor Browser (torproject.org), que oculta desde dónde se conecta.",
+    "No escriba en la denuncia datos que le identifiquen.",
+    "Desde un equipo o una red de la empresa se puede saber que alguien ha entrado en este canal, y cuándo.",
+]
+TEXTO_DENUNCIA_WEB = "Denuncia de prueba del 8444, enviada desde Chromium a 320 px."
+# La primera familia de la hoja del 8444: la del sistema, sin fuente propia.
+FAMILIA_8444 = "system-ui"
+CANARIO_8444 = ["canario", "true", True]
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -2168,6 +2239,120 @@ async def pasos_estetica(navegador):
 asyncio.run(ejecutar_personal(pasos_estetica))
 '''
 
+# q) El sitio del denunciante (8444) en Chromium, a 320 px: la hoja de
+# proxy/estatico/canario.css aplicada a sus páginas. Recibe el SPKI, el
+# identificador de la empresa y el texto de la denuncia que envía por el
+# formulario (así también se miran la página de enviada y el expediente). El
+# código de seguimiento no sale del navegador.
+NAVEGADOR_WEB = NAVEGADOR_COMUN + r'''
+spki, identificador, texto_denuncia = sys.argv[1:4]
+WEB = "https://localhost:8444"
+ANCHO = "() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]"
+H1 = "() => document.querySelector('main h1').textContent.trim()"
+# Los consejos de anonimato: el texto de cada párrafo y de cada punto, en orden.
+AVISO = ("() => { const a = document.querySelector('main div.aviso'); "
+         "return a === null ? null : [...a.querySelectorAll('p, li')].map((e) => e.textContent.trim()); }")
+FONDO = "() => getComputedStyle(document.body).backgroundColor"
+FAMILIA = "() => getComputedStyle(document.body).fontFamily"
+# Las fuentes declaradas por la página (@font-face o FontFace).
+FUENTES = "() => document.fonts.size"
+CANARIO = ("() => { const s = document.querySelector('.barra svg'); "
+           "return s === null ? null : [s.getAttribute('class'), s.getAttribute('aria-hidden'), "
+           "s.getBoundingClientRect().height > 0]; }")
+HOJA = ("[...document.styleSheets].find((s) => s.href !== null "
+        "&& new URL(s.href).pathname === '/estatico/canario.css')")
+INSERTAR = "(regla) => { const h = " + HOJA + "; return h.insertRule(regla, h.cssRules.length); }"
+QUITAR = "(i) => { " + HOJA + ".deleteRule(i); }"
+ALTOS = ("(selectores) => selectores.map((s) => { const e = document.querySelector(s); "
+         "return e === null ? null : Math.round(e.getBoundingClientRect().height * 100) / 100; })")
+APARIENCIA = "() => getComputedStyle(document.querySelector('main select')).appearance"
+# Un bloque de 400 px en main, quitado enseguida: a 320 px tiene que desbordar.
+DESBORDE = ("() => { const d = document.createElement('div'); d.style.width = '400px'; d.style.height = '1px'; "
+            "document.querySelector('main').append(d); "
+            "const r = [document.documentElement.scrollWidth, document.documentElement.clientWidth]; "
+            "d.remove(); return r; }")
+MUTANTE_ALTO = "input, select, button { line-height: 1.5; }"
+MUTANTE_SELECT_NATIVO = "select { appearance: auto; }"
+
+
+async def con_regla(pagina, regla, medida, argumento=None):
+    # Mide con una regla de más al final de la hoja, y la quita.
+    indice = await pagina.evaluate(INSERTAR, regla)
+    try:
+        return await pagina.evaluate(medida, argumento)
+    finally:
+        await pagina.evaluate(QUITAR, indice)
+
+
+async def mirar(pagina, nombre):
+    res["h1"][nombre] = await pagina.evaluate(H1)
+    res["anchos"][nombre] = await pagina.evaluate(ANCHO)
+
+
+async def enviar(pagina):
+    async with pagina.expect_navigation():
+        await pagina.click("main form button[type=submit]")
+
+
+async def pasos(contexto):
+    res["h1"], res["anchos"], res["avisos"] = {}, {}, {}
+    pagina = await contexto.new_page()
+    vigilar(pagina, "web")
+    await pagina.set_viewport_size({"width": 320, "height": 640})
+    await pagina.emulate_media(color_scheme="light")
+    await pagina.goto(WEB + "/")
+    await mirar(pagina, "inicio")
+    res["avisos"]["inicio"] = await pagina.evaluate(AVISO)
+    res["fondo_claro"] = await pagina.evaluate(FONDO)
+    res["familia"] = await pagina.evaluate(FAMILIA)
+    res["fuentes"] = await pagina.evaluate(FUENTES)
+    # Control: una fuente añadida a mano sí se cuenta.
+    res["fuentes_control"] = await pagina.evaluate(
+        "() => { const f = new FontFace('Control', 'local(Arial)'); document.fonts.add(f); "
+        "const n = document.fonts.size; document.fonts.delete(f); return n; }")
+    res["canario"] = await pagina.evaluate(CANARIO)
+    await pagina.emulate_media(color_scheme="dark")
+    res["fondo_oscuro"] = await pagina.evaluate(FONDO)
+    await pagina.emulate_media(color_scheme="light")
+
+    await pagina.goto(WEB + "/empresas/" + identificador)
+    await mirar(pagina, "formulario")
+    res["avisos"]["formulario"] = await pagina.evaluate(AVISO)
+    controles = ["#categoria", "main form button[type=submit]"]
+    res["altos_formulario"] = await pagina.evaluate(ALTOS, controles)
+    res["altos_formulario_mutante"] = await con_regla(pagina, MUTANTE_SELECT_NATIVO, ALTOS, controles)
+    res["apariencia"] = [await pagina.evaluate(APARIENCIA)]
+    await pagina.emulate_media(forced_colors="active")
+    res["apariencia"].append(await pagina.evaluate(APARIENCIA))
+    await pagina.emulate_media(forced_colors="none")
+    await pagina.select_option("#categoria", index=1)
+    await pagina.fill("#texto", texto_denuncia)
+    await enviar(pagina)
+    await mirar(pagina, "creada")
+    codigo = (await pagina.text_content(".codigo code")).strip()
+
+    await pagina.goto(WEB + "/seguimiento")
+    await mirar(pagina, "seguimiento")
+    controles = ["#codigo", "main form button[type=submit]"]
+    res["altos_seguimiento"] = await pagina.evaluate(ALTOS, controles)
+    res["altos_seguimiento_mutante"] = await con_regla(pagina, MUTANTE_ALTO, ALTOS, controles)
+    await pagina.fill("#codigo", codigo)
+    await enviar(pagina)
+    await mirar(pagina, "expediente")
+    res["texto_expediente"] = (await pagina.text_content("main .texto")).strip()
+    res["ancho_control"] = await pagina.evaluate(DESBORDE)
+
+    # Control de la consola: una imagen de otro origen deja su violación de
+    # la CSP (default-src 'none').
+    res["consola_antes_del_control"] = len(consola)
+    await pagina.evaluate("() => { const i = document.createElement('img'); "
+                          "i.src = 'https://ejemplo.invalid/x.png'; document.querySelector('main').append(i); }")
+    await asyncio.sleep(1)
+
+
+asyncio.run(ejecutar(spki, pasos))
+'''
+
 
 # ---------------------------------------------------------------------------
 # Utilidades de ejecución y de informe
@@ -2890,35 +3075,60 @@ def contraste_rgb(pareja):
     return contraste(*colores)
 
 
-def revisar_hoja(css):
-    """Lo que k) comprueba de una hoja: (parejas sin contraste suficiente en
-    algún tema, colores fuera de los dos :root, variables usadas que no
-    existen, colores del claro que el oscuro no redefine). Sin comentarios,
-    que pueden nombrar colores."""
+def temas_hoja(css, nombre):
+    """Las piezas de una hoja que k) mira: (la hoja sin comentarios, que
+    pueden nombrar colores; las variables del :root claro; las que redefine
+    el oscuro; el texto fuera de los dos :root)."""
     sin_comentarios = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     oscuro = PATRON_TEMA_OSCURO.search(sin_comentarios)
     if oscuro is None:
-        raise Parada("spa/src/styles.css no tiene el :root de @media (prefers-color-scheme: dark)")
+        raise Parada(f"{nombre} no tiene el :root de @media (prefers-color-scheme: dark)")
     resto = sin_comentarios[:oscuro.start()] + sin_comentarios[oscuro.end():]
     raices = list(re.finditer(r":root\s*\{(.*?)\}", resto, re.DOTALL))
     if len(raices) != 1:
-        raise Parada(f"spa/src/styles.css debe tener un solo :root fuera del tema oscuro (tiene {len(raices)})")
+        raise Parada(f"{nombre} debe tener un solo :root fuera del tema oscuro (tiene {len(raices)})")
     raiz = raices[0]
     claro = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", raiz.group(1)))
     propias = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", oscuro.group(1)))
+    return sin_comentarios, claro, propias, resto[:raiz.start()] + resto[raiz.end():]
+
+
+def revisar_hoja(css, parejas=PAREJAS_CONTRASTE, nombre="spa/src/styles.css"):
+    """Lo que k) comprueba de una hoja: (parejas sin contraste suficiente en
+    algún tema, colores fuera de los dos :root, variables usadas que no
+    existen, colores del claro que el oscuro no redefine)."""
+    sin_comentarios, claro, propias, fuera = temas_hoja(css, nombre)
     flojas = []
     for tema, variables in (("claro", claro), ("oscuro", {**claro, **propias})):
-        for frente, fondo, minimo in PAREJAS_CONTRASTE:
+        for frente, fondo, minimo in parejas:
             a, b = variables.get(frente, ""), variables.get(fondo, "")
             if not (re.fullmatch(r"#[0-9a-f]{6}", a) and re.fullmatch(r"#[0-9a-f]{6}", b)):
                 flojas.append(f"{tema} {frente}/{fondo}: no son #rrggbb ({a!r}, {b!r})")
             elif contraste(a, b) < minimo:
                 flojas.append(f"{tema} {frente}/{fondo}: {contraste(a, b):.2f} < {minimo}")
-    fuera = resto[:raiz.start()] + resto[raiz.end():]
     sueltos = re.findall(r"#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(", fuera)
     usadas = set(re.findall(r"var\((--[a-z0-9-]+)\)", sin_comentarios))
     olvidados = sorted(n for n in claro if n.startswith("--color-") and n not in propias)
     return flojas, sueltos, sorted(usadas - set(claro) - set(propias)), olvidados
+
+
+def revisar_comunes(css_8444, css_spa):
+    """Las variables de la hoja del 8444 que no están en la de la SPA o valen
+    otra cosa, en algún tema: ["tema --nombre: 8444 / SPA"]."""
+    _, claro, propias, _ = temas_hoja(css_8444, "proxy/estatico/canario.css")
+    _, claro_spa, propias_spa, _ = temas_hoja(css_spa, "spa/src/styles.css")
+    distintas = []
+    for tema, de_8444, de_spa in (("claro", claro, claro_spa),
+                                  ("oscuro", {**claro, **propias}, {**claro_spa, **propias_spa})):
+        for nombre, valor in sorted(de_8444.items()):
+            if de_spa.get(nombre) != valor:
+                distintas.append(f"{tema} {nombre}: {valor} / {de_spa.get(nombre)}")
+    return distintas
+
+
+def urls_hoja(css):
+    """Las url() de una hoja, sin contar los comentarios."""
+    return re.findall(r"\burl\(", re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL))
 
 
 def revisar_botones(textos):
@@ -2932,13 +3142,13 @@ def revisar_botones(textos):
     return con_disabled, distintos
 
 
-def revisar_plantillas(textos):
+def revisar_plantillas(textos, inventario=COLORES_EN_PLANTILLAS):
     """Lo que k) comprueba de los dibujos de las plantillas ({ruta relativa:
-    texto}): (ficheros cuyo número de colores escritos no es el de
-    COLORES_EN_PLANTILLAS, ficheros con un <svg> sin aria-hidden ni nombre)."""
+    texto}): (ficheros cuyo número de colores escritos no es el de su
+    inventario, ficheros con un <svg> sin aria-hidden ni nombre)."""
     cuentas = {f: len(PATRON_COLOR_PLANTILLA.findall(texto)) for f, texto in textos.items()}
-    distintos = sorted(f for f in set(cuentas) | set(COLORES_EN_PLANTILLAS)
-                       if cuentas.get(f, 0) != COLORES_EN_PLANTILLAS.get(f, 0))
+    distintos = sorted(f for f in set(cuentas) | set(inventario)
+                       if cuentas.get(f, 0) != inventario.get(f, 0))
     sin_nombre = sorted(f for f, texto in textos.items() for svg in PATRON_SVG.findall(texto)
                         if 'aria-hidden="true"' not in svg and not ('role="img"' in svg and "aria-label=" in svg))
     return distintos, sin_nombre
@@ -2950,28 +3160,21 @@ def seccion_k():
     control = round(contraste("#767676", "#ffffff"), 2) == 4.54 and round(contraste("#777777", "#ffffff"), 2) == 4.48
     pasa(control, "k) control: la formula de contraste da 4,54:1 con #767676 y 4,48:1 con #777777 sobre blanco")
     css = ESTILOS_SPA.read_text(encoding="utf-8")
-    flojas, sueltos, inexistentes, olvidados = revisar_hoja(css)
-    # Cada mutante, con el índice de lo que debe hacer saltar en revisar_hoja.
-    controles = {}
-    for nombre, mutante, indice in (("gris claro", MUTANTE_GRIS, 0), ("gris del oscuro", MUTANTE_GRIS_OSCURO, 0),
-                                    ("color olvidado", MUTANTE_OLVIDADO, 3)):
-        if css.count(mutante[0]) != 1:
-            sinc(f"k) el mutante del {nombre} no encuentra su texto en spa/src/styles.css")
-            controles[nombre] = False
-        else:
-            controles[nombre] = bool(revisar_hoja(css.replace(*mutante))[indice])
-    control_suelto = bool(revisar_hoja(css + MUTANTE_COLOR_SUELTO)[1])
-    control_variable = bool(revisar_hoja(css + MUTANTE_VARIABLE)[2])
-    negativo(f"k) las {len(PAREJAS_CONTRASTE)} parejas de colores llegan a su contraste minimo en los dos temas "
-             f"{flojas}".rstrip(),
-             not flojas, control and controles["gris claro"] and controles["gris del oscuro"],
-             "control: con un gris claro en uno de los temas la comprobacion no salta")
-    negativo(f"k) el tema oscuro redefine todos los colores del claro {olvidados}".rstrip(), not olvidados,
-             controles["color olvidado"], "control: un color que falta en el oscuro no se detecta")
-    negativo(f"k) ningun color fuera de los dos :root {sueltos}".rstrip(), not sueltos, control_suelto,
-             "control: un color suelto no se detecta")
-    negativo(f"k) toda variable usada esta definida {inexistentes}".rstrip(), not inexistentes, control_variable,
-             "control: una variable que no existe no se detecta")
+    css_8444 = ESTILOS_8444.read_text(encoding="utf-8")
+    revisar_base("spa/src/styles.css", css, PAREJAS_CONTRASTE, control)
+    revisar_base("proxy/estatico/canario.css", css_8444, PAREJAS_8444, control)
+
+    # El 8444 con los valores de la SPA, con un color cambiado como control.
+    distintas = revisar_comunes(css_8444, css)
+    if css_8444.count(MUTANTE_8444_DISTINTO[0]) != 1:
+        sinc("k) el mutante de las variables comunes no encuentra su texto en proxy/estatico/canario.css")
+        control_comunes = False
+    else:
+        control_comunes = bool(revisar_comunes(css_8444.replace(*MUTANTE_8444_DISTINTO), css))
+    negativo(f"k) cada variable del 8444 existe en la SPA con el mismo valor en los dos temas {distintas}".rstrip(),
+             not distintas, control_comunes, "control: un color distinto en el 8444 no se detecta")
+    negativo(f"k) la hoja del 8444 no tiene url() {urls_hoja(css_8444)}".rstrip(), not urls_hoja(css_8444),
+             bool(urls_hoja(css_8444 + MUTANTE_URL)), "control: una url() no se detecta")
 
     # Los botones ocupados, con el mutante de entrar.ts como control.
     textos = {f.relative_to(APP_SPA).as_posix(): f.read_text(encoding="utf-8") for f in APP_SPA.rglob("*.ts")}
@@ -3004,6 +3207,51 @@ def seccion_k():
              not colores, control_colores, 'control: un fill="#000000" en Leila no se detecta')
     negativo(f"k) todo SVG de las plantillas es decorativo o tiene nombre {sin_nombre}".rstrip(),
              not sin_nombre, control_svg, "control: Leila sin aria-hidden no se detecta")
+
+    # Las plantillas del 8444, sin ningún color en su inventario, con dos
+    # mutantes del canario de la barra como control.
+    html = {f.name: f.read_text(encoding="utf-8") for f in PLANTILLAS_8444.glob("*.html")}
+    colores, sin_nombre = revisar_plantillas(html, {})
+    if html.get(FICHERO_BASE_8444, "").count(ANCLA_CANARIO_8444) != 1:
+        sinc(f"k) los mutantes del canario no encuentran su texto en app/plantillas/{FICHERO_BASE_8444}")
+        control_colores = control_svg = False
+    else:
+        base = html[FICHERO_BASE_8444]
+        con_color = {**html, FICHERO_BASE_8444: base.replace(ANCLA_CANARIO_8444, ANCLA_CANARIO_8444 + ' fill="#000000"')}
+        control_colores = FICHERO_BASE_8444 in revisar_plantillas(con_color, {})[0]
+        sin_aria = {**html, FICHERO_BASE_8444: base.replace(ANCLA_CANARIO_8444, '<svg class="canario"')}
+        control_svg = FICHERO_BASE_8444 in revisar_plantillas(sin_aria, {})[1]
+    negativo(f"k) las plantillas del 8444 no escriben colores ({len(html)} ficheros) {colores}".rstrip(),
+             not colores and len(html) > 0, control_colores, 'control: un fill="#000000" en el canario no se detecta')
+    negativo(f"k) todo SVG de las plantillas del 8444 es decorativo o tiene nombre {sin_nombre}".rstrip(),
+             not sin_nombre, control_svg, "control: el canario sin aria-hidden no se detecta")
+
+
+def revisar_base(nombre, css, parejas, control_formula):
+    """Las cuatro comprobaciones de k) sobre una hoja, cada una con su
+    mutante como control."""
+    flojas, sueltos, inexistentes, olvidados = revisar_hoja(css, parejas, nombre)
+    # Cada mutante, con el índice de lo que debe hacer saltar en revisar_hoja.
+    controles = {}
+    for caso, mutante, indice in (("gris claro", MUTANTE_GRIS, 0), ("gris del oscuro", MUTANTE_GRIS_OSCURO, 0),
+                                  ("color olvidado", MUTANTE_OLVIDADO, 3)):
+        if css.count(mutante[0]) != 1:
+            sinc(f"k) el mutante del {caso} no encuentra su texto en {nombre}")
+            controles[caso] = False
+        else:
+            controles[caso] = bool(revisar_hoja(css.replace(*mutante), parejas, nombre)[indice])
+    control_suelto = bool(revisar_hoja(css + MUTANTE_COLOR_SUELTO, parejas, nombre)[1])
+    control_variable = bool(revisar_hoja(css + MUTANTE_VARIABLE, parejas, nombre)[2])
+    negativo(f"k) {nombre}: las {len(parejas)} parejas de colores llegan a su contraste minimo en los dos temas "
+             f"{flojas}".rstrip(),
+             not flojas, control_formula and controles["gris claro"] and controles["gris del oscuro"],
+             "control: con un gris claro en uno de los temas la comprobacion no salta")
+    negativo(f"k) {nombre}: el tema oscuro redefine todos los colores del claro {olvidados}".rstrip(), not olvidados,
+             controles["color olvidado"], "control: un color que falta en el oscuro no se detecta")
+    negativo(f"k) {nombre}: ningun color fuera de los dos :root {sueltos}".rstrip(), not sueltos, control_suelto,
+             "control: un color suelto no se detecta")
+    negativo(f"k) {nombre}: toda variable usada esta definida {inexistentes}".rstrip(), not inexistentes,
+             control_variable, "control: una variable que no existe no se detecta")
 
 
 def seccion_l():
@@ -3759,6 +4007,77 @@ def limpiar():
     return dc("down", "-v", "--rmi", "local")
 
 
+def seccion_q():
+    p("=== q) el sitio del denunciante (8444) en Chromium: la hoja, el aviso del dispositivo y 320 px sin desbordar")
+    if not IDENTIFICADOR:
+        sinc("q) sin la empresa de i) no se puede abrir su formulario")
+        return
+    res = navegador("navegador_q", NAVEGADOR_WEB, [SPKI_INTERMEDIA, IDENTIFICADOR, TEXTO_DENUNCIA_WEB])
+    if res is None:
+        sinc("q) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"q) el recorrido se interrumpe: {res['excepcion']}")
+
+    # El recorrido: cada página es la que se espera, y la denuncia enviada
+    # por el formulario se lee en el expediente.
+    pasa(res.get("h1") == H1_WEB, f"q) el recorrido pasa por las cinco paginas ({res.get('h1')})")
+    pasa(res.get("texto_expediente") == TEXTO_DENUNCIA_WEB,
+         f"q) la denuncia enviada por el formulario se lee en el expediente ({res.get('texto_expediente')!r})")
+    avisos = res.get("avisos") or {}
+    pasa(avisos == {"inicio": AVISO_DISPOSITIVO, "formulario": AVISO_DISPOSITIVO},
+         f"q) el inicio y el formulario llevan los consejos de anonimato ({avisos})")
+
+    # El tema, con el claro como control de que se lee el de la hoja: los
+    # mismos fondos que la SPA en p).
+    control_tema = res.get("fondo_claro") == FONDO_CLARO
+    pasa(control_tema, f"q) control: con el sistema en claro, el fondo es el del claro ({res.get('fondo_claro')!r})")
+    negativo(f"q) con el sistema en oscuro, el fondo es el del oscuro ({res.get('fondo_oscuro')!r})",
+             res.get("fondo_oscuro") == FONDO_OSCURO, control_tema)
+
+    # La fuente del sistema y ninguna declarada; una añadida a mano, sí.
+    familia = res.get("familia") or ""
+    pasa(familia.split(",")[0].strip() == FAMILIA_8444,
+         f"q) la letra es la del sistema ({familia!r})")
+    negativo(f"q) la pagina no declara ninguna fuente ({res.get('fuentes')})", res.get("fuentes") == 0,
+             res.get("fuentes_control") == 1, f"control: una fuente anadida a mano da {res.get('fuentes_control')}")
+    pasa(res.get("canario") == CANARIO_8444,
+         f"q) el canario de la barra es decorativo (aria-hidden) y se ve ({res.get('canario')})")
+
+    # Los controles a 38 px, como en la SPA, cada medida con su control.
+    for nombre, clave, causa in (("el select y el boton del formulario", "altos_formulario",
+                                  "con la apariencia nativa"),
+                                 ("el campo y el boton de la consulta", "altos_seguimiento",
+                                  "con el interlineado del cuerpo")):
+        altos, mutante = res.get(clave), res.get(f"{clave}_mutante")
+        negativo(f"q) {nombre} miden {ALTO_CONTROL} px ({altos})", altos == [ALTO_CONTROL] * 2,
+                 isinstance(mutante, list) and None not in mutante and mutante[0] > ALTO_CONTROL,
+                 f"control: {causa} miden {mutante}")
+    apariencia = res.get("apariencia")
+    negativo(f"q) en los colores forzados el select vuelve a la apariencia nativa ([sin, con] {apariencia})",
+             apariencia == APARIENCIA_SELECT,
+             isinstance(apariencia, list) and len(apariencia) == 2 and apariencia[0] != apariencia[1],
+             "control: la apariencia no cambia con los colores forzados")
+
+    # 320 px, con un bloque de 400 px como control.
+    ancho_control = res.get("ancho_control") or [0, 0]
+    control_ancho = ancho_control[0] > ancho_control[1] > 0
+    pasa(control_ancho, f"q) control: un bloque de 400 px desborda a 320 px ({ancho_control})")
+    anchos = res.get("anchos") or {}
+    anchas = {n: a for n, a in anchos.items() if not 0 < a[0] <= a[1]}
+    negativo(f"q) a 320 px ninguna pagina del 8444 desborda en horizontal ({len(anchos)} de {len(H1_WEB)}) "
+             f"{anchas if anchas else ''}".rstrip(),
+             sorted(anchos) == sorted(H1_WEB) and not anchas, control_ancho, f"{anchos}")
+
+    consola = res.get("consola") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    control_csp = bool(senales_csp(consola[corte:]))
+    pasa(control_csp,
+         f"q) control: una imagen de otro origen deja su violacion de la CSP ({senales_csp(consola[corte:])[:1]})")
+    negativo(f"q) en todo el recorrido, ninguna violacion de la CSP ({len(senales_csp(consola[:corte]))})",
+             not senales_csp(consola[:corte]), control_csp, f"{senales_csp(consola[:corte])[:3]}")
+
+
 def seccion_s():
     p("=== s) limpieza")
     r = limpiar()
@@ -3881,7 +4200,7 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p):
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p, seccion_q):
             seccion()
     except Parada as e:
         parada = str(e)
