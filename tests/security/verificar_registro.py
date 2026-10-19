@@ -42,7 +42,15 @@ Qué prueba:
 * j) sin CANARIO_ORIGEN_PERSONAL, o mal formado, la API no arranca;
 * k) con PostgreSQL parado, el registro responde el mismo 202 al momento (la
   base de datos va después de responder) y el fallo queda en el log, como
-  EVENTO registro_fallido, sin el email.
+  EVENTO registro_fallido, sin el email;
+* l) (tras h y antes de i) la herramienta del buzón de desarrollo (scripts/buzon.py)
+  enseña un correo de verificación con su asunto, su destinatario y el
+  enlace entero, el mismo que lee el lector propio de la batería; con Mailpit
+  parado (la red correo sigue, como al arrancar sin el perfil desarrollo) sale
+  con código 1 y un error, sin enlaces ni traza (control: con Mailpit sale
+  con 0). Va después de las secciones que leen correos anteriores, porque
+  parar Mailpit borra su buzón (tmpfs), y antes de k, que deja la API
+  reconectando con PostgreSQL.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -144,6 +152,11 @@ ASUNTO_AVISO_PENDIENTE = "Su solicitud de registro en Canario sigue pendiente"
 ASUNTO_INVITACION = "Active su cuenta del personal en Canario"
 ASUNTO_ACTIVACION = "Aviso de Canario: se ha activado una cuenta del personal"
 TEXTO_SIN_DESTINATARIO = "EVENTO aviso_sin_destinatario: tipo=aviso_activacion empresa="
+
+# l) La herramienta del buzón (scripts/buzon.py): su primera línea de error y
+# un límite que alcanza a todos los correos de la batería.
+ERROR_BUZON = "ERROR: no se pudo leer el buzon de Mailpit: "
+LIMITE_BUZON = 100
 PATRON_VERIFICACION = re.compile(r"https://localhost:8445/registro/verificacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 PATRON_ACTIVACION = re.compile(r"https://localhost:8445/activacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 ACCION_APROBACION = "aprobacion_registro"
@@ -1028,6 +1041,46 @@ def seccion_k():
     pasa(arranca.rc == 0, f"k) PostgreSQL vuelve a arrancar (codigo {arranca.rc})")
 
 
+def buzon_herramienta(proyecto):
+    """scripts/buzon.py tal cual lo usa una persona, con el proyecto dado."""
+    return ejecutar([sys.executable, str(RAIZ / "scripts" / "buzon.py"), "--proyecto", proyecto,
+                     "--limite", str(LIMITE_BUZON)], timeout=120)
+
+
+def seccion_l():
+    p("=== l) la herramienta del buzon de desarrollo ensena el correo con su enlace, o falla de forma visible")
+    ident = EMPRESAS["A"][1]
+    email = "l.buzon@registro.test"
+    r = una(registro(ident, email))
+    correos = esperar_correos(email, 1)
+    token = token_de(correos[0], PATRON_VERIFICACION) if correos else None
+    if r.get("estado") != 202 or token is None:
+        sinc(f"l) sin un correo de verificacion no hay oraculo ({r.get('estado')}, {len(correos)} correos)")
+        return
+    # Oráculo: el enlace entero, con el origen literal y el token que leyó el
+    # lector propio de la batería (LECTOR_CORREO), no la herramienta.
+    enlace = f"{ORIGEN_PERSONAL}/registro/verificacion#{token}"
+    r = buzon_herramienta(PROYECTO)
+    lineas = [linea.strip() for linea in r.out.splitlines()]
+    control = r.rc == 0 and enlace in lineas
+    # Sin volcar la salida: lleva tokens.
+    pasa(control, f"l) control: con Mailpit, la herramienta sale con 0 y muestra el enlace entero en su linea "
+                  f"(codigo {r.rc}, {len(lineas)} lineas)")
+    pasa(control and f"Asunto: {ASUNTO_VERIFICACION}" in lineas and f"Para:   {email}" in lineas,
+         "l) y el asunto y el destinatario del correo de verificacion")
+    # Mailpit parado con la red correo en pie (la API sigue en ella): lo que
+    # pasa al arrancar la pila sin el perfil desarrollo.
+    dc("stop", "mailpit")
+    try:
+        sin = buzon_herramienta(PROYECTO)
+    finally:
+        dc("start", "mailpit")
+    negativo("l) con Mailpit parado sale con 1 y un error claro, sin enlaces ni traza",
+             sin.rc == 1 and sin.err.startswith(ERROR_BUZON) and "https://" not in sin.out
+             and "Traceback" not in sin.todo, control,
+             f"(codigo {sin.rc}, {sin.err.strip()[:200]!r})")
+
+
 def seccion_s():
     p("=== s) limpieza")
     r = dc("down", "-v", "--rmi", "local")
@@ -1122,8 +1175,11 @@ def main():
     TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_registro_"))
     parada = None
     try:
+        # l va antes de i: necesita la API y PostgreSQL sanos (k, la última,
+        # deja el pool reconectando) y para Mailpit, que borra su buzón; i
+        # también lo para y no depende de correos anteriores.
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h,
-                        seccion_i, seccion_j, seccion_k):
+                        seccion_l, seccion_i, seccion_j, seccion_k):
             seccion()
     except Parada as e:
         parada = str(e)
