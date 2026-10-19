@@ -139,9 +139,15 @@ etapa. Prueba:
   horizontal (control: un elemento de 400 px sí desborda); la barra separa el
   email del rol con un espacio; con las solicitudes vacías (bloque 6b-4b),
   Leila sale con aria-hidden (si la lista no está vacía, SIN CONCLUSION), y
-  también en la 404 (si la ruta no da la 404, SIN CONCLUSION); ninguna violación
-  de la CSP ni error de JavaScript (control: una fuente de otro origen sí
-  deja su violación de font-src).
+  también en la 404 (si la ruta no da la 404, SIN CONCLUSION); a 1280 px
+  (pulido 1), el botón de cerrar la sesión acaba en el borde derecho de la
+  barra, menos su relleno (control: con el reseteo .barra p de antes, no);
+  h1, h2 y h3 miden 24, 20 y 18 px, a 600 (control: con el h2 del navegador,
+  no); las patas del canario contrastan al menos 3:1 con la barra y con el
+  fondo de /entrar en los dos temas (control: con el contorno casi negro, en
+  la barra no); ninguna violación de la CSP ni error de JavaScript (control:
+  una fuente de otro origen sí deja su violación de font-src). Los controles
+  del pulido añaden su regla a la hoja con el CSSOM, que la CSP no limita.
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
 misma forma (docs/threat-model.md, 8); Web Locks y las cookies en otros
@@ -161,7 +167,9 @@ provocar cada 404 y 409 desde la pantalla exigiría cambiar los datos por
 debajo a mitad del recorrido. Del tema oscuro, en el navegador solo el fondo:
 el contraste de cada pareja lo comprueba k) sobre la hoja. Del ancho de 320
 px, las páginas del instructor y del auditor y el expediente de una denuncia:
-usan las mismas piezas que las del admin. Y que Geist tenga todos los
+usan las mismas piezas que las del admin. Las patas del canario en la barra
+del tema oscuro: la barra y su texto tienen los mismos colores en los dos
+temas. Y que Geist tenga todos los
 caracteres del castellano: si le falta uno, el navegador lo pinta con la
 fuente del sistema.
 
@@ -393,6 +401,8 @@ PRUEBAS_UNITARIAS = (
     "la verificación: intacta, o la fila donde se rompe",
     "la primera página va sin antes, las anteriores con él",
     "lleva a Leila decorativa y conserva el aviso y el botón de reintentar",
+    "los accesos del inicio son las páginas del rol, sin el propio inicio y cada una con su descripción",
+    "los plazos de la Ley 2/2023 los ven quienes instruyen, y el auditor no",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
 # Mutantes del interceptor, del guard, del cliente de denuncias y de los
@@ -646,6 +656,14 @@ FONDO_OSCURO = "rgb(11, 13, 16)"
 FUENTES_ESPERADAS = [["Geist", "loaded"]]
 # Las páginas del admin que se miran a 320 px, además de /entrar.
 RUTAS_ANCHO = ["/inicio", "/denuncias", "/cuentas", "/solicitudes", "/auditoria", "/cuenta"]
+# p) Pulido 1. A 1280 px, lo que queda entre el botón de cerrar la sesión y el
+# borde derecho: el relleno de la barra (--espacio-6, 1.5rem). Los títulos de
+# /cuentas (h1 y h2) y un h3, con su tamaño y su peso. Y el contraste mínimo de
+# las patas del canario con lo que tienen detrás (WCAG 2.2, 1.4.11).
+ANCHO_ESCRITORIO = 1280
+HUECO_BARRA = 24
+TITULOS_ESPERADOS = ["24px 600", "20px 600", "18px 600"]
+CONTRASTE_PATAS = 3.0
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -799,9 +817,12 @@ async def entrar(pagina, clave, codigo):
 
 
 async def en_inicio(pagina):
+    # El email y el rol de /yo, en la barra del armazón (el inicio ya no los
+    # repite). Un solo elemento de cada: el modo estricto de Playwright falla
+    # si hubiera dos.
     await pagina.wait_for_url(ORIGEN + "/inicio")
-    await pagina.locator(".cuenta dd").first.wait_for()
-    return await pagina.locator(".cuenta dd").all_inner_texts()
+    await pagina.locator(".quien-email").wait_for()
+    return [await pagina.locator(".quien-email").inner_text(), await pagina.locator(".quien-rol").inner_text()]
 
 
 async def renovar_a_mano(pagina):
@@ -1018,7 +1039,7 @@ async def entrar(pagina, email, clave, secreto):
     await pagina.get_by_label(CODIGO).fill(await codigo_de(secreto))
     await pagina.get_by_role("button", name="Entrar", exact=True).click()
     await pagina.wait_for_url(ORIGEN + "/inicio")
-    await pagina.locator(".cuenta dd").first.wait_for()
+    await pagina.locator(".quien-email").wait_for()
 
 
 async def menu(pagina):
@@ -1706,6 +1727,7 @@ NAVEGADOR_ESTETICA = NAVEGADOR_PERSONAL + r'''
 spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin = sys.argv[1:7]
 rutas_ancho = json.loads(sys.argv[7])
 ruta_sin_pagina = sys.argv[8]
+ancho_escritorio = int(sys.argv[9])
 usados[secreto_admin] = int(paso_admin)
 # La familia sin comillas, las ponga Chromium o no.
 FUENTES = "() => [...document.fonts].map((f) => [f.family.replace(/[\"']/g, ''), f.status])"
@@ -1723,6 +1745,36 @@ SUELTA = ("() => { const h = document.querySelector('main h1'); const s = docume
           "return {h1: h === null ? null : h.textContent.trim(), "
           "svg: [...document.querySelectorAll('main svg')].map((e) => [e.getAttribute('class'), e.getAttribute('aria-hidden')]), "
           "alto: s === null ? 0 : s.getBoundingClientRect().height}; }")
+# Pulido 1. La hoja de la SPA (styles-*.css, del mismo origen) para los
+# controles: se les añade una regla al final con el CSSOM y se quita después.
+HOJA = ("[...document.styleSheets].find((s) => s.href !== null "
+        "&& new URL(s.href).pathname.startsWith('/styles-'))")
+INSERTAR = "(regla) => { const h = " + HOJA + "; return h.insertRule(regla, h.cssRules.length); }"
+QUITAR = "(i) => { " + HOJA + ".deleteRule(i); }"
+# Lo que queda entre el botón de cerrar la sesión y el borde derecho.
+BARRA = ("() => { const b = document.querySelector('.barra button'); "
+         "return Math.round(document.documentElement.clientWidth - b.getBoundingClientRect().right); }")
+# Tamaño y peso de h1 y h2 de la página, y de un h3 puesto en main y quitado
+# enseguida (las páginas del admin sin denuncias no tienen ninguno).
+TITULOS = ("() => { const m = document.querySelector('main'); const h3 = document.createElement('h3'); "
+           "h3.textContent = 'x'; m.append(h3); "
+           "const t = (s) => { const c = getComputedStyle(m.querySelector(s)); return c.fontSize + ' ' + c.fontWeight; }; "
+           "const r = [t('h1'), t('h2'), t('h3')]; h3.remove(); return r; }")
+# El color de las patas del canario y el fondo que tienen detrás.
+PATAS = ("(fondo) => [getComputedStyle(document.querySelector('.canario-patas')).stroke, "
+         "getComputedStyle(document.querySelector(fondo)).backgroundColor]")
+MUTANTE_BARRA = ".barra p { margin: 0; }"
+MUTANTE_H2 = "h2 { font-size: 1.5em; font-weight: 700; }"
+MUTANTE_PATAS = ".canario-patas { stroke: var(--color-canario-contorno); }"
+
+
+async def con_regla(pagina, regla, medida, argumento=None):
+    # Mide con una regla de más al final de la hoja, y la quita.
+    indice = await pagina.evaluate(INSERTAR, regla)
+    try:
+        return await pagina.evaluate(medida, argumento)
+    finally:
+        await pagina.evaluate(QUITAR, indice)
 
 
 async def pagina_con(navegador, nombre, tema):
@@ -1741,6 +1793,7 @@ async def pasos_estetica(navegador):
     await claro.evaluate("() => document.fonts.ready.then(() => null)")
     res["fuentes"] = await claro.evaluate(FUENTES)
     res["fondo_claro"] = await claro.evaluate(FONDO)
+    res["patas_entrar_claro"] = await claro.evaluate(PATAS, "body")
     anchos = {"/entrar": await claro.evaluate(ANCHO)}
     await entrar(claro, email_admin, contrasena_admin, secreto_admin)
     # El texto de la barra tal cual, sin depender del ancho: textContent.
@@ -1757,10 +1810,24 @@ async def pasos_estetica(navegador):
     res["anchos"] = anchos
     res["ultimo_paso_admin"] = usados[secreto_admin]
 
+    # Pulido 1, en una pantalla de escritorio: la barra, los títulos y las
+    # patas del canario sobre la barra; cada uno con su control.
+    await claro.set_viewport_size({"width": ancho_escritorio, "height": 800})
+    await abrir(claro, "/cuentas")
+    res["hueco_barra"] = await claro.evaluate(BARRA)
+    res["titulos"] = await claro.evaluate(TITULOS)
+    res["patas_barra"] = await claro.evaluate(PATAS, ".barra")
+    res["hueco_barra_mutante"] = await con_regla(claro, MUTANTE_BARRA, BARRA)
+    res["titulos_mutante"] = await con_regla(claro, MUTANTE_H2, TITULOS)
+    res["patas_barra_mutante"] = await con_regla(claro, MUTANTE_PATAS, PATAS, ".barra")
+    # De vuelta a 320 px: el control del ancho de abajo se mide en esta página.
+    await claro.set_viewport_size({"width": 320, "height": 640})
+
     oscuro = await pagina_con(navegador, "oscuro", "dark")
     await oscuro.goto(ORIGEN + "/entrar")
     await h1(oscuro)
     res["fondo_oscuro"] = await oscuro.evaluate(FONDO)
+    res["patas_entrar_oscuro"] = await oscuro.evaluate(PATAS, "body")
 
     # Lo que sigue deja mensajes en la consola a propósito. La comprobación
     # de la consola mira solo hasta aquí.
@@ -2327,7 +2394,7 @@ def seccion_i():
     pasa(fallido.get("alerta") == ALERTA_LOGIN, f"i) el login fallido se anuncia con role=alert ({fallido.get('alerta')!r})")
 
     # Login correcto.
-    pasa(res.get("inicio") == [EMAIL_ADMIN, NOMBRE_ROL_ADMIN], f"i) /inicio muestra el email y el rol ({res.get('inicio')})")
+    pasa(res.get("inicio") == [EMAIL_ADMIN, NOMBRE_ROL_ADMIN], f"i) /inicio muestra en la barra el email y el rol ({res.get('inicio')})")
     pasa(res.get("foco_inicio") == H1_INICIO, f"i) al cambiar de pagina el foco va al h1 ({res.get('foco_inicio')!r})")
     sesion = res.get("cookies_sesion") or {}
     atributos = {"httpOnly": True, "secure": True, "sameSite": "Strict", "path": "/"}
@@ -2440,6 +2507,21 @@ def luminancia(color):
 def contraste(a, b):
     claro, oscuro = sorted((luminancia(a), luminancia(b)), reverse=True)
     return (claro + 0.05) / (oscuro + 0.05)
+
+
+def contraste_rgb(pareja):
+    """El contraste de [primer plano, fondo] tal como los da getComputedStyle
+    ("rgb(r, g, b)"), o None si alguno no tiene esa forma (otro formato, un
+    color con transparencia o nada)."""
+    if not isinstance(pareja, list) or len(pareja) != 2:
+        return None
+    colores = []
+    for texto in pareja:
+        m = re.fullmatch(r"rgb\((\d+), (\d+), (\d+)\)", texto if isinstance(texto, str) else "")
+        if m is None:
+            return None
+        colores.append("#" + "".join(f"{int(c):02x}" for c in m.groups()))
+    return contraste(*colores)
 
 
 def revisar_hoja(css):
@@ -3115,7 +3197,7 @@ def seccion_p():
         return
     res = navegador("navegador_p", NAVEGADOR_ESTETICA,
                     [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
-                     json.dumps(RUTAS_ANCHO), RUTA_SIN_PAGINA])
+                     json.dumps(RUTAS_ANCHO), RUTA_SIN_PAGINA, str(ANCHO_ESCRITORIO)])
     if res is None:
         sinc("p) no se pudo ejecutar el navegador")
         return
@@ -3166,6 +3248,32 @@ def seccion_p():
     else:
         pasa(suelta.get("svg") == [["leila", "true"]] and suelta.get("alto", 0) > 0,
              f"p) en la pagina no encontrada, Leila sale decorativa (aria-hidden) y se ve ({suelta})")
+
+    # Pulido 1: la barra, los títulos y las patas del canario, cada uno con
+    # su regla de antes como control.
+    hueco, hueco_mutante = res.get("hueco_barra"), res.get("hueco_barra_mutante")
+    negativo(f"p) a {ANCHO_ESCRITORIO} px el boton de cerrar la sesion acaba en el borde derecho de la barra "
+             f"(hueco {hueco}, esperado {HUECO_BARRA})",
+             hueco == HUECO_BARRA, isinstance(hueco_mutante, int) and hueco_mutante != HUECO_BARRA,
+             f"control: con .barra p {{ margin: 0 }} el hueco sigue siendo {hueco_mutante}")
+    titulos, titulos_mutante = res.get("titulos"), res.get("titulos_mutante")
+    negativo(f"p) h1, h2 y h3 con su tamano y su peso {titulos} (esperado {TITULOS_ESPERADOS})",
+             titulos == TITULOS_ESPERADOS,
+             isinstance(titulos_mutante, list) and titulos_mutante != TITULOS_ESPERADOS,
+             f"control: con el h2 del navegador no cambia nada ({titulos_mutante})")
+    patas = {sitio: contraste_rgb(res.get(clave)) for sitio, clave in (
+        ("barra", "patas_barra"), ("/entrar en claro", "patas_entrar_claro"),
+        ("/entrar en oscuro", "patas_entrar_oscuro"))}
+    patas_mutante = contraste_rgb(res.get("patas_barra_mutante"))
+    control_patas = patas_mutante is not None and patas_mutante < CONTRASTE_PATAS
+    if any(v is None for v in patas.values()):
+        sinc(f"p) no se pudo leer el color de las patas o de su fondo ({res.get('patas_barra')}, "
+             f"{res.get('patas_entrar_claro')}, {res.get('patas_entrar_oscuro')})")
+    else:
+        negativo(f"p) las patas del canario contrastan al menos {CONTRASTE_PATAS}:1 con su fondo "
+                 f"{ {s: round(v, 2) for s, v in patas.items()} }",
+                 all(v >= CONTRASTE_PATAS for v in patas.values()), control_patas,
+                 f"control: con el contorno casi negro, en la barra da {patas_mutante}")
 
     # Consola.
     consola, errores = res.get("consola") or [], res.get("errores") or []
