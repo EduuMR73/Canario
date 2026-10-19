@@ -205,10 +205,30 @@ main.ancho {
   padding-top: 2rem;
 }
 
+/* La escala de los títulos, toda explícita: sin ella, h2 y h3 toman los
+   tamaños y la negrita del navegador (h2 a 1.5em y 700), y un h2 se veía
+   igual de grande y más grueso que el h1. h3 queda por encima del cuerpo y
+   de las etiquetas de los campos, que también van a 600. Un título puede
+   llevar un email entero, sin espacios: se parte en vez de desbordar a
+   320 px. */
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 h1 {
   font-size: 1.5rem;
-  font-weight: 600;
   letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: 1.25rem;
+}
+
+h3 {
+  font-size: 1.125rem;
 }
 
 .formulario {
@@ -368,13 +388,98 @@ button[aria-disabled="true"] {
   word-break: break-all;
 }
 
-.cuenta dt {
-  font-weight: 600;
+/* Los accesos del inicio: una tarjeta por página, en una rejilla que pone
+   tantas columnas como quepan de al menos 18rem y una sola en una pantalla
+   estrecha (min(100%, ...): a 320 px no desborda), sin media queries. Sigue
+   siendo una lista: el lector de pantalla anuncia cuántas páginas hay.
+   La tarjeta va sobre el fondo de la página, sin un fondo propio: así sus
+   textos usan parejas de colores que ya se comprueban. */
+.accesos {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+  gap: var(--espacio-4);
+  margin: 0 0 var(--espacio-4);
+  padding: 0;
+  list-style: none;
 }
 
-.cuenta dd {
-  margin: 0 0 var(--espacio-3);
-  overflow-wrap: anywhere;
+/* position: relative hace de la tarjeta el bloque contenedor del ::after
+   del enlace. */
+.accesos > li {
+  position: relative;
+  padding: var(--espacio-3) var(--espacio-4);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
+}
+
+.accesos > li:hover {
+  border-color: var(--color-borde);
+}
+
+/* Toda la tarjeta lleva a la página, pero el enlace es solo el título: su
+   nombre accesible queda corto y la descripción no se lee dos veces. Su
+   ::after se estira sobre la tarjeta y recibe los clics (el patrón "block
+   link" de Inclusive Components). Sin subrayado: no está dentro de un
+   texto corrido, sino solo y en negrita como título (WCAG 2.2, F73 se
+   refiere a los enlaces dentro de un párrafo); se subraya al pasar por
+   encima. */
+.accesos a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.accesos a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radio);
+}
+
+.accesos > li:hover a {
+  text-decoration: underline;
+}
+
+/* El foco rodea la tarjeta entera, que es lo que se pulsa: el contorno
+   pasa del enlace a su ::after, con el mismo color y grosor que el resto
+   (:focus-visible, arriba). */
+.accesos a:focus-visible {
+  outline: none;
+}
+
+.accesos a:focus-visible::after {
+  outline: 3px solid var(--color-acento);
+  outline-offset: 2px;
+}
+
+.accesos p {
+  margin: var(--espacio-1) 0 0;
+  color: var(--color-texto-suave);
+}
+
+/* Los plazos de la Ley 2/2023 en el inicio de quien instruye: una caja
+   como las tarjetas, sobre el mismo fondo (sin parejas de colores nuevas).
+   Es información fija, no un aviso: sin role="alert". */
+.plazos {
+  padding: var(--espacio-3) var(--espacio-4);
+  border: 1px solid var(--color-separador);
+  border-radius: var(--radio);
+}
+
+.plazos > h2 {
+  margin: 0 0 var(--espacio-2);
+}
+
+.plazos > ul {
+  margin: 0;
+  padding-inline-start: var(--espacio-5);
+}
+
+.plazos > ul > li + li {
+  margin-top: var(--espacio-2);
+}
+
+.plazos > .ayuda {
+  margin: var(--espacio-3) 0 0;
 }
 
 /* Las páginas de acceso (entrar, activar, solicitar y confirmar): el
@@ -454,15 +559,16 @@ main.acceso {
   border-bottom: 1px solid var(--color-separador);
 }
 
-.barra p {
-  margin: 0;
-}
-
+/* Sin un reseteo por elemento (.barra p): con su especificidad (0,1,1)
+   ganaba a .quien (0,1,0), le quitaba el margin-left: auto y la cuenta
+   quedaba pegada al menú. Cada párrafo de la barra quita su margen en su
+   propia clase. */
 .barra :focus-visible {
   outline-color: var(--color-foco-barra);
 }
 
 .marca {
+  margin: 0;
   display: flex;
   align-items: center;
   gap: var(--espacio-2);
@@ -497,8 +603,10 @@ main.acceso {
   border-bottom-color: var(--color-foco-barra);
 }
 
+/* margin-left: auto la empuja, con el botón de cerrar, al extremo derecho
+   de la barra; en una pantalla estrecha, al de su línea. */
 .quien {
-  margin-left: auto;
+  margin: 0 0 0 auto;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -798,8 +906,15 @@ td.acciones > * {
   fill: var(--color-canario-contorno);
 }
 
+/* Las patas son lo único del canario que va sobre el fondo y no sobre el
+   amarillo: con el contorno casi negro no se veían en la barra (oscura en
+   los dos temas) ni en las páginas de acceso del oscuro. Toman el color del
+   texto que las rodea, que ya contrasta con su fondo en cada sitio y que en
+   los colores forzados de Windows pasa a ser el del sistema. Va después de
+   .canario-trazo, que también fija stroke, para ganarle. */
 .canario-patas {
   fill: none;
+  stroke: currentColor;
 }
 
 /* Leila: con width y height en el SVG reserva su sitio al cargar; aquí no
