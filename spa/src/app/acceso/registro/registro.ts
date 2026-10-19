@@ -8,8 +8,15 @@ import { enfocarEncabezado } from '../../nucleo/foco';
 
 // Solicitud de acceso, "primero el email" (app/solicitudes.py): empresa y
 // email. La API responde siempre lo mismo, exista o no la empresa o la
-// cuenta, y aquí se muestra su mensaje tal cual: la página tampoco puede
-// distinguir los casos. El rol lo elige un admin al aprobar.
+// cuenta, así que la página enseña un texto fijo suyo (el de la API va en
+// minúscula, pensado para cualquier cliente): no distingue los casos ni
+// pierde nada. El rol lo elige un admin al aprobar.
+//
+// Sin entradilla: el correo de confirmación lo anuncia el aviso al enviar, y
+// la revisión del admin, la página de confirmación del email (acceso/
+// verificacion), cada cosa cuando pasa.
+const TEXTO_SOLICITADO = 'Si los datos son correctos, recibirá un correo en unos minutos. Si no le llega, vuelva a solicitarlo más tarde.';
+
 @Component({
   selector: 'app-registro',
   imports: [Canario, ReactiveFormsModule, RouterLink],
@@ -17,14 +24,13 @@ import { enfocarEncabezado } from '../../nucleo/foco';
     <main class="acceso">
       <app-canario />
       <h1 tabindex="-1">Solicitar acceso</h1>
-      @if (respuesta(); as mensaje) {
+      @if (solicitado()) {
         <div class="tarjeta">
-          <p role="status">{{ mensaje }}</p>
+          <p role="status">{{ texto }}</p>
         </div>
         <p class="tarjeta-pie"><a routerLink="/entrar">Volver a la entrada</a></p>
       } @else {
         <form class="tarjeta" [formGroup]="formulario" (ngSubmit)="solicitar()" ngNativeValidate>
-          <p>Le enviaremos un correo para confirmar que el email es suyo. Después, un admin de su empresa revisará la solicitud.</p>
           <p class="campo">
             <label for="registro-empresa">Empresa</label>
             <input id="registro-empresa" formControlName="empresa" required autocomplete="organization"
@@ -56,7 +62,8 @@ export class Registro {
   // quitarle el foco (acceso/entrar): la guarda de solicitar() es la barrera.
   readonly enviando = signal(false);
   readonly error = signal<string | null>(null);
-  readonly respuesta = signal<string | null>(null);
+  readonly solicitado = signal(false);
+  readonly texto = TEXTO_SOLICITADO;
 
   solicitar(): void {
     if (this.enviando()) {
@@ -66,8 +73,8 @@ export class Registro {
     this.error.set(null);
     const { empresa, email } = this.formulario.getRawValue();
     this.api.solicitarRegistro(empresa, email).subscribe({
-      next: (respuesta) => {
-        this.respuesta.set(respuesta.mensaje);
+      next: () => {
+        this.solicitado.set(true);
         enfocarEncabezado(this.injector);
       },
       error: (error: unknown) => {

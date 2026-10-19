@@ -12,6 +12,9 @@ import { consumirToken } from '../../nucleo/fragmento';
 // Se envía al pulsar el botón, no al abrir la página: algunos filtros de
 // correo abren los enlaces, y si ejecutan JavaScript gastarían un token de un
 // solo uso sin que la persona hiciera nada.
+//
+// Confirmado el email, la página no se queda sin salida: "Volver a la
+// entrada" debajo de la tarjeta, como en el registro.
 
 type Estado = 'sin-enlace' | 'pendiente' | 'hecho';
 
@@ -42,6 +45,9 @@ type Estado = 'sin-enlace' | 'pendiente' | 'hecho';
           }
         }
       </div>
+      @if (estado() === 'hecho') {
+        <p class="tarjeta-pie"><a routerLink="/entrar">Volver a la entrada</a></p>
+      }
     </main>
   `,
 })

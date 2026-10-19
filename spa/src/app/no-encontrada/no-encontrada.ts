@@ -14,7 +14,7 @@ import { Leila } from '../marca/leila';
     <main class="acceso">
       <app-leila />
       <h1 tabindex="-1">Página no encontrada</h1>
-      <p><a routerLink="/entrar">Ir a la entrada</a></p>
+      <p><a class="boton" routerLink="/entrar">Ir a la entrada</a></p>
     </main>
   `,
   imports: [Leila, RouterLink],

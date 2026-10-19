@@ -298,7 +298,13 @@ textarea {
   color: var(--color-texto-suave);
 }
 
-button {
+/* a.boton: un enlace con el aspecto del botón principal, cuando es la única
+   salida de una página (la activación terminada, la 404). Sigue siendo un
+   enlace, porque navega, como el "start button" de GOV.UK. Comparte estas
+   reglas, el interlineado y el :hover con el botón para no tener dos sitios
+   que mantener; con el borde, en colores forzados se ve su contorno. */
+button,
+a.boton {
   font: inherit;
   font-weight: 600;
   padding: var(--espacio-2) var(--espacio-4);
@@ -307,6 +313,13 @@ button {
   background: var(--color-boton);
   color: var(--color-boton-texto);
   cursor: pointer;
+}
+
+/* Va solo y no dentro de un texto: sin subrayado (como .accesos a). */
+a.boton {
+  display: inline-block;
+  text-align: center;
+  text-decoration: none;
 }
 
 /* Los controles de una línea, con un interlineado más corto que el del
@@ -325,7 +338,8 @@ button {
    misma especificidad gana la última regla. */
 input,
 select,
-button {
+button,
+a.boton {
   line-height: 1.25;
 }
 
@@ -351,7 +365,8 @@ button.peligro {
    plantilla con la clase, no el tipo del botón: "Confirmar mi email" es
    type="button" a propósito (acceso/verificacion) y también es la acción
    principal. */
-button.ancho-completo {
+button.ancho-completo,
+a.boton.ancho-completo {
   width: 100%;
 }
 
@@ -368,7 +383,8 @@ button[aria-disabled="true"] {
 /* :hover solo con un puntero que puede quedarse encima: en una pantalla
    táctil se quedaría pegado tras tocar. Nunca en un botón ocupado. */
 @media (hover: hover) {
-  button:not([aria-disabled="true"]):hover {
+  button:not([aria-disabled="true"]):hover,
+  a.boton:hover {
     background: var(--color-boton-encima);
   }
 
@@ -407,6 +423,20 @@ button[aria-disabled="true"] {
   background: var(--color-aviso-fondo);
 }
 
+/* Dentro de una tarjeta, el error no lleva su propia caja: la tarjeta ya es
+   una, y una caja dentro de otra pesaba más que el formulario. Se queda
+   junto al botón, a la vista de quien acaba de pulsarlo (encima de la
+   tarjeta, en un móvil quedaba fuera de la pantalla y el foco sigue en el
+   botón). No depende solo del color: lo dice el texto, lo marca la barra y
+   va en role="alert". */
+.tarjeta .error {
+  padding: 0 0 0 var(--espacio-3);
+  border: 0;
+  border-inline-start: 3px solid var(--color-peligro);
+  border-radius: 0;
+  background: none;
+}
+
 /* Oculto a la vista pero leído por los lectores de pantalla (el email en los
    botones de cada fila, la etiqueta del rol de una solicitud). */
 .visualmente-oculto {
@@ -428,6 +458,7 @@ button[aria-disabled="true"] {
   width: 12rem;
   height: 12rem;
   max-width: 100%;
+  margin: var(--espacio-4) auto;
   background: var(--color-fondo);
 }
 

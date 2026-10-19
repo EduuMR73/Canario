@@ -41,10 +41,11 @@ import { Sesion } from '../../nucleo/sesion';
                  autocomplete="current-password">
         </p>
         <p class="campo">
-          <label for="entrar-codigo">Código de la aplicación de autenticación</label>
+          <label for="entrar-codigo">Código de autenticación</label>
           <input id="entrar-codigo" formControlName="codigo_totp" required inputmode="numeric"
+                 pattern="[0-9]{6}" title="Las 6 cifras, sin espacios."
                  autocomplete="one-time-code" aria-describedby="entrar-codigo-ayuda">
-          <span id="entrar-codigo-ayuda" class="ayuda">Las 6 cifras que muestra ahora la aplicación.</span>
+          <span id="entrar-codigo-ayuda" class="ayuda">Las 6 cifras que muestra su aplicación.</span>
         </p>
         @if (error(); as texto) {
           <p class="error" role="alert">{{ texto }}</p>

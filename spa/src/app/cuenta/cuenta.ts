@@ -33,10 +33,11 @@ import { enfocarEncabezado } from '../nucleo/foco';
         <input id="cuenta-repetir" type="password" formControlName="repetir" required autocomplete="new-password">
       </p>
       <p class="campo">
-        <label for="cuenta-codigo">Código de la aplicación de autenticación</label>
+        <label for="cuenta-codigo">Código de autenticación</label>
         <input id="cuenta-codigo" formControlName="codigo_totp" required inputmode="numeric"
+               pattern="[0-9]{6}" title="Las 6 cifras, sin espacios."
                autocomplete="one-time-code" aria-describedby="cuenta-codigo-ayuda">
-        <span id="cuenta-codigo-ayuda" class="ayuda">Las 6 cifras que muestra ahora la aplicación.</span>
+        <span id="cuenta-codigo-ayuda" class="ayuda">Las 6 cifras que muestra su aplicación.</span>
       </p>
       @if (error(); as texto) {
         <p class="error" role="alert">{{ texto }}</p>

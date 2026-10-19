@@ -13,6 +13,13 @@ import { qrDe } from '../../nucleo/qr';
 // Dos pasos con el mismo token: la contraseña, que devuelve el secreto TOTP,
 // y el primer código, que activa la cuenta y deja la cookie del dispositivo
 // de confianza. El token y el secreto solo viven en esta página, en memoria.
+//
+// La clave en texto es la alternativa al QR para quien no puede escanearlo
+// (WCAG 2.2, 1.1.1), pero va dentro de un <details> cerrado: no se queda a
+// la vista de quien mire la pantalla, y quien la necesita la abre.
+//
+// El pattern del código solo evita gastar un intento por una errata (5
+// cifras, un espacio): la API lo valida igual.
 
 type Paso = 'sin-enlace' | 'contrasena' | 'codigo' | 'hecho';
 
@@ -35,7 +42,7 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
             <h2 class="paso" tabindex="-1">Paso 1 de 2: elija su contraseña</h2>
             <form [formGroup]="contrasenas" (ngSubmit)="fijarContrasena()" ngNativeValidate>
               <p class="campo">
-                <label for="activacion-contrasena">Contraseña nueva</label>
+                <label for="activacion-contrasena">Contraseña</label>
                 <input id="activacion-contrasena" type="password" formControlName="contrasena" required
                        autocomplete="new-password" aria-describedby="activacion-contrasena-ayuda">
                 <span id="activacion-contrasena-ayuda" class="ayuda">Entre 12 y 128 caracteres. Una frase larga es más fácil de recordar.</span>
@@ -53,7 +60,10 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
           }
           @case ('codigo') {
             <h2 class="paso" tabindex="-1">Paso 2 de 2: configure la aplicación de autenticación</h2>
-            <p>Escanee este código con su aplicación de autenticación (por ejemplo, la de su móvil).</p>
+            <ol>
+              <li>Escanee el código QR con la aplicación de autenticación de su móvil.</li>
+              <li>Escriba abajo el código de 6 cifras que le muestra.</li>
+            </ol>
             @if (qr(); as codigo) {
               <svg class="qr" role="img" aria-label="Código QR para la aplicación de autenticación"
                    [attr.viewBox]="'0 0 ' + codigo.lado + ' ' + codigo.lado" shape-rendering="crispEdges">
@@ -61,14 +71,18 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
                 <path [attr.d]="codigo.ruta" fill="#000000" />
               </svg>
             }
-            <p>Si no puede escanearlo, escriba esta clave en la aplicación:</p>
-            <p><code class="secreto" id="activacion-secreto">{{ secretoAgrupado() }}</code></p>
+            <details>
+              <summary>¿No puede escanear el código QR?</summary>
+              <p>Escriba esta clave en la aplicación del móvil, no en esta página:</p>
+              <p><code class="secreto" id="activacion-secreto">{{ secretoAgrupado() }}</code></p>
+            </details>
             <form [formGroup]="confirmacion" (ngSubmit)="confirmar()" ngNativeValidate>
               <p class="campo">
-                <label for="activacion-codigo">Código de la aplicación de autenticación</label>
+                <label for="activacion-codigo">Código de autenticación</label>
                 <input id="activacion-codigo" formControlName="codigo_totp" required inputmode="numeric"
+                       pattern="[0-9]{6}" title="Las 6 cifras, sin espacios."
                        autocomplete="one-time-code" aria-describedby="activacion-codigo-ayuda">
-                <span id="activacion-codigo-ayuda" class="ayuda">Las 6 cifras que muestra ahora la aplicación.</span>
+                <span id="activacion-codigo-ayuda" class="ayuda">Las 6 cifras que muestra su aplicación.</span>
               </p>
               @if (error(); as texto) {
                 <p class="error" role="alert">{{ texto }}</p>
@@ -81,7 +95,7 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
           @case ('hecho') {
             <h2 class="paso" tabindex="-1">Cuenta activada</h2>
             <p>Este navegador queda como dispositivo de confianza durante 90 días.</p>
-            <p><a routerLink="/entrar">Entrar</a></p>
+            <p><a class="boton ancho-completo" routerLink="/entrar">Entrar</a></p>
           }
         }
       </div>
