@@ -13,6 +13,7 @@ Las amenazas consideradas, las decisiones de diseño y sus límites están en el
 | `proxy/` | Imagen y `Caddyfile` del proxy, el único punto de entrada, y los estáticos del sitio del denunciante (`proxy/estatico/`) |
 | `spa/` | La SPA del personal (Angular 22.2.2), que la imagen del proxy compila y sirve en el 8445 |
 | `scripts/generar_secretos.py` | Crea los secretos que faltan y comprueba el conjunto |
+| `scripts/buzon.py` | En desarrollo, enseña los últimos correos de Mailpit con sus enlaces |
 | `tests/security/` | Las doce baterías de pruebas de seguridad |
 | `tests/unit/` | Las pruebas unitarias de la lógica pura de `app/` |
 | `ruff.toml` | Configuración del análisis estático (ruff) |
@@ -168,10 +169,18 @@ En desarrollo los correos van a Mailpit, que no los entrega a nadie. Está en su
 docker compose --profile desarrollo up -d --build --wait
 ```
 
-Para leer el buzón, desde un contenedor en esa red (con la imagen de la API, que trae Python):
+Para leer el buzón, en PowerShell desde la raíz del repositorio:
 
 ```powershell
-docker run --rm --network canario_correo --entrypoint python canario-api -c "import urllib.request; print(urllib.request.urlopen('http://mailpit:8025/api/v1/messages').read().decode())"
+python scripts/buzon.py
+```
+
+Enseña los 10 últimos correos, del más nuevo al más antiguo, con la fecha, el destinatario, el asunto y cada enlace en su propia línea (en Windows Terminal se abre con Ctrl+clic); `--limite 30` enseña más. Los lee desde un contenedor desechable en esa red, con la imagen de la API, de solo lectura y sin capacidades, y no borra nada. Si Mailpit no está en marcha, lo dice y sale con código 1. Los enlaces llevan tokens de un solo uso: la salida es para la terminal de quien la pide. La interfaz web de Mailpit no se publica a propósito (modelo de amenazas, 8).
+
+Para parar la pila con Mailpit, hay que nombrar el perfil: `docker compose down` sin él deja Mailpit en marcha.
+
+```powershell
+docker compose --profile desarrollo down
 ```
 
 `POST /v1/personal/registro` responde el 202 en el acto: guardar la solicitud y enviar el correo se hace después de responder, para que el tiempo no diga si la empresa existe o el email tiene cuenta. Por email caben 3 solicitudes cada 15 minutos y 10 al día (UTC); pasado eso, 429 con `Retry-After`. Si alguien agota el cupo de un email ajeno, su dueño puede esperar o pedir a un admin que le invite (`POST /v1/personal/usuarios`).
@@ -323,7 +332,7 @@ Doce baterías, una por área. Cada prueba negativa lleva su control positivo: s
 | `verificar_sesion.py` | La sesión del personal en el navegador por el 8445: tokens solo en cookies con sus atributos exactos, CSRF desde otro puerto, rotación y reutilización, cierre, cookies que no salen por el 8443 y logs sin tokens |
 | `verificar_spa.py` | La SPA del personal en el 8445: cabeceras y CSP exactas, nada en línea (con un mutante), imagen sin Node, contexto de compilación aislado, rutas, las pruebas unitarias sin red (con siete mutantes), el contraste de la base visual en los dos temas, la fuente servida con su sha256, los botones ocupados con `aria-disabled` (con un mutante), las plantillas sin colores fuera del inventario y todo SVG decorativo o con nombre (con dos mutantes), y en un Chromium real la carga sin violaciones de la CSP, Trusted Types, la activación, el login, la renovación entre pestañas, el cierre, el registro con su correo, las pantallas por rol (menú, páginas de otro rol, solicitudes, cuentas y contraseña), las denuncias (listado y asignación, expediente que no se lee solo, XSS almacenado con un mutante, id con `..`, mensajes, estados, no veraz y "atrás" tras cerrar la sesión) la auditoría (emails, páginas, actualizar, verificación y un email con HTML con un mutante) y los botones ocupados (el foco tras un login fallido y un solo envío con un doble clic, con dos mutantes, y "Cargar más" hasta el final), y la fuente cargada, el tema oscuro, las páginas a 320 px sin desbordar y Leila decorativa en la lista vacía y en la 404 (en "no disponible", con una prueba unitaria), y el pulido de la barra, los títulos y las patas del canario (con tres reglas de antes como control) |
 | `verificar_inyeccion.py` | Inyección SQL y validación de la frontera de entrada |
-| `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo, sin base de datos antes de responder), verificación, administración de solicitudes, límites por destinatario (15 minutos y día), logs sin rastro, el origen obligatorio y el registro con PostgreSQL parado |
+| `verificar_registro.py` | Registro del personal con Mailpit: de extremo a extremo, enumeración (respuesta, correo y tiempo, sin base de datos antes de responder), verificación, administración de solicitudes, límites por destinatario (15 minutos y día), logs sin rastro, el origen obligatorio, el registro con PostgreSQL parado y la herramienta del buzón (el enlace entero, o un error visible con Mailpit parado) |
 | `verificar_escaneos.py` | Secretos en Git, dependencias de Python y de npm, análisis estático, imágenes y SBOM |
 | `verificar_unitarios.py` | Las pruebas unitarias (`tests/unit/`) en la imagen de la API, y mutantes que demuestran que fallan cuando deben |
 
