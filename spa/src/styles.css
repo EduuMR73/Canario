@@ -379,7 +379,9 @@ button[aria-disabled="true"] {
 
 /* Las páginas de acceso (entrar, activar, solicitar y confirmar): el
    canario, el título y una tarjeta estrecha, como la entrada de GitHub. La
-   activación lleva el QR y la clave, y usa una más ancha. */
+   activación lleva el QR y la clave, y usa una más ancha. Las otras páginas
+   fuera del armazón (no encontrada y no disponible) usan la misma columna,
+   con Leila en vez del canario. */
 main.acceso {
   max-width: none;
   display: flex;
@@ -392,6 +394,14 @@ main.acceso {
   margin: var(--espacio-4) 0 var(--espacio-5);
   font-weight: 300;
   text-align: center;
+}
+
+/* El aviso de "no disponible": del ancho de la tarjeta, ni estirado a toda
+   la página ni encogido a su texto. */
+.acceso > .error {
+  width: 100%;
+  max-width: var(--ancho-tarjeta);
+  margin: 0 0 var(--espacio-4);
 }
 
 .tarjeta,
