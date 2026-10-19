@@ -22,6 +22,11 @@ import { Sesion } from '../nucleo/sesion';
 // de la supresión lo aplica el sistema solo (6.14), así que tiene que
 // saberlo. El acuse de recibo no es tarea suya: el canal lo da al recibir la
 // denuncia (art. 9.2.c, la respuesta con el código y la fecha).
+//
+// El título dice a qué se aplican los plazos y no solo el número de la ley,
+// que no dice nada a quien no la conoce; debajo, la ley con un nombre corto
+// (el oficial, con la fecha y "de lucha contra la corrupción", está en el
+// modelo de amenazas).
 type Ruta = (typeof MENU)[keyof typeof MENU]['ruta'];
 
 // Una descripción por página, con la ruta como clave: si alguien añade una
@@ -54,7 +59,8 @@ const DESCRIPCIONES: Record<Exclude<Ruta, '/inicio'>, string> = {
       </ul>
       @if (instruye()) {
         <section class="plazos" aria-labelledby="inicio-plazos">
-          <h2 id="inicio-plazos">Plazos de la Ley 2/2023</h2>
+          <h2 id="inicio-plazos">Plazos legales de cada denuncia</h2>
+          <p class="ayuda">Ley 2/2023, de protección de las personas que informen sobre infracciones normativas.</p>
           <ul>
             <li><strong>Respuesta:</strong> como máximo tres meses desde la recepción, ampliable hasta tres meses más si el caso es especialmente complejo (art. 9.2.d).</li>
             <li><strong>Supresión:</strong> una denuncia que sigue en "Nueva" o "Inadmitida" a los tres meses de su recepción se suprime (art. 32.4). Para conservarla hay que iniciar la investigación.</li>

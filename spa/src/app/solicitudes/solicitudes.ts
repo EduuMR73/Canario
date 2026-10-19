@@ -23,7 +23,7 @@ const TEXTO_YA_CERRADA = 'La solicitud ya no está abierta: la ha resuelto otra 
   imports: [Leila],
   template: `
     <h1 tabindex="-1">Solicitudes de registro</h1>
-    <p>Personas que han pedido acceso y han confirmado su email. Si aprueba una, recibirá por correo el enlace para activar su cuenta.</p>
+    <p class="entradilla">Al aprobar una, la persona recibe el enlace para activar su cuenta.</p>
 
     @if (hecho(); as texto) {
       <p class="aviso" id="solicitudes-hecho" role="status" tabindex="-1">{{ texto }}</p>

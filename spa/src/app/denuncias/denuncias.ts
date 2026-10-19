@@ -27,7 +27,7 @@ const TEXTO_NO_ASIGNABLE = 'No se puede asignar: la denuncia está cerrada o la 
   imports: [Leila, ReactiveFormsModule, RouterLink],
   template: `
     <h1 tabindex="-1">Denuncias</h1>
-    <p>
+    <p class="entradilla">
       @if (esAdmin()) {
         Todas las denuncias de la empresa, las más recientes primero. Para leer una, asígnesela.
       } @else {

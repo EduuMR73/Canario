@@ -19,7 +19,7 @@ import { enfocarEncabezado } from '../../nucleo/foco';
       <h1 tabindex="-1">Solicitar acceso</h1>
       @if (respuesta(); as mensaje) {
         <div class="tarjeta">
-          <p class="aviso" role="status">{{ mensaje }}</p>
+          <p role="status">{{ mensaje }}</p>
         </div>
         <p class="tarjeta-pie"><a routerLink="/entrar">Volver a la entrada</a></p>
       } @else {
@@ -38,7 +38,7 @@ import { enfocarEncabezado } from '../../nucleo/foco';
           @if (error(); as texto) {
             <p class="error" role="alert">{{ texto }}</p>
           }
-          <button type="submit" [attr.aria-disabled]="enviando() || null">
+          <button type="submit" class="ancho-completo" [attr.aria-disabled]="enviando() || null">
             {{ enviando() ? 'Enviando...' : 'Solicitar acceso' }}
           </button>
         </form>

@@ -48,7 +48,7 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
               @if (error(); as texto) {
                 <p class="error" role="alert">{{ texto }}</p>
               }
-              <button type="submit" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Guardando...' : 'Continuar' }}</button>
+              <button type="submit" class="ancho-completo" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Guardando...' : 'Continuar' }}</button>
             </form>
           }
           @case ('codigo') {
@@ -73,7 +73,7 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
               @if (error(); as texto) {
                 <p class="error" role="alert">{{ texto }}</p>
               }
-              <button type="submit" [attr.aria-disabled]="enviando() || null">
+              <button type="submit" class="ancho-completo" [attr.aria-disabled]="enviando() || null">
                 {{ enviando() ? 'Activando...' : 'Activar la cuenta' }}
               </button>
             </form>

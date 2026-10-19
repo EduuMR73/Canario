@@ -49,7 +49,7 @@ import { Sesion } from '../../nucleo/sesion';
         @if (error(); as texto) {
           <p class="error" role="alert">{{ texto }}</p>
         }
-        <button type="submit" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Entrando...' : 'Entrar' }}</button>
+        <button type="submit" class="ancho-completo" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Entrando...' : 'Entrar' }}</button>
       </form>
       <p class="tarjeta-pie">¿No tiene cuenta? <a routerLink="/registro">Solicitar acceso</a></p>
     </main>
@@ -88,7 +88,7 @@ export class Entrar {
         // El código cambia cada 30 segundos y uno usado no vuelve a valer.
         this.formulario.controls.codigo_totp.reset();
         this.error.set(textoDeError(error, {
-          401: 'No se ha podido entrar. Revise la empresa, el email, la contraseña y el código.',
+          401: 'Empresa, email, contraseña o código incorrectos.',
           422: 'Revise los datos: alguno no tiene un formato válido.',
         }));
       },

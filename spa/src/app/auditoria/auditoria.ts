@@ -20,17 +20,18 @@ import { nombreAccion, quienActua, sobreQue, textoCadena, textoCargadas } from '
 // impide la segunda petición.
 //
 // fechaLegible viene de las denuncias: es la misma lectura de un día sin hora.
+//
+// Lo que hace la cadena se explica bajo "Verificación", junto al botón que
+// la comprueba, y no en la entradilla, que solo dice qué es la página.
 
 @Component({
   selector: 'app-auditoria',
   template: `
     <h1 tabindex="-1">Auditoría</h1>
-    <p>
-      Quién ha hecho qué en la empresa, lo más reciente primero. Cada fila está encadenada con la anterior: si
-      alguien cambiara, borrara o insertara una, la verificación diría dónde.
-    </p>
+    <p class="entradilla">Quién ha hecho qué en la empresa, lo más reciente primero.</p>
 
     <h2 id="auditoria-cadena">Verificación</h2>
+    <p class="ayuda">Comprueba que nadie ha cambiado, borrado ni insertado ninguna fila.</p>
     <p>
       <button type="button" class="secundario" (click)="verificar()" [attr.aria-disabled]="verificando() || null">
         {{ verificando() ? 'Verificando...' : 'Verificar la cadena' }}

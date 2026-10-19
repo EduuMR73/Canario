@@ -114,6 +114,10 @@
   --ancho-tarjeta: 21.25rem;
   --ancho-formulario: 34rem;
   --ancho-pagina: 64rem;
+  /* La medida de los párrafos largos. ch es el ancho del "0" y la mayoría
+     de las letras son más estrechas: 65ch quedan por debajo de los 80
+     caracteres por línea (WCAG 2.2, 1.4.8). */
+  --medida-texto: 65ch;
 }
 
 /* Tema oscuro: los mismos nombres, todos, también los que no cambian (la
@@ -133,7 +137,9 @@
     --color-boton-texto: #1a1a1a;
     --color-boton-borde: #facc15;
     --color-boton-encima: #eab308;
-    --color-secundario-encima: #21262d;
+    /* Más claro que la superficie del botón (#151a21) lo bastante para que
+       el puntero encima se note; con #21262d apenas cambiaba. */
+    --color-secundario-encima: #2d333b;
     --color-peligro: #f87171;
     --color-peligro-texto: #0a0a0a;
     --color-error-texto: #fecaca;
@@ -202,7 +208,7 @@ main {
 /* Las páginas del armazón tienen tablas: más anchas que un formulario. */
 main.ancho {
   max-width: var(--ancho-pagina);
-  padding-top: 2rem;
+  padding-top: var(--espacio-6);
 }
 
 /* La escala de los títulos, toda explícita: sin ella, h2 y h3 toman los
@@ -210,7 +216,10 @@ main.ancho {
    igual de grande y más grueso que el h1. h3 queda por encima del cuerpo y
    de las etiquetas de los campos, que también van a 600. Un título puede
    llevar un email entero, sin espacios: se parte en vez de desbordar a
-   320 px. */
+   320 px.
+   Los márgenes también: los del navegador van en em (el h1, 0.67em arriba)
+   y sumaban un hueco sobre el h1 que no venía de ninguna regla de aquí. Más
+   aire encima que debajo, para que cada título se lea con lo que sigue. */
 h1,
 h2,
 h3 {
@@ -219,16 +228,25 @@ h3 {
 }
 
 h1 {
+  margin: 0 0 var(--espacio-4);
   font-size: 1.5rem;
   letter-spacing: -0.01em;
 }
 
 h2 {
+  margin: var(--espacio-6) 0 var(--espacio-3);
   font-size: 1.25rem;
 }
 
 h3 {
+  margin: var(--espacio-5) 0 var(--espacio-2);
   font-size: 1.125rem;
+}
+
+/* El párrafo que presenta una página: a la medida de lectura, aunque la
+   página sea ancha por sus tablas. */
+.entradilla {
+  max-width: var(--medida-texto);
 }
 
 .formulario {
@@ -291,6 +309,26 @@ button {
   cursor: pointer;
 }
 
+/* Los controles de una línea, con un interlineado más corto que el del
+   texto: 20 px de línea, 8 de relleno arriba y abajo y el borde, 38 px, lo
+   mismo un campo que un botón, y caben juntos en una fila. Sin una altura
+   fija: si quien lee sube el interlineado o el tamaño, el control crece
+   con él (WCAG 2.2, 1.4.12). El textarea no está: es texto de varias
+   líneas y conserva el 1.5 del cuerpo.
+   El select nativo de Chromium no lo respeta (fuerza line-height: normal
+   y mide 40): se queda nativo a propósito, con el selector del sistema en
+   el móvil y los colores forzados del sistema; appearance: base-select lo
+   igualaría, pero su ancho sigue a la opción elegida y movería el resto
+   de la fila al cambiarla. Firefox sí lo respeta.
+   Va DESPUÉS de las reglas de input y de button: su "font: inherit" es un
+   atajo que también fija el interlineado (el 1.5 del cuerpo), y con la
+   misma especificidad gana la última regla. */
+input,
+select,
+button {
+  line-height: 1.25;
+}
+
 /* Acciones de menos peso: mismo texto, sobre la superficie. */
 button.secundario {
   background: var(--color-superficie);
@@ -299,11 +337,22 @@ button.secundario {
 }
 
 /* Lo que no tiene vuelta atrás inmediata (dar de baja, rechazar). El color
-   no es la única señal: el texto del botón lo dice, y pide confirmación. */
+   no es la única señal: el texto del botón lo dice, y pide confirmación.
+   En reposo, solo el texto y el borde en rojo, como el botón de peligro de
+   Primer: un bloque rojo en cada fila de una tabla pesaba más que la acción
+   principal. Se rellena al pasar por encima (abajo). */
 button.peligro {
-  background: var(--color-peligro);
+  background: var(--color-fondo);
   border-color: var(--color-peligro);
-  color: var(--color-peligro-texto);
+  color: var(--color-peligro);
+}
+
+/* La acción principal de una tarjeta ocupa todo su ancho. Lo decide la
+   plantilla con la clase, no el tipo del botón: "Confirmar mi email" es
+   type="button" a propósito (acceso/verificacion) y también es la acción
+   principal. */
+button.ancho-completo {
+  width: 100%;
 }
 
 /* Un botón ocupado lleva aria-disabled y no disabled: a uno disabled
@@ -329,7 +378,7 @@ button[aria-disabled="true"] {
 
   button.peligro:not([aria-disabled="true"]):hover {
     background: var(--color-peligro);
-    filter: brightness(0.9);
+    color: var(--color-peligro-texto);
   }
 }
 
@@ -469,6 +518,13 @@ button[aria-disabled="true"] {
   margin: 0 0 var(--espacio-2);
 }
 
+/* La caja sigue a todo el ancho, como las tarjetas de encima; solo el
+   texto se queda a la medida de lectura. */
+.plazos > ul,
+.plazos > p {
+  max-width: var(--medida-texto);
+}
+
 .plazos > ul {
   margin: 0;
   padding-inline-start: var(--espacio-5);
@@ -482,6 +538,11 @@ button[aria-disabled="true"] {
   margin: var(--espacio-3) 0 0;
 }
 
+/* La ley, pegada al título que acompaña y separada de la lista. */
+.plazos > h2 + .ayuda {
+  margin: 0 0 var(--espacio-3);
+}
+
 /* Las páginas de acceso (entrar, activar, solicitar y confirmar): el
    canario, el título y una tarjeta estrecha, como la entrada de GitHub. La
    activación lleva el QR y la clave, y usa una más ancha. Las otras páginas
@@ -492,12 +553,12 @@ main.acceso {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: 3.5rem;
+  padding-top: 2rem;
 }
 
+/* Con el peso de la escala (600), como el resto de los títulos. */
 .acceso > h1 {
-  margin: var(--espacio-4) 0 var(--espacio-5);
-  font-weight: 300;
+  margin: var(--espacio-3) 0 var(--espacio-5);
   text-align: center;
 }
 
@@ -533,10 +594,6 @@ main.acceso {
 
 .tarjeta > :last-child {
   margin-bottom: 0;
-}
-
-.tarjeta button[type="submit"] {
-  width: 100%;
 }
 
 .tarjeta-pie {
@@ -667,12 +724,23 @@ table {
   width: 100%;
 }
 
+/* Centrado en vertical: con top, el texto de una celda quedaba más arriba
+   que los botones de la de al lado, que son más altos que una línea. */
 th,
 td {
   padding: var(--espacio-3) var(--espacio-4);
   border-bottom: 1px solid var(--color-separador);
   text-align: start;
-  vertical-align: top;
+  vertical-align: middle;
+}
+
+/* Los controles de una fila, más bajos: 30 px, por encima de los 24 del
+   tamaño mínimo de un objetivo (WCAG 2.2, 2.5.8). Solo baja el relleno: la
+   letra sigue a 1rem, porque Safari en iOS amplía la página al tocar un
+   campo o un select con la letra por debajo de 16 px. */
+td button,
+td select {
+  padding: var(--espacio-1) var(--espacio-3);
 }
 
 tbody tr:last-child > * {
@@ -685,10 +753,16 @@ thead th {
   font-size: 0.875rem;
 }
 
-/* Emails e ids: largos y sin espacios, se parten donde haga falta. */
+/* Emails e ids: largos y sin espacios, se parten solo si no caben enteros.
+   break-word y no anywhere: los dos parten la palabra que desborda, pero
+   anywhere además deja que la tabla encoja la columna hasta una letra, y
+   un texto largo en otra celda (la confirmación de una baja) partía todos
+   los emails por la mitad. Con break-word, lo que baja de línea es ese
+   texto, que tiene espacios; a 320 px, la tabla se desplaza dentro de su
+   región. */
 .dato {
   font-weight: 400;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 /* Las referencias de las denuncias, en letra de ancho fijo para leerlas y
@@ -699,7 +773,8 @@ thead th {
 }
 
 /* Botones de una fila o de un aviso: se parten en líneas si no caben. En
-   una celda, con márgenes y no con flex, para que siga siendo una celda. */
+   una celda, con márgenes y no con flex, para que siga siendo una celda; el
+   margen igual arriba y abajo deja el bloque centrado en la fila. */
 p.acciones {
   display: flex;
   flex-wrap: wrap;
@@ -708,7 +783,13 @@ p.acciones {
 }
 
 td.acciones > * {
-  margin: 0 var(--espacio-2) var(--espacio-2) 0;
+  margin: var(--espacio-1) var(--espacio-2) var(--espacio-1) 0;
+}
+
+/* La pregunta de una confirmación, en su línea, y los botones debajo: si
+   los botones siguieran al texto, la fila cambiaría de forma con el ancho. */
+td.acciones > .pregunta {
+  display: block;
 }
 
 .etiqueta {
@@ -804,10 +885,14 @@ td.acciones > * {
   font-weight: 600;
 }
 
+/* balance reparte el texto entre sus líneas: sin él, la última se quedaba
+   con una o dos palabras. Donde el navegador no lo conoce, se parte como
+   siempre. */
 .vacio-texto {
   margin: 0;
   max-width: 26rem;
   color: var(--color-texto-suave);
+  text-wrap: balance;
 }
 
 /* Los datos de una denuncia: término y valor en la misma línea. */

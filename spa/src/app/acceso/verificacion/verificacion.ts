@@ -33,12 +33,12 @@ type Estado = 'sin-enlace' | 'pendiente' | 'hecho';
             @if (error(); as texto) {
               <p class="error" role="alert">{{ texto }}</p>
             }
-            <button type="button" (click)="confirmar()" [attr.aria-disabled]="enviando() || null">
+            <button type="button" class="ancho-completo" (click)="confirmar()" [attr.aria-disabled]="enviando() || null">
               {{ enviando() ? 'Confirmando...' : 'Confirmar mi email' }}
             </button>
           }
           @case ('hecho') {
-            <p class="aviso" role="status">Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá otro correo para activar la cuenta.</p>
+            <p role="status">Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá otro correo para activar la cuenta.</p>
           }
         }
       </div>

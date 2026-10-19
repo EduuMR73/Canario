@@ -98,8 +98,9 @@ interface EnlaceMostrado {
                 </td>
                 <td class="acciones">
                   @if (confirmando() === cuenta.usuario_id) {
-                    <span>¿Dar de baja a {{ cuenta.email }}? Se cerrarán sus sesiones al momento.</span>
+                    <span class="pregunta" [id]="'baja-' + cuenta.usuario_id">¿Dar de baja a {{ cuenta.email }}? Se cerrarán sus sesiones.</span>
                     <button type="button" id="cuentas-confirmar" class="peligro" (click)="darDeBaja(cuenta)"
+                            [attr.aria-describedby]="'baja-' + cuenta.usuario_id"
                             [attr.aria-disabled]="ocupado() !== null || null">Confirmar la baja</button>
                     <button type="button" class="secundario" (click)="confirmando.set(null)">Cancelar</button>
                   } @else {
@@ -207,7 +208,9 @@ export class Cuentas {
       return;
     }
     this.confirmando.set(cuenta.usuario_id);
-    // El botón pulsado desaparece: el foco pasa a la confirmación.
+    // El botón pulsado desaparece: el foco pasa a la confirmación. La
+    // pregunta la describe (aria-describedby): el lector de pantalla dice a
+    // quién se da de baja y qué pasa, no solo "Confirmar la baja".
     enfocarEncabezado(this.injector, '#cuentas-confirmar');
   }
 
