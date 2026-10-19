@@ -60,7 +60,9 @@ etapa. Prueba:
   origen sí deja su violación en la consola);
 * j) la verificación del registro desde el enlace del correo (Mailpit): el
   token sale de la URL, se envía al pulsar el botón y, después, el admin ve
-  la solicitud por la API;
+  la solicitud por la API; el botón ocupa el ancho de la tarjeta aunque es
+  type="button" (control: uno sin la clase, no) y la confirmación no es una
+  caja dentro de la tarjeta (control: está dentro de ella);
 * k) la base visual de spa/src/styles.css, sin Docker: el contraste de cada
   pareja de colores que usa, en el tema claro y en el oscuro (4,5:1 el texto
   y 3:1 bordes y foco, WCAG 2.2, 1.4.3 y 1.4.11), que el oscuro redefine
@@ -145,9 +147,29 @@ etapa. Prueba:
   h1, h2 y h3 miden 24, 20 y 18 px, a 600 (control: con el h2 del navegador,
   no); las patas del canario contrastan al menos 3:1 con la barra y con el
   fondo de /entrar en los dos temas (control: con el contorno casi negro, en
-  la barra no); ninguna violación de la CSP ni error de JavaScript (control:
-  una fuente de otro origen sí deja su violación de font-src). Los controles
-  del pulido añaden su regla a la hoja con el CSSOM, que la CSP no limita.
+  la barra no); en el pulido 2a, el campo y el botón de /entrar y el botón
+  del filtro de /denuncias miden 38 px (control: con el interlineado del
+  cuerpo, no; el select nativo no: Chromium le fuerza line-height: normal y
+  se queda nativo a propósito), el h1 de /entrar va a 600 (control: con el
+  300 de antes, no), el canario de la barra está centrado con las
+  mayúsculas de "Canario" (control: con el viewBox de antes, no), el h1 de
+  /cuentas empieza 24 px por debajo del borde de
+  main (control: con el margen del navegador, no), en la fila de otra cuenta
+  el email y los botones están centrados entre sí (control: con
+  vertical-align: top, no; sin otra fila, SIN CONCLUSION), su "Dar de baja"
+  va en rojo sobre el fondo y se rellena con el puntero encima (control: con
+  la regla de antes, relleno; sin ese botón, SIN CONCLUSION), con su
+  confirmación abierta ningún email de la tabla se parte en dos líneas
+  (control: con overflow-wrap: anywhere, alguno sí; si ninguno, SIN
+  CONCLUSION), "Confirmar la baja" lleva como descripción la pregunta con el
+  email de su fila, y la pregunta va en su línea con los botones debajo
+  (control: con la pregunta en línea, no), el texto de la
+  lista vacía reparte sus líneas (control: sin text-wrap: balance, la última
+  queda corta; si no queda, SIN CONCLUSION) y la entradilla de /solicitudes
+  no pasa de 65ch (control: sin el límite, sí); ninguna violación de la CSP
+  ni error de JavaScript (control: una fuente de otro origen sí deja su
+  violación de font-src). Los controles del pulido añaden su regla a la hoja
+  con el CSSOM, que la CSP no limita.
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
 misma forma (docs/threat-model.md, 8); Web Locks y las cookies en otros
@@ -453,7 +475,7 @@ RUTA_CIERRE = "/v1/personal/sesiones/actual"
 PASO_CODIGO = "Paso 2 de 2: configure la aplicación de autenticación"
 H1_INICIO = "Inicio"
 NOMBRE_ROL_ADMIN = "Admin"
-ALERTA_LOGIN = "No se ha podido entrar. Revise la empresa, el email, la contraseña y el código."
+ALERTA_LOGIN = "Empresa, email, contraseña o código incorrectos."
 # app/rutas_personal.py, MENSAJE_REGISTRO.
 MENSAJE_REGISTRO = ("si los datos son correctos, recibirá un correo en unos minutos; "
                     "si no le llega, vuelva a solicitarlo más tarde")
@@ -500,6 +522,9 @@ PAREJAS_CONTRASTE = (
     ("--color-boton-borde", "--color-fondo", 3.0),
     ("--color-foco-barra", "--color-barra", 3.0),
     ("--color-foco-barra", "--color-barra-activo", 3.0),
+    # Pulido 2a: el botón de peligro en reposo, texto y borde rojos sobre el
+    # fondo.
+    ("--color-peligro", "--color-fondo", 4.5),
 )
 # Mutantes de la hoja para los controles de k).
 MUTANTE_GRIS = ("--color-texto-suave: #59636e;", "--color-texto-suave: #8a8a8a;")
@@ -664,6 +689,31 @@ ANCHO_ESCRITORIO = 1280
 HUECO_BARRA = 24
 TITULOS_ESPERADOS = ["24px 600", "20px 600", "18px 600"]
 CONTRASTE_PATAS = 3.0
+# p) Pulido 2a. El alto de un control de una línea: 20 px de línea (1.25 de
+# 16), 8 + 8 de relleno y 1 + 1 de borde. El peso del h1 de las páginas de
+# acceso. Lo que hay del borde de main al h1 en una página del armazón: el
+# relleno de main (1.5rem) y nada del h1. El descuadre máximo, en px, entre
+# el email de una fila y sus botones. El botón de peligro en reposo y con el
+# puntero encima, [fondo, texto], con #b91c1c (--color-peligro del claro).
+# La última línea del texto de la lista vacía, como parte de la primera. Y
+# la medida de la entradilla, en ch. Las líneas de cada email de /cuentas
+# con la confirmación de una baja abierta. El descuadre máximo, en px, entre
+# el centro del dibujo del canario de la barra y el de las mayúsculas de
+# "Canario", y el viewBox de antes, que lo dejaba unos 2 px más bajo.
+ALTO_CONTROL = 38
+PESO_H1_ACCESO = "600"
+HUECO_H1 = 24
+DESCUADRE_FILA = 1
+PELIGRO_REPOSO = ["rgb(255, 255, 255)", "rgb(185, 28, 28)"]
+PELIGRO_ENCIMA = ["rgb(185, 28, 28)", "rgb(255, 255, 255)"]
+ULTIMA_LINEA_MINIMA = 0.5
+MEDIDA_ENTRADILLA = "65ch"
+LINEAS_EMAIL = 1
+# La pregunta de la baja, que describe "Confirmar la baja", con el email de
+# su fila.
+PREGUNTA_BAJA = "¿Dar de baja a {}? Se cerrarán sus sesiones."
+DESCUADRE_MARCA = 1
+VIEWBOX_ANTERIOR = "0 0 48 48"
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -962,11 +1012,23 @@ async def pasos(contexto):
     marca = len(eventos)
     await asyncio.sleep(1)
     res["api_antes_del_boton"] = api_desde(marca)
+    # Pulido 2a: [el botón, uno type="button" sin la clase puesto en la
+    # tarjeta y quitado enseguida, el ancho del contenido de la tarjeta].
+    res["anchos_boton"] = await pagina.evaluate(
+        "() => { const t = document.querySelector('main .tarjeta'); const c = getComputedStyle(t); "
+        "const b = document.createElement('button'); b.type = 'button'; b.textContent = 'x'; t.append(b); "
+        "const otro = b.getBoundingClientRect().width; b.remove(); "
+        "return [t.querySelector('button').getBoundingClientRect().width, otro, "
+        "t.clientWidth - parseFloat(c.paddingLeft) - parseFloat(c.paddingRight)].map(Math.round); }")
     await pagina.get_by_role("button", name="Confirmar mi email", exact=True).click()
     estado = pagina.get_by_role("status")
     await estado.wait_for()
     res["texto"] = await estado.inner_text()
     res["api"] = api_desde(marca)
+    # [el aviso dentro de la tarjeta, cajas .aviso dentro de ella].
+    res["caja"] = await pagina.evaluate(
+        "() => [document.querySelectorAll('main .tarjeta [role=\"status\"]').length, "
+        "document.querySelectorAll('main .tarjeta .aviso').length]")
 
 
 asyncio.run(ejecutar(spki, pasos))
@@ -1721,13 +1783,16 @@ asyncio.run(ejecutar_personal(pasos_botones))
 
 # p) La fuente, el tema oscuro y el ancho de 320 px. Recibe el SPKI, el
 # identificador, el email, la contraseña, el secreto TOTP y el último paso
-# usado del admin, y las rutas que se miran. Cada contexto lleva su tema y su
+# usado del admin, las rutas que se miran, el ancho de escritorio, la medida
+# de la entradilla y el viewBox de antes del canario. Cada contexto lleva su tema y su
 # ancho: Playwright los emula como lo haría el sistema.
 NAVEGADOR_ESTETICA = NAVEGADOR_PERSONAL + r'''
 spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin = sys.argv[1:7]
 rutas_ancho = json.loads(sys.argv[7])
 ruta_sin_pagina = sys.argv[8]
 ancho_escritorio = int(sys.argv[9])
+medida_entradilla = sys.argv[10]
+viewbox_anterior = sys.argv[11]
 usados[secreto_admin] = int(paso_admin)
 # La familia sin comillas, las ponga Chromium o no.
 FUENTES = "() => [...document.fonts].map((f) => [f.family.replace(/[\"']/g, ''), f.status])"
@@ -1766,6 +1831,80 @@ PATAS = ("(fondo) => [getComputedStyle(document.querySelector('.canario-patas'))
 MUTANTE_BARRA = ".barra p { margin: 0; }"
 MUTANTE_H2 = "h2 { font-size: 1.5em; font-weight: 700; }"
 MUTANTE_PATAS = ".canario-patas { stroke: var(--color-canario-contorno); }"
+# Pulido 2a. El alto de cada control, con dos decimales.
+ALTOS = ("(selectores) => selectores.map((s) => { const e = document.querySelector(s); "
+         "return e === null ? null : Math.round(e.getBoundingClientRect().height * 100) / 100; })")
+PESO_H1 = "() => getComputedStyle(document.querySelector('main h1')).fontWeight"
+# Del borde de arriba de main al del h1: no depende de que haya un aviso
+# de error entre la barra y main.
+HUECO_MAIN_H1 = ("() => Math.round((document.querySelector('main h1').getBoundingClientRect().top "
+                 "- document.querySelector('main').getBoundingClientRect().top) * 100) / 100")
+# La fila de una cuenta que no es la propia y tiene botones: la distancia
+# entre el centro del texto del email (un Range, solo el texto) y el centro
+# del bloque de sus botones, del primero al último (si no caben en una
+# línea, pasan a dos, y el primero solo ya no está en el centro).
+FILA = ("(propio) => { const f = [...document.querySelectorAll('main tbody tr')].find((t) => "
+        "t.querySelector('th').textContent.trim() !== propio && t.querySelector('td.acciones button') !== null); "
+        "if (f === undefined) return null; const r = document.createRange(); r.selectNodeContents(f.querySelector('th')); "
+        "const t = r.getBoundingClientRect(); "
+        "const b = [...f.querySelector('td.acciones').children].map((e) => e.getBoundingClientRect()); "
+        "const arriba = Math.min(...b.map((x) => x.top)); const abajo = Math.max(...b.map((x) => x.bottom)); "
+        "return Math.round(Math.abs((t.top + t.bottom) / 2 - (arriba + abajo) / 2) * 100) / 100; }")
+# El primer "Dar de baja" de la tabla (la propia cuenta no lo tiene).
+PELIGRO = "main tbody button.peligro"
+COLORES = ("(s) => { const e = document.querySelector(s); if (e === null) return null; "
+           "const c = getComputedStyle(e); return [c.backgroundColor, c.color]; }")
+# El ancho de cada línea del texto de la lista vacía: un rectángulo por
+# línea de su único nodo de texto.
+LINEAS = ("() => { const p = document.querySelector('main .vacio-texto'); if (p === null) return null; "
+          "const r = document.createRange(); r.selectNodeContents(p); "
+          "return [...r.getClientRects()].map((x) => Math.round(x.width)); }")
+# El ancho de la entradilla y el de la medida pedida, con un bloque de ese
+# ancho dentro de ella (misma fuente y tamaño), quitado enseguida.
+ENTRADILLA = ("(medida) => { const p = document.querySelector('main .entradilla'); if (p === null) return null; "
+              "const m = document.createElement('span'); m.style.display = 'block'; m.style.width = medida; "
+              "p.append(m); const w = m.getBoundingClientRect().width; m.remove(); "
+              "return [Math.round(p.getBoundingClientRect().width), Math.round(w)]; }")
+# Las líneas del texto de cada email de la tabla: los rectángulos de su
+# texto, contados por su borde de arriba (una línea, una altura).
+EMAILS = ("() => [...document.querySelectorAll('main tbody th.dato')].map((th) => { "
+          "const r = document.createRange(); r.selectNodeContents(th); "
+          "return new Set([...r.getClientRects()].map((x) => Math.round(x.top))).size; })")
+# La distancia entre el centro del dibujo del canario de la barra (de lo
+# más alto de la cabeza a lo más bajo de las patas) y el de las mayúsculas
+# de "Canario" (de la altura de la C a la línea base, con las métricas de
+# la fuente en un canvas). Con un viewBox, lo mide con ese marco y deja el
+# suyo: es el control, y no se puede poner con el CSSOM.
+MARCA = ("(caja) => { const svg = document.querySelector('.marca svg'); const antes = svg.getAttribute('viewBox'); "
+         "if (caja !== null) svg.setAttribute('viewBox', caja); try { "
+         "const r = [...svg.children].map((e) => e.getBoundingClientRect()); "
+         "const dibujo = (Math.min(...r.map((x) => x.top)) + Math.max(...r.map((x) => x.bottom))) / 2; "
+         "const p = document.querySelector('.marca'); "
+         "const texto = [...p.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim() !== ''); "
+         "const rango = document.createRange(); rango.selectNodeContents(texto); const t = rango.getBoundingClientRect(); "
+         "const c = getComputedStyle(p); const lienzo = document.createElement('canvas').getContext('2d'); "
+         "lienzo.font = c.fontWeight + ' ' + c.fontSize + ' ' + c.fontFamily; "
+         "const base = t.top + lienzo.measureText(texto.textContent).fontBoundingBoxAscent; "
+         "const alto = lienzo.measureText('C').actualBoundingBoxAscent; "
+         "return Math.round(Math.abs(dibujo - (base - alto / 2)) * 100) / 100; "
+         "} finally { svg.setAttribute('viewBox', antes); } }")
+MUTANTE_ALTO = "input, select, button { line-height: 1.5; }"
+MUTANTE_PESO_H1 = ".acceso > h1 { font-weight: 300; }"
+MUTANTE_HUECO_H1 = "h1 { margin-top: 0.67em; }"
+MUTANTE_FILA = "th, td { vertical-align: top; }"
+MUTANTE_PELIGRO = "button.peligro { background: var(--color-peligro); color: var(--color-peligro-texto); }"
+MUTANTE_LINEAS = ".vacio-texto { text-wrap: wrap; }"
+MUTANTE_ENTRADILLA = ".entradilla { max-width: none; }"
+MUTANTE_EMAILS = ".dato { overflow-wrap: anywhere; }"
+# [la descripción de "Confirmar la baja" (aria-describedby), el email de su
+# fila, lo que hay del final de la pregunta al principio del botón]: si el
+# botón sigue a la pregunta en su misma línea, sale negativo.
+PREGUNTA = ("() => { const b = document.querySelector('#cuentas-confirmar'); "
+            "const d = document.getElementById(b.getAttribute('aria-describedby') || ''); "
+            "const p = b.closest('td').querySelector('.pregunta'); "
+            "return [d === null ? null : d.textContent.trim(), b.closest('tr').querySelector('th').textContent.trim(), "
+            "Math.round((b.getBoundingClientRect().top - p.getBoundingClientRect().bottom) * 100) / 100]; }")
+MUTANTE_PREGUNTA = "td.acciones > .pregunta { display: inline; }"
 
 
 async def con_regla(pagina, regla, medida, argumento=None):
@@ -1794,6 +1933,12 @@ async def pasos_estetica(navegador):
     res["fuentes"] = await claro.evaluate(FUENTES)
     res["fondo_claro"] = await claro.evaluate(FONDO)
     res["patas_entrar_claro"] = await claro.evaluate(PATAS, "body")
+    # Pulido 2a: el alto no depende del ancho de la pantalla.
+    controles_entrar = ["#entrar-email", "main form button"]
+    res["altos_entrar"] = await claro.evaluate(ALTOS, controles_entrar)
+    res["altos_entrar_mutante"] = await con_regla(claro, MUTANTE_ALTO, ALTOS, controles_entrar)
+    res["peso_h1"] = await claro.evaluate(PESO_H1)
+    res["peso_h1_mutante"] = await con_regla(claro, MUTANTE_PESO_H1, PESO_H1)
     anchos = {"/entrar": await claro.evaluate(ANCHO)}
     await entrar(claro, email_admin, contrasena_admin, secreto_admin)
     # El texto de la barra tal cual, sin depender del ancho: textContent.
@@ -1804,6 +1949,12 @@ async def pasos_estetica(navegador):
         # abrir() espera a que la red se calme: la lista ya está pintada.
         if ruta_pedida == "/solicitudes":
             res["solicitudes_vacia"] = await claro.evaluate(VACIO)
+        if ruta_pedida == "/denuncias":
+            # Solo el botón: al select nativo Chromium le fuerza
+            # line-height: normal (mide 40) y se queda nativo a propósito.
+            controles_filtro = [".filtro button"]
+            res["altos_filtro"] = await claro.evaluate(ALTOS, controles_filtro)
+            res["altos_filtro_mutante"] = await con_regla(claro, MUTANTE_ALTO, ALTOS, controles_filtro)
     await abrir(claro, ruta_sin_pagina)
     anchos[ruta_sin_pagina] = await claro.evaluate(ANCHO)
     res["sin_pagina"] = await claro.evaluate(SUELTA)
@@ -1820,6 +1971,37 @@ async def pasos_estetica(navegador):
     res["hueco_barra_mutante"] = await con_regla(claro, MUTANTE_BARRA, BARRA)
     res["titulos_mutante"] = await con_regla(claro, MUTANTE_H2, TITULOS)
     res["patas_barra_mutante"] = await con_regla(claro, MUTANTE_PATAS, PATAS, ".barra")
+    # Pulido 2a, en la misma página: el hueco sobre el h1, la fila de otra
+    # cuenta y su "Dar de baja", en reposo y con el puntero encima.
+    res["marca"] = await claro.evaluate(MARCA, None)
+    res["marca_mutante"] = await claro.evaluate(MARCA, viewbox_anterior)
+    res["hueco_h1"] = await claro.evaluate(HUECO_MAIN_H1)
+    res["hueco_h1_mutante"] = await con_regla(claro, MUTANTE_HUECO_H1, HUECO_MAIN_H1)
+    res["fila"] = await claro.evaluate(FILA, email_admin)
+    res["fila_mutante"] = await con_regla(claro, MUTANTE_FILA, FILA, email_admin)
+    res["peligro"] = await claro.evaluate(COLORES, PELIGRO)
+    res["peligro_mutante"] = await con_regla(claro, MUTANTE_PELIGRO, COLORES, PELIGRO)
+    if res["peligro"] is not None:
+        await claro.locator(PELIGRO).first.hover()
+        res["peligro_encima"] = await claro.evaluate(COLORES, PELIGRO)
+        await claro.mouse.move(0, 0)
+        # Con la confirmación abierta, que no da de baja a nadie hasta
+        # pulsar "Confirmar la baja": los emails de la tabla, y se cancela.
+        await claro.locator(PELIGRO).first.click()
+        await claro.locator("#cuentas-confirmar").wait_for()
+        res["emails"] = await claro.evaluate(EMAILS)
+        res["emails_mutante"] = await con_regla(claro, MUTANTE_EMAILS, EMAILS)
+        res["pregunta"] = await claro.evaluate(PREGUNTA)
+        res["pregunta_mutante"] = await con_regla(claro, MUTANTE_PREGUNTA, PREGUNTA)
+        await claro.locator("main tbody button.secundario", has_text="Cancelar").click()
+        await claro.locator("#cuentas-confirmar").wait_for(state="detached")
+    # La lista vacía y la entradilla, al ancho en que se veía la palabra
+    # suelta.
+    await abrir(claro, "/solicitudes")
+    res["lineas"] = await claro.evaluate(LINEAS)
+    res["lineas_mutante"] = await con_regla(claro, MUTANTE_LINEAS, LINEAS)
+    res["entradilla"] = await claro.evaluate(ENTRADILLA, medida_entradilla)
+    res["entradilla_mutante"] = await con_regla(claro, MUTANTE_ENTRADILLA, ENTRADILLA, medida_entradilla)
     # De vuelta a 320 px: el control del ancho de abajo se mide en esta página.
     await claro.set_viewport_size({"width": 320, "height": 640})
 
@@ -2473,6 +2655,17 @@ def seccion_j():
     pasa(respuestas(res.get("api") or []) == [("POST", "/v1/personal/registro/verificacion", 204)]
          and res.get("texto") == TEXTO_VERIFICADO,
          f"j) el boton confirma el email ({respuestas(res.get('api') or [])}, {res.get('texto')!r})")
+    # Pulido 2a. El botón es type="button" a propósito: el ancho lo da su
+    # clase, no el tipo.
+    anchos = res.get("anchos_boton")
+    control_ancho = isinstance(anchos, list) and anchos[1] < anchos[2]
+    negativo(f"j) \"Confirmar mi email\" ocupa el ancho de la tarjeta ([boton, sin la clase, tarjeta] {anchos})",
+             control_ancho and anchos[0] == anchos[2], control_ancho,
+             "control: un boton sin la clase no lo ocupa")
+    caja = res.get("caja")
+    negativo(f"j) la confirmacion va en la tarjeta sin otra caja dentro ([aviso, cajas] {caja})",
+             caja == [1, 0], isinstance(caja, list) and caja[0] == 1,
+             "control: el aviso esta dentro de la tarjeta")
     errores, csp = res.get("errores") or [], senales_csp(res.get("consola") or [])
     pasa(not errores and not csp, f"j) ninguna violacion de la CSP ni error de JavaScript ({csp[:2]} {errores[:2]})")
 
@@ -3197,7 +3390,7 @@ def seccion_p():
         return
     res = navegador("navegador_p", NAVEGADOR_ESTETICA,
                     [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
-                     json.dumps(RUTAS_ANCHO), RUTA_SIN_PAGINA, str(ANCHO_ESCRITORIO)])
+                     json.dumps(RUTAS_ANCHO), RUTA_SIN_PAGINA, str(ANCHO_ESCRITORIO), MEDIDA_ENTRADILLA, VIEWBOX_ANTERIOR])
     if res is None:
         sinc("p) no se pudo ejecutar el navegador")
         return
@@ -3274,6 +3467,76 @@ def seccion_p():
                  f"{ {s: round(v, 2) for s, v in patas.items()} }",
                  all(v >= CONTRASTE_PATAS for v in patas.values()), control_patas,
                  f"control: con el contorno casi negro, en la barra da {patas_mutante}")
+
+    # Pulido 2a, cada medida con la regla de antes como control.
+    for sitio, clave, cuantos in (("/entrar (email y Entrar)", "altos_entrar", 2),
+                                  ("el boton del filtro de /denuncias", "altos_filtro", 1)):
+        altos, altos_mutante = res.get(clave), res.get(f"{clave}_mutante")
+        negativo(f"p) los controles de {sitio} miden {ALTO_CONTROL} px ({altos})",
+                 altos == [ALTO_CONTROL] * cuantos,
+                 isinstance(altos_mutante, list) and None not in altos_mutante
+                 and all(a > ALTO_CONTROL for a in altos_mutante),
+                 f"control: con el interlineado del cuerpo miden {altos_mutante}")
+    peso, peso_mutante = res.get("peso_h1"), res.get("peso_h1_mutante")
+    negativo(f"p) el h1 de /entrar va a {PESO_H1_ACCESO} ({peso!r})", peso == PESO_H1_ACCESO,
+             peso_mutante is not None and peso_mutante != PESO_H1_ACCESO,
+             f"control: con el peso de antes va a {peso_mutante!r}")
+    marca, marca_mutante = res.get("marca"), res.get("marca_mutante")
+    negativo(f"p) el canario de la barra esta centrado con las mayusculas de \"Canario\" "
+             f"(descuadre {marca} px, maximo {DESCUADRE_MARCA})",
+             isinstance(marca, (int, float)) and marca <= DESCUADRE_MARCA,
+             isinstance(marca_mutante, (int, float)) and marca_mutante > DESCUADRE_MARCA,
+             f"control: con el viewBox {VIEWBOX_ANTERIOR} el descuadre es {marca_mutante}")
+    hueco_h1, hueco_h1_mutante = res.get("hueco_h1"), res.get("hueco_h1_mutante")
+    negativo(f"p) el h1 de /cuentas empieza {HUECO_H1} px por debajo del borde de main ({hueco_h1})",
+             hueco_h1 == HUECO_H1, isinstance(hueco_h1_mutante, (int, float)) and hueco_h1_mutante > HUECO_H1,
+             f"control: con el margen del navegador empieza a {hueco_h1_mutante}")
+    fila, fila_mutante = res.get("fila"), res.get("fila_mutante")
+    if fila is None:
+        sinc("p) en /cuentas no hay ninguna fila de otra cuenta con botones: no se puede mirar el centrado")
+    else:
+        negativo(f"p) en la fila de otra cuenta, el email y sus botones estan centrados entre si "
+                 f"(descuadre {fila} px, maximo {DESCUADRE_FILA})",
+                 fila <= DESCUADRE_FILA, isinstance(fila_mutante, (int, float)) and fila_mutante > DESCUADRE_FILA,
+                 f"control: con vertical-align: top el descuadre es {fila_mutante}")
+    peligro, peligro_mutante = res.get("peligro"), res.get("peligro_mutante")
+    if peligro is None:
+        sinc("p) en /cuentas no hay ningun \"Dar de baja\": no se puede mirar el boton de peligro")
+    else:
+        negativo(f"p) \"Dar de baja\" va en rojo sobre el fondo {peligro} y se rellena con el puntero encima "
+                 f"{res.get('peligro_encima')}",
+                 peligro == PELIGRO_REPOSO and res.get("peligro_encima") == PELIGRO_ENCIMA,
+                 isinstance(peligro_mutante, list) and peligro_mutante[0] != PELIGRO_REPOSO[0],
+                 f"control: con la regla de antes, en reposo {peligro_mutante}")
+        emails, emails_mutante = res.get("emails"), res.get("emails_mutante")
+        if not (isinstance(emails_mutante, list) and any(n > LINEAS_EMAIL for n in emails_mutante)):
+            sinc(f"p) con overflow-wrap: anywhere ningun email de /cuentas se parte al confirmar una baja "
+                 f"({emails_mutante}): no se puede mirar")
+        else:
+            pasa(isinstance(emails, list) and len(emails) > 0 and all(n == LINEAS_EMAIL for n in emails),
+                 f"p) con la confirmacion de una baja abierta, cada email de /cuentas sigue en una linea "
+                 f"({emails}; control con anywhere: {emails_mutante})")
+        pregunta, pregunta_mutante = res.get("pregunta"), res.get("pregunta_mutante")
+        pasa(isinstance(pregunta, list) and pregunta[0] == PREGUNTA_BAJA.format(pregunta[1]),
+             f"p) \"Confirmar la baja\" lleva la pregunta con el email de su fila como descripcion ({pregunta})")
+        negativo(f"p) la pregunta de la baja va en su linea y los botones debajo ({pregunta})",
+                 isinstance(pregunta, list) and pregunta[2] >= 0,
+                 isinstance(pregunta_mutante, list) and pregunta_mutante[2] < 0,
+                 f"control: con la pregunta en linea, el boton empieza {pregunta_mutante} px por debajo de su final")
+    lineas, lineas_mutante = res.get("lineas"), res.get("lineas_mutante")
+    corta = (isinstance(lineas_mutante, list) and len(lineas_mutante) >= 2
+             and lineas_mutante[-1] < ULTIMA_LINEA_MINIMA * lineas_mutante[0])
+    if not corta:
+        sinc(f"p) sin text-wrap: balance la ultima linea de la lista vacia no queda corta ({lineas_mutante}): "
+             f"no se puede mirar el reparto")
+    else:
+        pasa(isinstance(lineas, list) and len(lineas) >= 2 and lineas[-1] >= ULTIMA_LINEA_MINIMA * lineas[0],
+             f"p) el texto de la lista vacia reparte sus lineas ({lineas} px; control sin balance: {lineas_mutante})")
+    entradilla, entradilla_mutante = res.get("entradilla"), res.get("entradilla_mutante")
+    negativo(f"p) la entradilla de /solicitudes no pasa de {MEDIDA_ENTRADILLA} ([ancho, medida] {entradilla})",
+             isinstance(entradilla, list) and entradilla[0] <= entradilla[1],
+             isinstance(entradilla_mutante, list) and entradilla_mutante[0] > entradilla_mutante[1],
+             f"control: sin el limite, {entradilla_mutante}")
 
     # Consola.
     consola, errores = res.get("consola") or [], res.get("errores") or []

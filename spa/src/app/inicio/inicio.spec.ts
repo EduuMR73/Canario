@@ -61,14 +61,18 @@ describe('página de inicio', () => {
         titulo: seccion.querySelector('h2')?.textContent?.trim(),
         nombre: seccion.getAttribute('aria-labelledby'),
         lista: [...seccion.querySelectorAll('li')].map((li) => li.textContent?.trim()),
-        acuse: seccion.querySelector('.ayuda')?.textContent?.trim(),
+        // La ley bajo el título y el acuse al final, en ese orden.
+        ayudas: [...seccion.querySelectorAll('.ayuda')].map((p) => p.textContent?.trim()),
       };
     };
     const esperado = {
-      titulo: 'Plazos de la Ley 2/2023',
+      titulo: 'Plazos legales de cada denuncia',
       nombre: 'inicio-plazos',
       lista: PLAZOS,
-      acuse: 'El acuse de recibo lo da el canal al recibir la denuncia (art. 9.2.c).',
+      ayudas: [
+        'Ley 2/2023, de protección de las personas que informen sobre infracciones normativas.',
+        'El acuse de recibo lo da el canal al recibir la denuncia (art. 9.2.c).',
+      ],
     };
 
     const admin = pintar('admin');
