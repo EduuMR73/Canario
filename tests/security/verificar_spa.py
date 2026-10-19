@@ -49,20 +49,27 @@ etapa. Prueba:
   su etiqueta (si un campo no la tiene, la prueba falla): activación desde el
   enlace con el token en el fragmento, que sale de la URL y no queda en la
   página ni en el almacenamiento (control: /no-existe#abc conserva su
-  fragmento); QR y secreto; foco al cambiar de paso y de página; cookies
+  fragmento); QR y secreto, con la clave oculta hasta abrir "¿No puede
+  escanear el código QR?" (control: abierto, se ve); "Entrar" tras activar
+  es un enlace con los colores del botón principal; foco al cambiar de paso
+  y de página; cookies
   __Host- con HttpOnly, Secure y SameSite=Strict y document.cookie vacío; un
   login fallido hace una sola petición y ninguna renovación (control: con el
-  acceso caducado, /yo sí renueva); dos pestañas con el acceso caducado
+  acceso caducado, /yo sí renueva), y su error va dentro de la tarjeta sin
+  caja propia, con la barra roja (control: con la caja de antes, fondo); un
+  código de 5 cifras no sale de la página (control: el de 6 sí hace la
+  petición); dos pestañas con el acceso caducado
   renuevan de una en una y la sesión sigue viva (control: dos renovaciones a
   la vez sí la cierran); cerrar la sesión borra sus cookies y deja la del
-  dispositivo; la solicitud de registro muestra el mensaje fijo; ninguna
+  dispositivo; la solicitud de registro muestra el texto fijo de la SPA; ninguna
   violación de la CSP ni error de JavaScript (control: una conexión a otro
   origen sí deja su violación en la consola);
 * j) la verificación del registro desde el enlace del correo (Mailpit): el
   token sale de la URL, se envía al pulsar el botón y, después, el admin ve
   la solicitud por la API; el botón ocupa el ancho de la tarjeta aunque es
   type="button" (control: uno sin la clase, no) y la confirmación no es una
-  caja dentro de la tarjeta (control: está dentro de ella);
+  caja dentro de la tarjeta (control: está dentro de ella); confirmado, la
+  página tiene "Volver a la entrada";
 * k) la base visual de spa/src/styles.css, sin Docker: el contraste de cada
   pareja de colores que usa, en el tema claro y en el oscuro (4,5:1 el texto
   y 3:1 bordes y foco, WCAG 2.2, 1.4.3 y 1.4.11), que el oscuro redefine
@@ -476,9 +483,17 @@ PASO_CODIGO = "Paso 2 de 2: configure la aplicación de autenticación"
 H1_INICIO = "Inicio"
 NOMBRE_ROL_ADMIN = "Admin"
 ALERTA_LOGIN = "Empresa, email, contraseña o código incorrectos."
-# app/rutas_personal.py, MENSAJE_REGISTRO.
-MENSAJE_REGISTRO = ("si los datos son correctos, recibirá un correo en unos minutos; "
-                    "si no le llega, vuelva a solicitarlo más tarde")
+# El texto fijo de la SPA tras solicitar el acceso (la API responde lo mismo
+# en todos los casos; su mensaje, en minúscula, ya no se enseña).
+TEXTO_REGISTRO = ("Si los datos son correctos, recibirá un correo en unos minutos. "
+                  "Si no le llega, vuelva a solicitarlo más tarde.")
+# Pulido 2b. El error dentro de la tarjeta: [en la tarjeta, fondo, barra de
+# la izquierda, borde de arriba]. "Entrar" tras activar: [etiqueta, href,
+# fondo], con el amarillo del botón principal (#facc15). La salida de la
+# verificación confirmada.
+ERROR_EN_TARJETA = [True, "rgba(0, 0, 0, 0)", "3px", "0px"]
+SALIDA_ACTIVADA = ["A", "/entrar", "rgb(250, 204, 21)"]
+SALIDA_VERIFICADA = "/entrar"
 TEXTO_VERIFICADO = ("Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá "
                     "otro correo para activar la cuenta.")
 ASUNTO_VERIFICACION = "Confirme su email para registrarse en Canario"
@@ -506,6 +521,10 @@ PAREJAS_CONTRASTE = (
     ("--color-borde", "--color-fondo", 3.0),
     ("--color-acento", "--color-aviso-fondo", 3.0),
     ("--color-peligro", "--color-error-fondo", 3.0),
+    # Pulido 2b: el error dentro de una tarjeta, sin su fondo, con la barra
+    # roja a la izquierda.
+    ("--color-error-texto", "--color-superficie", 4.5),
+    ("--color-peligro", "--color-superficie", 3.0),
     # Bloque 6b-4b: el botón principal amarillo y su :hover, el secundario
     # bajo el puntero, la barra oscura (texto, email, pestaña actual y foco)
     # y la etiqueta de cada estado sobre la tabla.
@@ -781,7 +800,8 @@ sys.path.insert(0, "/tmp/pw")
 from playwright.async_api import async_playwright
 
 ORIGEN = "https://localhost:8445"
-CODIGO = "Código de la aplicación de autenticación"
+CODIGO = "Código de autenticación"
+CLAVE_OCULTA = "¿No puede escanear el código QR?"
 res = {}
 eventos, consola, errores = [], [], []
 ultimo = {"paso": -1}
@@ -855,6 +875,16 @@ NAVEGADOR_SESION = NAVEGADOR_COMUN + r'''
 spki, identificador, invitacion, email, contrasena, email_registro = sys.argv[1:7]
 RENOVACION = "/v1/personal/sesiones/renovacion"
 ACCESO = "__Host-canario_acceso"
+# El aviso de error de la página: [dentro de una tarjeta, fondo, barra de la
+# izquierda, borde de arriba], con una regla de más al final de la hoja de la
+# SPA si se pide (el control), que se quita al medir.
+ERROR_TARJETA = ("(regla) => { const h = [...document.styleSheets].find((s) => s.href !== null "
+                 "&& new URL(s.href).pathname.startsWith('/styles-')); "
+                 "const i = regla === null ? -1 : h.insertRule(regla, h.cssRules.length); try { "
+                 "const e = document.querySelector('main [role=\"alert\"]'); const c = getComputedStyle(e); "
+                 "return [e.closest('.tarjeta') !== null, c.backgroundColor, c.borderInlineStartWidth, c.borderTopWidth]; "
+                 "} finally { if (i >= 0) h.deleteRule(i); } }")
+MUTANTE_ERROR_TARJETA = ".tarjeta .error { background: var(--color-error-fondo); border: 1px solid var(--color-peligro); }"
 
 
 async def entrar(pagina, clave, codigo):
@@ -897,12 +927,17 @@ async def pasos(contexto):
     res["token_en_pagina"] = await pagina.evaluate(
         "document.documentElement.outerHTML.includes(" + json.dumps(invitacion) + ")")
     res["almacen_activacion"] = await almacenamiento(pagina)
-    await pagina.get_by_label("Contraseña nueva").fill(contrasena)
+    await pagina.get_by_label("Contraseña", exact=True).fill(contrasena)
     await pagina.get_by_label("Repita la contraseña").fill(contrasena)
     await pagina.get_by_role("button", name="Continuar", exact=True).click()
     await pagina.get_by_role("heading", name="Paso 2 de 2: configure la aplicación de autenticación").wait_for()
     res["foco_paso"] = await foco(pagina)
     res["qr"] = await pagina.get_by_role("img", name="Código QR para la aplicación de autenticación").count()
+    # Pulido 2b: la clave, oculta hasta abrir su <details>, como haría una
+    # persona que no puede escanear el QR.
+    res["clave_cerrada"] = await pagina.locator("#activacion-secreto").is_visible()
+    await pagina.get_by_text(CLAVE_OCULTA, exact=True).click()
+    res["clave_abierta"] = await pagina.locator("#activacion-secreto").is_visible()
     secreto = (await pagina.locator("#activacion-secreto").inner_text()).replace(" ", "")
     res["secreto"] = secreto
     await pagina.get_by_label(CODIGO).fill(await codigo_libre(secreto))
@@ -910,6 +945,10 @@ async def pasos(contexto):
     await pagina.get_by_role("heading", name="Cuenta activada").wait_for()
     res["activada"] = True
     res["cookies_activacion"] = await cookies(contexto)
+    res["salida_activada"] = await pagina.evaluate(
+        "() => { const e = [...document.querySelectorAll('main .tarjeta a, main .tarjeta button')]"
+        ".find((x) => x.textContent.trim() === 'Entrar'); "
+        "return e === undefined ? null : [e.tagName, e.getAttribute('href'), getComputedStyle(e).backgroundColor]; }")
 
     # Login fallido: una sola petición y ninguna renovación.
     marca = len(eventos)
@@ -918,6 +957,16 @@ async def pasos(contexto):
     await alerta.wait_for()
     await asyncio.sleep(1)
     res["login_fallido"] = {"alerta": await alerta.inner_text(), "api": api_desde(marca)}
+    # Pulido 2b: el error dentro de la tarjeta, sin caja propia; el control
+    # le devuelve la caja de antes con una regla añadida con el CSSOM.
+    res["error_tarjeta"] = await pagina.evaluate(ERROR_TARJETA, None)
+    res["error_tarjeta_mutante"] = await pagina.evaluate(ERROR_TARJETA, MUTANTE_ERROR_TARJETA)
+    # Un código de 5 cifras: el pattern lo para antes de enviarlo.
+    marca = len(eventos)
+    await entrar(pagina, contrasena + "-mal", "12345")
+    await asyncio.sleep(1)
+    res["codigo_corto"] = {"api": api_desde(marca), "patron": await pagina.evaluate(
+        "() => document.querySelector('#entrar-codigo').validity.patternMismatch")}
 
     # Login correcto.
     marca = len(eventos)
@@ -1029,6 +1078,9 @@ async def pasos(contexto):
     res["caja"] = await pagina.evaluate(
         "() => [document.querySelectorAll('main .tarjeta [role=\"status\"]').length, "
         "document.querySelectorAll('main .tarjeta .aviso').length]")
+    # Pulido 2b: la página confirmada tiene salida.
+    salida = pagina.get_by_role("link", name="Volver a la entrada", exact=True)
+    res["salida"] = await salida.get_attribute("href") if await salida.count() == 1 else None
 
 
 asyncio.run(ejecutar(spki, pasos))
@@ -1115,10 +1167,11 @@ async def ir_por_menu(pagina, texto):
 
 async def activar(pagina, enlace):
     await pagina.goto(enlace)
-    await pagina.get_by_label("Contraseña nueva").fill(contrasena)
+    await pagina.get_by_label("Contraseña", exact=True).fill(contrasena)
     await pagina.get_by_label("Repita la contraseña").fill(contrasena)
     await pagina.get_by_role("button", name="Continuar", exact=True).click()
     await pagina.get_by_role("heading", name="Paso 2 de 2: configure la aplicación de autenticación").wait_for()
+    await pagina.get_by_text(CLAVE_OCULTA, exact=True).click()
     secreto = (await pagina.locator("#activacion-secreto").inner_text()).replace(" ", "")
     await pagina.get_by_label(CODIGO).fill(await codigo_de(secreto))
     await pagina.get_by_role("button", name="Activar la cuenta", exact=True).click()
@@ -2558,6 +2611,11 @@ def seccion_i():
     pasa(res.get("foco_paso") == PASO_CODIGO, f"i) el foco pasa al encabezado del paso 2 ({res.get('foco_paso')!r})")
     pasa(res.get("qr") == 1 and PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN) is not None,
          f"i) la activacion muestra el QR con su nombre accesible y el secreto en texto ({res.get('qr')})")
+    negativo(f"i) la clave en texto esta oculta hasta abrir su desplegable ({res.get('clave_cerrada')})",
+             res.get("clave_cerrada") is False, res.get("clave_abierta") is True,
+             f"control: al abrirlo se ve ({res.get('clave_abierta')})")
+    pasa(res.get("salida_activada") == SALIDA_ACTIVADA,
+         f"i) tras activar, \"Entrar\" es un enlace con los colores del boton principal ({res.get('salida_activada')})")
     dispositivo = (res.get("cookies_activacion") or {}).get(COOKIE_DISPOSITIVO)
     pasa(res.get("activada") is True and dispositivo == {"httpOnly": True, "secure": True, "sameSite": "Strict",
                                                          "path": "/"},
@@ -2574,6 +2632,18 @@ def seccion_i():
              respuestas(api_fallido) == [("POST", RUTA_SESIONES, 401)]
              and not any(e["ruta"] == RUTA_RENOVACION for e in api_fallido), control_renovacion)
     pasa(fallido.get("alerta") == ALERTA_LOGIN, f"i) el login fallido se anuncia con role=alert ({fallido.get('alerta')!r})")
+    error_tarjeta, error_mutante = res.get("error_tarjeta"), res.get("error_tarjeta_mutante")
+    negativo(f"i) el error va dentro de la tarjeta, sin caja propia y con la barra roja "
+             f"([en la tarjeta, fondo, barra, borde] {error_tarjeta})",
+             error_tarjeta == ERROR_EN_TARJETA,
+             isinstance(error_mutante, list) and error_mutante[1] != ERROR_EN_TARJETA[1],
+             f"control: con la caja de antes, {error_mutante}")
+    corto = res.get("codigo_corto") or {}
+    negativo(f"i) un codigo de 5 cifras no sale de la pagina ({respuestas(corto.get('api') or [])}, "
+             f"patternMismatch {corto.get('patron')})",
+             corto.get("api") == [] and corto.get("patron") is True,
+             respuestas(api_fallido) == [("POST", RUTA_SESIONES, 401)],
+             "control: el de 6 cifras de arriba si hace la peticion")
 
     # Login correcto.
     pasa(res.get("inicio") == [EMAIL_ADMIN, NOMBRE_ROL_ADMIN], f"i) /inicio muestra en la barra el email y el rol ({res.get('inicio')})")
@@ -2614,7 +2684,8 @@ def seccion_i():
          f"i) tras cerrarla, /inicio lleva a /entrar sin sesion que renovar ({cierre[-2:]})")
 
     # Registro.
-    pasa(res.get("registro") == MENSAJE_REGISTRO, f"i) la solicitud de registro muestra el mensaje fijo ({res.get('registro')!r})")
+    pasa(res.get("registro") == TEXTO_REGISTRO,
+         f"i) la solicitud de registro muestra el texto fijo de la SPA ({res.get('registro')!r})")
 
     # Consola: sin violaciones de la CSP ni errores de JavaScript.
     consola, errores = res.get("consola") or [], res.get("errores") or []
@@ -2666,6 +2737,8 @@ def seccion_j():
     negativo(f"j) la confirmacion va en la tarjeta sin otra caja dentro ([aviso, cajas] {caja})",
              caja == [1, 0], isinstance(caja, list) and caja[0] == 1,
              "control: el aviso esta dentro de la tarjeta")
+    pasa(res.get("salida") == SALIDA_VERIFICADA,
+         f"j) con el email confirmado, la pagina tiene \"Volver a la entrada\" ({res.get('salida')!r})")
     errores, csp = res.get("errores") or [], senales_csp(res.get("consola") or [])
     pasa(not errores and not csp, f"j) ninguna violacion de la CSP ni error de JavaScript ({csp[:2]} {errores[:2]})")
 
