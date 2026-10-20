@@ -372,8 +372,8 @@ services:
     # Solo la red interna correo: sin salida a internet (un correo de prueba
     # nunca puede llegar a un buzón real) y sin puertos publicados (una red
     # interna no puede publicarlos). Los mensajes se leen con su API HTTP
-    # (puerto 8025) desde un contenedor en la misma red: README, sección
-    # Correo de desarrollo.
+    # (puerto 8025) desde un contenedor en la misma red: docs/api.md, sección
+    # Registro del personal y correo de desarrollo.
     networks:
       - correo
     # Sin healthcheck propio: la imagen trae el suyo (/mailpit readyz).

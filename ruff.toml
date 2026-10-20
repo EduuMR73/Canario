@@ -1,6 +1,6 @@
 # Configuración de ruff, el analizador estático de Python. No se instala en el
 # equipo: se ejecuta con la imagen oficial fijada por versión y digest (ver
-# README, sección Pruebas). Desde ruff 0.16.0 el conjunto de reglas por defecto
+# docs/pruebas.md). Desde ruff 0.16.0 el conjunto de reglas por defecto
 # es amplio (413 reglas) y es el que se usa: aquí solo va lo que el proyecto
 # decide distinto, cada cosa con su porqué.
 

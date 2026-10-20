@@ -35,7 +35,7 @@
 --   desde ese momento la API ya no la muestra a nadie. La destrucción la hace
 --   la siguiente ejecución de esta función, no la API: el borrado sigue
 --   teniendo un único camino, con su evidencia. "Inmediatamente" depende, por
---   tanto, de la frecuencia con que se programe (README: cada hora).
+--   tanto, de la frecuencia con que se programe (docs/operacion.md: cada hora).
 --   Si es un posible ilícito penal, el admin no la declara no veraz: la deja
 --   como está y la remite al Ministerio Fiscal (art. 9.2.j).
 -- * Lotes acotados (p_lote): todas las sesiones tienen statement_timeout, y un
