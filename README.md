@@ -39,7 +39,7 @@ El enunciado recomienda React o Vue. Se usa Angular porque trae de serie lo que 
 
 ## Puesta en marcha
 
-**Requisitos:** Docker Desktop con `docker compose` (probado con Docker Compose v5.1.4 en Windows) y Python 3.12 (solo la biblioteca estándar). Las órdenes son de PowerShell, desde la raíz del repositorio.
+**Requisitos:** Docker Desktop con `docker compose` (probado con Docker Compose v5.1.4 en Windows) y Python 3.12 (solo la biblioteca estándar). Para el manual de uso, además, una aplicación de autenticación en el móvil (Google Authenticator, Microsoft Authenticator o similar): el segundo factor es obligatorio. Las órdenes son de PowerShell, desde la raíz del repositorio.
 
 ```powershell
 # 1. Crear los secretos (solo los que faltan; no imprime ninguno)
@@ -58,9 +58,13 @@ La puesta en marcha completa (sin Mailpit, cómo comprobar el certificado y la c
 
 ## Manual de uso
 
-Un recorrido completo en local. No hay cuentas ni contraseñas de ejemplo: cada cuenta elige la suya al activarse y configura el segundo factor en una aplicación de autenticación del móvil.
+Un recorrido completo en local. No hay cuentas ni contraseñas de ejemplo: cada cuenta elige la suya al activarse y configura el segundo factor en una aplicación de autenticación del móvil. Conviene ir apuntando el identificador de la empresa, los códigos de seguimiento y las contraseñas que se elijan.
 
-**Aviso del navegador.** El certificado lo firma la autoridad propia de Caddy, así que el navegador avisará de que no lo conoce. Para la demo basta con aceptar el aviso en cada puerto. No conviene instalar esa autoridad como raíz de confianza del sistema: podría firmar un certificado para cualquier dominio.
+Antes de empezar:
+
+- **El aviso del navegador.** La primera vez que se abre la demo (y quizá de nuevo en otro puerto), el navegador muestra "La conexión no es privada" (`NET::ERR_CERT_AUTHORITY_INVALID`). Es lo esperado: el certificado lo firma la autoridad propia de Caddy, que el navegador no conoce. La conexión va cifrada igual. En Chrome se acepta con **Avanzado** y después **Acceder a localhost (sitio no seguro)**. No conviene instalar esa autoridad como raíz de confianza del sistema: podría firmar un certificado para cualquier dominio.
+- **Son dos sitios separados.** El denunciante usa el 8444 y el personal entra por `https://localhost:8445`, que lleva a `/entrar`. Ningún enlace del sitio del denunciante lleva al del personal (el canario de su barra vuelve a su propio inicio): es a propósito.
+- **Los correos no llegan a ningún buzón real.** En la demo se quedan en Mailpit y se leen con `python scripts\buzon.py`, que enseña cada enlace en su línea (la hora sale en UTC). La pantalla dirá "recibirá un correo": es lo que pasaría en producción.
 
 ### 1. Dar de alta una empresa
 
@@ -68,7 +72,7 @@ Un recorrido completo en local. No hay cuentas ni contraseñas de ejemplo: cada 
 docker compose run --rm gestion alta-empresa --nombre "Demo S.L." --zona Europe/Madrid
 ```
 
-La salida termina en `identificador_publico=` y 32 caracteres hexadecimales: es el identificador de la empresa.
+En la salida, la línea `empresa creada: ...` termina en `identificador_publico=` y 32 caracteres hexadecimales: es el identificador de la empresa.
 
 > **Cópialo ahora.** Hace falta para todo lo demás, y hasta que el admin entre en la SPA es el único sitio donde aparece: no hay una orden para listar empresas.
 
@@ -78,7 +82,13 @@ La salida termina en `identificador_publico=` y 32 caracteres hexadecimales: es 
 docker compose run --rm gestion alta-admin --identificador <identificador> --email admin@demo.test
 ```
 
-Imprime `token_invitacion=` una sola vez. Abre `https://localhost:8445/activacion#<token>`, elige una contraseña de 12 caracteres o más y escanea el código QR con la aplicación de autenticación.
+Imprime `token_invitacion=` una sola vez. Abre `https://localhost:8445/activacion#<token>` (con todo lo que va después de `token_invitacion=`) y:
+
+1. Elige una contraseña de 12 caracteres o más, que no contenga el nombre de la empresa.
+2. Escanea el código QR con la aplicación de autenticación. Aparece la entrada `Canario: admin@demo.test`.
+3. Escribe el código de 6 cifras que muestra la aplicación y pulsa "Activar la cuenta".
+
+Si el móvil no lee el QR, "¿No puede escanear el código QR?" muestra la clave secreta. **No es el código de 6 cifras:** se escribe en la aplicación, y es la aplicación la que da el código.
 
 ### 3. Presentar una denuncia (8444)
 
@@ -91,7 +101,7 @@ https://localhost:8444/empresas/0123456789abcdef0123456789abcdef
 ```
 
 1. En una ventana privada, abre el enlace, escribe la denuncia y envíala.
-2. Apunta el **código de seguimiento** que da la página: es lo único que identifica al denunciante y no se puede recuperar.
+2. Apunta el **código de seguimiento** que da la página (un clic lo selecciona entero): es lo único que identifica al denunciante y no se puede recuperar.
 3. Con ese código, en `https://localhost:8444/seguimiento`, se consulta el estado y se escriben mensajes.
 
 Si se abre `https://localhost:8444/` sin el enlace, la página pide usar el que da la empresa. Un identificador mal copiado da 404.
@@ -107,7 +117,7 @@ Si se abre `https://localhost:8444/` sin el enlace, la página pide usar el que 
 
 **Por qué se entra con el identificador y no con el nombre de la empresa:** el nombre no es único, cambia (una fusión, una nueva razón social) y se escribe de varias formas ("S.L." o "SL"). Buscar por nombre, además, dejaría averiguar qué empresas usan Canario. El identificador no es secreto: es el mismo del enlace público del canal.
 
-> **Una cuenta por navegador.** La sesión va en cookies del 8445, así que entrar con otra cuenta en el mismo navegador sustituye a la anterior. Para los pasos 5 y 6, cierra la sesión (en la barra) o usa otro navegador. Cada cuenta añade su propia entrada en la aplicación de autenticación, que puede guardar varias.
+> **Una cuenta por ventana.** La sesión va en cookies del 8445, así que entrar con otra cuenta en la misma ventana sustituye a la anterior. Lo más cómodo: el admin en una ventana normal y el instructor o el auditor en una ventana de incógnito, que tiene sus propias cookies. Para cambiar de cuenta en la misma ventana, "Cerrar la sesión" en la barra. Cada cuenta añade su propia entrada en la aplicación de autenticación (`Canario: <email>`), que puede guardar varias.
 
 ### 5. El instructor: se registra e instruye
 
@@ -141,6 +151,7 @@ En **Cuentas**, el admin ve todo el personal con su rol y su estado, invita, rei
 
 - Quien decide es la API, no la SPA: un instructor o un auditor que pide a la API una ruta de otro rol recibe 403.
 - Un código de seguimiento inventado da 404, sin decir si alguna parte era correcta.
+- **Declarar no veraz (art. 32.3).** Con una segunda denuncia, porque no tiene vuelta atrás: el admin se la asigna, abre el expediente y pulsa "Declarar no veraz" y después "Confirmar: declarar no veraz". La denuncia desaparece del listado, y su código da en el 8444 el mismo "código de seguimiento no válido" que uno inventado. La destruye la siguiente supresión, que en producción se programa cada hora y en la demo se lanza a mano: `docker compose run --rm gestion suprimir-caducadas`, que responde con una línea `suprimidas: ... articulo=art32_3 denuncias=1`. En Auditoría quedan la declaración y la supresión.
 - Cinco intentos de entrada fallidos hacen esperar un minuto a quien entra desde un navegador nuevo, pero el titular sigue entrando desde el suyo.
 
 ## Fallos conocidos
