@@ -82,7 +82,7 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `POST /v1/seguimiento/mensajes` | denunciante | Enviar un mensaje con el código |
 | `POST /v1/personal/activacion` y `/activacion/confirmar` | personal | Activar la cuenta con la invitación: contraseña y TOTP |
 | `POST /v1/personal/sesiones`, `POST /v1/personal/sesiones/renovacion`, `DELETE /v1/personal/sesiones/actual` | personal | Entrar (JWT de acceso de 5 minutos y token de renovación), renovar y salir |
-| `GET /v1/personal/yo`, `POST /v1/personal/contrasena` | personal | Datos de la propia cuenta y cambio de contraseña (devuelve tokens nuevos) |
+| `GET /v1/personal/yo`, `POST /v1/personal/contrasena` | personal | Datos de la propia cuenta, con el enlace del canal de su empresa, y cambio de contraseña (devuelve tokens nuevos) |
 | `/v1/personal/usuarios...` | admin | Invitar, reinvitar, anular invitaciones y dar de baja |
 | `/v1/personal/denuncias...` | admin e instructor (asignar, solo admin) | Listar, leer, asignar, cambiar de estado y escribir mensajes |
 | `POST /v1/personal/denuncias/{id}/redaccion` y `.../mensajes/{secuencia}/redaccion` | admin con la denuncia asignada | Tachar datos que no deben conservarse (art. 32.2) |
@@ -162,7 +162,9 @@ Formularios HTML sin JavaScript. Las genera la API bajo `/web` (`app/rutas_web.p
 | `GET /seguimiento` y `POST /seguimiento/consulta` | Consultar una denuncia con su código |
 | `POST /seguimiento/mensajes` | Enviar un mensaje desde la consulta |
 
-El inicio y el formulario llevan los consejos de anonimato en una lista: un dispositivo y una conexión que no sean de la empresa, Tor Browser si se puede y no escribir datos que identifiquen, porque desde un equipo o una red de la empresa se puede saber que alguien ha entrado en el canal (modelo de amenazas, 6.1). El texto está una sola vez, en `app/plantillas/macros.html`.
+El inicio, el formulario y la consulta llevan los consejos de anonimato en una lista: un dispositivo y una conexión que no sean de la empresa, Tor Browser si se puede y no escribir datos que identifiquen, porque desde un equipo o una red de la empresa se puede saber que alguien ha entrado en el canal (modelo de amenazas, 6.1). El texto está una sola vez, en `app/plantillas/macros.html`. El inicio dice además que se puede informar ante la Autoridad Independiente de Protección del Informante, el canal externo de la ley, con un enlace a su dominio oficial.
+
+En la SPA, todo el personal (admin, instructor y auditor) ve en su inicio el enlace del canal de su empresa, con un botón para copiarlo y otro para abrir el formulario: la empresa debe publicarlo en la página de inicio de su web (art. 25 de la Ley 2/2023).
 
 El aspecto es el de la SPA (`proxy/estatico/canario.css`): la barra oscura con el canario, los mismos colores en los dos temas, los botones y el select de 38 px. Las variables se llaman igual que en `spa/src/styles.css` y valen lo mismo; si se cambia un color en la SPA, hay que cambiarlo aquí, y la batería de la SPA (k) falla si no. La fuente es la del sistema, no Geist: estas páginas no se guardan en caché, Tor Browser desactiva algunas fuentes y la CSP del sitio no cambia (modelo de amenazas, 6.11).
 
