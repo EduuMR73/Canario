@@ -1,13 +1,18 @@
 """Pruebas unitarias de app/frontera_http.py: el cuerpo de error uniforme, el
-límite de tamaño del cuerpo y el 500 que no filtra el mensaje del error.
+límite de tamaño del cuerpo, el 500 que no filtra el mensaje del error y el
+503 sin conexión a PostgreSQL.
 
 Los middlewares ASGI se prueban con un receive y un send falsos (sin red ni
 servidor): el send guarda lo que se enviaría y la aplicación interior anota
-si se le ha llamado y con qué cuerpo.
+si se le ha llamado y con qué cuerpo. Con PostgreSQL de verdad (parado y
+reiniciado) lo prueba tests/security/verificar_arranque.py, f.
 """
+import asyncio
 import unittest
 
+from fastapi import FastAPI, Request
 from psycopg import errors as errores_bd
+from psycopg_pool import PoolTimeout
 
 from app import frontera_http
 
@@ -152,3 +157,30 @@ class ErroresInternos(unittest.IsolatedAsyncioTestCase):
             await frontera_http.ErroresInternos(falla_a_medias)(peticion_http(), None, send)
         self.assertEqual([m["type"] for m in enviados], ["http.response.start"])
         self.assertEqual(enviados[0]["status"], 200)
+
+
+class Neutro:
+    """Middleware que no hace nada: instalar() pide el del limitador."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        await self.app(scope, receive, send)
+
+
+class SinConexion(unittest.TestCase):
+    def test_pool_agotado_503_con_retry_after(self):
+        app = FastAPI()
+        frontera_http.instalar(app, Neutro)
+        # Control: el manejador es el de la clase exacta. Un OperationalError
+        # cualquiera (la conexión rota a mitad de una transacción) no tiene, y
+        # sigue siendo el 500 de ErroresInternos.
+        self.assertNotIn(errores_bd.OperationalError, app.exception_handlers)
+        error = PoolTimeout("couldn't get a connection after 10.00 sec")
+        with self.assertLogs("canario.api", "WARNING") as registro:
+            respuesta = asyncio.run(app.exception_handlers[PoolTimeout](Request({"type": "http"}), error))
+        self.assertEqual(respuesta.status_code, 503)
+        self.assertEqual(respuesta.headers["retry-after"], "5")
+        self.assertEqual(respuesta.body, '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode())
+        self.assertEqual(registro.output, ["WARNING:canario.api:SIN CONEXION: PoolTimeout"])

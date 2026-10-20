@@ -66,7 +66,7 @@ PRUEBAS_POR_FICHERO = {
     "test_cripto": 38,
     "test_denuncias": 10,
     "test_errores": 11,
-    "test_frontera": 10,
+    "test_frontera": 11,
     "test_instruccion": 33,
     "test_limitador": 16,
     "test_login": 8,
@@ -77,7 +77,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 229
+TOTAL_PRUEBAS = 230
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -249,6 +249,10 @@ MUTANTES = [
      '    respuesta.delete_cookie(nombre, path="/", secure=False,',
      "test_transporte.Respuestas.test_cierre_en_el_navegador_borra_acceso_y_renovacion",
      "el cierre de sesion no borra las cookies __Host- (el navegador ignora un borrado sin Secure)"),
+    # Sin conexión a PostgreSQL (app/frontera_http.py).
+    ("frontera_http.py", "    aplicacion.add_exception_handler(PoolTimeout, _sin_conexion)\n", "",
+     "test_frontera.SinConexion.test_pool_agotado_503_con_retry_after",
+     "sin conexion a PostgreSQL la API responde 500 en vez de 503 con Retry-After"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

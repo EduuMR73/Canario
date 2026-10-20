@@ -12,8 +12,10 @@ RLS, permisos de tabla y de columna, funciones, dueño de las funciones de
 definidor, políticas y search_path) y vuelve a arrancar al revertirla; que el
 contexto de empresa aísla las filas, no se arrastra entre transacciones de la
 misma conexión, no admite valores sin validar, y que el pool descarta una
-conexión devuelta con contexto; y que la API aguanta una ráfaga concurrente
-dentro de su pids_limit. Cada prueba negativa lleva su control positivo: si el
+conexión devuelta con contexto; que la API aguanta una ráfaga concurrente
+dentro de su pids_limit; y que, si PostgreSQL se reinicia, el pool descarta
+las conexiones rotas en vez de entregarlas (ninguna petición recibe 500), y
+con PostgreSQL parado la respuesta es 503 con Retry-After. Cada prueba negativa lleva su control positivo: si el
 control falla, el resultado es SIN CONCLUSION, nunca PASA. Los oráculos son
 literales.
 
@@ -225,6 +227,78 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=60) as ex:
     codigos = list(ex.map(pedir, range(300)))
 print(json.dumps({"total": len(codigos), "ok": codigos.count(200)}))
 """
+
+# Reinicio de PostgreSQL, dentro del contenedor de la API con el código real
+# de app/bd.py. Dos pools de tamaño 1, con una sola conexión cada uno: el real
+# (con check) y un control idéntico sin check, con los mismos parámetros de
+# conexión. Usan su conexión, avisan con "listo" y esperan una línea por la
+# entrada estándar: entre medias, la batería reinicia PostgreSQL. El control
+# demuestra que el reinicio rompe la conexión que el pool tenía guardada; el
+# real debe descartarla y responder con otra.
+PRUEBA_REINICIO = """
+import json, sys, time
+import psycopg
+from psycopg_pool import ConnectionPool
+from app import bd
+real = bd.crear_pool(tamano_maximo=1)
+control = ConnectionPool(kwargs=real.kwargs, min_size=1, max_size=1, open=False, name="control", timeout=10)
+real.open(wait=True, timeout=15)
+control.open(wait=True, timeout=15)
+
+def pid(pool):
+    with pool.connection() as c, c.transaction():
+        return c.execute("select pg_backend_pid()").fetchone()[0]
+
+res = {"antes": [pid(real), pid(control)]}
+print("listo", flush=True)
+sys.stdin.readline()
+try:
+    pid(control)
+    res["control"] = "respondio"
+except psycopg.OperationalError as e:
+    res["control"] = "OperationalError"
+    res["control_clase"] = type(e).__name__
+t0 = time.monotonic()
+try:
+    res["real"] = ["respondio", pid(real)]
+except psycopg.Error as e:
+    res["real"] = [type(e).__name__, None]
+res["segundos_real"] = round(time.monotonic() - t0, 1)
+real.close()
+control.close()
+print(json.dumps(res, sort_keys=True))
+"""
+
+# Peticiones HTTP a la API desde otro contenedor de la red app, una detrás de
+# otra. Cada una anota [código, Retry-After, segundos]; un fallo de red anota
+# la clase en lugar del código. Con hasta_404 = "si" para en el primer 404 o
+# al pasar el límite de segundos.
+SONDA = """
+import http.client, json, sys, time
+ruta, veces, intervalo, hasta_404, limite = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), sys.argv[4], float(sys.argv[5])
+inicio = time.monotonic()
+res = []
+for i in range(veces):
+    if i:
+        time.sleep(intervalo)
+    t0 = time.monotonic()
+    try:
+        c = http.client.HTTPConnection("api", 8000, timeout=30)
+        c.request("GET", ruta)
+        r = c.getresponse()
+        r.read()
+        res.append([r.status, r.getheader("Retry-After"), round(time.monotonic() - t0, 1)])
+    except OSError as e:
+        res.append([type(e).__name__, None, round(time.monotonic() - t0, 1)])
+    if hasta_404 == "si" and (res[-1][0] == 404 or time.monotonic() - inicio > limite):
+        break
+print(json.dumps(res))
+"""
+# Formulario de una empresa que no existe: consulta la base de datos (la
+# función resolver_empresa) y responde 404. 404 = la API llegó a PostgreSQL.
+RUTA_SONDA = "/web/empresas/" + "0" * 32
+REINTENTAR_TRAS = "5"
+TEXTO_SIN_CONEXION = "SIN CONEXION: PoolTimeout"
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +579,120 @@ def seccion_e():
     pasa(salud(contenedor("api")) == "healthy", "e) la API sigue healthy tras la rafaga")
 
 
+def iniciado(cid):
+    return ejecutar(["docker", "inspect", "--format", "{{.State.StartedAt}}", cid]).out.strip()
+
+
+def postgres_healthy(etiqueta):
+    if not esperar(lambda: salud(contenedor("postgres")) == "healthy", 90):
+        raise Parada(f"{etiqueta}: PostgreSQL no vuelve a estar healthy")
+
+
+def reiniciar_postgres(etiqueta):
+    """Reinicia PostgreSQL y espera a que vuelva healthy. Devuelve si la API
+    siguió en marcha sin reiniciarse: si se reiniciara, su pool sería nuevo y
+    la prueba no probaría nada."""
+    api = contenedor("api")
+    antes = iniciado(api)
+    if dc("restart", "postgres").rc != 0:
+        raise Parada(f"{etiqueta}: no se pudo reiniciar PostgreSQL")
+    postgres_healthy(etiqueta)
+    return antes != "" and iniciado(api) == antes
+
+
+def sonda(etiqueta, veces, intervalo=0, hasta_404=False, limite=0):
+    nombre = f"{PROYECTO}_sonda"
+    try:
+        r = ejecutar(["docker", "run", "--rm", "--name", nombre, "--network", f"{PROYECTO}_app",
+                      "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                      "--entrypoint", "python", IMAGEN_API, "-c", SONDA, RUTA_SONDA, str(veces), str(intervalo),
+                      "si" if hasta_404 else "no", str(limite)], timeout=600)
+    finally:
+        ejecutar(["docker", "rm", "-f", nombre])
+    try:
+        return json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        sinc(f"{etiqueta}: la sonda no devolvio resultado: {r.err.strip()[-300:]!r}")
+        return None
+
+
+def seccion_f():
+    p("=== f) PostgreSQL reiniciado o parado (codigo real de app/bd.py)")
+    # f1: los dos pools dentro de la API. Se espera "listo" antes de reiniciar,
+    # para que las dos conexiones existan ya cuando PostgreSQL se reinicia.
+    proc = subprocess.Popen(BASE + ["exec", "-T", "api", "python", "-c", PRUEBA_REINICIO],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace")
+    try:
+        listo = proc.stdout.readline().strip() == "listo"
+        if listo:
+            reiniciar_postgres("f1")
+        out, err = proc.communicate("\n", timeout=120)
+    except BaseException:
+        proc.kill()
+        proc.communicate()
+        raise
+    try:
+        res = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        sinc(f"f1) no se pudo ejecutar la prueba del reinicio (listo {listo}): {err.strip()[-400:]!r}")
+        res = None
+    if res is not None:
+        p(f"   resultado: {res}")
+        antes = res.get("antes") or [None, None]
+        real = res.get("real") or [None, None]
+        # Control: el mismo pool sin check falla, así que el reinicio sí rompe
+        # la conexión guardada y lo que se mide es el check.
+        control = res.get("control") == "OperationalError"
+        segundos = res.get("segundos_real")
+        negativo(f"f1) el pool de app/bd.py descarta la conexion rota y responde con otra ({real}, "
+                 f"{segundos} s)",
+                 real[0] == "respondio" and real[1] != antes[0]
+                 and isinstance(segundos, (int, float)) and segundos < 10,
+                 control, f"el control sin check: {res.get('control')}")
+
+    # f2: por HTTP, con el pool de la API en marcha. Control: antes del
+    # reinicio la API llega a PostgreSQL (404) y la API no se reinicia con él.
+    previa = sonda("f2", 2)
+    api_igual = reiniciar_postgres("f2")
+    tras = sonda("f2", 10)
+    p(f"   antes del reinicio: {previa}; despues: {tras}")
+    if tras is not None:
+        codigos = [x[0] for x in tras]
+        if 429 in codigos:
+            sinc("f2) el limitador respondio 429: la prueba no mide el pool")
+        else:
+            # Ninguna 500. Un 503 con Retry-After es válido: con varias
+            # conexiones rotas, el backoff del pool puede agotar su timeout.
+            validas = all(x[0] == 404 or (x[0] == 503 and x[1] == REINTENTAR_TRAS) for x in tras)
+            negativo("f2) tras reiniciar PostgreSQL ninguna peticion recibe 500 y la ultima recibe 404",
+                     validas and codigos[-1] == 404,
+                     previa is not None and [x[0] for x in previa] == [404, 404] and api_igual,
+                     f"antes {previa}, API sin reiniciarse {api_igual}")
+
+    # f3: PostgreSQL parado. Control: al arrancarlo, la API vuelve a llegar a
+    # él (404) sin reiniciarse; la reconexión del pool también va con backoff.
+    api = contenedor("api")
+    previas = logs_api().count(TEXTO_SIN_CONEXION)
+    if dc("stop", "postgres").rc != 0:
+        raise Parada("f3: no se pudo parar PostgreSQL")
+    api_viva = ejecutar(["docker", "inspect", "--format", "{{.State.Running}}", api]).out.strip() == "true"
+    parado = sonda("f3", 1)
+    registrado = logs_api().count(TEXTO_SIN_CONEXION) > previas
+    if dc("start", "postgres").rc != 0:
+        raise Parada("f3: no se pudo arrancar PostgreSQL")
+    postgres_healthy("f3")
+    vuelta = sonda("f3", 30, intervalo=3, hasta_404=True, limite=90)
+    p(f"   con PostgreSQL parado: {parado}; al arrancarlo: {vuelta}")
+    if parado is None:
+        return
+    control = api_viva and vuelta is not None and vuelta[-1][0] == 404
+    negativo(f"f3) con PostgreSQL parado la respuesta es 503 con Retry-After {REINTENTAR_TRAS}",
+             parado[0][:2] == [503, REINTENTAR_TRAS], control,
+             f"API en marcha {api_viva}, al arrancar PostgreSQL {vuelta}")
+    negativo(f"f3) el log de la API registra {TEXTO_SIN_CONEXION!r}", registrado, parado[0][0] == 503)
+
+
 def seccion_s():
     p("=== s) limpieza")
     r = dc("down", "-v", "--rmi", "local")
@@ -592,7 +780,7 @@ def main():
     TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_arranque_"))
     parada = None
     try:
-        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e):
+        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f):
             seccion()
     except Parada as e:
         parada = str(e)
@@ -601,7 +789,7 @@ def main():
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
-        for nombre in ("api_falsa", "api_mal", "rafaga"):
+        for nombre in ("api_falsa", "api_mal", "rafaga", "sonda"):
             ejecutar(["docker", "rm", "-f", f"{PROYECTO}_{nombre}"])
         if parada is not None:
             dc("down", "-v", "--rmi", "local")
