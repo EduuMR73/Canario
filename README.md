@@ -1,6 +1,6 @@
 # Canario
 
-Canario es un canal de denuncias anónimo multiempresa, pensado para cumplir la Ley 2/2023, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción. Es una aplicación web distribuida, con el backend y el frontend separados, detrás de un proxy Caddy y todo con Docker Compose:
+Canario es un canal de denuncias anónimo multiempresa, pensado para cumplir la Ley 2/2023, de 20 de febrero, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción. Es una aplicación web distribuida, con el backend y el frontend separados, detrás de un proxy Caddy y todo con Docker Compose:
 
 - **Backend:** una API REST con FastAPI, PostgreSQL y Redis. El personal se autentica con JWT de acceso de 5 minutos y una renovación que rota en cada uso.
 - **Frontend del personal:** una SPA en Angular (`spa/`), en el 8445, que habla con la API por JSON. Tiene tres roles (admin, instructor y auditor), cada uno con sus pantallas: denuncias, cuentas, solicitudes de acceso, auditoría y su propia cuenta. El registro pide confirmar el email, después un admin aprueba la solicitud y la cuenta se activa con contraseña y un código TOTP.

@@ -76,7 +76,7 @@ describe('página de inicio', () => {
       nombre: 'inicio-plazos',
       lista: PLAZOS,
       ayudas: [
-        'Ley 2/2023, de protección de las personas que informen sobre infracciones normativas.',
+        'Ley 2/2023, de 20 de febrero, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción.',
         'El acuse de recibo lo da el canal al recibir la denuncia (art. 9.2.c).',
       ],
     };

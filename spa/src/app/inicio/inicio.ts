@@ -24,9 +24,9 @@ import { Sesion } from '../nucleo/sesion';
 // denuncia (art. 9.2.c, la respuesta con el código y la fecha).
 //
 // El título dice a qué se aplican los plazos y no solo el número de la ley,
-// que no dice nada a quien no la conoce; debajo, la ley con un nombre corto
-// (el oficial, con la fecha y "de lucha contra la corrupción", está en el
-// modelo de amenazas).
+// que no dice nada a quien no la conoce; debajo, la ley con su título
+// oficial del BOE, sin acortarlo: un nombre corto parecido al oficial se lee
+// como un error.
 //
 // Al final, para todo el personal, el enlace del canal de denuncias de la
 // empresa: la ley obliga a la empresa a publicarlo (art. 25), y si lo viera
@@ -68,7 +68,7 @@ const DESCRIPCIONES: Record<Exclude<Ruta, '/inicio'>, string> = {
       @if (instruye()) {
         <section class="plazos" aria-labelledby="inicio-plazos">
           <h2 id="inicio-plazos">Plazos legales de cada denuncia</h2>
-          <p class="ayuda">Ley 2/2023, de protección de las personas que informen sobre infracciones normativas.</p>
+          <p class="ayuda">Ley 2/2023, de 20 de febrero, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción.</p>
           <ul>
             <li><strong>Respuesta:</strong> como máximo tres meses desde la recepción, ampliable hasta tres meses más si el caso es especialmente complejo (art. 9.2.d).</li>
             <li><strong>Supresión:</strong> una denuncia que sigue en "Nueva" o "Inadmitida" a los tres meses de su recepción se suprime (art. 32.4). Para conservarla hay que iniciar la investigación.</li>
