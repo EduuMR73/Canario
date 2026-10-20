@@ -11,6 +11,8 @@ Uso (desde la raíz del repositorio, con la pila arrancada con
 --profile desarrollo):
     python scripts/buzon.py                       los 10 últimos correos
     python scripts/buzon.py --limite 30           los 30 últimos (de 1 a 100)
+    python scripts/buzon.py --texto               además, el texto entero de cada
+                                                  correo (los avisos no llevan enlace)
     python scripts/buzon.py --proyecto NOMBRE     otro proyecto de Docker (pruebas)
 
 Por qué así y no con la interfaz web de Mailpit (docs/threat-model.md, 8):
@@ -35,7 +37,10 @@ Reglas:
   o la imagen sin construir), lo dice y sale con código 1. Nunca da un buzón
   vacío por bueno cuando no lo ha podido leer.
 - Los enlaces llevan tokens de un solo uso: la salida es solo para la
-  terminal de quien la pide, en desarrollo.
+  terminal de quien la pide, en desarrollo. El texto entero (--texto) los
+  lleva también.
+- Todo lo que viene del correo pasa por limpiar() antes de imprimirse: un
+  carácter de control no llega nunca a la terminal.
 
 Solo usa la biblioteca estándar.
 """
@@ -45,6 +50,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 
 PROYECTO_POR_DEFECTO = "canario"
 LIMITE_POR_DEFECTO = 10
@@ -73,6 +79,21 @@ for m in lista.get("messages") or []:
                    "asunto": d.get("Subject"), "texto": d.get("Text")})
 print(json.dumps(salida))
 '''
+
+
+def limpiar(texto):
+    """El texto con cada carácter de las categorías Unicode C* cambiado por
+    "?", salvo el salto de línea.
+
+    Codificación de salida para la terminal (CWE-150): un ESC empezaría una
+    secuencia ANSI (mover el cursor, cambiar el título de la ventana), un \\r
+    reescribiría la línea ya impresa y un U+202E (Cf) invertiría lo que
+    sigue (ATT&CK T1036.002). Hoy los datos variables de los correos ya se
+    validan al entrar (app/validacion.py), pero el CHECK de la base de datos
+    no lo exige: esto no depende de que la entrada se haya validado. Se
+    cubren todas las C* y no solo C0 y C1 porque las de formato (Cf) son las
+    que la validación de la entrada deja pasar."""
+    return "".join(c if c == "\n" or not unicodedata.category(c).startswith("C") else "?" for c in texto)
 
 
 def limite_valido(texto):
@@ -129,6 +150,8 @@ def main():
     parser = argparse.ArgumentParser(description="Los ultimos correos de Mailpit con sus enlaces.")
     parser.add_argument("--limite", type=limite_valido, default=LIMITE_POR_DEFECTO,
                         help=f"cuantos correos (de 1 a {LIMITE_MAXIMO}, por defecto {LIMITE_POR_DEFECTO})")
+    parser.add_argument("--texto", action="store_true",
+                        help="ensenar tambien el texto entero de cada correo")
     parser.add_argument("--proyecto", type=proyecto_valido, default=PROYECTO_POR_DEFECTO,
                         help="proyecto de Docker Compose (por defecto canario)")
     args = parser.parse_args()
@@ -142,15 +165,27 @@ def main():
         return
     print(f"{len(correos)} correo(s), del mas nuevo al mas antiguo:")
     for numero, correo in enumerate(correos, start=1):
+        # Cada campo se limpia antes de usarlo: también el texto antes de
+        # buscar sus enlaces, para que un enlace no lleve nada de control.
+        fecha = limpiar(str(correo.get("fecha") or "-"))
+        para = limpiar(", ".join(str(a) for a in correo.get("para") or []) or "-")
+        asunto = limpiar(str(correo.get("asunto") or "-"))
+        # El salto de línea de un correo es CRLF (RFC 5322, 2.3): se pasa a
+        # \n antes de limpiar; un \r suelto sí se cambia por "?".
+        texto = limpiar(str(correo.get("texto") or "").replace("\r\n", "\n"))
         print()
-        print(f"[{numero}] {correo.get('fecha') or '-'}")
-        print(f"    Para:   {', '.join(correo.get('para') or []) or '-'}")
-        print(f"    Asunto: {correo.get('asunto') or '-'}")
-        enlaces = PATRON_ENLACE.findall(correo.get("texto") or "")
+        print(f"[{numero}] {fecha}")
+        print(f"    Para:   {para}")
+        print(f"    Asunto: {asunto}")
+        enlaces = PATRON_ENLACE.findall(texto)
         for enlace in enlaces:
             print(f"    {enlace}")
         if not enlaces:
             print("    (sin enlaces)")
+        if args.texto:
+            print("    Texto:")
+            for linea in texto.splitlines():
+                print(f"      {linea}")
 
 
 if __name__ == "__main__":
