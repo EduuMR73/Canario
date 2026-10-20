@@ -126,12 +126,25 @@ def _comprobar_sin_contexto(conexion):
 
 
 def crear_pool(tamano_maximo=TAMANO_MAXIMO_POOL):
-    """Crea el pool sin abrirlo. Se abre en el arranque de la API."""
+    """Crea el pool sin abrirlo. Se abre en el arranque de la API.
+
+    check: antes de entregar una conexión, el pool le manda una consulta
+    vacía. Si PostgreSQL se ha reiniciado, las conexiones que el pool tenía
+    abiertas están rotas y él no lo sabe hasta usarlas: sin la comprobación,
+    cada una hacía fallar con 500 la petición que la recibía. Con ella, el
+    pool la descarta y entrega otra, y la petición no se entera. Cuesta una
+    ida y vuelta a la base de datos por transacción, dentro de la red data.
+    Tras la primera conexión rota, psycopg_pool prueba otra sin esperar; a
+    partir de la segunda, con backoff (1 s, 2 s, 4 s...): si quedan varias
+    rotas, una petición puede agotar timeout y recibir 503
+    (app/frontera_http.py), nunca 500.
+    """
     return ConnectionPool(
         kwargs=_parametros_con_contrasena,
         min_size=1,
         max_size=tamano_maximo,
         open=False,
+        check=ConnectionPool.check_connection,
         reset=_comprobar_sin_contexto,
         name="canario",
         timeout=10,

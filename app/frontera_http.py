@@ -24,6 +24,13 @@ Tres piezas que no dependen de ninguna ruta concreta:
   espera a que el personal termine de cambiar el estado de su denuncia), y el
   cliente debe saber que puede reintentar. Se registra solo la clase y el
   SQLSTATE, como el resto de errores.
+* Sin conexión: si el pool no entrega una conexión en su timeout
+  (PoolTimeout, app/bd.py), por ejemplo con PostgreSQL parado o recién
+  reiniciado, también 503 con Retry-After. Se registra aparte (SIN CONEXION)
+  porque la causa no es la misma: no es contención, es que la base de datos
+  no responde. El cuerpo es el mismo 503 de siempre: al cliente no se le dice
+  qué pieza falla. Si PostgreSQL cae a mitad de una petición, el error es
+  otro y sigue siendo 500: reintentar una escritura podría duplicarla.
 * Limitador de peticiones (app/limitador.py): se instala aquí, entre
   ErroresInternos y LimiteCuerpo, para rechazar antes de leer el cuerpo.
   Responde 429 o, si Redis no responde, 503, con el mismo formato.
@@ -34,6 +41,7 @@ import logging
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from psycopg import errors as errores_bd
+from psycopg_pool import PoolTimeout
 from starlette.exceptions import HTTPException
 
 registro = logging.getLogger("canario.api")
@@ -54,8 +62,8 @@ MENSAJES = {
     503: "servicio ocupado; inténtelo de nuevo en unos segundos",
 }
 
-# Segundos que se sugieren al cliente antes de reintentar tras una saturación
-# o con Redis sin responder. Del orden de lock_timeout (2 s, app/bd.py) con
+# Segundos que se sugieren al cliente antes de reintentar tras una saturación,
+# sin conexión a PostgreSQL o con Redis sin responder. Del orden de lock_timeout (2 s, app/bd.py) con
 # margen.
 REINTENTAR_TRAS = "5"
 
@@ -170,6 +178,14 @@ async def _saturacion(_peticion, error):
                     headers={"Retry-After": REINTENTAR_TRAS})
 
 
+async def _sin_conexion(_peticion, error):
+    # Solo la clase: el mensaje de PoolTimeout no lleva datos, pero la regla
+    # es la misma para todos los errores.
+    registro.warning("SIN CONEXION: %s", describir_error(error))
+    return Response(cuerpo_error(503), status_code=503, media_type="application/json",
+                    headers={"Retry-After": REINTENTAR_TRAS})
+
+
 def instalar(aplicacion, limitador):
     """Middlewares y manejadores. Starlette pone el último añadido en la
     posición más externa, así que el orden, de fuera adentro, queda
@@ -178,10 +194,13 @@ def instalar(aplicacion, limitador):
     LimiteCuerpo."""
     aplicacion.add_exception_handler(HTTPException, _http_exception)
     aplicacion.add_exception_handler(RequestValidationError, _validacion)
-    # Solo estas dos clases: cualquier otro error de la base de datos sigue
-    # siendo un 500 de ErroresInternos.
+    # Solo estas tres clases: cualquier otro error de la base de datos sigue
+    # siendo un 500 de ErroresInternos. PoolTimeout hereda de
+    # OperationalError, pero el manejador se registra para la clase exacta:
+    # una conexión que se rompe a mitad de una transacción no entra aquí.
     aplicacion.add_exception_handler(errores_bd.LockNotAvailable, _saturacion)
     aplicacion.add_exception_handler(errores_bd.QueryCanceled, _saturacion)
+    aplicacion.add_exception_handler(PoolTimeout, _sin_conexion)
     aplicacion.add_middleware(LimiteCuerpo)
     aplicacion.add_middleware(limitador)
     aplicacion.add_middleware(ErroresInternos)
