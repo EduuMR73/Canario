@@ -146,6 +146,9 @@ def aplicacion():
     app.state.claves = None
     app.state.limitador = LimitadorQueAdmite()
     app.state.origen_personal = ORIGEN
+    # El sitio del denunciante: /yo compone con él el enlace del canal
+    # (app/rutas_personal.py). La API real lo fija al arrancar.
+    app.state.origen_web = OTRO_PUERTO
     return app
 
 
