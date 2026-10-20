@@ -76,6 +76,50 @@ docker compose down
 
 Nunca `docker compose down -v` en una instalación con datos: `-v` borra los volúmenes, es decir, la base de datos y la autoridad de certificación de Caddy.
 
+## Guía de demo
+
+Un recorrido completo en local, con la pila de desarrollo (que añade Mailpit para los correos). Las órdenes se ejecutan en PowerShell desde la raíz del repositorio. No hay cuentas ni contraseñas de ejemplo: cada cuenta elige la suya al activarse y configura el segundo factor en una aplicación de autenticación del móvil.
+
+El navegador avisará de que no conoce el certificado, porque lo firma la autoridad propia de Caddy (`tls internal`). Para la demo basta con aceptar el aviso en cada puerto. No conviene instalar esa autoridad como raíz de confianza del sistema: podría firmar un certificado para cualquier dominio, y su clave está en un volumen de Docker.
+
+1. **Arrancar.** Con los secretos generados (puesta en marcha, paso 1):
+
+   ```powershell
+   docker compose --profile desarrollo up -d --build --wait
+   ```
+
+2. **Dar de alta una empresa y su primer admin.** Lo hace quien opera la plataforma, con `gestion` (más abajo):
+
+   ```powershell
+   docker compose run --rm gestion alta-empresa --nombre "Demo S.L." --zona Europe/Madrid
+   ```
+
+   La salida termina en `identificador_publico=` y 32 caracteres hexadecimales: es el identificador de la empresa, el que llevan el formulario del denunciante y la entrada del personal. Con él:
+
+   ```powershell
+   docker compose run --rm gestion alta-admin --identificador <identificador> --email admin@demo.test
+   ```
+
+   Imprime `token_invitacion=` una sola vez. El admin lo abre en `https://localhost:8445/activacion#<token>`, elige su contraseña (12 caracteres o más) y escanea el código QR con su aplicación de autenticación.
+
+3. **El denunciante (8444).** En una ventana privada, `https://localhost:8444/empresas/<identificador>`: escribe la denuncia y la envía. La página le da el código de seguimiento, que es lo único que le identifica y no se puede recuperar. Con él, en `https://localhost:8444/seguimiento`, consulta el estado y escribe mensajes. La misma dirección del formulario la ve todo el personal en su inicio, con "Copiar el enlace".
+
+4. **El admin (8445).** Entra en `https://localhost:8445/entrar` con el identificador de la empresa, su email, su contraseña y el código de la aplicación. En Denuncias asigna la denuncia (a sí mismo o a un instructor), cambia su estado y escribe al denunciante, que ve la respuesta al consultar con su código.
+
+5. **Un instructor que se registra.** En `https://localhost:8445/registro` pide acceso con el identificador y su email (por ejemplo `instructor@demo.test`). El correo de confirmación se lee con `python scripts\buzon.py`, que enseña cada enlace en su línea. Cuando confirma, el admin ve la solicitud en Solicitudes y la aprueba con el rol de instructor; la invitación llega al buzón y el instructor activa su cuenta como en el paso 2. Al activarse, los admin y los auditores reciben un aviso que no lleva enlace: se lee con `python scripts\buzon.py --texto`.
+
+6. **Cuentas y auditoría.** En Cuentas, el admin ve el personal, invita y da de baja. En Auditoría (admin y auditor) está cada acción con quién la hizo, y se puede verificar que la cadena de registros no se ha alterado.
+
+Bordes que se pueden enseñar en la misma sesión:
+
+- Un instructor no ve Cuentas, Solicitudes ni Auditoría en el menú, y si pide esas rutas a la API recibe 403: quien decide es la API, no la SPA.
+- Un código de seguimiento inventado da 404, sin más pistas: la respuesta no dice si alguna parte del código era correcta.
+- Cinco intentos de entrada fallidos hacen esperar un minuto a quien entra sin dispositivo de confianza, pero el titular sigue entrando desde el navegador donde ya entró antes (modelo de amenazas, 6.3).
+
+**Por qué la entrada del personal pide el identificador y no el nombre de la empresa.** El nombre no es único (dos empresas pueden llamarse igual), cambia (una fusión, una nueva razón social) y se escribe de varias formas ("S.L." o "SL", con tilde o sin ella). Buscar por nombre, además, dejaría a cualquiera averiguar qué empresas usan Canario. El identificador no es secreto: es el mismo que va en el enlace público del canal (modelo de amenazas, 6.3).
+
+Para terminar sin perder los datos de la demo: `docker compose --profile desarrollo down`.
+
 ## La API
 
 Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
@@ -190,7 +234,7 @@ Para leer el buzón, en PowerShell desde la raíz del repositorio:
 python scripts/buzon.py
 ```
 
-Enseña los 10 últimos correos, del más nuevo al más antiguo, con la fecha, el destinatario, el asunto y cada enlace en su propia línea (en Windows Terminal se abre con Ctrl+clic); `--limite 30` enseña más. Los lee desde un contenedor desechable en esa red, con la imagen de la API, de solo lectura y sin capacidades, y no borra nada. Si Mailpit no está en marcha, lo dice y sale con código 1. Los enlaces llevan tokens de un solo uso: la salida es para la terminal de quien la pide. La interfaz web de Mailpit no se publica a propósito (modelo de amenazas, 8).
+Enseña los 10 últimos correos, del más nuevo al más antiguo, con la fecha, el destinatario, el asunto y cada enlace en su propia línea (en Windows Terminal se abre con Ctrl+clic); `--limite 30` enseña más, y `--texto` añade el texto entero de cada correo, para los avisos, que no llevan enlace. Antes de imprimir cambia por `?` cualquier carácter de control que traiga un correo, para que no llegue a la terminal (modelo de amenazas, 8). Los lee desde un contenedor desechable en esa red, con la imagen de la API, de solo lectura y sin capacidades, y no borra nada. Si Mailpit no está en marcha, lo dice y sale con código 1. Los enlaces llevan tokens de un solo uso: la salida es para la terminal de quien la pide. La interfaz web de Mailpit no se publica a propósito (modelo de amenazas, 8).
 
 Para parar la pila con Mailpit, hay que nombrar el perfil: `docker compose down` sin él deja Mailpit en marcha.
 
@@ -374,7 +418,7 @@ Cada batería usa un proyecto de Docker propio (`canario_<nombre>`), lo borra en
 python tests\security\verificar_unitarios.py
 ```
 
-La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 44 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
+La batería ejecuta las pruebas dentro de la imagen de la API (el mismo Python y las mismas dependencias que en producción), sin red, de solo lectura y sin capacidades, y exige el número exacto de pruebas de cada fichero: un fichero que `unittest` no encuentre se saltaría en silencio. Antes comprueba sus controles (una prueba que falla da código 1 y un directorio vacío, 5). Después aplica 57 mutantes: copias de `app/` con una medida de seguridad rota a propósito (por ejemplo, que la redacción acepte posiciones negativas o que una conexión vuelva al pool con el contexto de otra empresa), y cada una debe hacer fallar la prueba exacta que la cubre. Una prueba que nunca se ha visto fallar no demuestra nada. Al añadir o quitar una prueba hay que actualizar a mano su número en la batería.
 
 Para ejecutar solo las pruebas, sin controles ni mutantes (la imagen se borra al final; si se queda, la batería se detiene con `PARADA` al encontrarla):
 
