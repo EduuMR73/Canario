@@ -26,15 +26,17 @@ Redis, una empresa dada de alta con gestion y peticiones como las de un
 navegador. Prueba:
 
 * i) que la API arranca con el origen del sitio en el log;
-* j) la página de inicio, con las cabeceras del sitio y el aviso del
-  dispositivo y la red;
+* j) la página de inicio, con las cabeceras del sitio, el aviso del
+  dispositivo y la red y el enlace al canal externo de la Autoridad
+  Independiente de Protección del Informante;
 * k) el formulario de una empresa, con el mismo aviso, y el mismo 404 para
   una empresa que no existe que para una ruta que no existe;
 * l) que una denuncia por formulario se crea, que el código sale una sola vez
   y que se guarda lo mismo que guardaría la API JSON (CRLF -> LF), leyéndola
   por /v1 en el 8443;
-* m) la consulta: todo escapado, el código en el cuerpo y el mismo 404 para
-  un código que no existe, sin repetirlo;
+* m) la consulta: con el mismo aviso (también tras un error, debajo del
+  resumen), todo escapado, el código en el cuerpo y el mismo 404 para un
+  código que no existe, sin repetirlo;
 * n) los mensajes, y que un texto vacío vuelve con el formulario;
 * o) que un formulario de otro origen (o sin Origin, o same-site) se rechaza
   sin crear nada;
@@ -167,8 +169,8 @@ FORMULARIO = "application/x-www-form-urlencoded"
 CABECERAS_NAVEGADOR = {"Origin": ORIGEN_WEB, "Sec-Fetch-Site": "same-origin", "Content-Type": FORMULARIO}
 PATRON_ALTA = re.compile(r"empresa creada: empresa_id=([0-9a-f-]{36}) identificador_publico=([0-9a-f]{32})")
 PATRON_CODIGO = re.compile(rb'<p class="codigo"><code>([^<]+)</code></p>')
-# j) y k) Los consejos de anonimato (app/plantillas/macros.html), tal cual
-# los sirve la API, escritos aquí a mano.
+# j), k) y m) Los consejos de anonimato (app/plantillas/macros.html), tal
+# cual los sirve la API, escritos aquí a mano.
 AVISO_DISPOSITIVO = ('<div class="aviso">\n'
                      "<p><strong>Para proteger su anonimato:</strong></p>\n"
                      "<ul>\n"
@@ -180,6 +182,12 @@ AVISO_DISPOSITIVO = ('<div class="aviso">\n'
                      "<p>Desde un equipo o una red de la empresa se puede saber que alguien ha entrado en este canal, "
                      "y cuándo.</p>\n"
                      "</div>").encode()
+# j) El canal externo (art. 16.1 de la Ley 2/2023): al dominio oficial, con
+# el dominio como texto y rel="noreferrer" (app/plantillas/inicio.html).
+LINEA_AUTORIDAD = ("<p>También puede informar ante la Autoridad Independiente de Protección del Informante, "
+                   "el canal externo de la Ley 2/2023: "
+                   '<a href="https://www.proteccioninformante.gob.es" rel="noreferrer">'
+                   "www.proteccioninformante.gob.es</a>.</p>").encode()
 # Un texto con HTML y un salto de línea, enviado como lo codifica un navegador
 # (el salto, como CRLF: %0D%0A).
 TEXTO_HTML = "<script>alert(1)</script> & \"comillas\""
@@ -608,6 +616,7 @@ def seccion_j():
     pasa(control, f"j) GET / -> 200, la pagina de inicio de la API ({respuesta[0]})")
     cabeceras_exactas("j) pagina de inicio", respuesta[1], CABECERAS_HTML)
     negativo("j) el inicio lleva los consejos de anonimato", AVISO_DISPOSITIVO in respuesta[2], control)
+    negativo("j) el inicio lleva el enlace al canal externo de la Autoridad", LINEA_AUTORIDAD in respuesta[2], control)
 
 
 def seccion_k():
@@ -651,6 +660,10 @@ def seccion_l():
 
 def seccion_m():
     p("=== m) consulta por formulario")
+    pagina = peticion("GET", "/seguimiento")
+    control_pagina = pagina_api(pagina, 200) and b'action="/seguimiento/consulta"' in pagina[2]
+    pasa(control_pagina, f"m) GET /seguimiento -> 200 con el formulario de la consulta ({pagina[0]})")
+    negativo("m) la consulta lleva los consejos de anonimato", AVISO_DISPOSITIVO in pagina[2], control_pagina)
     respuesta = enviar("/seguimiento/consulta", f"codigo={CODIGO}".encode("ascii"))
     html = respuesta[2]
     control = pagina_api(respuesta, 200) and "segunda línea".encode() in html
@@ -664,6 +677,13 @@ def seccion_m():
         negativo(f"m) un codigo que no existe ({len(codigo)} caracteres) -> 404 con el formulario, sin repetirlo",
                  pagina_api(respuesta, 404) and MENSAJE_CODIGO.encode() in respuesta[2]
                  and f'value="{codigo}"'.encode() not in respuesta[2], control, f"{respuesta[0]}")
+    # Tras el error, el aviso sigue, pero debajo del resumen: el error es lo
+    # primero que se lee. Control: esa respuesta es el 404 con el mensaje.
+    html = respuesta[2]
+    control_error = pagina_api(respuesta, 404) and MENSAJE_CODIGO.encode() in html
+    negativo("m) con un error, el aviso va debajo del resumen de errores",
+             AVISO_DISPOSITIVO in html and html.index(MENSAJE_CODIGO.encode()) < html.index(AVISO_DISPOSITIVO),
+             control_error)
 
 
 def seccion_n():

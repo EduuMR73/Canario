@@ -14,7 +14,8 @@ const SESIONES = '/v1/personal/sesiones';
 const RENOVACION = '/v1/personal/sesiones/renovacion';
 const CIERRE = '/v1/personal/sesiones/actual';
 const CON_BEARER = new HttpHeaders({ 'WWW-Authenticate': 'Bearer' });
-const CUENTA = { usuario_id: 'u', email: 'admin@canario.test', rol: 'admin', invitacion_pendiente: false };
+const CUENTA = { usuario_id: 'u', email: 'admin@canario.test', rol: 'admin', invitacion_pendiente: false,
+                 enlace_canal: 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef' };
 const LOGIN = { empresa: 'e', email: 'admin@canario.test', contrasena: 'x', codigo_totp: '000000' };
 
 // Cerrojo falso con la misma semántica que Web Locks: un trabajo cada vez,

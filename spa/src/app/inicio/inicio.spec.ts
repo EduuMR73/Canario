@@ -1,19 +1,25 @@
 import { signal } from '@angular/core';
-import { TestBed } from '@angular/core/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Rol } from '../nucleo/api';
 import { Sesion } from '../nucleo/sesion';
 import { Inicio } from './inicio';
 
 // Oráculos literales: los textos y las rutas de los accesos de cada rol, no
 // las constantes del código que se prueba (nucleo/permisos.ts, MENU).
-function pintar(rol: Rol, invitacion_pendiente = false): HTMLElement {
-  const yo = signal({ usuario_id: 'u', email: 'persona@canario.test', rol, invitacion_pendiente });
+const ENLACE = 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef';
+
+function crear(rol: Rol, invitacion_pendiente = false): ComponentFixture<Inicio> {
+  const yo = signal({ usuario_id: 'u', email: 'persona@canario.test', rol, invitacion_pendiente, enlace_canal: ENLACE });
   TestBed.configureTestingModule({ providers: [provideRouter([]), { provide: Sesion, useValue: { yo } }] });
   const pagina = TestBed.createComponent(Inicio);
   pagina.detectChanges();
-  return pagina.nativeElement as HTMLElement;
+  return pagina;
+}
+
+function pintar(rol: Rol, invitacion_pendiente = false): HTMLElement {
+  return crear(rol, invitacion_pendiente).nativeElement as HTMLElement;
 }
 
 function accesos(raiz: HTMLElement): string[][] {
@@ -86,5 +92,80 @@ describe('página de inicio', () => {
     const auditor = pintar('auditor');
     expect(accesos(auditor)).toEqual([['Auditoría', '/auditoria'], ['Mi cuenta', '/cuenta']]);
     expect(plazos(auditor)).toBeNull();
+  });
+
+  describe('el canal de denuncias de la empresa', () => {
+    // Solo el portapapeles, no el navigator entero: el resto lo usa Angular.
+    const portapapeles = (escribir: (texto: string) => Promise<void>) =>
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText: escribir }, configurable: true });
+    afterEach(() => Reflect.deleteProperty(navigator, 'clipboard'));
+
+    const tarjeta = (raiz: HTMLElement) => {
+      const seccion = raiz.querySelector('section.canal');
+      const enlace = seccion?.querySelector('a');
+      return seccion === null ? null : {
+        titulo: seccion.querySelector('h2')?.textContent?.trim(),
+        nombre: seccion.getAttribute('aria-labelledby'),
+        texto: seccion.querySelector('code.enlace')?.textContent?.trim(),
+        ayudas: [...seccion.querySelectorAll('.ayuda')].map((p) => p.textContent?.trim()),
+        boton: seccion.querySelector('button')?.textContent?.trim(),
+        abrir: [enlace?.textContent?.trim(), enlace?.getAttribute('href'), enlace?.getAttribute('target'),
+                enlace?.getAttribute('rel')],
+      };
+    };
+    const ESPERADA = {
+      titulo: 'Canal de denuncias de su empresa',
+      nombre: 'inicio-canal',
+      texto: ENLACE,
+      ayudas: [
+        'La empresa debe publicar este enlace en la página de inicio de su web (art. 25 de la Ley 2/2023).',
+        'Lo que envíe desde ahí llega como una denuncia real de su empresa.',
+      ],
+      boton: 'Copiar el enlace',
+      abrir: ['Abrir el formulario (se abre en una pestaña nueva)', ENLACE, '_blank', 'noopener noreferrer'],
+    };
+
+    it('la ve todo el personal, con el enlace que da la API, y es la última de la página', () => {
+      for (const rol of ['admin', 'instructor', 'auditor'] as const) {
+        TestBed.resetTestingModule();
+        const raiz = pintar(rol);
+        expect(tarjeta(raiz)).toEqual(ESPERADA);
+        // Dato de consulta: va después de los accesos y de los plazos.
+        expect(raiz.lastElementChild?.matches('section.canal')).toBe(true);
+      }
+    });
+
+    it('copiar avisa en una región viva que ya estaba en la página', async () => {
+      const escribir = vi.fn().mockResolvedValue(undefined);
+      portapapeles(escribir);
+      const pagina = crear('auditor');
+      const raiz = pagina.nativeElement as HTMLElement;
+      const estado = () => raiz.querySelectorAll('section.canal [role="status"]');
+      // Control: la región existe y está vacía antes de pulsar; sin ella, el
+      // texto de después no diría si se anuncia.
+      expect(estado().length).toBe(1);
+      expect(estado()[0].textContent?.trim()).toBe('');
+      const region = estado()[0];
+      (raiz.querySelector('section.canal button') as HTMLButtonElement).click();
+      await vi.waitFor(() => {
+        pagina.detectChanges();
+        expect(region.textContent?.trim()).toBe('Copiado.');
+      });
+      expect(escribir).toHaveBeenCalledWith(ENLACE);
+      // El mismo nodo: solo ha cambiado su texto.
+      expect(estado()[0]).toBe(region);
+    });
+
+    it('si el navegador no deja copiar, lo dice y cómo seguir', async () => {
+      portapapeles(vi.fn().mockRejectedValue(new Error('denegado')));
+      const pagina = crear('admin');
+      const raiz = pagina.nativeElement as HTMLElement;
+      (raiz.querySelector('section.canal button') as HTMLButtonElement).click();
+      await vi.waitFor(() => {
+        pagina.detectChanges();
+        expect(raiz.querySelector('section.canal [role="status"]')?.textContent?.trim())
+          .toBe('No se ha podido copiar: selecciónelo y cópielo a mano.');
+      });
+    });
   });
 });

@@ -110,6 +110,9 @@ etapa. Prueba:
   sesión del auditor (control: antes de la baja entraba) y la propia cuenta
   no tiene botón de baja; los tres campos de contraseña de /cuenta tienen
   su botón "Mostrar" (pulido 2c; control: la instructora abre /cuenta);
+  los tres roles ven en /inicio la tarjeta del canal con el enlace de su
+  empresa en el 8444 y "Abrir el formulario" con pestaña nueva y rel
+  noopener noreferrer, y el clic abre ese formulario con un 200;
   cambiar la contraseña con la actual mal da su
   aviso sin renovar la sesión, y con la buena la sesión sigue viva; ninguna
   violación de la CSP ni error de JavaScript;
@@ -199,8 +202,8 @@ etapa. Prueba:
 * q) el sitio del denunciante (8444) en Chromium, a 320 px: el recorrido
   entero por sus cinco páginas (inicio, formulario, enviada, consulta y
   expediente), con una denuncia enviada por el formulario que se lee en el
-  expediente; el inicio y el formulario llevan el aviso del dispositivo y la
-  red, con su texto escrito aquí a mano; los fondos de los dos temas son los
+  expediente; el inicio, el formulario y la consulta llevan el aviso del
+  dispositivo y la red, con su texto escrito aquí a mano; los fondos de los dos temas son los
   de la SPA (control: en claro, el del claro); la letra es la del sistema y
   la página no declara ninguna fuente (control: una añadida a mano se
   cuenta); el canario de la barra es decorativo y se ve; el select, el campo
@@ -465,6 +468,9 @@ PRUEBAS_UNITARIAS = (
     "lleva a Leila decorativa y conserva el aviso y el botón de reintentar",
     "los accesos del inicio son las páginas del rol, sin el propio inicio y cada una con su descripción",
     "los plazos de la Ley 2/2023 los ven quienes instruyen, y el auditor no",
+    "la ve todo el personal, con el enlace que da la API, y es la última de la página",
+    "copiar avisa en una región viva que ya estaba en la página",
+    "si el navegador no deja copiar, lo dice y cómo seguir",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
 # Mutantes del interceptor, del guard, del cliente de denuncias y de los
@@ -1350,6 +1356,15 @@ async def ejecutar_personal(pasos):
     print(json.dumps(res, ensure_ascii=False))
 '''
 
+# l) La tarjeta del canal en el inicio, igual para los tres roles: el título,
+# el enlace al formulario de la empresa en el 8444 (sin CANARIO_ORIGEN_WEB,
+# el origen por defecto de la API), y "Abrir el formulario" con su texto,
+# pestaña nueva y rel. El identificador se añade al usarlo: es el del alta.
+PREFIJO_CANAL = "https://localhost:8444/empresas/"
+TITULO_CANAL = "Canal de denuncias de su empresa"
+ABRIR_CANAL = "Abrir el formulario (se abre en una pestaña nueva)"
+H1_FORMULARIO_WEB = "Nueva denuncia"
+
 # l) Las pantallas por rol, con tres cuentas. Recibe el SPKI, el
 # identificador, el email, la contraseña, el secreto TOTP y el último paso
 # usado del admin, el email de la solicitud de j), los emails de la
@@ -1359,6 +1374,17 @@ NAVEGADOR_ROLES = NAVEGADOR_PERSONAL + r'''
 (spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin, email_registro,
  email_instructora, email_auditor, contrasena) = sys.argv[1:11]
 USUARIOS = "/v1/personal/usuarios"
+# La tarjeta del canal en el inicio: [título, enlace en texto, y del enlace
+# "Abrir el formulario": texto, href, target y rel], o None si no está.
+CANAL = """() => {
+  const s = document.querySelector('main section.canal');
+  if (s === null) return null;
+  const a = s.querySelector('a');
+  return [s.querySelector('h2').textContent.trim(), s.querySelector('code.enlace').textContent.trim(),
+          a.textContent.trim(), a.getAttribute('href'), a.getAttribute('target'), a.getAttribute('rel')];
+}"""
+# El estado HTTP de la navegación de la página (Navigation Timing).
+ESTADO_NAVEGACION = "() => performance.getEntriesByType('navigation')[0].responseStatus"
 usados[secreto_admin] = int(paso_admin)
 
 
@@ -1423,6 +1449,21 @@ async def pasos_roles(navegador):
     res["menu_auditor"] = await menu(auditor)
     res["auditor_cuentas"] = await abrir(auditor, "/cuentas")
     res["auditor_inicio_antes"] = await abrir(auditor, "/inicio")
+
+    # El canal de la empresa en el inicio de los tres roles.
+    for nombre, pagina in (("admin", admin), ("instructora", instructora), ("auditor", auditor)):
+        await abrir(pagina, "/inicio")
+        res["canal_" + nombre] = await pagina.evaluate(CANAL)
+    # Seguir el enlace con un clic, como el personal: pestaña nueva y una
+    # navegación same-site del 8445 al 8444, que el GET del formulario acepta
+    # (Sec-Fetch-Site solo se comprueba en los POST).
+    async with auditor.context.expect_page() as nueva:
+        await auditor.get_by_role("link", name="Abrir el formulario (se abre en una pestaña nueva)", exact=True).click()
+    formulario = await nueva.value
+    await formulario.wait_for_load_state()
+    res["canal_formulario"] = {"url": formulario.url, "estado": await formulario.evaluate(ESTADO_NAVEGACION),
+                               "h1": (await formulario.locator("h1").inner_text()).strip()}
+    await formulario.close()
 
     # Admin: reinvitar, anular y dar de baja.
     await abrir(admin, "/cuentas")
@@ -2333,6 +2374,7 @@ async def pasos(contexto):
 
     await pagina.goto(WEB + "/seguimiento")
     await mirar(pagina, "seguimiento")
+    res["avisos"]["seguimiento"] = await pagina.evaluate(AVISO)
     controles = ["#codigo", "main form button[type=submit]"]
     res["altos_seguimiento"] = await pagina.evaluate(ALTOS, controles)
     res["altos_seguimiento_mutante"] = await con_regla(pagina, MUTANTE_ALTO, ALTOS, controles)
@@ -3284,6 +3326,19 @@ def seccion_l():
                                ("auditor_cuentas", "/cuentas")):
         negativo(f"l) {clave.split('_')[0]} pide {ruta_pedida} por su URL y vuelve a /inicio ({res.get(clave)})",
                  res.get(clave) == {"ruta": "/inicio", "h1": H1_INICIO}, control_guard)
+    # El canal de la empresa: lo ve todo el personal, también quien no instruye.
+    enlace = PREFIJO_CANAL + IDENTIFICADOR
+    canal_esperado = [TITULO_CANAL, enlace, ABRIR_CANAL, enlace, "_blank", "noopener noreferrer"]
+    for nombre in ("admin", "instructora", "auditor"):
+        pasa(res.get("canal_" + nombre) == canal_esperado,
+             f"l) {nombre} ve en /inicio la tarjeta del canal con el enlace de su empresa ({res.get('canal_' + nombre)})")
+    formulario = res.get("canal_formulario") or {}
+    pasa(formulario.get("url") == enlace and formulario.get("estado") == 200
+         and formulario.get("h1") == H1_FORMULARIO_WEB,
+         f"l) el clic en Abrir el formulario abre el formulario de la empresa en el 8444 ({formulario})")
+    # Sin prueba de window.opener: la COOP same-origin de los dos sitios ya lo
+    # corta, con noopener o sin él, y no habría control que lo distinguiera.
+    # El rel se comprueba arriba, como literal.
     negativo(f"l) y la API responde 403 a la instructora en /usuarios ({res.get('usuarios_instructora')})",
              res.get("usuarios_instructora") == 403, res.get("usuarios_admin") == 200,
              f"control: el admin recibe {res.get('usuarios_admin')}")
@@ -4025,8 +4080,8 @@ def seccion_q():
     pasa(res.get("texto_expediente") == TEXTO_DENUNCIA_WEB,
          f"q) la denuncia enviada por el formulario se lee en el expediente ({res.get('texto_expediente')!r})")
     avisos = res.get("avisos") or {}
-    pasa(avisos == {"inicio": AVISO_DISPOSITIVO, "formulario": AVISO_DISPOSITIVO},
-         f"q) el inicio y el formulario llevan los consejos de anonimato ({avisos})")
+    pasa(avisos == {"inicio": AVISO_DISPOSITIVO, "formulario": AVISO_DISPOSITIVO, "seguimiento": AVISO_DISPOSITIVO},
+         f"q) el inicio, el formulario y la consulta llevan los consejos de anonimato ({avisos})")
 
     # El tema, con el claro como control de que se lee el de la hoja: los
     # mismos fondos que la SPA en p).

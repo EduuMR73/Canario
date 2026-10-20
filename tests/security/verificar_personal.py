@@ -36,6 +36,8 @@ y 6.9). Qué prueba:
   admin 409; el cambio de contraseña revoca todas las sesiones, también la
   actual, y los demás dispositivos, y devuelve tokens nuevos (ASVS 7.2.4);
   la auditoría registra cada acción y su cadena es válida.
+* Enlace del canal: /yo da a cada rol el formulario de su empresa en el sitio
+  del denunciante, y el de una cuenta de B es el de B.
 * Recuperación: una reinvitación se ve (invitacion_pendiente en /yo y en la
   lista) y un admin puede anularla; reinvitar-admin solo actúa sobre un admin
   activado de esa empresa, revoca en el acto su acceso (la sesión anterior ya
@@ -221,7 +223,11 @@ TEXTO_EVENTO_LOGIN_FALLIDO = "EVENTO login_fallido: "
 # Una sesión de la batería renueva su acceso al construir una petición si
 # tiene más de 4 minutos: el acceso dura 5 y algunas secciones tardan más.
 RENOVAR_TRAS = 240
-CLAVES_YO = ["email", "invitacion_pendiente", "rol", "usuario_id"]
+CLAVES_YO = ["email", "enlace_canal", "invitacion_pendiente", "rol", "usuario_id"]
+# El enlace del canal en /yo: el origen del sitio del denunciante, el de por
+# defecto de la API porque la batería no fija CANARIO_ORIGEN_WEB (lo dice el
+# log del arranque), y la ruta del formulario de la empresa.
+PREFIJO_ENLACE_CANAL = "https://localhost:8444/empresas/"
 CLAVES_USUARIO = ["activado", "activo", "camino_sin_confianza_cerrado", "email", "en_espera", "invitacion_pendiente",
                   "rol", "usuario_id"]
 TEXTO_SEGUNDO_ADMIN = ("recomendacion: cuando este admin active su cuenta, que invite a un segundo admin; "
@@ -1352,6 +1358,15 @@ def seccion_f():
     datos = json_de(control) or {}
     pasa(control.get("estado") == 200 and sorted(datos) == CLAVES_YO and datos.get("email") == instr.email
          and datos.get("rol") == "instructor", "f) control: /yo con el JWT Bearer responde la cuenta")
+    # El enlace del canal sale de la sesión: el de una cuenta de B es el de B,
+    # nunca el de A ni uno fijo (el identificador de cada empresa, del alta).
+    enlace_a = PREFIJO_ENLACE_CANAL + EMPRESAS["A"][1]
+    pasa(datos.get("enlace_canal") == enlace_a,
+         f"f) /yo de una instructora de A da el enlace del canal de A ({datos.get('enlace_canal')!r})")
+    de_b = json_de(una(yo(sesion_de(CUENTAS["admin_b"]).jwt))) or {}
+    negativo("f) /yo del admin de B da el enlace del canal de B, no el de A (control: el de A, arriba)",
+             de_b.get("enlace_canal") == PREFIJO_ENLACE_CANAL + EMPRESAS["B"][1],
+             datos.get("enlace_canal") == enlace_a, f"de B: {de_b.get('enlace_canal')!r}")
     cabecera, cuerpo, _ = sesion.jwt.split(".")
     claims = leer_parte(cuerpo)
     pasa(len(sesion.jwt) == LONGITUD_JWT and leer_parte(cabecera) == CABECERA_JWT and sorted(claims) == CLAIMS_JWT
@@ -2540,6 +2555,9 @@ def seccion_k_auditor():
     yo = json_de(una(pt("GET", "/v1/personal/yo", token=tokens["auditor"]))) or {}
     pasa(alta.get("estado") == 201 and yo.get("rol") == "auditor",
          f"ka1) un admin invita a un auditor y, activado, su sesion tiene ese rol ({yo.get('rol')!r})")
+    # Todo el personal ve el enlace del canal, también quien solo audita.
+    pasa(yo.get("enlace_canal") == PREFIJO_ENLACE_CANAL + EMPRESAS["A"][1],
+         f"ka1) /yo del auditor da el enlace del canal de su empresa ({yo.get('enlace_canal')!r})")
 
     # ka2) La auditoría: la lee y verifica su cadena, sin dejar filas (como un admin).
     antes = total_auditoria("A")
