@@ -554,8 +554,16 @@ def cerrar_sesion(peticion: Request, sesion: SesionPersonal):
 @router.get("/yo")
 def yo(peticion: Request, sesion: SesionPersonal):
     pendiente = personal.invitacion_pendiente(peticion.app.state.pool, sesion)
+    # El enlace del canal de la empresa, para todo el personal y no solo para
+    # el admin: la ley obliga a la empresa a publicarlo (art. 25 de la Ley
+    # 2/2023), y así ninguna persona sola es la única que lo conoce. Lo arma
+    # la API porque la SPA no conoce el origen del sitio del denunciante: un
+    # origen escrito a mano en el cliente se desincronizaría con
+    # CANARIO_ORIGEN_WEB, que se valida al arrancar. No es secreto: es el
+    # enlace que la empresa debe publicar.
+    enlace_canal = f"{peticion.app.state.origen_web}/empresas/{sesion.identificador}"
     return JSONResponse(content={"usuario_id": str(sesion.usuario_id), "email": sesion.email, "rol": sesion.rol,
-                                 "invitacion_pendiente": pendiente})
+                                 "invitacion_pendiente": pendiente, "enlace_canal": enlace_canal})
 
 
 @router.post("/contrasena")

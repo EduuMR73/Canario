@@ -21,6 +21,9 @@ export interface Yo {
   email: string;
   rol: Rol;
   invitacion_pendiente: boolean;
+  // El formulario de denuncia de la empresa en el sitio del denunciante,
+  // armado por la API (la SPA no conoce ese origen).
+  enlace_canal: string;
 }
 
 export interface DatosLogin {

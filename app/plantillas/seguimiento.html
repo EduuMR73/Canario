@@ -1,9 +1,13 @@
 {% extends "base.html" %}
-{% from "macros.html" import resumen_errores, atributos_error, mensaje_error %}
+{% from "macros.html" import aviso_dispositivo, resumen_errores, atributos_error, mensaje_error %}
 {% block titulo %}Consultar una denuncia{% endblock %}
 {% block contenido %}
 <h1>Consultar una denuncia</h1>
 {{ resumen_errores(errores) }}
+{#- El mismo aviso que al enviar: consultar desde el equipo del trabajo o
+    desde su red deja el mismo rastro. Después del resumen de errores, como
+    en el formulario: si la consulta falla, el error es lo primero. -#}
+{{ aviso_dispositivo() }}
 {#- El código va en el cuerpo de un POST, nunca en la URL: así no queda en el
     historial ni en ningún registro de rutas. -#}
 <form method="post" action="/seguimiento/consulta" autocomplete="off">

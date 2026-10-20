@@ -1,4 +1,4 @@
-import { Component, computed, inject } from '@angular/core';
+import { Component, computed, inject, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { MENU, menuDe } from '../nucleo/permisos';
 import { Sesion } from '../nucleo/sesion';
@@ -27,6 +27,14 @@ import { Sesion } from '../nucleo/sesion';
 // que no dice nada a quien no la conoce; debajo, la ley con un nombre corto
 // (el oficial, con la fecha y "de lucha contra la corrupción", está en el
 // modelo de amenazas).
+//
+// Al final, para todo el personal, el enlace del canal de denuncias de la
+// empresa: la ley obliga a la empresa a publicarlo (art. 25), y si lo viera
+// solo el admin, una sola persona decidiría si se conoce. Va el último
+// porque es un dato de consulta; los accesos son lo de cada día. Lo da la
+// API en /yo (la SPA no conoce el origen del sitio del denunciante).
+// "Abrir el formulario" dice en su texto visible que abre una pestaña nueva
+// (WCAG, G201): quien ve la pantalla también tiene que saberlo.
 type Ruta = (typeof MENU)[keyof typeof MENU]['ruta'];
 
 // Una descripción por página, con la ruta como clave: si alguien añade una
@@ -68,6 +76,17 @@ const DESCRIPCIONES: Record<Exclude<Ruta, '/inicio'>, string> = {
           <p class="ayuda">El acuse de recibo lo da el canal al recibir la denuncia (art. 9.2.c).</p>
         </section>
       }
+      <section class="canal" aria-labelledby="inicio-canal">
+        <h2 id="inicio-canal">Canal de denuncias de su empresa</h2>
+        <p class="ayuda">La empresa debe publicar este enlace en la página de inicio de su web (art. 25 de la Ley 2/2023).</p>
+        <p><code class="enlace">{{ yo.enlace_canal }}</code></p>
+        <p class="acciones">
+          <button type="button" class="secundario" (click)="copiar(yo.enlace_canal)">Copiar el enlace</button>
+        </p>
+        <p role="status">{{ copiado() }}</p>
+        <p class="ayuda">Lo que envíe desde ahí llega como una denuncia real de su empresa.</p>
+        <p><a [href]="yo.enlace_canal" target="_blank" rel="noopener noreferrer">Abrir el formulario (se abre en una pestaña nueva)</a></p>
+      </section>
     }
   `,
 })
@@ -88,4 +107,18 @@ export class Inicio {
   // Los mismos roles que la entrada de las denuncias del menú: si cambian
   // allí, cambian aquí.
   readonly instruye = computed(() => this.accesos().some((acceso) => acceso.ruta === MENU.denuncias.ruta));
+
+  // Lo lee el <p role="status"> de la tarjeta, que está siempre en la
+  // página aunque vacío: una región viva que se crea a la vez que su texto
+  // puede no anunciarse (MDN, ARIA live regions). Solo cambia el texto.
+  readonly copiado = signal('');
+
+  // Sin "bórrelo del portapapeles", a diferencia del enlace de activación
+  // (cuentas.ts): este enlace no es secreto, es el que se publica.
+  copiar(enlace: string): void {
+    navigator.clipboard.writeText(enlace).then(
+      () => this.copiado.set('Copiado.'),
+      () => this.copiado.set('No se ha podido copiar: selecciónelo y cópielo a mano.'),
+    );
+  }
 }

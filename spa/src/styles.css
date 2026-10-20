@@ -573,23 +573,34 @@ button[aria-disabled="true"] {
   color: var(--color-texto-suave);
 }
 
-/* Los plazos de la Ley 2/2023 en el inicio de quien instruye: una caja
-   como las tarjetas, sobre el mismo fondo (sin parejas de colores nuevas).
-   Es información fija, no un aviso: sin role="alert". */
-.plazos {
+/* Los plazos de la Ley 2/2023 en el inicio de quien instruye y el canal de
+   denuncias de la empresa, que ve todo el personal: una caja como las
+   tarjetas, sobre el mismo fondo (sin parejas de colores nuevas). Es
+   información fija, no un aviso: sin role="alert". Dos usos de la misma
+   caja, con un selector para cada uno: sin una clase genérica hasta que
+   haya un tercero. */
+.plazos,
+.canal {
   padding: var(--espacio-3) var(--espacio-4);
   border: 1px solid var(--color-separador);
   border-radius: var(--radio);
 }
 
-.plazos > h2 {
+/* Las dos cajas seguidas (quien instruye ve las dos) no se tocan. */
+.plazos + .canal {
+  margin-top: var(--espacio-4);
+}
+
+.plazos > h2,
+.canal > h2 {
   margin: 0 0 var(--espacio-2);
 }
 
 /* La caja sigue a todo el ancho, como las tarjetas de encima; solo el
    texto se queda a la medida de lectura. */
 .plazos > ul,
-.plazos > p {
+.plazos > p,
+.canal > p {
   max-width: var(--medida-texto);
 }
 
@@ -606,9 +617,17 @@ button[aria-disabled="true"] {
   margin: var(--espacio-3) 0 0;
 }
 
-/* La ley, pegada al título que acompaña y separada de la lista. */
-.plazos > h2 + .ayuda {
+/* La ley, pegada al título que acompaña y separada de lo que sigue. */
+.plazos > h2 + .ayuda,
+.canal > h2 + .ayuda {
   margin: 0 0 var(--espacio-3);
+}
+
+/* Sin el margen del navegador bajo el último párrafo: el hueco inferior de
+   la caja es su relleno, igual que el superior. El role="status" vacío no
+   suma nada: un bloque vacío colapsa sus márgenes con los de al lado. */
+.canal > p:last-child {
+  margin-bottom: 0;
 }
 
 /* Las páginas de acceso (entrar, activar, solicitar y confirmar): el

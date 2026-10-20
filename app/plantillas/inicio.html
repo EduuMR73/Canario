@@ -5,4 +5,11 @@
 <h1>Canal de denuncias anónimo</h1>
 {{ aviso_dispositivo() }}
 <p>Para presentar una denuncia, use el enlace que le ha dado su empresa. No necesita registrarse ni dar su nombre.</p>
-<p>Si ya presentó una denuncia, puede <a href="/seguimiento">consultar su estado</a> con el código de seguimiento que recibió.</p>{% endblock %}
+<p>Si ya presentó una denuncia, puede <a href="/seguimiento">consultar su estado</a> con el código de seguimiento que recibió.</p>
+{#- El canal externo de la ley (art. 16.1): quien no quiera usar el de su
+    empresa tiene otro camino. Al dominio oficial y no al formulario, que lo
+    sirve un tercero en otro dominio: el oficial es estable y se puede
+    comprobar, y el texto del enlace es el propio dominio para que una copia
+    falsa se note. rel="noreferrer" por si faltase la Referrer-Policy del
+    proxy. Sin prometer anonimato: ese canal no lo controla Canario. -#}
+<p>También puede informar ante la Autoridad Independiente de Protección del Informante, el canal externo de la Ley 2/2023: <a href="https://www.proteccioninformante.gob.es" rel="noreferrer">www.proteccioninformante.gob.es</a>.</p>{% endblock %}
