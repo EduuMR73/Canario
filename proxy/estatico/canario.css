@@ -375,8 +375,13 @@ select {
 }
 
 /* El código de seguimiento: en una caja, para que se vea qué hay que
-   guardar, y partido si no cabe a 320 px. */
+   guardar, y partido si no cabe a 320 px. Un clic lo selecciona entero: el
+   8444 no tiene JavaScript (su CSP no admite scripts, y Tor Browser en su
+   nivel más seguro los desactiva), así que no puede haber un botón de copiar.
+   El prefijo, como en el ejemplo de MDN (user-select), para Safari. */
 .codigo code {
+  -webkit-user-select: all;
+  user-select: all;
   display: block;
   padding: var(--espacio-3) var(--espacio-4);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
