@@ -45,7 +45,10 @@ Qué prueba:
   EVENTO registro_fallido, sin el email;
 * l) (tras h y antes de i) la herramienta del buzón de desarrollo (scripts/buzon.py)
   enseña un correo de verificación con su asunto, su destinatario y el
-  enlace entero, el mismo que lee el lector propio de la batería; con Mailpit
+  enlace entero, el mismo que lee el lector propio de la batería; con --texto,
+  además, el texto del correo (control: sin --texto no sale); su limpieza
+  cambia por "?" cada carácter de control (ESC, \r suelto, U+202E, tabulador
+  y C1) y deja el resto igual, salto de línea incluido; con Mailpit
   parado (la red correo sigue, como al arrancar sin el perfil desarrollo) sale
   con código 1 y un error, sin enlaces ni traza (control: con Mailpit sale
   con 0). Va después de las secciones que leen correos anteriores, porque
@@ -157,6 +160,22 @@ TEXTO_SIN_DESTINATARIO = "EVENTO aviso_sin_destinatario: tipo=aviso_activacion e
 # un límite que alcanza a todos los correos de la batería.
 ERROR_BUZON = "ERROR: no se pudo leer el buzon de Mailpit: "
 LIMITE_BUZON = 100
+# Una línea del texto del correo de verificación (app/solicitudes.py). Sin
+# tildes a propósito: por una tubería, Python en Windows escribe en cp1252 y
+# la batería lee UTF-8, así que una tilde no se compararía bien.
+LINEA_TEXTO_VERIFICACION = "Si no lo ha pedido usted, ignore este correo: sin confirmar, la solicitud caduca sola."
+# limpiar() de scripts/buzon.py, cargada sin ejecutar main(). Las entradas
+# llegan en JSON por la entrada estándar y la salida va en JSON con escapes
+# ASCII: ningún carácter de control pasa por la línea de órdenes ni por la
+# consola.
+PRUEBA_LIMPIEZA = """
+import json, runpy, sys
+limpiar = runpy.run_path(sys.argv[1])["limpiar"]
+print(json.dumps([limpiar(t) for t in json.load(sys.stdin)]))
+"""
+CON_CONTROL = "a\x1b[31mb\rc\N{RIGHT-TO-LEFT OVERRIDE}d\te\x85f"
+LIMPIO = "a?[31mb?c?d?e?f"
+SIN_CONTROL = "linea 1\nlinea 2 con tilde: camión"
 PATRON_VERIFICACION = re.compile(r"https://localhost:8445/registro/verificacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 PATRON_ACTIVACION = re.compile(r"https://localhost:8445/activacion#([0-9a-f]{32}\.[A-Za-z0-9_-]{43})")
 ACCION_APROBACION = "aprobacion_registro"
@@ -1041,10 +1060,10 @@ def seccion_k():
     pasa(arranca.rc == 0, f"k) PostgreSQL vuelve a arrancar (codigo {arranca.rc})")
 
 
-def buzon_herramienta(proyecto):
+def buzon_herramienta(proyecto, *extra):
     """scripts/buzon.py tal cual lo usa una persona, con el proyecto dado."""
     return ejecutar([sys.executable, str(RAIZ / "scripts" / "buzon.py"), "--proyecto", proyecto,
-                     "--limite", str(LIMITE_BUZON)], timeout=120)
+                     "--limite", str(LIMITE_BUZON), *extra], timeout=120)
 
 
 def seccion_l():
@@ -1068,6 +1087,26 @@ def seccion_l():
                   f"(codigo {r.rc}, {len(lineas)} lineas)")
     pasa(control and f"Asunto: {ASUNTO_VERIFICACION}" in lineas and f"Para:   {email}" in lineas,
          "l) y el asunto y el destinatario del correo de verificacion")
+    # --texto. Control: sin --texto, la línea del texto no sale, así que si
+    # sale es por la opción.
+    con_texto = buzon_herramienta(PROYECTO, "--texto")
+    lineas_texto = [linea.strip() for linea in con_texto.out.splitlines()]
+    negativo("l) con --texto ensena tambien el texto del correo, con el enlace en su linea",
+             con_texto.rc == 0 and LINEA_TEXTO_VERIFICACION in lineas_texto and enlace in lineas_texto,
+             control and LINEA_TEXTO_VERIFICACION not in lineas,
+             f"(codigo {con_texto.rc}, {len(lineas_texto)} lineas)")
+    # limpiar(). Control: un texto sin caracteres de control sale igual.
+    # Entrada en JSON con escapes ASCII: por una tubería, Python en Windows
+    # lee la entrada estándar en cp1252.
+    r = ejecutar([sys.executable, "-I", "-c", PRUEBA_LIMPIEZA, str(RAIZ / "scripts" / "buzon.py")],
+                 entrada=json.dumps([CON_CONTROL, SIN_CONTROL]).encode("ascii"), timeout=60)
+    try:
+        limpios = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        limpios = [None, None]
+    negativo(f"l) la limpieza cambia por ? cada caracter de control ({limpios[0]!a})",
+             limpios[0] == LIMPIO, limpios[1] == SIN_CONTROL,
+             f"sin control: {limpios[1]!a}, error: {r.err.strip()[-200:]!r}")
     # Mailpit parado con la red correo en pie (la API sigue en ella): lo que
     # pasa al arrancar la pila sin el perfil desarrollo.
     dc("stop", "mailpit")
