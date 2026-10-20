@@ -1,8 +1,14 @@
 # Canario
 
-Canario es un canal de denuncias anónimo multiempresa, pensado para cumplir la Ley 2/2023, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción. Este repositorio contiene el backend: una API REST con FastAPI, PostgreSQL y Redis, detrás de un proxy Caddy, todo con Docker Compose. El denunciante tiene sus páginas, en HTML generado por la propia API y sin JavaScript. El personal tiene su propio frontend, separado del backend: una SPA en Angular (`spa/`) que Caddy sirve en su propio puerto y que habla con la API por JSON. Hoy permite entrar, activar una cuenta invitada y solicitar el acceso; las pantallas de trabajo de cada rol están en construcción.
+Canario es un canal de denuncias anónimo multiempresa, pensado para cumplir la Ley 2/2023, reguladora de la protección de las personas que informen sobre infracciones normativas y de lucha contra la corrupción. Es una aplicación web distribuida, con el backend y el frontend separados, detrás de un proxy Caddy y todo con Docker Compose:
 
-Las amenazas consideradas, las decisiones de diseño y sus límites están en el [modelo de amenazas](docs/threat-model.md). Este README explica cómo ponerlo en marcha, operarlo y verificarlo.
+- **Backend:** una API REST con FastAPI, PostgreSQL y Redis. El personal se autentica con JWT de acceso de 5 minutos y una renovación que rota en cada uso.
+- **Frontend del personal:** una SPA en Angular (`spa/`), en el 8445, que habla con la API por JSON. Tiene tres roles (admin, instructor y auditor), cada uno con sus pantallas: denuncias, cuentas, solicitudes de acceso, auditoría y su propia cuenta. El registro pide confirmar el email, después un admin aprueba la solicitud y la cuenta se activa con contraseña y un código TOTP.
+- **Sitio del denunciante:** páginas HTML que genera la propia API, sin JavaScript, en el 8444. No hace falta registrarse ni dar el nombre.
+
+Se usa Angular aunque el enunciado recomienda React o Vue, porque trae de serie lo que necesita una SPA que maneja datos sensibles. Por un lado, su sanitizado del HTML y su política propia de Trusted Types, que permiten una CSP sin `unsafe-inline` y con `require-trusted-types-for 'script'`. Por otro, el router, los formularios y el cliente HTTP, del propio proyecto. En ejecución, la SPA solo depende de tres paquetes de terceros: rxjs, tslib y qrcode-generator.
+
+Las amenazas consideradas, las decisiones de diseño y sus límites están en el [modelo de amenazas](docs/threat-model.md). Los límites principales, aceptados para esta entrega: una sesión de admin robada puede quedarse con la empresa, porque invitar y dar de baja no piden un segundo factor, y el TOTP no resiste el phishing con un proxy en medio (modelo de amenazas, 8). Quedan diseñados pero sin implementar los adjuntos y los avisos al personal de una denuncia nueva (6.6 y 10). Este README explica cómo ponerlo en marcha, operarlo y verificarlo.
 
 ## Qué hay en el repositorio
 
