@@ -71,13 +71,14 @@ PRUEBAS_POR_FICHERO = {
     "test_limitador": 16,
     "test_login": 8,
     "test_personal": 8,
+    "test_proveedores_externos": 18,
     "test_solicitudes": 9,
     "test_tokens": 10,
     "test_transporte": 18,
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 230
+TOTAL_PRUEBAS = 248
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -253,6 +254,16 @@ MUTANTES = [
     ("frontera_http.py", "    aplicacion.add_exception_handler(PoolTimeout, _sin_conexion)\n", "",
      "test_frontera.SinConexion.test_pool_agotado_503_con_retry_after",
      "sin conexion a PostgreSQL la API responde 500 en vez de 503 con Retry-After"),
+    # Proveedor externo: el adaptador de Google del broker (app/proveedores_externos.py).
+    ("proveedores_externos.py", 'if claims.get("aud") != client_id:', "if False:",
+     "test_proveedores_externos.IdToken.test_audiencia", "se acepta un id_token emitido para otra aplicacion"),
+    ("proveedores_externos.py", "not hmac.compare_digest(recibido.encode(), nonce.encode())", "False",
+     "test_proveedores_externos.IdToken.test_nonce", "se acepta un id_token de otro flujo (sin nonce o con otro)"),
+    ("proveedores_externos.py", "if type(exp) is not int or ahora() >= exp:", "if type(exp) is not int or ahora() > exp:",
+     "test_proveedores_externos.IdToken.test_caducidad", "se acepta un id_token en el segundo exacto en que caduca"),
+    ("proveedores_externos.py", '        "code_challenge_method": "S256",\n', "",
+     "test_proveedores_externos.Autorizacion.test_url_exacta",
+     "la URL de autorizacion no fija S256 y el proveedor tomaria plain (RFC 7636, 4.3)"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

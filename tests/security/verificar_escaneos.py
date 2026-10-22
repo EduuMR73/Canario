@@ -529,6 +529,9 @@ def preparar_imagenes():
     # escaneo es el de la API.
     pasa(servicios["gestion"].get("build") == servicios["api"].get("build"),
          "e) gestion se construye exactamente como la API (mismo build): escanear api la cubre")
+    # Igual el broker de canje (app/broker.py): misma imagen, otro punto de entrada.
+    pasa(servicios["broker"].get("build") == servicios["api"].get("build"),
+         "e) el broker se construye exactamente como la API (mismo build): escanear api la cubre")
     r = dc("build", "postgres", "api", "caddy")
     if r.rc != 0:
         raise SinRed(f"no se pudieron construir las imagenes: {r.err.strip()[-300:]}")
@@ -984,7 +987,8 @@ def main():
     # is_file, nunca se leen.
     for fichero in ("contrasena_redis.txt", "redis_acl.conf", "contrasena_postgres_superusuario.txt",
                     "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt",
-                    "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt"):
+                    "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt",
+                    "google_client_id.txt", "google_client_secret.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
             terminar(parada=True)
