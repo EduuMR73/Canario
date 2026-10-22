@@ -236,11 +236,19 @@ services:
       redis:
         condition: service_healthy
     # Se añade al ENTRYPOINT de la imagen (que ya fija --no-access-log y
-    # --no-server-header). Solo se confía en las cabeceras de reenvío que vengan
-    # de la IP fija del proxy en la red app; nunca "*". Sin esto, todos los
-    # clientes parecerían el proxy y compartirían un único contador de rate
-    # limit; con "*", cualquiera podría falsificar su IP.
+    # --no-server-header).
+    # --host: uvicorn escucha solo en la IP fija de la API en la red app, la
+    # única por la que llega el proxy. En data, cache y correo la API es
+    # cliente y no escucha: un vecino de esas redes que se viera comprometido
+    # (PostgreSQL, Redis, el SMTP) no puede hablarle saltándose el proxy y sus
+    # cabeceras. uvicorn acepta una sola dirección (comprobado con su --help).
+    # Solo se confía en las cabeceras de reenvío que vengan de la IP fija del
+    # proxy en la red app; nunca "*". Sin esto, todos los clientes parecerían
+    # el proxy y compartirían un único contador de rate limit; con "*",
+    # cualquiera podría falsificar su IP.
     command:
+      - --host
+      - 10.88.0.4
       - --proxy-headers
       - --forwarded-allow-ips
       - 10.88.0.2
@@ -261,10 +269,14 @@ services:
     # (samenet). En cache habla con Redis, el del limitador de peticiones. En
     # correo, con el servidor SMTP de desarrollo (mailpit, app/correo.py).
     networks:
-      - app
-      - data
-      - cache
-      - correo
+      app:
+        # IP fija: es en la que escucha uvicorn (--host, arriba). Está en el
+        # tramo reservado para IPs fijas (de .2 a .7; ver la red app): la .2 es
+        # del proxy y la .3 la usa el cliente directo de las baterías.
+        ipv4_address: 10.88.0.4
+      data: {}
+      cache: {}
+      correo: {}
     # Origen de la SPA del personal (el 8445 de caddy): los enlaces de los
     # correos del registro apuntan a él (app/solicitudes.py), y es el único
     # Origin que la API acepta en una petición del navegador con cookies
@@ -291,7 +303,8 @@ services:
     healthcheck:
       # Sin curl: un script de la propia imagen que solo da sano con 200 y el
       # cuerpo exacto {"estado":"ok"}. El motivo del fallo queda en stderr.
-      test: ["CMD", "python", "-m", "app.comprobar_salud"]
+      # Contra la IP de --host: en 127.0.0.1 uvicorn ya no escucha.
+      test: ["CMD", "python", "-m", "app.comprobar_salud", "10.88.0.4"]
       interval: 10s
       timeout: 5s
       retries: 3

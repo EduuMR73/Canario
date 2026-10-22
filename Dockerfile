@@ -55,4 +55,10 @@ EXPOSE 8000
 # Sin --proxy-headers ni --forwarded-allow-ips aquí: en qué proxy se confía
 # depende del despliegue y lo fija docker-compose.yml (command). Sin ellas,
 # uvicorn solo confía en 127.0.0.1, que es el valor seguro.
-ENTRYPOINT ["uvicorn", "app.principal:aplicacion", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--no-server-header"]
+# Sin --host, por el mismo motivo: en qué dirección se escucha depende de la
+# red del despliegue y lo fija docker-compose.yml. Sin él, uvicorn escucha
+# solo en 127.0.0.1 (su valor por defecto en la 0.54.0, comprobado con
+# uvicorn --help en esta imagen): la imagen sola no acepta conexiones de fuera
+# del contenedor. Nunca 0.0.0.0: cualquier vecino de red (PostgreSQL, Redis,
+# el SMTP o un servicio nuevo) llegaría a la API sin pasar por el proxy.
+ENTRYPOINT ["uvicorn", "app.principal:aplicacion", "--port", "8000", "--no-access-log", "--no-server-header"]
