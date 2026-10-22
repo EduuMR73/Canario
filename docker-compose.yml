@@ -282,9 +282,11 @@ services:
     # Origin que la API acepta en una petición del navegador con cookies
     # (app/rutas_personal.py). Obligatorio y explícito, sin valor por defecto
     # en el código: un enlace con un secreto no puede apuntar a un sitio que
-    # nadie eligió.
+    # nadie eligió. El ancla lo comparte con el broker, que construye con él la
+    # redirect_uri de los proveedores externos: un solo valor, no dos copias
+    # que puedan divergir.
     environment:
-      CANARIO_ORIGEN_PERSONAL: "https://localhost:8445"
+      CANARIO_ORIGEN_PERSONAL: &origen_personal "https://localhost:8445"
     # Secretos como ficheros en /run/secrets, nunca como variables de entorno:
     # la contraseña del rol aplicacion (se lee en cada conexión nueva), la
     # clave maestra (desenvuelve las claves de cada empresa), la clave del
@@ -310,6 +312,50 @@ services:
       retries: 3
       start_period: 10s
     # Rotación de logs: evita que crezcan sin límite y llenen el disco.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  broker:
+    # Canje con los proveedores de identidad externos (app/broker.py): el
+    # único servicio con salida a internet, para que la API, que guarda las
+    # claves de Canario, siga sin ella (docs/threat-model.md, 6.19). Misma
+    # imagen que la API con otro punto de entrada, como gestion: una sola
+    # imagen que fijar y escanear.
+    build:
+      context: .
+    entrypoint: ["uvicorn", "app.broker:aplicacion", "--port", "8000", "--no-access-log", "--no-server-header"]
+    # Solo en su IP de canje: en salida, la red con internet, no escucha.
+    command: ["--host", "10.88.2.3"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 32
+    networks:
+      canje:
+        ipv4_address: 10.88.2.3
+      salida: {}
+    environment:
+      CANARIO_ORIGEN_PERSONAL: *origen_personal
+      # La única IP a la que atiende (además de su propio healthcheck).
+      CANARIO_IP_API: "10.88.2.4"
+    # Solo la configuración de los proveedores. Ninguna clave de Canario ni
+    # acceso a la base de datos: si cae el broker, eso no se pierde.
+    secrets:
+      - google_client_id
+      - google_client_secret
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.comprobar_salud", "10.88.2.3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     logging:
       driver: json-file
       options:
@@ -485,6 +531,19 @@ networks:
       config:
         - subnet: 10.88.1.0/28
           ip_range: 10.88.1.8/29
+  canje:
+    # Red interna entre la API y el broker: sin salida a internet. Subred fija
+    # porque el broker solo atiende a la IP fija de la API (.4); el broker
+    # tiene la .3. De .2 a .7, IPs fijas, como en app.
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.88.2.0/28
+          ip_range: 10.88.2.8/29
+  salida:
+    # La única red con salida a internet aparte de edge, y solo para el
+    # broker. No publica puertos.
+    {}
 
 secrets:
   contrasena_redis:
@@ -505,6 +564,12 @@ secrets:
     file: ./secrets/clave_hmac_codigos.txt
   clave_firma_tokens:
     file: ./secrets/clave_firma_tokens.txt
+  # Configuración de Google para el broker: scripts/generar_secretos.py los crea
+  # con un marcador (sin configurar) y quien opera pone los de Google Cloud.
+  google_client_id:
+    file: ./secrets/google_client_id.txt
+  google_client_secret:
+    file: ./secrets/google_client_secret.txt
 
 volumes:
   # Persiste entre reinicios, a diferencia de redis. Los scripts de

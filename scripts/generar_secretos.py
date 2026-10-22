@@ -40,6 +40,14 @@ ES_POSIX = os.name == "posix"
 # encaja nunca (a diferencia de "$", que lo tolera).
 PATRON_URLSAFE = re.compile(rb"[A-Za-z0-9_-]{64}")
 PATRON_HEXADECIMAL = re.compile(rb"[0-9a-f]{64}")
+# Configuración de un proveedor externo (app/proveedores_externos.py,
+# PATRON_CONFIGURACION): ASCII imprimible sin espacios ni salto final.
+PATRON_CONFIGURACION = re.compile(rb"[\x21-\x7e]{1,255}")
+# Marcadores de "sin configurar", los mismos literales que
+# app/proveedores_externos.py (este script no importa app/). Distintos entre
+# sí: la comprobación de duplicados de abajo los rechazaría si fueran iguales.
+MARCADOR_GOOGLE_CLIENT_ID = "sin-configurar:client-id"
+MARCADOR_GOOGLE_CLIENT_SECRET = "sin-configurar:client-secret"
 
 # Permisos del usuario "aplicacion" de Redis (la línea de la ACL sin el hash).
 # Es la única fuente de verdad: tanto el patrón de comprobación como el
@@ -68,6 +76,11 @@ SECRETOS = {
     "clave_hmac_codigos.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
     "clave_maestra.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
     "clave_firma_tokens.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
+    # No son aleatorios: se crean con su marcador y el login con Google queda
+    # desactivado hasta que quien opera ponga los valores de Google Cloud. El
+    # broker no arranca si solo uno de los dos está puesto.
+    "google_client_id.txt": (lambda: MARCADOR_GOOGLE_CLIENT_ID, PATRON_CONFIGURACION),
+    "google_client_secret.txt": (lambda: MARCADOR_GOOGLE_CLIENT_SECRET, PATRON_CONFIGURACION),
 }
 FICHERO_REDIS = "contrasena_redis.txt"
 FICHERO_ACL = "redis_acl.conf"
@@ -216,7 +229,9 @@ def diagnosticar_txt(datos, patron):
         return "contiene retornos de carro"
     if b"\n" in datos:
         return "contiene saltos de linea"
-    if len(datos) != 64:
+    # Solo los patrones de longitud fija (64): la configuración de un
+    # proveedor tiene longitud variable y su fallo es de caracteres.
+    if patron.pattern.endswith(b"{64}") and len(datos) != 64:
         return "longitud incorrecta"
     return "contiene caracteres no permitidos"
 
