@@ -105,6 +105,8 @@ PUERTO_SPA = 8445
 SUBRED_APP = "10.88.0.0/28"
 SUBRED_EDGE = "10.88.1.0/28"
 IP_PROXY = "10.88.0.2"
+IP_API = "10.88.0.4"  # IP fija de la API en app: la única en la que escucha uvicorn
+COMANDO_API = ["--host", IP_API, "--proxy-headers", "--forwarded-allow-ips", IP_PROXY]
 RAIZ_CA = "/data/caddy/pki/authorities/local/root.crt"
 LIMITE_CUERPO = 128 * 1024
 
@@ -430,7 +432,7 @@ def seccion_a():
     override.write_text(
         "services:\n"
         "  api:\n"
-        "    entrypoint: [\"uvicorn\", \"eco:aplicacion\", \"--app-dir\", \"/eco\", \"--host\", \"0.0.0.0\",\n"
+        "    entrypoint: [\"uvicorn\", \"eco:aplicacion\", \"--app-dir\", \"/eco\",\n"
         "                 \"--port\", \"8000\", \"--no-access-log\", \"--no-server-header\"]\n"
         "    volumes:\n"
         "      - type: bind\n"
@@ -444,8 +446,7 @@ def seccion_a():
         p(r.todo.strip()[-1500:])
         raise Parada("no arranca el proxy con la aplicacion de eco")
     comando = inspeccionar(contenedor("api"), "{{json .Config.Cmd}}")
-    pasa(comando == ["--proxy-headers", "--forwarded-allow-ips", IP_PROXY],
-         f"a) el eco corre con el command del compose ({comando})")
+    pasa(comando == COMANDO_API, f"a) el eco corre con el command del compose ({comando})")
     CA_LOCAL = TEMPORAL / "root.crt"
     r = dc("cp", f"caddy:{RAIZ_CA}", str(CA_LOCAL))
     if r.rc != 0 or not CA_LOCAL.is_file():

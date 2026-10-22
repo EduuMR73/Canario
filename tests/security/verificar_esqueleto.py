@@ -3,7 +3,9 @@
 de la API (docker-compose.yml, Dockerfile, proxy/Dockerfile, proxy/Caddyfile y
 app/).
 
-Qué prueba: que la API no tiene salida a internet; que los únicos puertos
+Qué prueba: que la API no tiene salida a internet ni resuelve nombres
+externos; que la API solo escucha en su IP fija de la red app (no desde data,
+cache ni correo, ni en su propio 127.0.0.1); que los únicos puertos
 publicados son los tres del proxy (8443, la API; 8444, el sitio del
 denunciante; 8445, la SPA del personal) y solo en 127.0.0.1; que solo /salud responde; las cabeceras de
 seguridad con valores literales y sin Server; que un Host que no coincide con
@@ -77,7 +79,12 @@ RANGO_APP = "10.88.0.8/29"  # IPs automáticas; de .2 a .7 quedan para IPs fijas
 RANGO_EDGE = "10.88.1.8/29"
 IP_CLIENTE = "10.88.1.3"  # cliente de pruebas en la red edge (fuera del rango automático)
 IP_DIRECTO = "10.88.0.3"  # cliente de pruebas en la red app, sin pasar por el proxy
+IP_API = "10.88.0.4"  # IP fija de la API en app: la única en la que escucha uvicorn
 IP_FALSA = "6.6.6.6"  # valor falsificado de X-Forwarded-For
+# ENTRYPOINT de la imagen de la API, sin --host (uvicorn escucha entonces en
+# 127.0.0.1), y command del compose, que lo añade.
+ENTRYPOINT_API = ["uvicorn", "app.principal:aplicacion", "--port", "8000", "--no-access-log", "--no-server-header"]
+COMANDO_API = ["--host", IP_API, "--proxy-headers", "--forwarded-allow-ips", IP_PROXY]
 
 CUERPO_SALUD = b'{"estado":"ok"}'
 CABECERAS = {
@@ -483,6 +490,8 @@ def seccion_b():
         pasa(usuario == USUARIO[servicio], f"b) la imagen {servicio} declara USER {USUARIO[servicio]} ({usuario!r})")
     r = docker_run("--entrypoint", "python", IMAGEN_API, "-c", "import pip")
     pasa(r.rc != 0 and "No module named 'pip'" in r.err, "b) la imagen de la API no tiene pip")
+    entrypoint = inspeccionar(IMAGEN_API, "{{json .Config.Entrypoint}}")
+    pasa(entrypoint == ENTRYPOINT_API, f"b) el ENTRYPOINT de la imagen de la API no fija --host ({entrypoint})")
 
 
 def seccion_c():
@@ -528,6 +537,8 @@ def seccion_d():
              f"d) {servicio}: PortBindings = {i['HostConfig']['PortBindings']}")
     ip = inspeccionar(contenedor("caddy"))["NetworkSettings"]["Networks"][f"{PROYECTO}_app"]["IPAddress"]
     pasa(ip == IP_PROXY, f"d) caddy tiene la IP fija {IP_PROXY} en app ({ip})")
+    ip = inspeccionar(contenedor("api"))["NetworkSettings"]["Networks"][f"{PROYECTO}_app"]["IPAddress"]
+    pasa(ip == IP_API, f"d) la API tiene la IP fija {IP_API} en app ({ip})")
     for red, subred, rango, interna in ((f"{PROYECTO}_app", SUBRED_APP, RANGO_APP, True),
                                         (f"{PROYECTO}_edge", SUBRED_EDGE, RANGO_EDGE, False)):
         i = inspeccionar(red)
@@ -547,6 +558,17 @@ PRUEBA_SALIDA = ("import socket\n"
                  "    print('SIN_SALIDA', type(e).__name__)\n")
 
 
+# Resolución de un nombre externo. Sin DNS hacia fuera no hay exfiltración por
+# consultas DNS (ATT&CK T1071.004). github.com y no example.com: con el DNS del
+# anfitrión de Windows, example.com no resolvía ni desde la red bridge
+# (comprobado), y un control que falla por eso deja la prueba sin conclusión.
+PRUEBA_DNS = ("import socket\n"
+              "try:\n"
+              "    socket.getaddrinfo('github.com', 443, socket.AF_INET); print('RESUELVE')\n"
+              "except OSError as e:\n"
+              "    print('SIN_DNS', type(e).__name__)\n")
+
+
 def seccion_e():
     p("=== e) la API no tiene salida a internet")
     control = docker_run("--network", "bridge", "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_SALIDA)
@@ -554,6 +576,47 @@ def seccion_e():
     negativo(f"e) desde la API no se llega a 1.1.1.1:443 ({r.out.strip()})",
              r.out.startswith("SIN_SALIDA"), control.out.strip() == "CONECTA",
              f"control en la red bridge: {control.out.strip()!r}")
+    control = docker_run("--network", "bridge", "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_DNS)
+    r = exec_("api", "python", "-c", PRUEBA_DNS)
+    negativo(f"e) desde la API no se resuelve github.com ({r.out.strip()})",
+             r.out.startswith("SIN_DNS"), control.out.strip() == "RESUELVE",
+             f"control en la red bridge: {control.out.strip()!r}")
+
+
+# Conexión a /salud en el puerto 8000 de una dirección. RECHAZA solo con
+# ConnectionRefusedError: nadie escucha en esa dirección. Un tiempo agotado
+# u otro error no demuestra eso y sale como OTRO.
+PRUEBA_ESCUCHA = ("import http.client, sys\n"
+                  "c = http.client.HTTPConnection(sys.argv[1], 8000, timeout=5)\n"
+                  "try:\n"
+                  "    c.request('GET', '/salud'); r = c.getresponse(); print('RESPONDE', r.status, r.read().decode())\n"
+                  "except ConnectionRefusedError:\n"
+                  "    print('RECHAZA')\n"
+                  "except (OSError, http.client.HTTPException) as e:\n"
+                  "    print('OTRO', type(e).__name__)\n")
+RESPUESTA_SALUD = 'RESPONDE 200 {"estado":"ok"}'
+
+
+def seccion_o():
+    p("=== o) la API solo escucha en su IP de la red app")
+    redes = inspeccionar(contenedor("api"))["NetworkSettings"]["Networks"]
+    # Control: un cliente de la red app (sin pasar por el proxy) sí llega.
+    control = docker_run("--network", f"{PROYECTO}_app", "--ip", IP_DIRECTO, "--read-only", "--cap-drop", "ALL",
+                         "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_ESCUCHA, IP_API).out.strip()
+    control_ok = control == RESPUESTA_SALUD
+    pasa(control_ok, f"o) control: desde app, {IP_API}:8000 responde ({control!r})")
+    for red in ("data", "cache", "correo"):
+        ip = redes[f"{PROYECTO}_{red}"]["IPAddress"]
+        r = docker_run("--network", f"{PROYECTO}_{red}", "--read-only", "--cap-drop", "ALL",
+                       "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_ESCUCHA, ip).out.strip()
+        negativo(f"o) desde {red}, la API en {ip}:8000 rechaza la conexion ({r!r})", r == "RECHAZA",
+                 control_ok, f"control: {control!r}")
+    # Dentro del propio contenedor: 127.0.0.1 ya no es la dirección de escucha
+    # (el healthcheck usa la IP de app). Control: la IP de app sí responde.
+    dentro = exec_("api", "python", "-c", PRUEBA_ESCUCHA, IP_API).out.strip()
+    local = exec_("api", "python", "-c", PRUEBA_ESCUCHA, "127.0.0.1").out.strip()
+    negativo(f"o) dentro de la API, 127.0.0.1:8000 rechaza la conexion ({local!r})", local == "RECHAZA",
+             dentro == RESPUESTA_SALUD, f"control dentro, {IP_API}: {dentro!r}")
 
 
 def seccion_f():
@@ -841,7 +904,7 @@ def seccion_j():
     override.write_text(
         "services:\n"
         "  api:\n"
-        "    entrypoint: [\"uvicorn\", \"eco:aplicacion\", \"--app-dir\", \"/eco\", \"--host\", \"0.0.0.0\",\n"
+        "    entrypoint: [\"uvicorn\", \"eco:aplicacion\", \"--app-dir\", \"/eco\",\n"
         "                 \"--port\", \"8000\", \"--no-access-log\", \"--no-server-header\"]\n"
         "    volumes:\n"
         "      - type: bind\n"
@@ -855,8 +918,7 @@ def seccion_j():
         sinc(f"j) no arranca la app de eco: {r.todo.strip()[-400:]!r}")
     else:
         comando = inspeccionar(contenedor("api"), "{{json .Config.Cmd}}")
-        pasa(comando == ["--proxy-headers", "--forwarded-allow-ips", IP_PROXY],
-             f"j) el eco corre con el command del compose ({comando})")
+        pasa(comando == COMANDO_API, f"j) el eco corre con el command del compose ({comando})")
         via_proxy = cliente_red(f"{PROYECTO}_edge", IP_CLIENTE, "eco_proxy", "caddy") or {}
         control = via_proxy.get("codigo") == 200 and via_proxy.get("prueba") == "canario"
         negativo(f"j) via proxy, X-Forwarded-For que llega = {via_proxy.get('xff')!r}",
@@ -1185,7 +1247,7 @@ def main():
     parada = None
     try:
         seccion_a()
-        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_n, seccion_g,
+        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_o, seccion_f, seccion_n, seccion_g,
                         seccion_h, seccion_i, seccion_j, seccion_k, seccion_l, seccion_m):
             seccion()
     except Parada as e:
