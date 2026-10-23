@@ -11,7 +11,7 @@ Trece baterías, una por área. Cada prueba negativa lleva su control positivo: 
 | `verificar_esqueleto.py` | Proxy y API: sin salida a internet, solo los tres puertos del proxy, cabeceras, 421, estáticos del denunciante (sin rangos ni salir de `/srv`), logs sin IP, endurecimiento de los contenedores |
 | `verificar_web.py` | Sitio del denunciante: lo que el 8444 reenvía a la API (con una aplicación de eco; las cookies, solo por el 8445) y las páginas con la API real: escapado, formularios de otro origen, cuerpo estricto, NUL y logs sin rastro |
 | `verificar_arranque.py` | Conexión a PostgreSQL con secretos y el arranque verificado de la API |
-| `verificar_esquema.py` | Esquema, RLS entre empresas, permisos, auditoría encadenada y supresión legal en la base de datos |
+| `verificar_esquema.py` | Esquema, RLS entre empresas, permisos, auditoría encadenada, supresión legal y vínculos con identidades externas en la base de datos |
 | `verificar_denuncia.py` | Cifrado, denuncia anónima, seguimiento, mensajes, limitador y supresión por la API y `gestion` |
 | `verificar_personal.py` | Identidad del personal, login, bloqueos, sesiones, administración, instrucción, no veraz (art. 32.3) y la auditoría por la API (emails y páginas) |
 | `verificar_sesion.py` | La sesión del personal en el navegador por el 8445: tokens solo en cookies con sus atributos exactos, CSRF desde otro puerto, rotación y reutilización, cierre, cookies que no salen por el 8443 y logs sin tokens |
