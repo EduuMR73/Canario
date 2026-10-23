@@ -320,7 +320,12 @@ SQL_LISTAR = """
 # con ninguna cuenta, y una acción que no está en ninguna de las dos listas
 # deja el CASE en null y tampoco. La empresa va en cada join, como en
 # SQL_LISTAR, aunque la RLS ya la limita.
-_SQL_FILAS_AUDITORIA = """
+# Las tres sentencias repiten el select entero a propósito: cada una es un
+# literal completo y no una suma de trozos, para que la capa estática de
+# verificar_inyeccion pueda probar que todo el SQL es literal. Una suma hoy
+# inocua es la misma forma que mañana admite una variable sin que nadie lo
+# vea. Si cambia el select, cambia en las tres.
+SQL_AUDITORIA = """
     select a.secuencia, a.fecha, a.actor, a.accion, a.objeto_id, a.destino_id, ua.email, uc.email
       from canal.registro_auditoria a
       left join canal.usuario_personal ua
@@ -330,8 +335,6 @@ _SQL_FILAS_AUDITORIA = """
              when a.accion = any(%(en_objeto)s) then a.objeto_id
              when a.accion = any(%(en_destino)s) then a.destino_id
            end
-"""
-SQL_AUDITORIA = _SQL_FILAS_AUDITORIA + """
      where a.secuencia >= %(desde)s
      order by a.secuencia
      limit %(limite)s
@@ -339,11 +342,29 @@ SQL_AUDITORIA = _SQL_FILAS_AUDITORIA + """
 # Desde lo más reciente: la primera página y las anteriores. Dos sentencias
 # en vez de una con "%(antes)s is null or": cada una dice exactamente lo que
 # pide.
-SQL_AUDITORIA_RECIENTE = _SQL_FILAS_AUDITORIA + """
+SQL_AUDITORIA_RECIENTE = """
+    select a.secuencia, a.fecha, a.actor, a.accion, a.objeto_id, a.destino_id, ua.email, uc.email
+      from canal.registro_auditoria a
+      left join canal.usuario_personal ua
+        on ua.empresa_id = a.empresa_id and a.actor = 'personal:' || ua.id::text
+      left join canal.usuario_personal uc
+        on uc.empresa_id = a.empresa_id and uc.id = case
+             when a.accion = any(%(en_objeto)s) then a.objeto_id
+             when a.accion = any(%(en_destino)s) then a.destino_id
+           end
      order by a.secuencia desc
      limit %(limite)s
 """
-SQL_AUDITORIA_ANTERIOR = _SQL_FILAS_AUDITORIA + """
+SQL_AUDITORIA_ANTERIOR = """
+    select a.secuencia, a.fecha, a.actor, a.accion, a.objeto_id, a.destino_id, ua.email, uc.email
+      from canal.registro_auditoria a
+      left join canal.usuario_personal ua
+        on ua.empresa_id = a.empresa_id and a.actor = 'personal:' || ua.id::text
+      left join canal.usuario_personal uc
+        on uc.empresa_id = a.empresa_id and uc.id = case
+             when a.accion = any(%(en_objeto)s) then a.objeto_id
+             when a.accion = any(%(en_destino)s) then a.destino_id
+           end
      where a.secuencia < %(antes)s
      order by a.secuencia desc
      limit %(limite)s
