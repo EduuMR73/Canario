@@ -277,6 +277,11 @@ services:
       data: {}
       cache: {}
       correo: {}
+      # En canje la API es solo cliente del broker y no escucha (--host es la
+      # IP de app): si el broker cae, no tiene a quién hablarle. IP fija porque
+      # el broker solo atiende a la .4 (CANARIO_IP_API del broker).
+      canje:
+        ipv4_address: 10.88.2.4
     # Origen de la SPA del personal (el 8445 de caddy): los enlaces de los
     # correos del registro apuntan a él (app/solicitudes.py), y es el único
     # Origin que la API acepta en una petición del navegador con cookies
@@ -291,9 +296,11 @@ services:
     # la contraseña del rol aplicacion (se lee en cada conexión nueva), la
     # clave maestra (desenvuelve las claves de cada empresa), la clave del
     # HMAC de los códigos de seguimiento, la que firma los JWT de acceso del
-    # personal y la contraseña del usuario aplicacion de Redis (también se
-    # lee en cada conexión nueva). Sin contrasena_plataforma: la API no puede
-    # dar de alta empresas.
+    # personal, la del HMAC de las identidades externas vinculadas, la que
+    # cifra las cookies del login externo y la contraseña del usuario
+    # aplicacion de Redis (también se lee en cada conexión nueva). Sin
+    # contrasena_plataforma: la API no puede dar de alta empresas. Sin los
+    # client_secret de los proveedores: solo los tiene el broker.
     # Sin variable CANARIO_LIMITES: la API usa los límites de producción de
     # app/limitador.py y los registra al arrancar.
     secrets:
@@ -301,6 +308,8 @@ services:
       - clave_maestra
       - clave_hmac_codigos
       - clave_firma_tokens
+      - clave_hmac_identidades
+      - clave_flujo_externo
       - contrasena_redis
     healthcheck:
       # Sin curl: un script de la propia imagen que solo da sano con 200 y el
@@ -564,6 +573,10 @@ secrets:
     file: ./secrets/clave_hmac_codigos.txt
   clave_firma_tokens:
     file: ./secrets/clave_firma_tokens.txt
+  clave_hmac_identidades:
+    file: ./secrets/clave_hmac_identidades.txt
+  clave_flujo_externo:
+    file: ./secrets/clave_flujo_externo.txt
   # Configuración de Google para el broker: scripts/generar_secretos.py los crea
   # con un marcador (sin configurar) y quien opera pone los de Google Cloud.
   google_client_id:

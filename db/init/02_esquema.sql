@@ -305,6 +305,45 @@ CREATE TABLE canal.sesion_personal (
 );
 CREATE INDEX sesion_personal_tokens_usados ON canal.sesion_personal USING gin (tokens_usados);
 
+-- Vínculo de una cuenta del personal con su cuenta de un proveedor externo
+-- (Google o GitHub) para entrar con él (docs/threat-model.md, 6.19). El login
+-- externo sustituye a la contraseña, nunca al TOTP.
+-- * sub_hmac: del identificador de la cuenta en el proveedor (el sub) solo se
+--   guarda un HMAC-SHA256 con una clave propia, clave_hmac_identidades, que
+--   incluye la empresa en el cálculo (6.19). Un volcado de la base de datos no
+--   dice qué cuenta de Google o de GitHub tiene cada persona, ni deja cruzar
+--   la misma cuenta entre empresas. Hace falta la clave y no basta un hash:
+--   el id de GitHub es público y numérico, y se recorrería entero. No es la
+--   clave de los códigos de seguimiento: así cada una se rota sin tocar la
+--   otra, y el lado anónimo no comparte nada con el identificado. Rotarla
+--   rompe los vínculos (se vuelven a hacer); la cuenta sigue entrando con su
+--   contraseña.
+-- * creada: solo el día, del reloj del servidor, como empresa.fecha_alta.
+--   Sirve para que el titular reconozca su vínculo; no necesita hora.
+-- * revocada: desvincular, la baja de la cuenta, su reinvitación y el cambio
+--   de contraseña revocan, no borran (aquí no hay DELETE para nadie). Una
+--   revocada no vuelve a valer: lo impide el trigger identidad_externa_revocacion.
+-- Los índices parciales permiten, entre las vigentes, una sola cuenta por
+-- identidad externa (la misma cuenta de Google no entra en dos cuentas de la
+-- empresa) y una sola identidad por cuenta y proveedor (quien robe una sesión
+-- no puede añadir su cuenta de Google junto a la del titular sin quitar antes
+-- la de este, que recibe el aviso).
+CREATE TABLE canal.identidad_externa (
+    empresa_id uuid NOT NULL,
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    usuario_id uuid NOT NULL,
+    proveedor text NOT NULL CHECK (proveedor IN ('google', 'github')),
+    sub_hmac bytea NOT NULL CHECK (octet_length(sub_hmac) = 32),
+    creada date NOT NULL DEFAULT current_date,
+    revocada boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (empresa_id, id),
+    FOREIGN KEY (empresa_id, usuario_id) REFERENCES canal.usuario_personal (empresa_id, id)
+);
+CREATE UNIQUE INDEX identidad_externa_una_por_identidad
+    ON canal.identidad_externa (empresa_id, proveedor, sub_hmac) WHERE NOT revocada;
+CREATE UNIQUE INDEX identidad_externa_una_por_cuenta
+    ON canal.identidad_externa (empresa_id, usuario_id, proveedor) WHERE NOT revocada;
+
 -- El id lo genera la API: lo necesita antes de cifrar, porque forma parte del
 -- AAD (app/cripto.py). fecha la fija siempre el trigger denuncia_fecha, sin
 -- valor por defecto: si el trigger no pudiera calcularla, NOT NULL lo
@@ -420,6 +459,8 @@ ALTER TABLE canal.dispositivo_personal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.dispositivo_personal FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.sesion_personal ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.sesion_personal FORCE ROW LEVEL SECURITY;
+ALTER TABLE canal.identidad_externa ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canal.identidad_externa FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.denuncia ENABLE ROW LEVEL SECURITY;
 ALTER TABLE canal.denuncia FORCE ROW LEVEL SECURITY;
 ALTER TABLE canal.mensaje ENABLE ROW LEVEL SECURITY;
@@ -496,6 +537,17 @@ CREATE POLICY sesion_personal_update ON canal.sesion_personal
     USING (empresa_id = canal.empresa_actual())
     WITH CHECK (empresa_id = canal.empresa_actual());
 
+CREATE POLICY identidad_externa_select ON canal.identidad_externa
+    FOR SELECT TO aplicacion
+    USING (empresa_id = canal.empresa_actual());
+CREATE POLICY identidad_externa_insert ON canal.identidad_externa
+    FOR INSERT TO aplicacion
+    WITH CHECK (empresa_id = canal.empresa_actual());
+CREATE POLICY identidad_externa_update ON canal.identidad_externa
+    FOR UPDATE TO aplicacion
+    USING (empresa_id = canal.empresa_actual())
+    WITH CHECK (empresa_id = canal.empresa_actual());
+
 CREATE POLICY denuncia_select ON canal.denuncia
     FOR SELECT TO aplicacion
     USING (empresa_id = canal.empresa_actual());
@@ -541,6 +593,7 @@ REVOKE ALL ON TABLE canal.invitacion_personal FROM PUBLIC;
 REVOKE ALL ON TABLE canal.solicitud_registro FROM PUBLIC;
 REVOKE ALL ON TABLE canal.dispositivo_personal FROM PUBLIC;
 REVOKE ALL ON TABLE canal.sesion_personal FROM PUBLIC;
+REVOKE ALL ON TABLE canal.identidad_externa FROM PUBLIC;
 REVOKE ALL ON TABLE canal.denuncia FROM PUBLIC;
 REVOKE ALL ON TABLE canal.mensaje FROM PUBLIC;
 REVOKE ALL ON TABLE canal.busqueda_seguimiento FROM PUBLIC;
@@ -568,6 +621,13 @@ GRANT UPDATE (intentos_fallidos, bloqueado_hasta, revocado) ON canal.dispositivo
 GRANT SELECT ON canal.sesion_personal TO aplicacion;
 GRANT INSERT (empresa_id, usuario_id, dispositivo_id, token_sha256) ON canal.sesion_personal TO aplicacion;
 GRANT UPDATE (token_sha256, tokens_usados, ultimo_uso, revocada) ON canal.sesion_personal TO aplicacion;
+-- Ni creada ni revocada al insertar (un vínculo nace vigente y con el día de
+-- la base de datos), y después solo revocada, en un sentido (trigger
+-- identidad_externa_revocacion): ni el proveedor ni el sub_hmac ni la cuenta
+-- de un vínculo cambian.
+GRANT SELECT ON canal.identidad_externa TO aplicacion;
+GRANT INSERT (empresa_id, usuario_id, proveedor, sub_hmac) ON canal.identidad_externa TO aplicacion;
+GRANT UPDATE (revocada) ON canal.identidad_externa TO aplicacion;
 GRANT SELECT, INSERT ON canal.denuncia TO aplicacion;
 GRANT UPDATE (estado, asignada_a) ON canal.denuncia TO aplicacion;
 GRANT SELECT, INSERT ON canal.mensaje TO aplicacion;
@@ -820,6 +880,26 @@ BEGIN
 END
 $$;
 
+-- Un vínculo externo revocado no vuelve a valer. La API solo puede escribir
+-- revocada (permisos por columna), y aquí se limita el sentido: un error de
+-- la API, o una inyección limitada a un UPDATE, no puede devolver la entrada
+-- a una cuenta de Google que su titular quitó o que se revocó en una baja.
+-- Límite: no frena a una API comprometida del todo, que puede insertar un
+-- vínculo nuevo (docs/threat-model.md, 6.19). Volver a vincular es otra fila,
+-- con su aviso y su auditoría.
+CREATE FUNCTION canal.controlar_identidad_externa() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, canal
+AS $$
+BEGIN
+    IF OLD.revocada AND NOT NEW.revocada THEN
+        RAISE EXCEPTION 'un vinculo externo revocado no vuelve a valer'
+            USING ERRCODE = 'CN003';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
 -- Recorre la cadena de auditoría visible (con RLS, la de la empresa del
 -- contexto) y devuelve la primera secuencia que se rompe, o NULL si está
 -- intacta. Se rompe si la secuencia no es consecutiva, si hash_anterior no es
@@ -886,6 +966,7 @@ REVOKE EXECUTE ON FUNCTION canal.preparar_mensaje() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.fijar_fecha_denuncia() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.controlar_asignacion_denuncia() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.controlar_solicitud_registro() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION canal.controlar_identidad_externa() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION canal.verificar_cadena_auditoria() TO aplicacion;
 
@@ -910,6 +991,9 @@ CREATE TRIGGER denuncia_asignacion
 CREATE TRIGGER solicitud_registro_transicion
     BEFORE UPDATE ON canal.solicitud_registro
     FOR EACH ROW EXECUTE FUNCTION canal.controlar_solicitud_registro();
+CREATE TRIGGER identidad_externa_revocacion
+    BEFORE UPDATE ON canal.identidad_externa
+    FOR EACH ROW EXECUTE FUNCTION canal.controlar_identidad_externa();
 
 -- ---------------------------------------------------------------------------
 -- Ruta de búsqueda del rol de la aplicación

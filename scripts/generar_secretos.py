@@ -76,6 +76,8 @@ SECRETOS = {
     "clave_hmac_codigos.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
     "clave_maestra.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
     "clave_firma_tokens.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
+    "clave_hmac_identidades.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
+    "clave_flujo_externo.txt": (lambda: secrets.token_hex(32), PATRON_HEXADECIMAL),
     # No son aleatorios: se crean con su marcador y el login con Google queda
     # desactivado hasta que quien opera ponga los valores de Google Cloud. El
     # broker no arranca si solo uno de los dos está puesto.

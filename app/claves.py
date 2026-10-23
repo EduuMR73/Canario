@@ -1,6 +1,6 @@
 """Claves de cifrado de Canario (docs/threat-model.md, 6.1 y 6.4).
 
-Tres claves del servidor, cada una en su Docker secret (nunca en variables de
+Cinco claves del servidor, cada una en su Docker secret (nunca en variables de
 entorno), generadas por scripts/generar_secretos.py como 64 caracteres
 hexadecimales en minúscula (32 bytes):
 
@@ -10,6 +10,13 @@ hexadecimales en minúscula (32 bytes):
 * clave_firma_tokens: firma (HMAC-SHA256) los JWT de acceso del personal
   (app/tokens.py). 32 bytes aleatorios: RFC 7518, 3.2, pide al menos el
   tamaño del hash, y RFC 8725, 3.5, prohíbe usar una contraseña como clave.
+* clave_hmac_identidades: calcula el HMAC del identificador de una cuenta
+  externa (Google o GitHub) vinculada, lo único que se guarda de él
+  (docs/threat-model.md, 6.19). Separada de clave_hmac_codigos: rotar una no
+  toca la otra, y el lado del denunciante anónimo no comparte clave con el
+  del personal identificado.
+* clave_flujo_externo: cifra (AES-256-GCM) las cookies del login externo,
+  la del flujo hacia el proveedor y la del ticket de vuelta (6.19).
 
 Se leen una sola vez, al arrancar, y la API no arranca si alguna falta o no
 tiene el formato exacto: un fichero con un salto de línea final o en
@@ -28,6 +35,8 @@ from dataclasses import dataclass
 FICHERO_CLAVE_MAESTRA = pathlib.Path("/run/secrets/clave_maestra")
 FICHERO_CLAVE_HMAC = pathlib.Path("/run/secrets/clave_hmac_codigos")
 FICHERO_CLAVE_FIRMA = pathlib.Path("/run/secrets/clave_firma_tokens")
+FICHERO_CLAVE_IDENTIDADES = pathlib.Path("/run/secrets/clave_hmac_identidades")
+FICHERO_CLAVE_FLUJO = pathlib.Path("/run/secrets/clave_flujo_externo")
 
 # fullmatch: un salto de línea final no encaja nunca (a diferencia de "$").
 PATRON_CLAVE = re.compile(r"[0-9a-f]{64}")
@@ -44,6 +53,8 @@ class Claves:
     maestra: bytes
     hmac_codigos: bytes
     firma_tokens: bytes
+    hmac_identidades: bytes
+    flujo_externo: bytes
 
     def __repr__(self):
         return "Claves(<ocultas>)"
@@ -60,11 +71,14 @@ def _leer(fichero, nombre):
 
 
 def cargar(fichero_maestra=FICHERO_CLAVE_MAESTRA, fichero_hmac=FICHERO_CLAVE_HMAC,
-           fichero_firma=FICHERO_CLAVE_FIRMA):
-    """Lee y valida las tres claves. Lanza ErrorClaves con un motivo sin valores."""
+           fichero_firma=FICHERO_CLAVE_FIRMA, fichero_identidades=FICHERO_CLAVE_IDENTIDADES,
+           fichero_flujo=FICHERO_CLAVE_FLUJO):
+    """Lee y valida las cinco claves. Lanza ErrorClaves con un motivo sin valores."""
     leidas = {"clave_maestra": _leer(fichero_maestra, "clave_maestra"),
               "clave_hmac_codigos": _leer(fichero_hmac, "clave_hmac_codigos"),
-              "clave_firma_tokens": _leer(fichero_firma, "clave_firma_tokens")}
+              "clave_firma_tokens": _leer(fichero_firma, "clave_firma_tokens"),
+              "clave_hmac_identidades": _leer(fichero_identidades, "clave_hmac_identidades"),
+              "clave_flujo_externo": _leer(fichero_flujo, "clave_flujo_externo")}
     # Cada clave tiene un único uso. Dos secretos iguales indican un error al
     # generarlos o al montarlos, y romperían esa separación.
     nombres = list(leidas)
@@ -73,7 +87,9 @@ def cargar(fichero_maestra=FICHERO_CLAVE_MAESTRA, fichero_hmac=FICHERO_CLAVE_HMA
             if leidas[primero] == leidas[segundo]:
                 raise ErrorClaves(f"{primero} y {segundo} son iguales")
     return Claves(maestra=leidas["clave_maestra"], hmac_codigos=leidas["clave_hmac_codigos"],
-                  firma_tokens=leidas["clave_firma_tokens"])
+                  firma_tokens=leidas["clave_firma_tokens"],
+                  hmac_identidades=leidas["clave_hmac_identidades"],
+                  flujo_externo=leidas["clave_flujo_externo"])
 
 
 def cargar_maestra(fichero=FICHERO_CLAVE_MAESTRA):
