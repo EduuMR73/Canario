@@ -38,7 +38,14 @@ Por el 8443 todo sigue igual: Bearer y los tokens en el cuerpo. El 8443 y el 844
 
 La imagen del proxy compila la SPA en una primera etapa con Node y copia solo el resultado a la imagen de Caddy, que no lleva Node (modelo de amenazas, 6.11). No hace falta Node en el anfitrión para arrancar Canario: `docker compose up -d --build` la compila. Lo que conviene saber al tocarla:
 
-- Las dependencias se instalan sin scripts (`spa/.npmrc`) y con versiones exactas. Para cambiar una versión, en PowerShell desde `spa\`: `npm install --ignore-scripts <paquete>@<versión exacta>`, con una versión publicada hace al menos 14 días, y se commitean `package.json` y `package-lock.json`.
+- Las dependencias se instalan sin scripts (`spa/.npmrc`) y con versiones exactas. npm nunca se ejecuta en el equipo de desarrollo: ahí están `secrets/` y Docker Desktop, y el código de un paquete correría con ese alcance (`docs/threat-model.md`, 6.17). Para cambiar una versión se trabaja sobre una copia de `package.json`, `package-lock.json` y `.npmrc` en un directorio temporal, con la imagen de Node de `proxy/Dockerfile`, y solo se resuelve el lock (`--package-lock-only`, sin `node_modules`). `--before` con una fecha de hace al menos 14 días hace que tampoco entre ninguna transitiva más nueva. En PowerShell, desde ese directorio:
+
+  ```powershell
+  docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 -e HOME=/tmp -e npm_config_cache=/tmp/npm --tmpfs /tmp:size=512m --mount "type=bind,src=$PWD,dst=/spa" -w /spa node:24.20.0-alpine3.23@sha256:0388af2af070cd4736a1567cfed02469ba117848845b4165d87a333edb53d2ca npm install --ignore-scripts --package-lock-only --no-audit --no-fund --before=<AAAA-MM-DD> <paquete>@<versión exacta>
+  ```
+
+  Después se copian `package.json` y `package-lock.json` a `spa/` y se commitean. `verificar_escaneos.py` (j) lista lo que cambió en el lock con su fecha y falla si algo tiene menos de 14 días.
+- `overrides` de `spa/package.json` fuerza vite 8.3.4: `@angular/build` 22.2.x fija la 8.3.0, con CVE-2026-112942. Se retira cuando una versión estable de `@angular/build` traiga vite 8.3.3 o posterior (la batería falla para avisarlo).
 - Ningún componente declara estilos: todo el CSS va en `spa/src/styles.css`. Angular inyectaría los estilos de un componente con `<style>`, y la CSP lo bloquea.
 - Ninguna ruta de la SPA lleva un punto: el proxy trata como fichero cualquier ruta con extensión y, si no existe, responde 404.
 - Nada de `bypassSecurityTrust*` ni de asignar texto a `innerHTML`: Trusted Types lo bloquea en el navegador.

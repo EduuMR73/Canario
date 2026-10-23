@@ -26,7 +26,7 @@ Para ejecutarlas:
 
 - Docker en marcha y los secretos generados.
 - **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, sesión, SPA, inyección, registro y externo arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`. `verificar_externo.py` no sale a internet: en su copia, la red `salida` es interna.
-- `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades.
+- `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades, y lee del registro de npm la fecha de publicación de lo que cambia en `spa/package-lock.json`.
 - Todas las que construyen la imagen del proxy necesitan internet para compilar la SPA (`npm ci`). `verificar_spa.py` descarga además la imagen de Playwright (unos 2 GB la primera vez) y el paquete `playwright` con sus hashes.
 - `verificar_unitarios.py` no necesita los secretos ni la pila parada: solo construye la imagen de la API.
 
