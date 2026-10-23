@@ -11,11 +11,11 @@ Este directorio contiene los secretos que usan los servicios de Docker Compose (
 | `contrasena_redis.txt` | Contraseña del usuario `aplicacion` de Redis | La API y el healthcheck de Redis |
 | `redis_acl.conf` | ACL de Redis, derivada de `contrasena_redis.txt` (guarda su hash, no la contraseña) | Servicio `redis` |
 | `contrasena_postgres_superusuario.txt` | Contraseña del superusuario de PostgreSQL | Solo la inicialización de PostgreSQL |
-| `contrasena_migrador.txt` | Contraseña del rol de base de datos `migrador` | Migraciones |
-| `contrasena_aplicacion.txt` | Contraseña del rol de base de datos `aplicacion` | La API |
-| `contrasena_plataforma.txt` | Contraseña del rol de base de datos `plataforma` | Alta de empresas |
+| `contrasena_migrador.txt` | Contraseña del rol de base de datos `migrador`, dueño de la base | Solo la inicialización de PostgreSQL, que crea el rol con ella. Hoy ningún servicio entra como `migrador`: no hay servicio de migraciones |
+| `contrasena_aplicacion.txt` | Contraseña del rol de base de datos `aplicacion` | La API, el servicio `gestion` (guarda la clave de una empresa nueva) y la inicialización de PostgreSQL |
+| `contrasena_plataforma.txt` | Contraseña del rol de base de datos `plataforma` | Solo el servicio `gestion` (alta de empresas) y la inicialización de PostgreSQL |
 | `clave_hmac_codigos.txt` | Clave del HMAC de los códigos de seguimiento | La API |
-| `clave_maestra.txt` | Clave maestra para el cifrado de las claves de empresa | La API |
+| `clave_maestra.txt` | Clave maestra para el cifrado de las claves de empresa | La API y el servicio `gestion` (alta de empresas y claves nuevas) |
 | `clave_firma_tokens.txt` | Clave de la firma (HMAC-SHA256) de los JWT de acceso del personal | La API |
 | `clave_hmac_identidades.txt` | Clave del HMAC del identificador de una cuenta externa (Google o GitHub) vinculada, lo único que se guarda de él. Separada de `clave_hmac_codigos.txt`: rotar una no toca la otra | La API |
 | `clave_flujo_externo.txt` | Clave AES-256-GCM de las cookies del login externo (la del flujo hacia el proveedor y la del ticket de vuelta) | La API |
