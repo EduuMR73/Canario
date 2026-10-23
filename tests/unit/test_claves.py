@@ -1,4 +1,4 @@
-"""Pruebas unitarias de app/claves.py: el formato exacto de las tres claves
+"""Pruebas unitarias de app/claves.py: el formato exacto de las cinco claves
 del servidor, que sean distintas entre sí y que nunca salgan en un repr ni
 en un mensaje de error.
 
@@ -15,6 +15,8 @@ from app import claves
 MAESTRA = "0123456789abcdef" * 4
 HMAC = "fedcba9876543210" * 4
 FIRMA = "00112233445566778899aabbccddeeff" * 2
+IDENTIDADES = "ffeeddccbbaa99887766554433221100" * 2
+FLUJO = "0f1e2d3c4b5a69788796a5b4c3d2e1f0" * 2
 
 
 class Carga(unittest.TestCase):
@@ -33,14 +35,17 @@ class Carga(unittest.TestCase):
             ruta.write_text(contenido, encoding="ascii", newline="")
         return ruta
 
-    def cargar(self, maestra=MAESTRA, hmac_codigos=HMAC, firma=FIRMA):
-        return claves.cargar(self.fichero("m", maestra), self.fichero("h", hmac_codigos), self.fichero("f", firma))
+    def cargar(self, maestra=MAESTRA, hmac_codigos=HMAC, firma=FIRMA, identidades=IDENTIDADES, flujo=FLUJO):
+        return claves.cargar(self.fichero("m", maestra), self.fichero("h", hmac_codigos), self.fichero("f", firma),
+                             self.fichero("i", identidades), self.fichero("x", flujo))
 
     def test_valida(self):
         cargadas = self.cargar()
         self.assertEqual(cargadas.maestra, bytes.fromhex(MAESTRA))
         self.assertEqual(cargadas.hmac_codigos, bytes.fromhex(HMAC))
         self.assertEqual(cargadas.firma_tokens, bytes.fromhex(FIRMA))
+        self.assertEqual(cargadas.hmac_identidades, bytes.fromhex(IDENTIDADES))
+        self.assertEqual(cargadas.flujo_externo, bytes.fromhex(FLUJO))
 
     def test_formatos_rechazados(self):
         malos = {
@@ -71,13 +76,28 @@ class Carga(unittest.TestCase):
             self.cargar(firma=FIRMA + "\n")
         self.assertEqual(str(error.exception),
                          "clave_firma_tokens no tiene el formato esperado (64 hexadecimales en minuscula)")
+        with self.assertRaises(claves.ErrorClaves) as error:
+            self.cargar(identidades=IDENTIDADES.upper())
+        self.assertEqual(str(error.exception),
+                         "clave_hmac_identidades no tiene el formato esperado (64 hexadecimales en minuscula)")
+        with self.assertRaises(claves.ErrorClaves) as error:
+            self.cargar(flujo=FLUJO[:-1])
+        self.assertEqual(str(error.exception),
+                         "clave_flujo_externo no tiene el formato esperado (64 hexadecimales en minuscula)")
 
     def test_iguales(self):
-        # Las tres parejas: cada clave tiene un único uso.
+        # Las diez parejas: cada clave tiene un único uso.
         casos = {
             "clave_maestra y clave_hmac_codigos son iguales": {"hmac_codigos": MAESTRA},
             "clave_maestra y clave_firma_tokens son iguales": {"firma": MAESTRA},
+            "clave_maestra y clave_hmac_identidades son iguales": {"identidades": MAESTRA},
+            "clave_maestra y clave_flujo_externo son iguales": {"flujo": MAESTRA},
             "clave_hmac_codigos y clave_firma_tokens son iguales": {"firma": HMAC},
+            "clave_hmac_codigos y clave_hmac_identidades son iguales": {"identidades": HMAC},
+            "clave_hmac_codigos y clave_flujo_externo son iguales": {"flujo": HMAC},
+            "clave_firma_tokens y clave_hmac_identidades son iguales": {"identidades": FIRMA},
+            "clave_firma_tokens y clave_flujo_externo son iguales": {"flujo": FIRMA},
+            "clave_hmac_identidades y clave_flujo_externo son iguales": {"flujo": IDENTIDADES},
         }
         for mensaje, cambio in casos.items():
             with self.subTest(mensaje=mensaje):
@@ -87,7 +107,8 @@ class Carga(unittest.TestCase):
 
     def test_ilegibles_sin_valor_en_el_mensaje(self):
         with self.assertRaises(claves.ErrorClaves) as error:
-            claves.cargar(self.dir / "no_existe", self.fichero("h", HMAC), self.fichero("f", FIRMA))
+            claves.cargar(self.dir / "no_existe", self.fichero("h", HMAC), self.fichero("f", FIRMA),
+                          self.fichero("i", IDENTIDADES), self.fichero("x", FLUJO))
         self.assertEqual(str(error.exception), "no se puede leer clave_maestra (FileNotFoundError)")
         with self.assertRaises(claves.ErrorClaves) as error:
             claves.cargar_maestra(self.fichero("m", b"\xff" * 64))
@@ -100,7 +121,8 @@ class Carga(unittest.TestCase):
 class ClavesOcultas(unittest.TestCase):
     def test_repr_sin_valores_e_inmutable(self):
         cargadas = claves.Claves(maestra=bytes.fromhex(MAESTRA), hmac_codigos=bytes.fromhex(HMAC),
-                                 firma_tokens=bytes.fromhex(FIRMA))
+                                 firma_tokens=bytes.fromhex(FIRMA), hmac_identidades=bytes.fromhex(IDENTIDADES),
+                                 flujo_externo=bytes.fromhex(FLUJO))
         for texto in (repr(cargadas), str(cargadas), f"{cargadas}"):
             with self.subTest(texto=texto):
                 self.assertEqual(texto, "Claves(<ocultas>)")

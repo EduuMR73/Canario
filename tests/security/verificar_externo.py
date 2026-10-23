@@ -540,6 +540,12 @@ def seccion_a():
     pasa(en_salida == ["broker"], f"a) en salida solo esta el broker ({en_salida})")
     pasa("broker" not in [n for n, s in servicios.items() if "app" in (s.get("networks") or {})],
          "a) el broker no esta en la red app")
+    # La API es la única otra pieza de canje, con la IP a la que atiende el
+    # broker: si la tuviera otra, el broker serviría a quien no debe.
+    en_canje = sorted(n for n, s in servicios.items() if "canje" in (s.get("networks") or {}))
+    pasa(en_canje == ["api", "broker"], f"a) en canje solo estan la API y el broker ({en_canje})")
+    ip_api = ((servicios["api"].get("networks") or {}).get("canje") or {}).get("ipv4_address")
+    pasa(ip_api == IP_API, f"a) la API tiene en canje la IP fija {IP_API}, la que atiende el broker ({ip_api})")
     # Control: el override de la batería sí cambia lo que dice.
     r = dc("config", "--format", "json")
     try:
@@ -873,7 +879,10 @@ def main():
         terminar_con_parada()
     # Solo se comprueba que existen (is_file), nunca se leen: docker compose
     # valida que estén todos los ficheros de secretos del compose.
-    for fichero in ("google_client_id.txt", "google_client_secret.txt"):
+    # Las dos claves del login externo de la API, las últimas en llegar: sin
+    # ellas, compose falla antes de levantar nada y el motivo se ve peor.
+    for fichero in ("google_client_id.txt", "google_client_secret.txt",
+                    "clave_hmac_identidades.txt", "clave_flujo_externo.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (ejecute scripts/generar_secretos.py)")
             terminar_con_parada()

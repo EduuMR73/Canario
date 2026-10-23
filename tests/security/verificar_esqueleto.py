@@ -80,6 +80,9 @@ RANGO_EDGE = "10.88.1.8/29"
 IP_CLIENTE = "10.88.1.3"  # cliente de pruebas en la red edge (fuera del rango automático)
 IP_DIRECTO = "10.88.0.3"  # cliente de pruebas en la red app, sin pasar por el proxy
 IP_API = "10.88.0.4"  # IP fija de la API en app: la única en la que escucha uvicorn
+SUBRED_CANJE = "10.88.2.0/28"
+RANGO_CANJE = "10.88.2.8/29"
+IP_API_CANJE = "10.88.2.4"  # IP fija de la API en canje, la única a la que atiende el broker
 IP_FALSA = "6.6.6.6"  # valor falsificado de X-Forwarded-For
 # ENTRYPOINT de la imagen de la API, sin --host (uvicorn escucha entonces en
 # 127.0.0.1), y command del compose, que lo añade.
@@ -131,16 +134,21 @@ PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}],
                  "8444/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8444"}],
                  "8445/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8445"}]}
 # La API está en app (con el proxy), en data (con PostgreSQL), en cache (con
-# Redis, el del limitador) y en correo (con el SMTP de desarrollo), nunca en
-# edge.
-REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache", f"{PROYECTO}_correo"},
+# Redis, el del limitador), en correo (con el SMTP de desarrollo) y en canje
+# (con el broker del login externo), nunca en edge.
+REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache", f"{PROYECTO}_correo",
+                 f"{PROYECTO}_canje"},
          "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
-# Únicos montajes de la API: sus cinco Docker secrets (contraseña de la base
+# Únicos montajes de la API: sus siete Docker secrets (contraseña de la base
 # de datos, clave maestra, clave del HMAC de los códigos, clave de firma de
-# los JWT y contraseña de Redis), ordenados por destino porque docker inspect
-# no garantiza el orden. Nunca contrasena_plataforma.
+# los JWT, clave del HMAC de las identidades externas, clave de las cookies
+# del login externo y contraseña de Redis), ordenados por destino porque
+# docker inspect no garantiza el orden. Nunca contrasena_plataforma ni los
+# client_secret de los proveedores, que son solo del broker.
 MONTAJES_API = [("bind", "", "/run/secrets/clave_firma_tokens"),
+                ("bind", "", "/run/secrets/clave_flujo_externo"),
                 ("bind", "", "/run/secrets/clave_hmac_codigos"),
+                ("bind", "", "/run/secrets/clave_hmac_identidades"),
                 ("bind", "", "/run/secrets/clave_maestra"),
                 ("bind", "", "/run/secrets/contrasena_aplicacion"),
                 ("bind", "", "/run/secrets/contrasena_redis")]
@@ -539,8 +547,11 @@ def seccion_d():
     pasa(ip == IP_PROXY, f"d) caddy tiene la IP fija {IP_PROXY} en app ({ip})")
     ip = inspeccionar(contenedor("api"))["NetworkSettings"]["Networks"][f"{PROYECTO}_app"]["IPAddress"]
     pasa(ip == IP_API, f"d) la API tiene la IP fija {IP_API} en app ({ip})")
+    ip = inspeccionar(contenedor("api"))["NetworkSettings"]["Networks"][f"{PROYECTO}_canje"]["IPAddress"]
+    pasa(ip == IP_API_CANJE, f"d) la API tiene la IP fija {IP_API_CANJE} en canje ({ip})")
     for red, subred, rango, interna in ((f"{PROYECTO}_app", SUBRED_APP, RANGO_APP, True),
-                                        (f"{PROYECTO}_edge", SUBRED_EDGE, RANGO_EDGE, False)):
+                                        (f"{PROYECTO}_edge", SUBRED_EDGE, RANGO_EDGE, False),
+                                        (f"{PROYECTO}_canje", SUBRED_CANJE, RANGO_CANJE, True)):
         i = inspeccionar(red)
         config = [(c["Subnet"], c.get("IPRange")) for c in i["IPAM"]["Config"]]
         pasa(config == [(subred, rango)], f"d) {red}: subred y rango automatico = {config}")
@@ -569,8 +580,21 @@ PRUEBA_DNS = ("import socket\n"
               "    print('SIN_DNS', type(e).__name__)\n")
 
 
+# Ruta por defecto (destino 00000000 en /proc/net/route). Sin ella, el tráfico
+# hacia fuera no tiene por dónde salir aunque un vecino de una red interna
+# (el broker, en canje) tenga internet: la API no puede añadirse una ruta, porque
+# no tiene CAP_NET_ADMIN (cap_drop ALL).
+PRUEBA_RUTA = ("rutas = open('/proc/net/route').read().splitlines()[1:]\n"
+               "print('CON_RUTA' if any(l.split()[1] == '00000000' for l in rutas) else 'SIN_RUTA')\n")
+
+
 def seccion_e():
     p("=== e) la API no tiene salida a internet")
+    control = docker_run("--network", "bridge", "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_RUTA)
+    r = exec_("api", "python", "-c", PRUEBA_RUTA)
+    negativo(f"e) la API no tiene ruta por defecto ({r.out.strip()})",
+             r.out.strip() == "SIN_RUTA", control.out.strip() == "CON_RUTA",
+             f"control en la red bridge: {control.out.strip()!r}")
     control = docker_run("--network", "bridge", "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_SALIDA)
     r = exec_("api", "python", "-c", PRUEBA_SALIDA)
     negativo(f"e) desde la API no se llega a 1.1.1.1:443 ({r.out.strip()})",
@@ -605,7 +629,9 @@ def seccion_o():
                          "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_ESCUCHA, IP_API).out.strip()
     control_ok = control == RESPUESTA_SALUD
     pasa(control_ok, f"o) control: desde app, {IP_API}:8000 responde ({control!r})")
-    for red in ("data", "cache", "correo"):
+    # canje incluida: si el broker, el único vecino con salida a internet,
+    # cayera, tampoco podría hablarle a la API.
+    for red in ("data", "cache", "correo", "canje"):
         ip = redes[f"{PROYECTO}_{red}"]["IPAddress"]
         r = docker_run("--network", f"{PROYECTO}_{red}", "--read-only", "--cap-drop", "ALL",
                        "--entrypoint", "python", IMAGEN_API, "-c", PRUEBA_ESCUCHA, ip).out.strip()

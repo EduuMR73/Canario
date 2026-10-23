@@ -988,6 +988,7 @@ def main():
     for fichero in ("contrasena_redis.txt", "redis_acl.conf", "contrasena_postgres_superusuario.txt",
                     "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt",
                     "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt",
+                    "clave_hmac_identidades.txt", "clave_flujo_externo.txt",
                     "google_client_id.txt", "google_client_secret.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")

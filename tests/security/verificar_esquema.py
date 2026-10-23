@@ -26,7 +26,11 @@ se verifica abierta y sin caducar (y entonces pasa a 30 días), no se reabre
 ni deja de estar verificada, y que la poda borra solo las cerradas o
 caducadas, saltando las que están en uso. Que el rol auditor existe y que
 ninguna denuncia se le puede asignar, ni al insertarla ni al reasignarla, ni
-siquiera como superusuario (la asignación es la llave del contenido). Que la redacción (art. 32.2) solo reescribe el contenido de una
+siquiera como superusuario (la asignación es la llave del contenido). Que un
+vínculo con una identidad externa (login con Google o GitHub) solo guarda un
+HMAC de 32 bytes del proveedor de una lista cerrada, que entre los vigentes hay
+uno por identidad y uno por cuenta y proveedor, que uno revocado no vuelve a
+valer y que la API solo escribe las columnas que le tocan. Que la redacción (art. 32.2) solo reescribe el contenido de una
 denuncia o de un mensaje asignado a un admin activo de la empresa del
 contexto, solo si sigue siendo el que se leyó, con su fila de auditoría en la
 misma sentencia, y que aplicacion sigue sin poder cambiar ningún contenido
@@ -161,10 +165,11 @@ TEXTO_AISLAMIENTO = "la supresion exige el nivel de aislamiento READ COMMITTED"
 # Oráculos literales
 # ---------------------------------------------------------------------------
 TABLAS = ["busqueda_seguimiento", "clave_empresa", "denuncia", "directorio_empresas", "dispositivo_personal",
-          "empresa", "invitacion_personal", "mensaje", "registro_auditoria", "sesion_personal", "solicitud_registro",
-          "usuario_personal"]
-TABLAS_RLS = ["clave_empresa", "denuncia", "dispositivo_personal", "empresa", "invitacion_personal", "mensaje",
-              "registro_auditoria", "sesion_personal", "solicitud_registro", "usuario_personal"]
+          "empresa", "identidad_externa", "invitacion_personal", "mensaje", "registro_auditoria", "sesion_personal",
+          "solicitud_registro", "usuario_personal"]
+TABLAS_RLS = ["clave_empresa", "denuncia", "dispositivo_personal", "empresa", "identidad_externa",
+              "invitacion_personal", "mensaje", "registro_auditoria", "sesion_personal", "solicitud_registro",
+              "usuario_personal"]
 TABLAS_SIN_RLS = ["busqueda_seguimiento", "directorio_empresas"]
 COLUMNAS = {
     "empresa": ["id", "nombre", "activa", "fecha_alta", "zona_horaria"],
@@ -180,6 +185,8 @@ COLUMNAS = {
     "sesion_personal": ["empresa_id", "id", "usuario_id", "dispositivo_id", "token_sha256", "tokens_usados",
                         "ultimo_uso", "caduca", "revocada"],
     "solicitud_registro": ["empresa_id", "id", "email", "token_sha256", "caduca", "verificada", "cerrada"],
+    # Del sub del proveedor, solo su HMAC.
+    "identidad_externa": ["empresa_id", "id", "usuario_id", "proveedor", "sub_hmac", "creada", "revocada"],
     # Sin categoria: va dentro de contenido_cifrado.
     "denuncia": ["empresa_id", "id", "fecha", "estado", "asignada_a", "contenido_cifrado", "version_clave"],
     "mensaje": ["empresa_id", "denuncia_id", "secuencia", "fecha", "id", "autor", "autor_id", "contenido_cifrado",
@@ -202,6 +209,7 @@ CLAVES_PRIMARIAS = [
     "dispositivo_personal|PRIMARY KEY (empresa_id, id)",
     "sesion_personal|PRIMARY KEY (empresa_id, id)",
     "solicitud_registro|PRIMARY KEY (empresa_id, id)",
+    "identidad_externa|PRIMARY KEY (empresa_id, id)",
 ]
 # tabla|columnas|tabla referenciada|columnas referenciadas|accion al borrar (a = NO ACTION)
 CLAVES_FORANEAS = [
@@ -224,8 +232,9 @@ CLAVES_FORANEAS = [
     # La sesión exige que su dispositivo sea de su mismo usuario.
     "sesion_personal|empresa_id,usuario_id,dispositivo_id|dispositivo_personal|empresa_id,usuario_id,id|a",
     "solicitud_registro|empresa_id|empresa|id|a",
+    "identidad_externa|empresa_id,usuario_id|usuario_personal|empresa_id,id|a",
 ]
-# tabla|politica|comando (25 de aplicacion + 2 de propietario_funciones + 11 de propietario_supresion
+# tabla|politica|comando (28 de aplicacion + 2 de propietario_funciones + 11 de propietario_supresion
 # + 8 de propietario_redaccion)
 POLITICAS_APLICACION = [
     "empresa|empresa_select|SELECT",
@@ -246,6 +255,9 @@ POLITICAS_APLICACION = [
     "solicitud_registro|solicitud_registro_select|SELECT",
     "solicitud_registro|solicitud_registro_insert|INSERT",
     "solicitud_registro|solicitud_registro_update|UPDATE",
+    "identidad_externa|identidad_externa_select|SELECT",
+    "identidad_externa|identidad_externa_insert|INSERT",
+    "identidad_externa|identidad_externa_update|UPDATE",
     "denuncia|denuncia_select|SELECT",
     "denuncia|denuncia_insert|INSERT",
     "denuncia|denuncia_update|UPDATE",
@@ -308,6 +320,7 @@ PRIVILEGIOS_TABLA = {
         "dispositivo_personal": {"SELECT"},
         "sesion_personal": {"SELECT"},
         "solicitud_registro": {"SELECT"},
+        "identidad_externa": {"SELECT"},
         "denuncia": {"SELECT", "INSERT"},
         "mensaje": {"SELECT", "INSERT"},
         "registro_auditoria": {"SELECT", "INSERT"},
@@ -319,7 +332,7 @@ PRIVILEGIOS_TABLA = {
         "empresa": set(), "clave_empresa": set(), "usuario_personal": set(), "denuncia": set(),
         "mensaje": set(), "registro_auditoria": set(),
         "invitacion_personal": set(), "dispositivo_personal": set(), "sesion_personal": set(),
-        "solicitud_registro": set(),
+        "solicitud_registro": set(), "identidad_externa": set(),
         "directorio_empresas": {"SELECT"},
         "busqueda_seguimiento": {"SELECT", "INSERT"},
     },
@@ -329,7 +342,7 @@ PRIVILEGIOS_TABLA = {
         "empresa": set(), "clave_empresa": set(), "usuario_personal": set(),
         "invitacion_personal": set(), "dispositivo_personal": set(), "sesion_personal": set(),
         "denuncia": {"DELETE"}, "mensaje": {"DELETE"}, "busqueda_seguimiento": {"DELETE"},
-        "solicitud_registro": {"DELETE"},
+        "solicitud_registro": {"DELETE"}, "identidad_externa": set(),
         "registro_auditoria": set(), "directorio_empresas": set(),
     },
     # Nada a nivel de tabla: todo por columna.
@@ -352,6 +365,9 @@ PRIVILEGIOS_COLUMNA = {
         # Ni caduca ni el id: los fija la base de datos.
         ("solicitud_registro", "INSERT"): {"empresa_id", "email", "token_sha256"},
         ("solicitud_registro", "UPDATE"): {"verificada", "cerrada"},
+        # Ni creada ni revocada al insertar; despues, solo revocada.
+        ("identidad_externa", "INSERT"): {"empresa_id", "usuario_id", "proveedor", "sub_hmac"},
+        ("identidad_externa", "UPDATE"): {"revocada"},
         ("denuncia", "UPDATE"): {"estado", "asignada_a"},
     },
     "plataforma": {},
@@ -393,6 +409,7 @@ COLUMNAS_UPDATE = {
     "dispositivo_personal": {"intentos_fallidos", "bloqueado_hasta", "revocado"},
     "sesion_personal": {"token_sha256", "tokens_usados", "ultimo_uso", "revocada"},
     "solicitud_registro": {"verificada", "cerrada"},
+    "identidad_externa": {"revocada"},
     "denuncia": {"estado", "asignada_a"},
 }
 PRIVILEGIOS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -406,6 +423,7 @@ FUNCIONES_CATALOGO = {
     "encadenar_auditoria": ("migrador", "f", "v", "canal.encadenar_auditoria()"),
     "fijar_fecha_denuncia": ("migrador", "f", "v", "canal.fijar_fecha_denuncia()"),
     "controlar_solicitud_registro": ("migrador", "f", "v", "canal.controlar_solicitud_registro()"),
+    "controlar_identidad_externa": ("migrador", "f", "v", "canal.controlar_identidad_externa()"),
     "controlar_asignacion_denuncia": ("migrador", "f", "v", "canal.controlar_asignacion_denuncia()"),
     "rechazar_modificacion_auditoria": ("migrador", "f", "v", "canal.rechazar_modificacion_auditoria()"),
     "verificar_cadena_auditoria": ("migrador", "f", "s", "canal.verificar_cadena_auditoria()"),
@@ -433,6 +451,7 @@ EXECUTE_ESPERADO = {
     "encadenar_auditoria": set(),
     "fijar_fecha_denuncia": set(),
     "controlar_solicitud_registro": set(),
+    "controlar_identidad_externa": set(),
     "controlar_asignacion_denuncia": set(),
     "rechazar_modificacion_auditoria": set(),
     "verificar_cadena_auditoria": {"aplicacion"},
@@ -457,6 +476,7 @@ TRIGGERS = [
     "registro_auditoria|auditoria_inmutable_fila|O",
     "registro_auditoria|auditoria_inmutable_truncate|O",
     "solicitud_registro|solicitud_registro_transicion|O",
+    "identidad_externa|identidad_externa_revocacion|O",
 ]
 # Errores de canal.preparar_mensaje(). Los de estado y tope con su SQLSTATE
 # propio, tal como los muestra psql con VERBOSITY verbose.
@@ -470,7 +490,7 @@ CONTEOS = {
     "empresa": (1, 1), "clave_empresa": (1, 1), "usuario_personal": (2, 2),
     "denuncia": (2, 2), "mensaje": (2, 1), "registro_auditoria": (2, 1),
     "invitacion_personal": (1, 1), "dispositivo_personal": (1, 2), "sesion_personal": (1, 1),
-    "solicitud_registro": (1, 1),
+    "solicitud_registro": (1, 1), "identidad_externa": (1, 1),
 }
 # Fixture del personal (g): huellas de token de 32 bytes y uuid fijos.
 DISP_A = "a0000000-0000-4000-8000-0000000000f1"
@@ -485,6 +505,9 @@ TOKEN_SES_A = "31" * 32
 TOKEN_SES_B = "32" * 32
 TOKEN_SOL_A = "61" * 32
 TOKEN_SOL_B = "62" * 32
+# Identidades externas (ie): HMAC de prueba de 32 bytes, uno por empresa.
+SUB_A = "71" * 32
+SUB_B = "72" * 32
 ADMIN_DE = {EMPRESA_A: ADMIN_A, EMPRESA_B: ADMIN_B}
 DISP_DE = {EMPRESA_A: DISP_A, EMPRESA_B: DISP_B}
 TEXTO_CREDENCIALES = "usuario_personal_credenciales_check"
@@ -493,6 +516,8 @@ TEXTO_PENDIENTE = "invitacion_personal_pendiente_check"
 TEXTO_SOLICITUD_REABRIR = "CN003: una solicitud de registro cerrada no se reabre"
 TEXTO_SOLICITUD_DESVERIFICAR = "CN003: una solicitud de registro verificada no deja de estarlo"
 TEXTO_SOLICITUD_VERIFICAR = "CN003: solo se verifica una solicitud abierta y sin caducar"
+# Error de canal.controlar_identidad_externa() (seccion ie).
+TEXTO_IDENTIDAD_REVOCADA = "CN003: un vinculo externo revocado no vuelve a valer"
 # Error de canal.controlar_asignacion_denuncia() (seccion ra).
 TEXTO_ASIGNACION_NO_INSTRUYE = "CN004: una denuncia solo se asigna a una cuenta que instruye"
 # Comprobado con el mismo formato que CHECK_ESTADO (pg_get_constraintdef).
@@ -731,7 +756,7 @@ def seccion_c():
     comparar("c) esquema canal de migrador", r.lineas(), ["migrador"])
     r = sup("select c.relname, pg_get_userbyid(c.relowner) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
             "where n.nspname = 'canal' and c.relkind in ('r', 'p');")
-    comparar("c) exactamente las 12 tablas, todas de migrador", r.lineas(), [f"{t}|migrador" for t in TABLAS])
+    comparar("c) exactamente las 13 tablas, todas de migrador", r.lineas(), [f"{t}|migrador" for t in TABLAS])
     r = sup("select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
             "where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S');")
     comparar("c) ninguna tabla ni objeto en public", r.lineas(), ["0"])
@@ -765,7 +790,7 @@ select c.relname,
     r = sup("select c.relname, c.relrowsecurity, c.relforcerowsecurity from pg_class c "
             "join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'canal' and c.relkind = 'r';")
     esperado = [f"{t}|t|t" for t in TABLAS_RLS] + [f"{t}|f|f" for t in TABLAS_SIN_RLS]
-    comparar("c) RLS ENABLE y FORCE en las 10 tablas y ninguna en directorio_empresas ni busqueda_seguimiento", r.lineas(), esperado)
+    comparar("c) RLS ENABLE y FORCE en las 11 tablas y ninguna en directorio_empresas ni busqueda_seguimiento", r.lineas(), esperado)
     # Personal: tokens unicos por empresa y como mucho una invitacion abierta
     # por cuenta (indice parcial).
     r = sup("select c.relname || '|' || pg_get_constraintdef(co.oid) from pg_constraint co "
@@ -783,6 +808,27 @@ select c.relname,
     comparar("c) una sola invitacion abierta por cuenta (indice unico parcial)", r.lineas(), [
         ("CREATE UNIQUE INDEX invitacion_personal_una_abierta ON canal.invitacion_personal "
          "USING btree (empresa_id, usuario_id) WHERE (NOT cerrada)")])
+    # Identidades externas: entre las vigentes, una cuenta por identidad y
+    # una identidad por cuenta y proveedor. Literales comprobados en
+    # postgres:18.6-alpine (22 oct).
+    r = sup("select pg_get_indexdef('canal.identidad_externa_una_por_identidad'::regclass);")
+    comparar("c) una sola cuenta vigente por identidad externa (indice unico parcial)", r.lineas(), [
+        ("CREATE UNIQUE INDEX identidad_externa_una_por_identidad ON canal.identidad_externa "
+         "USING btree (empresa_id, proveedor, sub_hmac) WHERE (NOT revocada)")])
+    r = sup("select pg_get_indexdef('canal.identidad_externa_una_por_cuenta'::regclass);")
+    comparar("c) una sola identidad vigente por cuenta y proveedor (indice unico parcial)", r.lineas(), [
+        ("CREATE UNIQUE INDEX identidad_externa_una_por_cuenta ON canal.identidad_externa "
+         "USING btree (empresa_id, usuario_id, proveedor) WHERE (NOT revocada)")])
+    r = sup("select conname || '|' || pg_get_constraintdef(oid) from pg_constraint "
+            "where contype = 'c' and conrelid = 'canal.identidad_externa'::regclass;")
+    comparar("c) identidad_externa: proveedor de una lista cerrada y un HMAC de 32 bytes", r.lineas(), [
+        "identidad_externa_proveedor_check|CHECK ((proveedor = ANY (ARRAY['google'::text, 'github'::text])))",
+        "identidad_externa_sub_hmac_check|CHECK ((octet_length(sub_hmac) = 32))"])
+    r = sup("select a.attname || '|' || pg_get_expr(d.adbin, d.adrelid) from pg_attrdef d "
+            "join pg_attribute a on a.attrelid = d.adrelid and a.attnum = d.adnum "
+            "where d.adrelid = 'canal.identidad_externa'::regclass;")
+    comparar("c) identidad_externa: id, creada (solo el dia) y revocada los fija la base de datos", r.lineas(), [
+        "id|gen_random_uuid()", "creada|CURRENT_DATE", "revocada|false"])
     r = sup("select pg_get_indexdef('canal.solicitud_registro_una_abierta'::regclass);")
     comparar("c) una sola solicitud de registro abierta por email y empresa (indice unico parcial)", r.lineas(), [
         ("CREATE UNIQUE INDEX solicitud_registro_una_abierta ON canal.solicitud_registro "
@@ -828,7 +874,7 @@ def seccion_d():
     r = sup("select tablename, policyname, cmd, roles, coalesce(qual, ''), coalesce(with_check, '') "
             "from pg_policies where schemaname = 'canal' order by 1, 2;")
     filas = [l.split("|") for l in r.lineas()]
-    comparar("d) conjunto exacto de las 46 politicas (tabla, nombre, comando)",
+    comparar("d) conjunto exacto de las 49 politicas (tabla, nombre, comando)",
              ["|".join(f[:3]) for f in filas], POLITICAS)
 
     def rol_esperado(nombre):
@@ -840,7 +886,7 @@ def seccion_d():
             return "{propietario_redaccion}"
         return "{aplicacion}"
     pasa(all(f[3] == rol_esperado(f[1]) for f in filas),
-         "d) las 25 de aplicacion son TO aplicacion, las 2 del definidor solo TO propietario_funciones, "
+         "d) las 28 de aplicacion son TO aplicacion, las 2 del definidor solo TO propietario_funciones, "
          "las 11 de supresion solo TO propietario_supresion y las 8 de redaccion solo TO propietario_redaccion")
     pasa(all(f[2] != "ALL" for f in filas), "d) ninguna con comando ALL")
     con_delete = sorted(f[1] for f in filas if f[2] == "DELETE")
@@ -872,7 +918,7 @@ def seccion_d():
         if esperado_check != ("empresa_actual" in check) or (not esperado_check and check):
             ok = False
             p(f"   {nombre}: with_check inesperado {check!r}")
-    pasa(ok, "d) las 25 de aplicacion usan empresa_actual (SELECT solo qual, INSERT solo with_check, UPDATE ambos) y las 2 del definidor llevan true")
+    pasa(ok, "d) las 28 de aplicacion usan empresa_actual (SELECT solo qual, INSERT solo with_check, UPDATE ambos) y las 2 del definidor llevan true")
 
 
 def seccion_e():
@@ -947,7 +993,7 @@ def seccion_f():
     r = sup("select p.proname, pg_get_userbyid(p.proowner), p.prosecdef, p.provolatile, p.oid::regprocedure::text "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';")
     esperado = [f"{f}|{d}|{s}|{v}|{firma}" for f, (d, s, v, firma) in FUNCIONES_CATALOGO.items()]
-    comparar("f) exactamente las 18 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
+    comparar("f) exactamente las 19 funciones: dueno, SECURITY DEFINER, volatilidad y firma", r.lineas(), esperado)
     r = sup("select p.proname, c from pg_proc p join pg_namespace n on n.oid = p.pronamespace, unnest(p.proconfig) c "
             "where n.nspname = 'canal' and p.prosecdef;")
     comparar("f) las 9 de definidor tienen exactamente search_path=pg_catalog, canal, pg_temp",
@@ -965,10 +1011,10 @@ def seccion_f():
     for rol in ROLES:
         for f in FUNCIONES_CATALOGO:
             esperado.append(f"{rol}|{f}|{'true' if rol in EXECUTE_ESPERADO[f] else 'false'}")
-    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 18 funciones", r.lineas(), esperado)
+    comparar(f"f) matriz de EXECUTE de los {len(ROLES)} roles sobre las 19 funciones", r.lineas(), esperado)
     r = sup("select c.relname, t.tgname, t.tgenabled from pg_trigger t join pg_class c on c.oid = t.tgrelid "
             "join pg_namespace n on n.oid = c.relnamespace where not t.tgisinternal and n.nspname = 'canal';")
-    comparar("f) los 7 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
+    comparar("f) los 8 triggers esperados, todos con tgenabled = 'O'", r.lineas(), TRIGGERS)
     # control de privilegios por defecto: una funcion nueva de migrador no hereda EXECUTE de PUBLIC
     try:
         r = sup("SET ROLE migrador;\n"
@@ -1005,6 +1051,8 @@ INSERT INTO canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token
     ('{EMPRESA_B}', '{ADMIN_B}', '{DISP_B}', '\\x{TOKEN_SES_B}');
 INSERT INTO canal.solicitud_registro (empresa_id, email, token_sha256) VALUES
     ('{EMPRESA_A}', 'pide@ejemplo.test', '\\x{TOKEN_SOL_A}'), ('{EMPRESA_B}', 'pide@ejemplo.test', '\\x{TOKEN_SOL_B}');
+INSERT INTO canal.identidad_externa (empresa_id, usuario_id, proveedor, sub_hmac) VALUES
+    ('{EMPRESA_A}', '{ADMIN_A}', 'google', '\\x{SUB_A}'), ('{EMPRESA_B}', '{ADMIN_B}', 'google', '\\x{SUB_B}');
 INSERT INTO canal.denuncia (empresa_id, id, contenido_cifrado, version_clave, asignada_a) VALUES
     ('{EMPRESA_A}', '{DEN_A1}', {BYTES_FALSOS}, 1, '{INSTR_A}'),
     ('{EMPRESA_A}', '{DEN_A2}', {BYTES_FALSOS}, 1, NULL),
@@ -1077,6 +1125,8 @@ def seccion_i():
         "dispositivo_personal": lambda e, d: f"insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '\\x{'42' * 32}');",
         "sesion_personal": lambda e, d: f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) values ('{e}', '{ADMIN_DE[e]}', '{DISP_DE[e]}', '\\x{'43' * 32}');",
         "solicitud_registro": lambda e, d: f"insert into canal.solicitud_registro (empresa_id, email, token_sha256) values ('{e}', 'otra@ejemplo.test', '\\x{'44' * 32}');",
+        # La instructora de cada empresa, que no tiene vinculo en el fixture.
+        "identidad_externa": lambda e, d: f"insert into canal.identidad_externa (empresa_id, usuario_id, proveedor, sub_hmac) values ('{e}', '{INSTR_A if e == EMPRESA_A else INSTR_B}', 'google', '\\x{'45' * 32}');",
         "clave_empresa": lambda e, d: f"insert into canal.clave_empresa (empresa_id, version, clave_envuelta) values ('{e}', 2, {BYTES_FALSOS});",
         "registro_auditoria": lambda e, d: f"insert into canal.registro_auditoria (empresa_id, actor, accion) values ('{e}', 'prueba', 'accion');",
     }
@@ -1297,6 +1347,82 @@ def seccion_l():
              como_sup(f"insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) "
                       f"values ('{EMPRESA_A}', '{INSTR_A}', '{DISP_A}', '\\x{'58' * 32}');"),
              "violates foreign key constraint", sin_error(ctl))
+
+
+def seccion_ie():
+    p("=== ie) identidades externas (login con un proveedor, 6.19)")
+    # VERBOSITY verbose: psql muestra el SQLSTATE (CN003) delante del mensaje.
+    def en_a(cuerpo):
+        return app("\\set VERBOSITY verbose\n" + cuerpo, ctx=EMPRESA_A, final="ROLLBACK")
+
+    def vincular(usuario, proveedor, sub, empresa=EMPRESA_A):
+        return (f"insert into canal.identidad_externa (empresa_id, usuario_id, proveedor, sub_hmac) "
+                f"values ('{empresa}', '{usuario}', '{proveedor}', '\\x{sub}');")
+
+    # ie1) La API no elige id, creada ni revocada al vincular. Control: el
+    #      mismo INSERT con solo las columnas permitidas.
+    ctl = en_a(vincular(INSTR_A, "google", "73" * 32))
+    for columna, v in (("revocada", "true"), ("creada", "current_date - 30"), ("id", "gen_random_uuid()")):
+        negativo(f"ie1) INSERT de identidad_externa con {columna}",
+                 en_a(f"insert into canal.identidad_externa (empresa_id, usuario_id, proveedor, sub_hmac, {columna}) "
+                      f"values ('{EMPRESA_A}', '{INSTR_A}', 'google', '\\x{'73' * 32}', {v});"),
+                 "permission denied", sin_error(ctl))
+    # ie2) Despues solo puede revocar: ni la cuenta, ni el proveedor, ni el
+    #      HMAC, ni el dia ni la empresa de un vinculo cambian. Control: revocar.
+    ctl_revocar = en_a("update canal.identidad_externa set revocada = true;")
+    for columna, v in (("usuario_id", f"'{INSTR_A}'"), ("proveedor", "'github'"), ("sub_hmac", f"'\\x{'74' * 32}'"),
+                       ("creada", "current_date"), ("empresa_id", f"'{EMPRESA_A}'")):
+        negativo(f"ie2) UPDATE de identidad_externa.{columna}",
+                 en_a(f"update canal.identidad_externa set {columna} = {v};"), "permission denied", sin_error(ctl_revocar))
+    # ie3) Una revocada no vuelve a valer, tampoco como superusuario (el
+    #      trigger no depende de los permisos). Control: revocar funciona.
+    negativo("ie3) des-revocar un vinculo como aplicacion",
+             en_a("update canal.identidad_externa set revocada = true;\n"
+                  "update canal.identidad_externa set revocada = false;"),
+             TEXTO_IDENTIDAD_REVOCADA, sin_error(ctl_revocar))
+    ctl_sup = sup("BEGIN;\nupdate canal.identidad_externa set revocada = true;\nROLLBACK;\n")
+    negativo("ie3) des-revocar un vinculo como superusuario",
+             sup("\\set VERBOSITY verbose\nBEGIN;\nupdate canal.identidad_externa set revocada = true;\n"
+                 "update canal.identidad_externa set revocada = false;\nROLLBACK;\n"),
+             TEXTO_IDENTIDAD_REVOCADA, sin_error(ctl_sup))
+    # ie4) Una identidad vigente es de una sola cuenta. Control: otra
+    #      identidad para la misma cuenta. Y al revocarla, queda libre (el
+    #      indice es parcial): otra cuenta puede vincularla.
+    negativo("ie4) la identidad de ADMIN_A vinculada tambien a INSTR_A",
+             en_a(vincular(INSTR_A, "google", SUB_A)), "identidad_externa_una_por_identidad", sin_error(ctl))
+    r = en_a(f"update canal.identidad_externa set revocada = true where usuario_id = '{ADMIN_A}';\n"
+             + vincular(INSTR_A, "google", SUB_A))
+    pasa(sin_error(r), f"ie4) revocada la de ADMIN_A, INSTR_A puede vincular esa identidad {r.err.strip()[:200]}")
+    # ie5) Una cuenta tiene como mucho una identidad vigente por proveedor.
+    #      Control: la misma cuenta con el otro proveedor.
+    ctl_github = en_a(vincular(ADMIN_A, "github", "75" * 32))
+    pasa(sin_error(ctl_github), f"ie5) control: ADMIN_A vincula ademas una de GitHub {ctl_github.err.strip()[:200]}")
+    negativo("ie5) una segunda identidad de Google para ADMIN_A",
+             en_a(vincular(ADMIN_A, "google", "75" * 32)), "identidad_externa_una_por_cuenta", sin_error(ctl_github))
+    # ie6) El mismo HMAC en otra empresa no choca: el indice lleva la empresa,
+    #      y un "duplicate key" revelaria que la identidad existe en A.
+    r = app("\\set VERBOSITY verbose\n" + vincular(INSTR_B, "google", SUB_A, EMPRESA_B), ctx=EMPRESA_B,
+            final="ROLLBACK")
+    pasa(sin_error(r), f"ie6) en B se vincula el mismo sub_hmac que tiene A, sin 'duplicate key' {r.err.strip()[:200]}")
+    # ie7) Proveedor de la lista cerrada y HMAC de 32 bytes exactos. Control:
+    #      el INSERT de ie1 (google, 32 bytes).
+    negativo("ie7) proveedor fuera de la lista", en_a(vincular(INSTR_A, "facebook", "76" * 32)),
+             "identidad_externa_proveedor_check", sin_error(ctl))
+    for motivo, sub in (("31 bytes", "76" * 31), ("33 bytes", "76" * 33)):
+        negativo(f"ie7) sub_hmac de {motivo}", en_a(vincular(INSTR_A, "google", sub)),
+                 "identidad_externa_sub_hmac_check", sin_error(ctl))
+    # ie8) La cuenta de otra empresa da el mismo error que una inexistente
+    #      (clave foranea compuesta): no se averigua si un id existe en B.
+    ajena = en_a(vincular(INSTR_B, "google", "77" * 32))
+    inexistente = en_a(vincular(str(uuid.uuid4()), "google", "77" * 32))
+    if not sin_error(ctl):
+        sinc("ie8) el control (vincular una cuenta propia) fallo")
+    else:
+        a, b = normalizar_uuid(ajena.err), normalizar_uuid(inexistente.err)
+        pasa("violates foreign key constraint" in a and a == b,
+             "ie8) cuenta de B y uuid aleatorio: mismo error de clave foranea")
+        if a != b:
+            p(f"   ajena:       {a.strip()!r}\n   inexistente: {b.strip()!r}")
 
 
 def cliente_red(sql, rol="aplicacion", base="canario", requerir=None):
@@ -2046,7 +2172,8 @@ def seccion_v():
     ctl_ok = sin_error(ctl) and valor(ctl).isdigit() and int(valor(ctl)) >= 3
     pasa(ctl_ok, f"v) control: propietario_funciones si puede leer empresa(id) ({valor(ctl)} empresas)")
     for t in ("denuncia", "mensaje", "usuario_personal", "clave_empresa", "registro_auditoria",
-              "invitacion_personal", "dispositivo_personal", "sesion_personal", "solicitud_registro"):
+              "invitacion_personal", "dispositivo_personal", "sesion_personal", "solicitud_registro",
+              "identidad_externa"):
         negativo(f"v) propietario_funciones: select de {t}", como_propietario(f"select count(*) from canal.{t};"),
                  "permission denied", ctl_ok)
     # suposicion 2: INSERT ... RETURNING bajo RLS exige privilegio y politica de SELECT.
@@ -2109,10 +2236,10 @@ def seccion_x():
     for nombre, ctx, idx in (("A", EMPRESA_A, 0), ("B", EMPRESA_B, 1)):
         real = conteos_contexto(ctx)
         pasa(real == FOTO_PREVIA[nombre],
-             f"x) contexto {nombre}: las 6 tablas (incluida registro_auditoria) iguales a la foto previa: real={real} foto={FOTO_PREVIA[nombre]}")
+             f"x) contexto {nombre}: las {len(TABLAS_RLS)} tablas (incluida registro_auditoria) iguales a la foto previa: real={real} foto={FOTO_PREVIA[nombre]}")
         fijas = sorted(l for l in real if not l.startswith("registro_auditoria|"))
         esperado = sorted(f"{t}|{CONTEOS[t][idx]}" for t in TABLAS_RLS if t != "registro_auditoria")
-        pasa(fijas == esperado, f"x) contexto {nombre}: las 5 tablas sin registro_auditoria coinciden con los literales de h): real={fijas} esperado={esperado}")
+        pasa(fijas == esperado, f"x) contexto {nombre}: las {len(TABLAS_RLS) - 1} tablas sin registro_auditoria coinciden con los literales de h): real={fijas} esperado={esperado}")
         cadena = verificar_cadena(ctx)
         pasa(cadena == "NULL", f"x) contexto {nombre}: verificar_cadena_auditoria() = {cadena} (esperado NULL)")
     esperado_cero = sorted(f"{t}|0" for t in TABLAS_RLS)
@@ -2213,7 +2340,7 @@ COMMIT;
              como_supresion("select contenido_cifrado from canal.denuncia limit 1;"),
              "permission denied for table denuncia", ctl_ok)
     for t in ("clave_empresa", "usuario_personal", "empresa", "registro_auditoria", "directorio_empresas",
-              "invitacion_personal", "dispositivo_personal", "sesion_personal"):
+              "invitacion_personal", "dispositivo_personal", "sesion_personal", "identidad_externa"):
         negativo(f"su2) propietario_supresion no borra en {t}", como_supresion(f"delete from canal.{t};"),
                  "permission denied", ctl_ok)
     # Suposicion comprobada: sin la politica de bloqueo, FOR UPDATE no da
@@ -2654,11 +2781,11 @@ def seccion_r():
                                          "where n.nspname = 'canal' and c.relkind = 'r';").lineas(), TABLAS)
     politicas = sup("select tablename, policyname, cmd from pg_policies where schemaname = 'canal';").lineas()
     tablas_con_politicas = {l.split("|")[0] for l in politicas}
-    comparar("r) siguen las 46 politicas definidas en d)", politicas, POLITICAS)
-    pasa(len(politicas) == 46 and len(tablas_con_politicas) == 10,
-         f"r) exactamente 46 politicas repartidas en exactamente 10 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
+    comparar("r) siguen las 49 politicas definidas en d)", politicas, POLITICAS)
+    pasa(len(politicas) == 49 and len(tablas_con_politicas) == 11,
+         f"r) exactamente 49 politicas repartidas en exactamente 11 tablas ({len(politicas)} politicas, {len(tablas_con_politicas)} tablas)")
     funciones = sup("select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'canal';").lineas()
-    comparar("r) siguen las 18 funciones", funciones, list(FUNCIONES_CATALOGO))
+    comparar("r) siguen las 19 funciones",funciones, list(FUNCIONES_CATALOGO))
     pasa(esperar_healthy(CID) == "healthy", "r) el contenedor esta healthy")
 
 
@@ -2748,7 +2875,7 @@ def main():
         if not IMAGEN:
             raise Parada("no se pudo leer la imagen del contenedor postgres")
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_au, seccion_n, seccion_o, seccion_z, seccion_p,
+                        seccion_j, seccion_k, seccion_l, seccion_ie, seccion_m, seccion_au, seccion_n, seccion_o, seccion_z, seccion_p,
                         seccion_q,
                         seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_sr,
                         seccion_ra, seccion_re, seccion_r):

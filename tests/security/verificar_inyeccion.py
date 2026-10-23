@@ -468,7 +468,8 @@ def preparar_secretos_falsos():
     directorio = TEMPORAL / "secretos_compose"
     directorio.mkdir()
     lineas = ["secrets:"]
-    for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens"):
+    for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens",
+                   "clave_hmac_identidades", "clave_flujo_externo"):
         (directorio / nombre).write_text(secrets.token_hex(32), encoding="ascii", newline="")
         lineas += fichero_secreto(nombre, directorio / nombre)
     for usuario in ("aplicacion", "inspector"):
@@ -1332,7 +1333,8 @@ def main():
     # Solo se comprueba que existen (is_file), nunca se leen.
     for fichero in ("contrasena_redis.txt", "redis_acl.conf", "contrasena_postgres_superusuario.txt",
                     "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt",
-                    "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt"):
+                    "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt",
+                    "clave_hmac_identidades.txt", "clave_flujo_externo.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
             terminar(parada=True)

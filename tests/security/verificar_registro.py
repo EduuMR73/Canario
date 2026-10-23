@@ -993,6 +993,7 @@ def seccion_j():
     d.mkdir()
     ficheros = {"contrasena_aplicacion": secrets.token_urlsafe(48), "clave_maestra": secrets.token_hex(32),
                 "clave_hmac_codigos": secrets.token_hex(32), "clave_firma_tokens": secrets.token_hex(32),
+                "clave_hmac_identidades": secrets.token_hex(32), "clave_flujo_externo": secrets.token_hex(32),
                 "contrasena_redis": secrets.token_urlsafe(48)}
     montajes = []
     for nombre, contenido in ficheros.items():

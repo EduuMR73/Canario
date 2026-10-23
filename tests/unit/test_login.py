@@ -31,7 +31,8 @@ CONTRASENA = "Contrasena-correcta-1"
 def cuenta(contrasena=CONTRASENA, usuario_aad=USUARIO):
     """Fila reservada como la devuelve la base de datos (índices 1, 3, 4, 5)
     y la clave de empresa envuelta."""
-    claves_reales = claves.Claves(maestra=MAESTRA, hmac_codigos=bytes(32), firma_tokens=bytes(32))
+    claves_reales = claves.Claves(maestra=MAESTRA, hmac_codigos=bytes(32), firma_tokens=bytes(32),
+                                  hmac_identidades=bytes(32), flujo_externo=bytes(32))
     envuelta = cripto.envolver_clave(MAESTRA, CLAVE_EMPRESA, EMPRESA, 1)
     cifrado = cripto.cifrar(CLAVE_EMPRESA, SECRETO_RFC, cripto.aad_totp(EMPRESA, usuario_aad))
     reservada = (DISPOSITIVO, USUARIO, None, personal._hasher.hash(contrasena), cifrado, 1, 0)
@@ -39,7 +40,8 @@ def cuenta(contrasena=CONTRASENA, usuario_aad=USUARIO):
 
 
 def factores(reservada, envuelta, contrasena=CONTRASENA, codigo=CODIGO, claves_reales=None):
-    claves_reales = claves_reales or claves.Claves(maestra=MAESTRA, hmac_codigos=bytes(32), firma_tokens=bytes(32))
+    claves_reales = claves_reales or claves.Claves(maestra=MAESTRA, hmac_codigos=bytes(32), firma_tokens=bytes(32),
+                                                    hmac_identidades=bytes(32), flujo_externo=bytes(32))
     return personal._comprobar_factores(claves_reales, EMPRESA, reservada, envuelta, contrasena, codigo, INSTANTE)
 
 
