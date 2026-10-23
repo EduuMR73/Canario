@@ -22,7 +22,9 @@ Qué prueba:
      modelo de amenazas);
   f) que lo que el VEX declara no alcanzable no lo es: Caddy solo con HTTP/1.1
      (configuración adaptada y ALPN real en los dos puertos), cada file_server
-     detrás de la quita de la cabecera Range y sin ECH;
+     detrás de la quita de la cabecera Range, sin ECH y sin verificar nunca
+     el certificado de otro (lista blanca sobre la configuración adaptada); y
+     mailpit sin configuración y solo en su red interna;
   g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL);
   h) un SBOM CycloneDX por imagen, que se deja en el directorio temporal del
      sistema (canario_sbom);
@@ -33,6 +35,11 @@ Qué prueba:
      Caddy solo lleva el JavaScript compilado, sin package.json: Trivy no
      sabría de qué paquetes viene, así que se escanea el lock. Las de
      desarrollo cuentan porque se ejecutan al compilar (proxy/Dockerfile).
+     Además: el override de vite en spa/package.json es el que está en el
+     lock y sigue haciendo falta (falla cuando @angular/build ya trae una
+     vite arreglada, para retirarlo), y cada entrada del lock que cambia
+     respecto a HEAD se lista con su fecha de publicación y tiene al menos 14
+     días (la consulta al registro de npm es solo de metadatos, en JSON).
 Cada prueba negativa lleva su control positivo con datos sintéticos: si el
 control falla, el resultado es SIN CONCLUSION, nunca PASA. Los oráculos son
 literales.
@@ -43,7 +50,8 @@ marcha y conexión a internet):
     python tests/security/verificar_escaneos.py
 
 Necesita red para descargar las imágenes de las herramientas, los paquetes de
-pip-audit y bandit (con hashes), la base de datos de Trivy y los avisos de OSV.
+pip-audit y bandit (con hashes), la base de datos de Trivy, los avisos de OSV
+y las fechas de publicación del registro de npm.
 Si falla algo de eso, el resultado es SIN CONCLUSION. Los escaneos de Trivy y
 de gitleaks se ejecutan después sin red (--network none).
 
@@ -76,6 +84,9 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 
 RAIZ = pathlib.Path.cwd()
 PROYECTO = "canario_escaneos"
@@ -129,6 +140,19 @@ LOCK_CONTROL = {
     "packages": {"": {"name": "control", "dependencies": {"@angular/common": "22.0.0"}},
                  "node_modules/@angular/common": {"version": "22.0.0"}},
 }
+# Override de vite (CVE-2026-112942, arreglada en la 8.3.3): @angular/build
+# 22.2.x fija vite 8.3.0 exacta. Se fuerza la 8.3.4, la que ya usa
+# @angular/build 22.3.0-next, con más de 14 días al fijarla.
+OVERRIDES_SPA = {"vite": "8.3.4"}
+VITE_ARREGLADA = (8, 3, 3)
+# Control del override: un @angular/build que ya declara una vite arreglada.
+VITE_DECLARADA_CONTROL = "8.3.4"
+# Regla de los 14 días (docs/threat-model.md, 6.17) sobre lo que cambia en el
+# lock. Control: vite 8.3.4 (publicada el 8 de octubre) evaluada como si
+# hoy fuera el 9 de octubre tiene menos de 14 días.
+DIAS_ESPERA = 14
+CONTROL_RECIENTE = ("vite", "8.3.4", datetime.datetime(2026, 10, 9, tzinfo=datetime.UTC))
+REGISTRO_NPM = "https://registry.npmjs.org/"
 DOCKERFILE_CONTROL = "FROM alpine:3.20\nRUN echo hola\n"
 SEGUIDOS_EN_SECRETS = ["secrets/.gitkeep", "secrets/README.md"]
 SBOM_API_CONTROL = ("fastapi", "0.143.0")
@@ -145,11 +169,14 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
                            "vulnerable_code_not_in_execute_path",
                            "vulnerable_code_cannot_be_controlled_by_adversary",
                            "inline_mitigations_already_exist"}
-CVES_VEX_CADDY = {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031"}
+# Lo que el VEX declara no explotable en cada imagen.
+CVES_VEX = {"caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031", "CVE-2026-111943"},
+            "mailpit": {"CVE-2026-111943"}}
 # Para el control de atadura a la versión: las mismas declaraciones con la
 # versión siguiente del componente no deben suprimir nada.
 VERSIONES_VEX = {"pkg:golang/stdlib@v1.26.8": "pkg:golang/stdlib@v1.26.9",
-                 "pkg:golang/golang.org/x/net@v0.59.0": "pkg:golang/golang.org/x/net@v0.60.0"}
+                 "pkg:golang/golang.org/x/net@v0.59.0": "pkg:golang/golang.org/x/net@v0.60.0",
+                 "pkg:golang/stdlib@v1.27.2": "pkg:golang/stdlib@v1.27.3"}
 
 # Caddy
 PROTOCOLOS_CADDY = ["h1"]
@@ -618,20 +645,23 @@ def seccion_e():
         pasa(subcomponentes and all("@" in s for s in subcomponentes),
              f"e) VEX {cve}: atada a version exacta del componente {subcomponentes}")
 
-    # Caddy sin VEX (control: el VEX es lo que las suprime), con VEX y con el
-    # VEX movido a la versión siguiente (control de atadura a la versión).
-    _, sin_vex = escanear("caddy")
-    cves_sin_vex = {v["VulnerabilityID"] for _, v in hallazgos(sin_vex)[0]}
-    control_vex = CVES_VEX_CADDY <= cves_sin_vex
-    pasa(control_vex, f"e) control: sin VEX, Trivy reporta en caddy {sorted(CVES_VEX_CADDY)}")
+    # Cada imagen con declaraciones: sin VEX (control: el VEX es lo que las
+    # suprime) y con el VEX movido a la versión siguiente del componente
+    # (control de atadura a la versión).
     texto = VEX.read_text(encoding="utf-8")
     for actual, siguiente in VERSIONES_VEX.items():
         texto = texto.replace(actual, siguiente)
     vex_movido = escribir(TEMPORAL / "vex_movido" / "movido.openvex.json", texto)
-    _, movido = escanear("caddy", vex=vex_movido)
-    cves_movido = {v["VulnerabilityID"] for _, v in hallazgos(movido)[0]}
-    negativo("e) VEX atado a la version: con otra version del componente no suprime nada",
-             CVES_VEX_CADDY <= cves_movido, control_vex, f"siguen {sorted(cves_movido & CVES_VEX_CADDY)}")
+    control_vex = {}
+    for nombre, cves in sorted(CVES_VEX.items()):
+        _, sin_vex = escanear(nombre)
+        cves_sin_vex = {v["VulnerabilityID"] for _, v in hallazgos(sin_vex)[0]}
+        control_vex[nombre] = cves <= cves_sin_vex
+        pasa(control_vex[nombre], f"e) control: sin VEX, Trivy reporta en {nombre} {sorted(cves)}")
+        _, movido = escanear(nombre, vex=vex_movido)
+        cves_movido = {v["VulnerabilityID"] for _, v in hallazgos(movido)[0]}
+        negativo(f"e) VEX atado a la version en {nombre}: con otra version del componente no suprime nada",
+                 cves <= cves_movido, control_vex[nombre], f"siguen {sorted(cves_movido & cves)}")
 
     # Las cinco imágenes con el VEX real.
     suprimidas_total = set()
@@ -652,9 +682,10 @@ def seccion_e():
         so = (informe.get("Metadata") or {}).get("OS") or {}
         p(f"   {nombre} ({so.get('Family', '?')} {so.get('Name', '')}): sin arreglo publicado {len(sin_arreglo)}"
           + (f" -> {sorted({c for c, _, _ in sin_arreglo})}" if sin_arreglo else ""))
-    for cve in sorted(CVES_VEX_CADDY):
-        negativo(f"e) VEX {cve}: suprime el hallazgo en caddy (una declaracion sin efecto se revisa y se retira)",
-                 ("caddy", cve) in suprimidas_total, control_vex)
+    for nombre, cves in sorted(CVES_VEX.items()):
+        for cve in sorted(cves):
+            negativo(f"e) VEX {cve}: suprime el hallazgo en {nombre} (una declaracion sin efecto se revisa y se retira)",
+                     (nombre, cve) in suprimidas_total, control_vex[nombre])
 
 
 def json_de_texto(texto):
@@ -697,6 +728,28 @@ PUERTOS_CADDY = ("8443", "8444", "8445")
 # Cambio que convierte el Caddyfile real en el de control de la quita de Range:
 # el sitio del denunciante, el que tiene file_server, sin importar sin_range.
 CONTROL_SIN_RANGE = ("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n")
+# CVE-2026-111943: cambios que hacen que Caddy verifique certificados ajenos,
+# uno por condición de la lista blanca. Se aplican en orden y cada uno a la
+# primera aparición: el emisor acme va en el sitio sin nombre (con localhost
+# en dos políticas, caddy adapt se niega) y client_auth en el primer sitio.
+CONTROL_X509 = [
+    ("\tadmin off\n", "\tadmin localhost:2019\n"),
+    ("\tskip_install_trust\n", ""),
+    ("https://:8443, https://:8444, https://:8445 {\n\ttls internal\n",
+     "https://:8443, https://:8444, https://:8445 {\n\ttls {\n\t\tissuer acme\n\t}\n"),
+    ("\ttls internal\n", "\ttls internal {\n\t\tclient_auth {\n\t\t\tmode request\n\t\t}\n\t}\n"),
+    ("\treverse_proxy api:8000 {", "\treverse_proxy https://api:8000 {"),
+]
+# Mailpit con una variable de reenvío y en una red con salida: lo que haría
+# que abriese conexiones TLS hacia fuera.
+COMPOSE_CONTROL_MAILPIT = """services:
+  mailpit:
+    environment:
+      MP_SMTP_RELAY_HOST: relay.canario.invalid
+    networks:
+      - correo
+      - edge
+"""
 
 
 def quita_range(manejador):
@@ -731,6 +784,54 @@ def file_servers(rutas, quitado=False):
     return hallados
 
 
+def transportes(nodo):
+    """Todos los transportes de los manejadores, a cualquier profundidad."""
+    if isinstance(nodo, dict):
+        propios = [nodo["transport"] or {}] if "transport" in nodo else []
+        return propios + [t for v in nodo.values() for t in transportes(v)]
+    if isinstance(nodo, list):
+        return [t for v in nodo for t in transportes(v)]
+    return []
+
+
+def condiciones_x509(configuracion):
+    """Lista blanca de lo que mantiene a Caddy sin verificar nunca la cadena
+    de un certificado ajeno (CVE-2026-111943). En Caddy 2.11.7 eso pasa en el
+    admin remoto, en la instalación de la raíz local en el almacén del sistema
+    (trusted() con las raíces del sistema), en los emisores que no son el CA
+    interno (ACME es un cliente TLS), en la autenticación de clientes y en
+    los transportes con TLS. Lo que no está en la lista falla: una política
+    de emisión sin emisores usa ACME por defecto, así que no cuenta como
+    internal."""
+    apps = configuracion.get("apps", {})
+    politicas = ((apps.get("tls") or {}).get("automation") or {}).get("policies") or []
+    ca_local = ((apps.get("pki") or {}).get("certificate_authorities") or {}).get("local") or {}
+    return {
+        "admin desactivado": (configuracion.get("admin") or {}).get("disabled") is True,
+        "install_trust en false": ca_local.get("install_trust") is False,
+        "solo emisores internal": bool(politicas) and all(
+            pol.get("issuers") and all(e.get("module") == "internal" for e in pol["issuers"]) for pol in politicas),
+        "sin client_authentication": '"client_authentication"' not in json.dumps(configuracion),
+        "sin tls en ningun transporte": all("tls" not in t for t in transportes(apps.get("http", {}))),
+    }
+
+
+def mailpit_sin_salida(extra=()):
+    """Mailpit sin ninguna configuración (ni variables, ni fichero de
+    entorno, ni orden propia) y solo en la red correo, que es interna."""
+    r = ejecutar(BASE + list(extra) + ["--profile", "desarrollo", "config", "--format", "json"])
+    configuracion = json_de_texto(r.out)
+    if configuracion is None:
+        raise Parada(f"docker compose config no devuelve JSON: {r.err.strip()[-300:]}")
+    mailpit = configuracion["services"]["mailpit"]
+    redes = sorted(mailpit.get("networks") or {})
+    return {
+        "sin configuracion": not any(mailpit.get(k) for k in ("environment", "env_file", "command", "entrypoint")),
+        "solo en la red interna correo": redes == ["correo"]
+        and configuracion["networks"]["correo"].get("internal") is True,
+    }
+
+
 def caddyfile_control(cambios):
     texto = (RAIZ / "proxy" / "Caddyfile").read_text(encoding="utf-8")
     for viejo, nuevo in cambios:
@@ -760,7 +861,8 @@ def adaptar(caddyfile=None):
             # Recuento independiente del recorrido: si file_servers() se saltase
             # alguno, no coincidiría.
             "file_server_total": json.dumps(configuracion).count('"handler": "file_server"'),
-            "ech": "encrypted_client_hello" in json.dumps(configuracion["apps"].get("tls", {}))}
+            "ech": "encrypted_client_hello" in json.dumps(configuracion["apps"].get("tls", {})),
+            "x509": condiciones_x509(configuracion)}
 
 
 def seccion_f():
@@ -781,6 +883,20 @@ def seccion_f():
              and len(real["file_server"]) == real["file_server_total"],
              False in control["file_server"], f"control: {control['file_server']}")
     negativo("f) configuracion adaptada: sin encrypted_client_hello (CVE-2026-97031)", not real["ech"], control["ech"])
+    # CVE-2026-111943: Caddy no verifica ningún certificado ajeno. Control: el
+    # Caddyfile con un cambio que rompe cada condición.
+    control_x509 = adaptar(escribir(TEMPORAL / "caddy_x509" / "Caddyfile", caddyfile_control(CONTROL_X509)))
+    for condicion, cumple in real["x509"].items():
+        negativo(f"f) configuracion adaptada: {condicion} (CVE-2026-111943)", cumple,
+                 control_x509["x509"][condicion] is False)
+    # CVE-2026-111943 en mailpit: sin configuración que le haga abrir TLS hacia
+    # fuera y sin salida. Control: un compose adicional con una variable de
+    # reenvío y la red edge.
+    real_mailpit = mailpit_sin_salida()
+    compose_control = escribir(TEMPORAL / "mailpit_control" / "compose.yml", COMPOSE_CONTROL_MAILPIT)
+    control_mailpit = mailpit_sin_salida(["-f", str(compose_control)])
+    for condicion, cumple in real_mailpit.items():
+        negativo(f"f) mailpit: {condicion} (CVE-2026-111943)", cumple, control_mailpit[condicion] is False)
 
     # ALPN real contra dos Caddy en marcha en una red interna: el de la imagen
     # y uno de control con "protocols h1 h2".
@@ -845,6 +961,54 @@ def lock_npm(directorio):
     return r, json_de_texto(r.out)
 
 
+def version(texto):
+    """'8.3.0' -> (8, 3, 0); None si no es una versión exacta X.Y.Z."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", texto or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def override_vite_necesario(lock):
+    """True si @angular/build declara una vite anterior a la arreglada: el
+    override hace falta. False si ya la trae arreglada: el override sobra y
+    se retira. None si el lock no permite decidirlo."""
+    declarada = version(((lock.get("packages") or {}).get("node_modules/@angular/build") or {})
+                        .get("dependencies", {}).get("vite"))
+    return None if declarada is None else declarada < VITE_ARREGLADA
+
+
+def entradas_cambiadas(lock, lock_antes):
+    """(nombre, versión) de cada paquete del lock que es nuevo o cambia de
+    versión o de integrity respecto a lock_antes."""
+    antes = lock_antes.get("packages") or {}
+    cambiadas = set()
+    for ruta, datos in (lock.get("packages") or {}).items():
+        if not ruta or "version" not in datos:
+            continue
+        previo = antes.get(ruta) or {}
+        if (datos["version"], datos.get("integrity")) != (previo.get("version"), previo.get("integrity")):
+            cambiadas.add((ruta.rsplit("node_modules/", 1)[1], datos["version"]))
+    return sorted(cambiadas)
+
+
+def publicada(nombre, numero):
+    """Fecha de publicación de una versión en el registro de npm (solo los
+    metadatos en JSON: no se descarga ni se ejecuta ningún paquete)."""
+    url = REGISTRO_NPM + urllib.parse.quote(nombre, safe="@")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as respuesta:
+            fechas = json.loads(respuesta.read())["time"]
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
+        raise SinRed(f"no se pudo leer la fecha de {nombre} {numero} en el registro de npm: {error}") from None
+    if numero not in fechas:
+        raise Parada(f"el registro de npm no tiene {nombre} {numero}")
+    return datetime.datetime.fromisoformat(fechas[numero])
+
+
+def reciente(fecha, hoy):
+    """Menos de DIAS_ESPERA días entre la publicación y hoy."""
+    return hoy - fecha < datetime.timedelta(days=DIAS_ESPERA)
+
+
 def seccion_j():
     p("=== j) dependencias de npm de la SPA (Trivy sobre spa/package-lock.json)")
     control_dir = TEMPORAL / "lock_control"
@@ -876,6 +1040,38 @@ def seccion_j():
     resto = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("Severity")) for _, v in vulns
                     if (v["VulnerabilityID"], v["PkgName"]) not in claves_graves})
     p(f"   resto de avisos (otras severidades o sin arreglo): {len(resto)}" + (f" -> {resto}" if resto else ""))
+
+    # Override de vite: el de package.json, el instalado según el lock, y que
+    # sigue haciendo falta. Control: un @angular/build que ya declara una vite
+    # arreglada hace que sobre.
+    paquete = json_de(RAIZ / "spa" / "package.json") or {}
+    lock = json_de(RAIZ / "spa" / "package-lock.json") or {}
+    pasa(paquete.get("overrides") == OVERRIDES_SPA, f"j) spa/package.json: overrides exactamente {OVERRIDES_SPA}")
+    instalada = ((lock.get("packages") or {}).get("node_modules/vite") or {}).get("version")
+    pasa(instalada == OVERRIDES_SPA["vite"], f"j) el lock instala la vite del override ({instalada})")
+    lock_control = {"packages": {"node_modules/@angular/build": {"dependencies": {"vite": VITE_DECLARADA_CONTROL}}}}
+    negativo("j) el override de vite sigue haciendo falta: @angular/build declara una vite anterior a la "
+             f"{'.'.join(map(str, VITE_ARREGLADA))} (si no, se retira)",
+             override_vite_necesario(lock) is True, override_vite_necesario(lock_control) is False)
+
+    # Lo que cambia en el lock respecto a HEAD, con su fecha, para revisarlo
+    # en el commit, y la regla de los 14 días. Control: vite 8.3.4 evaluada
+    # como si hoy fuera el día siguiente a su publicación.
+    r = ejecutar(["git", "show", "HEAD:spa/package-lock.json"], cwd=RAIZ)
+    lock_head = json_de_texto(r.out)
+    if lock_head is None:
+        raise Parada(f"git show HEAD:spa/package-lock.json falla: {r.err.strip()[-200:]}")
+    nombre_ctl, numero_ctl, hoy_ctl = CONTROL_RECIENTE
+    control_reciente = reciente(publicada(nombre_ctl, numero_ctl), hoy_ctl)
+    pasa(control_reciente, f"j) control: {nombre_ctl} {numero_ctl} evaluada el {hoy_ctl.date()} tiene menos de {DIAS_ESPERA} dias")
+    ahora = datetime.datetime.now(datetime.UTC)
+    cambiadas = [(n, v, publicada(n, v)) for n, v in entradas_cambiadas(lock, lock_head)]
+    p(f"   entradas del lock que cambian respecto a HEAD: {len(cambiadas)}")
+    for n, v, fecha in cambiadas:
+        p(f"     {n} {v} publicada el {fecha.date()}")
+    recientes = [(n, v) for n, v, fecha in cambiadas if reciente(fecha, ahora)]
+    negativo(f"j) ninguna entrada que cambia en el lock tiene menos de {DIAS_ESPERA} dias", not recientes,
+             control_reciente, str(recientes))
 
 
 # ---------------------------------------------------------------------------

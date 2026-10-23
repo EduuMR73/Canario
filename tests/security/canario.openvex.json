@@ -1,12 +1,42 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "urn:canario:vex:caddy-2.11.7",
+  "@id": "urn:canario:vex:imagenes",
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "last_updated": "2026-10-15T06:20:00Z",
-  "version": 2,
+  "last_updated": "2026-10-23T10:50:00Z",
+  "version": 3,
   "statements": [
+    {
+      "vulnerability": {"name": "CVE-2026-111943"},
+      "timestamp": "2026-10-23T10:50:00Z",
+      "products": [
+        {
+          "@id": "pkg:golang/caddy",
+          "subcomponents": [
+            {"@id": "pkg:golang/stdlib@v1.26.8"}
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. En Caddy 2.11.7 eso pasa en la autenticación de clientes (modules/caddytls/connpolicy.go), en el admin remoto (admin.go), en todo cliente TLS (ACME, reverse_proxy a https://) y en la instalación de la raíz local en el almacén del sistema (modules/caddypki/crypto.go, trusted). La configuración adaptada no tiene ninguno: admin desactivado, install_trust en false, solo emisores internal, sin client_authentication y sin tls en ningún transporte (comprobado en verificar_escaneos.py, f, en lista blanca, con un Caddyfile de control que rompe cada condición). Se revisa al publicarse una imagen de Caddy con Go 1.26.10 o posterior."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-111943"},
+      "timestamp": "2026-10-23T10:50:00Z",
+      "products": [
+        {
+          "@id": "pkg:golang/github.com/axllent/mailpit",
+          "subcomponents": [
+            {"@id": "pkg:golang/stdlib@v1.27.2"}
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. Mailpit solo abriría una conexión TLS hacia fuera con el reenvío SMTP o los webhooks, y no tiene ninguna variable de configuración (ni MP_ ni otra) y está solo en la red interna correo, sin salida (comprobado en verificar_escaneos.py, f, con un compose de control que añade una variable y otra red). Es solo de desarrollo (perfil desarrollo). Se retira al subir a mailpit 1.32.0 o posterior, que se adopta desde el 5 de noviembre de 2026 (regla de los 14 días, docs/threat-model.md, 6.17)."
+    },
     {
       "vulnerability": {"name": "CVE-2026-78669"},
       "timestamp": "2026-10-15T06:20:00Z",
