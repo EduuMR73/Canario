@@ -405,6 +405,9 @@ RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguim
              "/v1/personal/denuncias/x/mensajes": "otras", "/v1/personal/denuncias/x/estado": "otras",
              "/v1/personal/denuncias/x/asignacion": "otras", "/v1/personal/auditoria": "otras",
              "/v1/personal/auditoria/verificacion": "otras",
+             # La auditoría desde lo más reciente es una lectura con sesión,
+             # como la auditoría por posición.
+             "/v1/personal/auditoria/recientes": "otras",
              # Redacción (art. 32.2): instrucción de un admin, con sesión,
              # como el resto de la instrucción.
              "/v1/personal/denuncias/x/redaccion": "otras",
