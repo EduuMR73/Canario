@@ -4,10 +4,10 @@ Qué hace:
 
 * Cada petición, salvo GET /salud, consume una unidad del contador de su
   regla para su cliente: denuncia, seguimiento, mensajes, acceso (login,
-  activación y cambio de contraseña del personal), registro (solicitud de
-  registro del personal) u otras. Lo que no
-  tiene regla propia cae en "otras": una ruta nueva queda limitada sin que
-  nadie tenga que acordarse (cerrado por construcción).
+  login externo, activación y cambio de contraseña del personal), registro
+  (solicitud de registro del personal) u otras. Lo que no tiene regla propia
+  cae en "otras": una ruta nueva queda limitada sin que nadie tenga que
+  acordarse (cerrado por construcción).
 * Ventana fija: el número de ventana va dentro de la clave, y INCR y
   EXPIRE NX van en un MULTI/EXEC, que Redis ejecuta entero o no ejecuta. Una
   clave sin TTL no bloquearía a nadie (la ventana siguiente usa otra clave),
@@ -173,8 +173,15 @@ LIMITES_POR_DEFECTO = {
 # Las reglas que consume cada solicitud de registro, por email.
 REGLAS_DESTINATARIO = ("destinatario", "destinatario_dia")
 
+# El login externo (app/rutas_externo.py) también es "acceso": cada ruta
+# comprueba un código TOTP o abre o cierra un flujo con el proveedor. La
+# vuelta va aquí porque es la que llega al broker: con el flujo de un solo
+# uso, cada canje exige un inicio, y los dos gastan este cupo. Las del
+# vínculo, como el cambio de contraseña, piden un código con la sesión.
 RUTAS_ACCESO = {"/v1/personal/sesiones", "/v1/personal/activacion", "/v1/personal/activacion/confirmar",
-                "/v1/personal/contrasena"}
+                "/v1/personal/contrasena", "/v1/personal/externo/google/inicio",
+                "/v1/personal/externo/google/vuelta", "/v1/personal/sesiones/externa",
+                "/v1/personal/externo/google/vinculo/inicio", "/v1/personal/externo/google/vinculo"}
 RUTAS_REGISTRO = {"/v1/personal/registro"}
 # El denunciante tiene dos entradas a las mismas acciones: la API JSON (/v1) y
 # los formularios del sitio (/web, app/rutas_web.py). Cada acción tiene la
@@ -190,8 +197,9 @@ RUTAS_MENSAJES = {"/v1/seguimiento/mensajes", "/web/seguimiento/mensajes"}
 EXENTAS = {"/salud"}
 # Valores de un solo uso (consumir_una_vez): espacios de una lista cerrada,
 # para que sus claves no choquen con las de las reglas (limite:<regla>:...),
-# e identificadores en hexadecimal (el jti de 16 bytes del ticket externo).
-ESPACIOS_UNA_VEZ = ("ticket",)
+# e identificadores en hexadecimal (el jti de 16 bytes del ticket externo y
+# el del flujo, app/externo.py).
+ESPACIOS_UNA_VEZ = ("ticket", "flujo")
 PATRON_UNA_VEZ = re.compile(r"[0-9a-f]{32}")
 SEGUNDOS_UNA_VEZ_MAXIMOS = 3600
 _RUTA_DENUNCIAS = re.compile(r"/(?:v1|web)/empresas/[^/]+/denuncias")
@@ -409,9 +417,9 @@ class Limitador:
 
     async def consumir_una_vez(self, espacio, identificador, segundos):
         """True solo la primera vez que se presenta identificador en su
-        espacio durante segundos: el ticket del login externo vale una vez
-        (app/externo.py). Lanza NoDisponible si Redis no lo ha contado: falla
-        cerrado, como el resto del limitador.
+        espacio durante segundos: el flujo y el ticket del login externo
+        valen una vez (app/externo.py). Lanza NoDisponible si Redis no lo ha
+        contado: falla cerrado, como el resto del limitador.
 
         INCR y EXPIRE NX en un MULTI, como los contadores, y no SET NX EX: la
         ACL del usuario aplicacion no permite SET (scripts/generar_secretos.py),
@@ -421,7 +429,10 @@ class Limitador:
         Límite asumido (docs/threat-model.md, 8): Redis no persiste a disco.
         Si se reinicia, un ticket ya gastado vuelve a dar 1 durante el resto
         de su vida (5 minutos como mucho). Lo contiene el paso del TOTP, que
-        exige un código que no se haya usado (ultimo_paso_totp).
+        exige un código que no se haya usado (ultimo_paso_totp). Un flujo
+        gastado también vuelve a valer (10 minutos como mucho): permite un
+        canje más con el mismo flujo, que el proveedor rechaza si el code ya
+        se usó.
         """
         if espacio not in ESPACIOS_UNA_VEZ or not PATRON_UNA_VEZ.fullmatch(identificador):
             raise ValueError("espacio o identificador de un solo uso no valido")
@@ -540,15 +551,15 @@ class FronteraLimitador:
             permitida, segundos = await scope["app"].state.limitador.consumir(regla, cliente[0])
         except NoDisponible as error:
             registro.error("EVENTO limitador_no_disponible: %s", error.clase)
-            await responder(send, 503, [(b"retry-after", REINTENTAR_TRAS.encode("ascii"))])
+            await responder(send, 503, [(b"retry-after", REINTENTAR_TRAS.encode("ascii"))], ruta=scope["path"])
             return
         except ValueError:
             # uvicorn siempre da la dirección del socket o la del proxy de
             # confianza; si no es una IP, se rechaza sin registrar su valor.
             registro.error("EVENTO limitador_cliente_invalido")
-            await responder(send, 503, [(b"retry-after", REINTENTAR_TRAS.encode("ascii"))])
+            await responder(send, 503, [(b"retry-after", REINTENTAR_TRAS.encode("ascii"))], ruta=scope["path"])
             return
         if not permitida:
-            await responder(send, 429, [(b"retry-after", str(segundos).encode("ascii"))])
+            await responder(send, 429, [(b"retry-after", str(segundos).encode("ascii"))], ruta=scope["path"])
             return
         await self.app(scope, receive, send)

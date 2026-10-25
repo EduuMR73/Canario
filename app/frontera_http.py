@@ -34,6 +34,8 @@ Tres piezas que no dependen de ninguna ruta concreta:
 * Limitador de peticiones (app/limitador.py): se instala aquí, entre
   ErroresInternos y LimiteCuerpo, para rechazar antes de leer el cuerpo.
   Responde 429 o, si Redis no responde, 503, con el mismo formato.
+* Rutas de navegación (NAVEGACION): un error de estos middlewares en ellas
+  es un 303 a una página de la SPA, nunca un JSON en la pantalla.
 """
 import json
 import logging
@@ -68,13 +70,30 @@ MENSAJES = {
 REINTENTAR_TRAS = "5"
 
 
+# Rutas a las que se llega navegando y no con fetch: la vuelta de un
+# proveedor externo (app/rutas_externo.py). Un error de la frontera (el 429 o
+# el 503 del limitador, el 500 de ErroresInternos) en una de ellas sería un
+# JSON que el navegador enseña en crudo, sin forma de volver. En su lugar,
+# 303 a una página fija de la SPA que explica el fallo. Lista cerrada y
+# literal: tests/unit/test_rutas_externo.py comprueba que son justo las rutas
+# de navegación de app/rutas_externo.py.
+NAVEGACION = {"/v1/personal/externo/google/vuelta": "/entrar?externo=no_disponible"}
+
+
 def cuerpo_error(codigo, mensaje=None):
     return json.dumps({"detalle": mensaje or MENSAJES.get(codigo, "error")},
                       ensure_ascii=False).encode("utf-8")
 
 
-async def responder(send, codigo, cabeceras=(), mensaje=None):
-    """Respuesta de error completa desde un middleware ASGI."""
+async def responder(send, codigo, cabeceras=(), mensaje=None, ruta=None):
+    """Respuesta de error completa desde un middleware ASGI. En una ruta de
+    NAVEGACION, 303 a su página de error de la SPA y sin cuerpo."""
+    destino = NAVEGACION.get(ruta)
+    if destino is not None:
+        await send({"type": "http.response.start", "status": 303,
+                    "headers": [(b"location", destino.encode("ascii")), (b"content-length", b"0")]})
+        await send({"type": "http.response.body", "body": b""})
+        return
     cuerpo = cuerpo_error(codigo, mensaje)
     await send({"type": "http.response.start", "status": codigo,
                 "headers": [(b"content-type", b"application/json"),
@@ -101,11 +120,11 @@ class LimiteCuerpo:
         declarada = dict(scope["headers"]).get(b"content-length")
         if declarada is not None:
             if not declarada.isdigit():
-                await responder(send, 400)
+                await responder(send, 400, ruta=scope["path"])
                 return
             # Se rechaza antes de leer nada.
             if int(declarada) > self.maximo:
-                await responder(send, 413, [(b"connection", b"close")])
+                await responder(send, 413, [(b"connection", b"close")], ruta=scope["path"])
                 return
         partes = []
         recibidos = 0
@@ -118,7 +137,7 @@ class LimiteCuerpo:
             # Cuenta lo que llega de verdad: cubre un Content-Length falso y
             # el envío por trozos sin Content-Length.
             if recibidos > self.maximo:
-                await responder(send, 413, [(b"connection", b"close")])
+                await responder(send, 413, [(b"connection", b"close")], ruta=scope["path"])
                 return
             partes.append(trozo)
             if not mensaje.get("more_body", False):
@@ -159,7 +178,7 @@ class ErroresInternos:
             # Si la respuesta ya había empezado no se puede enviar otra: la
             # conexión se cierra incompleta y el cliente lo ve.
             if not iniciada:
-                await responder(send, 500)
+                await responder(send, 500, ruta=scope["path"])
 
 
 async def _http_exception(_peticion, error):

@@ -11,9 +11,10 @@ y cada uno con su etiqueta como AAD, así que uno no se abre como el otro:
 * Flujo: lo que la API necesita al volver del proveedor sin guardar estado
   en el servidor: el state, el nonce y el verifier de PKCE, la empresa, el
   propósito (entrar o vincular) y, al vincular, la sesión que lo pidió.
-  Caduca a los 10 minutos. Cifrado y no solo firmado: el verifier y el nonce
-  solo los debe conocer el cliente que los generó (RFC 7636, 4.1; OIDC Core
-  1.0, 3.1.2.1), y el navegador no los necesita.
+  Caduca a los 10 minutos y vale una vez: la vuelta gasta su jti, derivado
+  del state, antes de llamar al broker. Cifrado y no solo firmado: el
+  verifier y el nonce solo los debe conocer el cliente que los generó (RFC
+  7636, 4.1; OIDC Core 1.0, 3.1.2.1), y el navegador no los necesita.
 * Ticket: el resultado de la vuelta. Lleva la empresa, el propósito, la
   sesión si es una vinculación y la huella de la cuenta externa
   (cripto.hmac_identidad), nunca el sub. Caduca a los 5 minutos y vale una
@@ -177,6 +178,23 @@ class Flujo:
         """S256 (RFC 7636, 4.2): base64url sin relleno del SHA-256 del verifier
         en ASCII."""
         return _texto(hashlib.sha256(self.verifier.encode("ascii")).digest())
+
+    @property
+    def jti(self):
+        """Identificador de un solo uso del flujo: los 16 primeros bytes del
+        SHA-256 del state. La vuelta lo gasta en Redis antes de llamar al
+        broker (app/limitador.py, consumir_una_vez): el state es de un solo
+        uso, como exige RFC 9700, 2.1 a quien no ha comprobado que el
+        proveedor admite PKCE. Sin esto, quien guarde la cookie del flujo
+        repetiría la vuelta con codes inventados, y cada intento sería un
+        canje. Es un hash y no el state: Redis no guarda nada que sirva para
+        completar un flujo."""
+        return hashlib.sha256(self.state_crudo).digest()[:LONGITUD_JTI]
+
+    def segundos_restantes(self, ahora=None):
+        """Vida que le queda, al menos 1: es el TTL de su jti en Redis."""
+        ahora = int(time.time() if ahora is None else ahora)
+        return max(1, self.caduca - ahora)
 
 
 @dataclasses.dataclass(frozen=True)

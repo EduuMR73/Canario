@@ -12,7 +12,9 @@
   devuelve un acceso y una renovación nuevos (app/personal.py, renovar).
 * DELETE /v1/personal/sesiones/actual: cierra la sesión.
 * GET /v1/personal/yo: cuenta de la sesión, con invitacion_pendiente (el
-  aviso de una reinvitación de esa cuenta).
+  aviso de una reinvitación de esa cuenta) y sus cuentas externas vinculadas
+  (proveedor y día).
+* El login externo y los vínculos tienen sus rutas en app/rutas_externo.py.
 * POST /v1/personal/contrasena: cambia la contraseña (actual, nueva y código)
   y devuelve los tokens de una sesión nueva: la anterior queda revocada.
 * GET y POST /v1/personal/usuarios, POST y DELETE .../{usuario_id}/invitacion
@@ -38,7 +40,7 @@
 
 Este módulo es el único que sabe cómo viajan los tokens, y hay dos
 transportes (docs/threat-model.md, 6.3), que decide la dependencia
-_transporte en todas las rutas:
+transporte en todas las rutas:
 
 * Cliente (las baterías, cualquier cliente que no sea un navegador): el JWT
   de acceso en la cabecera Authorization (Bearer), y los de renovación y
@@ -170,7 +172,13 @@ MAXIMO_MENSAJES = 200
 COOKIE_ACCESO = "__Host-canario_acceso"
 COOKIE_RENOVACION = "__Host-canario_renovacion"
 COOKIE_DISPOSITIVO = "__Host-canario_dispositivo"
-COOKIES = (COOKIE_ACCESO, COOKIE_RENOVACION, COOKIE_DISPOSITIVO)
+# Las del login externo: el flujo hacia el proveedor y el ticket de la vuelta.
+# Sus atributos, su duración y cuándo se ponen y se borran solo los conoce
+# app/rutas_externo.py; aquí van sus nombres porque este es el filtro de todas
+# las cookies de Canario: una repetida o demasiado larga no vale ninguna.
+COOKIE_FLUJO = "__Host-canario_flujo"
+COOKIE_TICKET = "__Host-canario_ticket"
+COOKIES = (COOKIE_ACCESO, COOKIE_RENOVACION, COOKIE_DISPOSITIVO, COOKIE_FLUJO, COOKIE_TICKET)
 # Cuánto las guarda el navegador. Quien decide si un token vale es siempre la
 # base de datos o la firma; esto solo evita que el navegador guarde de más.
 # La sesión caduca a las 8 horas y el dispositivo a los 90 días
@@ -236,10 +244,11 @@ def es_navegador(metodo, cabeceras, hay_cookies, origen_personal):
     return True
 
 
-async def _transporte(peticion: Request):
+async def transporte(peticion: Request):
     """Dependencia de todas las rutas del router (cerrado por construcción:
     una ruta nueva queda cubierta sin hacer nada). Deja en peticion.state el
-    transporte y las cookies de Canario."""
+    transporte y las cookies de Canario. La usa también el router del login
+    externo (app/rutas_externo.py), que además exige el navegador."""
     cookies = cookies_canario(peticion.headers.getlist("cookie"))
     # La aplicación siempre lo tiene: sin él no arranca (app/principal.py).
     # Si faltara, ningún Origin es igual a None y todo POST del navegador se
@@ -260,7 +269,7 @@ def _borrar_cookie(respuesta, nombre):
     respuesta.delete_cookie(nombre, path="/", secure=True, httponly=True, samesite="strict")
 
 
-router = APIRouter(prefix="/v1/personal", dependencies=[Depends(_transporte)])
+router = APIRouter(prefix="/v1/personal", dependencies=[Depends(transporte)])
 
 
 # extra="forbid" y strict=True, como en app/rutas_denuncias.py. Cada campo de
@@ -487,11 +496,13 @@ def confirmar_activacion(datos: Confirmacion, peticion: Request):
     return respuesta
 
 
-def _tokens(peticion, acceso, codigo=200):
+def respuesta_con_tokens(peticion, acceso, codigo=200):
     """Respuesta con los tokens de una sesión. expira_en: segundos que dura
     el acceso, para que el cliente renueve antes de que caduque. En el
     navegador, los tokens van en sus cookies y el cuerpo solo lleva
-    expira_en: ningún script de la página los ve."""
+    expira_en: ningún script de la página los ve. La usa también el login
+    externo (app/rutas_externo.py): una sesión es la misma venga de donde
+    venga."""
     if not peticion.state.navegador:
         contenido = {"token_acceso": acceso.token_acceso, "token_renovacion": acceso.token_renovacion,
                      "expira_en": tokens.DURACION_ACCESO}
@@ -519,7 +530,7 @@ def iniciar_sesion(datos: Login, peticion: Request):
         dispositivo = peticion.state.cookies.get(COOKIE_DISPOSITIVO) or None
     acceso = personal.iniciar_sesion(estado.pool, estado.claves, datos.empresa, datos.email, datos.contrasena,
                                      datos.codigo_totp, dispositivo)
-    return _tokens(peticion, acceso, 201)
+    return respuesta_con_tokens(peticion, acceso, 201)
 
 
 @router.post("/sesiones/renovacion")
@@ -535,7 +546,7 @@ def renovar_sesion(datos: Renovacion, peticion: Request):
         if datos.token_renovacion is None:
             return _error(422)
         token = datos.token_renovacion
-    return _tokens(peticion, personal.renovar(estado.pool, estado.claves, token))
+    return respuesta_con_tokens(peticion, personal.renovar(estado.pool, estado.claves, token))
 
 
 @router.delete("/sesiones/actual", status_code=204)
@@ -562,15 +573,21 @@ def yo(peticion: Request, sesion: SesionPersonal):
     # CANARIO_ORIGEN_WEB, que se valida al arrancar. No es secreto: es el
     # enlace que la empresa debe publicar.
     enlace_canal = f"{peticion.app.state.origen_web}/empresas/{sesion.identificador}"
+    # Las cuentas externas vinculadas (app/rutas_externo.py): solo el
+    # proveedor y el día, nada que identifique la cuenta externa. /yo es la
+    # única fuente de la SPA para pintarlas.
+    vinculados = [{"proveedor": v.proveedor, "creada": v.creada.isoformat()}
+                  for v in personal.vinculos(peticion.app.state.pool, sesion)]
     return JSONResponse(content={"usuario_id": str(sesion.usuario_id), "email": sesion.email, "rol": sesion.rol,
-                                 "invitacion_pendiente": pendiente, "enlace_canal": enlace_canal})
+                                 "invitacion_pendiente": pendiente, "enlace_canal": enlace_canal,
+                                 "vinculos": vinculados})
 
 
 @router.post("/contrasena")
 def cambiar_contrasena(datos: CambioContrasena, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
-    return _tokens(peticion, personal.cambiar_contrasena(estado.pool, estado.claves, sesion, datos.contrasena_actual,
-                                                         datos.contrasena_nueva, datos.codigo_totp))
+    return respuesta_con_tokens(peticion, personal.cambiar_contrasena(
+        estado.pool, estado.claves, sesion, datos.contrasena_actual, datos.contrasena_nueva, datos.codigo_totp))
 
 
 @router.get("/usuarios")
