@@ -5,7 +5,7 @@ La base de datos se sustituye por una conexión falsa que devuelve filas fijas
 y apunta cada sentencia; el ticket se gasta con una función de la prueba que
 apunta cuándo se la llama. Lo que depende de PostgreSQL de verdad (RLS, los
 índices únicos, que la reserva case con la cuenta vinculada y no con otra)
-lo prueba tests/security/verificar_externo.py.
+lo prueba tests/security/verificar_login_externo.py.
 
 El TOTP es real: el secreto de RFC 4226 cifrado con la clave de la empresa,
 y el código del paso 5 (instante 150), como tests/unit/test_login.py.
