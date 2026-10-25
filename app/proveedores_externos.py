@@ -1,10 +1,13 @@
 """Proveedores de identidad externos del personal: el adaptador de Google.
 
-Lo usa solo el broker (app/broker.py), el único contenedor con salida a
-internet (docs/threat-model.md, 6.19). La API no habla con Google: le pasa al
-broker lo que necesita y recibe una identidad (proveedor, sub). Así ni el
+Lo usa el broker (app/broker.py), el único contenedor con salida a internet
+(docs/threat-model.md, 6.19). La API no habla con Google: le pasa al broker
+lo que necesita y recibe una identidad (proveedor, sub). Así ni el
 client_secret ni ningún token de Google llegan a la API ni al navegador
-(OWASP ASVS 5.0.0, 10.1.1).
+(OWASP ASVS 5.0.0, 10.1.1). La API solo importa de aquí las constantes y
+los formatos (app/cliente_broker.py), para validar lo que le devuelve el
+broker con los mismos valores; nunca llama a publicar ni a canjear_google,
+y sin internet no podría.
 
 Google (OpenID Connect, flujo de código de autorización):
 * La URL de autorización la construye el broker con valores fijos (scope

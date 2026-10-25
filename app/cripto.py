@@ -62,6 +62,19 @@ ETIQUETA_DISPOSITIVO = b"canario/dispositivo/v1"
 ETIQUETA_RENOVACION = b"canario/renovacion/v1"
 # Enlace de verificación de una solicitud de registro (app/solicitudes.py).
 ETIQUETA_REGISTRO = b"canario/registro/v1"
+# Login externo (app/externo.py): el AAD de cada cookie cifrada con
+# clave_flujo_externo es su etiqueta. Con etiquetas distintas, la cookie del
+# flujo no se descifra como ticket ni al revés, aunque las cifre la misma
+# clave.
+ETIQUETA_FLUJO_EXTERNO = b"canario/flujo_externo/v1"
+ETIQUETA_TICKET_EXTERNO = b"canario/ticket_externo/v1"
+# HMAC del identificador (sub) de una cuenta externa vinculada
+# (docs/threat-model.md, 6.19).
+ETIQUETA_IDENTIDAD = b"canario/identidad/v1"
+# El proveedor y el sub van con su longitud en un byte delante: dos pares
+# distintos nunca dan el mismo mensaje. Google limita el sub a 255
+# caracteres ASCII.
+LONGITUD_MAXIMA_PARTE_IDENTIDAD = 255
 
 # Mismos valores que el CHECK de canal.mensaje.autor.
 AUTORES = {"denunciante": b"D", "personal": b"P"}
@@ -257,6 +270,32 @@ def hmac_codigo(clave_hmac, crudo):
     if not isinstance(crudo, bytes) or len(crudo) != LONGITUD_CODIGO:
         raise ValueError("el codigo debe tener 20 bytes")
     return hmac.new(clave_hmac, ETIQUETA_SEGUIMIENTO + crudo, hashlib.sha256).digest()
+
+
+# ---------------------------------------------------------------------------
+# Identidades externas (docs/threat-model.md, 6.19)
+# ---------------------------------------------------------------------------
+
+def _parte_identidad(texto):
+    if not isinstance(texto, str) or not texto.isascii():
+        raise ValueError("parte de identidad no ASCII")
+    datos = texto.encode("ascii")
+    if not 1 <= len(datos) <= LONGITUD_MAXIMA_PARTE_IDENTIDAD:
+        raise ValueError("parte de identidad con longitud fuera de rango")
+    return len(datos).to_bytes(1, "big") + datos
+
+
+def hmac_identidad(clave_hmac, empresa_id, proveedor, sub):
+    """HMAC-SHA256 de una cuenta externa: 32 bytes, lo único que se guarda
+    de ella (canal.identidad_externa.sub_hmac).
+
+    Con la empresa dentro, la misma cuenta de Google da huellas distintas en
+    dos empresas. Con clave y no un hash: el id de GitHub es público y
+    numérico, y sin clave se recorrería entero.
+    """
+    _exigir_uuid(empresa_id)
+    mensaje = ETIQUETA_IDENTIDAD + empresa_id.bytes + _parte_identidad(proveedor) + _parte_identidad(sub)
+    return hmac.new(clave_hmac, mensaje, hashlib.sha256).digest()
 
 
 # ---------------------------------------------------------------------------

@@ -188,6 +188,12 @@ RUTAS_MENSAJES = {"/v1/seguimiento/mensajes", "/web/seguimiento/mensajes"}
 # Rutas exentas: solo la vivacidad, que usa el healthcheck desde dentro del
 # contenedor y no toca ninguna dependencia.
 EXENTAS = {"/salud"}
+# Valores de un solo uso (consumir_una_vez): espacios de una lista cerrada,
+# para que sus claves no choquen con las de las reglas (limite:<regla>:...),
+# e identificadores en hexadecimal (el jti de 16 bytes del ticket externo).
+ESPACIOS_UNA_VEZ = ("ticket",)
+PATRON_UNA_VEZ = re.compile(r"[0-9a-f]{32}")
+SEGUNDOS_UNA_VEZ_MAXIMOS = 3600
 _RUTA_DENUNCIAS = re.compile(r"/(?:v1|web)/empresas/[^/]+/denuncias")
 # El nombre son palabras en minúsculas unidas por un guion bajo
 # ("destinatario_dia"): ni al principio, ni al final, ni dos seguidos.
@@ -400,6 +406,36 @@ class Limitador:
         instante = time.time() if instante is None else instante
         huella = huella_destinatario(self._sal.del_instante(instante), email)
         return decidir(await self._contar_varias(REGLAS_DESTINATARIO, huella, instante))
+
+    async def consumir_una_vez(self, espacio, identificador, segundos):
+        """True solo la primera vez que se presenta identificador en su
+        espacio durante segundos: el ticket del login externo vale una vez
+        (app/externo.py). Lanza NoDisponible si Redis no lo ha contado: falla
+        cerrado, como el resto del limitador.
+
+        INCR y EXPIRE NX en un MULTI, como los contadores, y no SET NX EX: la
+        ACL del usuario aplicacion no permite SET (scripts/generar_secretos.py),
+        y ampliarla daría a una API comprometida una orden más sobre limite:*.
+        El primero recibe 1; cualquier repetición, más de 1.
+
+        Límite asumido (docs/threat-model.md, 8): Redis no persiste a disco.
+        Si se reinicia, un ticket ya gastado vuelve a dar 1 durante el resto
+        de su vida (5 minutos como mucho). Lo contiene el paso del TOTP, que
+        exige un código que no se haya usado (ultimo_paso_totp).
+        """
+        if espacio not in ESPACIOS_UNA_VEZ or not PATRON_UNA_VEZ.fullmatch(identificador):
+            raise ValueError("espacio o identificador de un solo uso no valido")
+        if isinstance(segundos, bool) or not isinstance(segundos, int) or not 1 <= segundos <= SEGUNDOS_UNA_VEZ_MAXIMOS:
+            raise ValueError("segundos fuera de rango")
+        clave = f"limite:{espacio}:{identificador}"
+        try:
+            async with self._cliente.pipeline(transaction=True) as tubo:
+                tubo.execute_command("INCR", clave)
+                tubo.execute_command("EXPIRE", clave, segundos, "NX")
+                resultado = await tubo.execute()
+        except (RedisError, OSError) as error:
+            raise NoDisponible(type(error).__name__) from None
+        return resultado[0] == 1
 
     async def _contar(self, regla, huella, instante):
         [(_, cuenta, limite, segundos)] = await self._contar_varias((regla,), huella, instante)
