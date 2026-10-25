@@ -284,7 +284,8 @@ TAMANO_PAGINA_AUDITORIA = 200
 # asignación la guarda en destino_id). Literal de la batería, no importado
 # de app/instruccion.py: es el oráculo de los emails de la auditoría.
 ACCIONES_CUENTA_OBJETO = ("acceso", "activacion", "cambio_contrasena", "invitacion", "baja", "anulacion_invitacion",
-                          "invitacion_admin_plataforma", "reinvitacion_admin_plataforma", "aprobacion_registro")
+                          "invitacion_admin_plataforma", "reinvitacion_admin_plataforma", "aprobacion_registro",
+                          "acceso_externo", "vinculacion_externa", "revocacion_externa")
 TAMANO_PAGINA_DENUNCIAS = 100
 # Textos y códigos de las denuncias de la sección k: no deben aparecer en
 # los logs ni en el volcado (sección i).

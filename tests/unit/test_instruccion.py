@@ -327,16 +327,17 @@ class Auditoria(unittest.TestCase):
         # de cuenta nueva que no esté aquí sale sin email, con el id a la vista.
         self.assertEqual(instruccion.ACCIONES_CUENTA_EN_OBJETO, {
             "acceso", "activacion", "cambio_contrasena", "invitacion", "baja", "anulacion_invitacion",
-            "invitacion_admin_plataforma", "reinvitacion_admin_plataforma", "aprobacion_registro"})
+            "invitacion_admin_plataforma", "reinvitacion_admin_plataforma", "aprobacion_registro",
+            "acceso_externo", "vinculacion_externa", "revocacion_externa"})
         self.assertEqual(instruccion.ACCIONES_CUENTA_EN_DESTINO, {"asignacion"})
 
     def test_parametros_de_la_consulta(self):
         conexion = _ConexionAuditoria([])
         self.llamar(conexion, instruccion.listar_auditoria_reciente)
         self.assertEqual(conexion.parametros, {
-            "en_objeto": ["acceso", "activacion", "anulacion_invitacion", "aprobacion_registro", "baja",
-                          "cambio_contrasena", "invitacion", "invitacion_admin_plataforma",
-                          "reinvitacion_admin_plataforma"],
+            "en_objeto": ["acceso", "acceso_externo", "activacion", "anulacion_invitacion", "aprobacion_registro",
+                          "baja", "cambio_contrasena", "invitacion", "invitacion_admin_plataforma",
+                          "reinvitacion_admin_plataforma", "revocacion_externa", "vinculacion_externa"],
             "en_destino": ["asignacion"], "limite": 201})
 
     def test_reciente_sin_antes_y_con_antes(self):

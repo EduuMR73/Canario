@@ -59,7 +59,7 @@ estado = {"falla": False, "sin_conclusion": False}
 # cambiar este número a mano: es lo que hace visible un fichero que no corre.
 PRUEBAS_POR_FICHERO = {
     "test_arranque": 4,
-    "test_avisos": 5,
+    "test_avisos": 6,
     "test_bd": 9,
     "test_capas": 3,
     "test_claves": 7,
@@ -73,6 +73,7 @@ PRUEBAS_POR_FICHERO = {
     "test_instruccion": 33,
     "test_limitador": 20,
     "test_login": 8,
+    "test_login_externo": 23,
     "test_personal": 8,
     "test_proveedores_externos": 18,
     "test_solicitudes": 9,
@@ -81,7 +82,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 286
+TOTAL_PRUEBAS = 310
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -298,6 +299,41 @@ MUTANTES = [
      "la huella de una cuenta externa no lleva la empresa (se cruza entre empresas)"),
     ("limitador.py", "        return resultado[0] == 1\n", "        return resultado[0] >= 1\n",
      "test_limitador.ConsumirUnaVez.test_solo_la_primera_vez", "un ticket de un solo uso vale varias veces"),
+    # Login externo y vínculos en app/personal.py (bloque A1-b2, paso 1b).
+    ("personal.py", "i.sub_hmac = %(sub_hmac)s and not i.revocada", "i.sub_hmac = %(sub_hmac)s",
+     "test_login_externo.ReservaPorLaCuentaVinculada.test_sentencia",
+     "un vinculo revocado sigue sirviendo para entrar"),
+    ("personal.py", "            if not gastar_ticket():\n                raise CredencialesNoValidas\n", "",
+     "test_login_externo.LoginExterno.test_ticket_repetido_no_escribe", "un ticket ya gastado sirve para entrar otra vez"),
+    ("personal.py",
+     ("            if conexion.execute(SQL_VINCULO_VIGENTE, {**vinculo, \"usuario\": usuario_id}).fetchone() is None:\n"
+      "                raise CredencialesNoValidas\n"), "",
+     "test_login_externo.LoginExterno.test_vinculo_revocado_entre_la_reserva_y_la_escritura",
+     "una desvinculacion simultanea no impide entrar con ese vinculo"),
+    ("personal.py", "    propia = resuelta if resuelta == ticket.empresa_id else None\n", "    propia = resuelta\n",
+     "test_login_externo.LoginExterno.test_empresa_que_ya_no_es_la_del_ticket",
+     "un ticket de una empresa entra en otra (o en una desactivada)"),
+    ("personal.py", "if ticket.sesion_id != sesion.sesion_id or ticket.empresa_id != sesion.empresa_id:",
+     "if ticket.empresa_id != sesion.empresa_id:",
+     "test_login_externo.Vincular.test_completar_solo_con_el_ticket_de_esta_sesion",
+     "el ticket de vinculacion de otra sesion vincula en esta"),
+    ("personal.py",
+     ("    paso = _codigo_de_la_sesion(pool, claves, sesion, codigo, instante)\n"
+      "    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:\n"
+      "        _gastar_codigo(conexion, sesion, paso)\n        conexion.execute(SQL_LIBERAR_DISPOSITIVO"),
+     ("    paso = cripto.paso_totp(instante)\n"
+      "    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:\n"
+      "        _gastar_codigo(conexion, sesion, paso)\n        conexion.execute(SQL_LIBERAR_DISPOSITIVO"),
+     "test_login_externo.Vincular.test_iniciar_pide_un_codigo_y_lo_gasta",
+     "se vincula una cuenta externa con la sesion sola, sin codigo TOTP"),
+    ("personal.py",
+     ("        conexion.execute(SQL_CERRAR_INVITACIONES, [usuario_id])\n"
+      "        conexion.execute(SQL_REVOCAR_VINCULOS, [usuario_id])\n"),
+     "        conexion.execute(SQL_CERRAR_INVITACIONES, [usuario_id])\n",
+     "test_login_externo.LoQueRevocaLosVinculos.test_baja", "una cuenta dada de baja conserva sus vinculos"),
+    ("avisos.py", "    return (al_titular,) + a_quien_vigila\n", "    return a_quien_vigila\n",
+     "test_avisos.Correos.test_vinculo_primero_al_titular",
+     "el titular no se entera de que han vinculado una cuenta a la suya (NIST 800-63B-4, 4.1.2.1)"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

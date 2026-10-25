@@ -47,6 +47,24 @@ class Correos(unittest.TestCase):
                       correos[0].cuerpo)
         correo.componer(correos[0])
 
+    def test_vinculo_primero_al_titular(self):
+        # NIST SP 800-63B-4, 4.1.2.1 y 4.5: el titular se entera de que se ha
+        # añadido o quitado una forma de entrar en su cuenta.
+        for vinculado, asunto in ((True, "Aviso de Canario: se ha vinculado una cuenta de Google"),
+                                  (False, "Aviso de Canario: se ha desvinculado la cuenta de Google")):
+            with self.subTest(vinculado=vinculado):
+                correos = avisos.correos_vinculo("Empresa", EMAILS, "titular@empresa.es", "google", vinculado)
+                self.assertEqual([c.destinatario for c in correos], ["titular@empresa.es", *EMAILS])
+                self.assertTrue(all(c.tipo == "aviso_vinculo" and c.asunto == asunto for c in correos))
+                self.assertIn("En su cuenta titular@empresa.es de Empresa en Canario", correos[0].cuerpo)
+                self.assertIn("Si no ha sido usted, alguien ha usado su sesión", correos[0].cuerpo)
+                self.assertIn("En la cuenta titular@empresa.es de Empresa en Canario", correos[1].cuerpo)
+                self.assertNotIn("Si no ha sido usted", correos[1].cuerpo)
+                correo.componer(correos[0])
+        # Sin nadie que vigile, el titular lo recibe igual.
+        solo = avisos.correos_vinculo("Empresa", (), "titular@empresa.es", "google", True)
+        self.assertEqual([c.destinatario for c in solo], ["titular@empresa.es"])
+
     def test_sin_destinatarios_no_hay_correos(self):
         self.assertEqual(avisos.correos_lecturas("Empresa", (), "x@empresa.es", 20, 50), ())
         self.assertEqual(avisos.correos_activacion("Empresa", (), "x@empresa.es", "admin"), ())
