@@ -19,7 +19,7 @@ function fila(cambios: Partial<FilaAuditoria>): FilaAuditoria {
 describe('textos de la auditoría', () => {
   it('cada acción de la API tiene nombre, y una desconocida se enseña tal cual', () => {
     const acciones = [
-      'acceso', 'activacion', 'cambio_contrasena', 'invitacion', 'baja', 'anulacion_invitacion',
+      'acceso', 'acceso_externo', 'vinculacion_externa', 'revocacion_externa', 'activacion', 'cambio_contrasena', 'invitacion', 'baja', 'anulacion_invitacion',
       'invitacion_admin_plataforma', 'reinvitacion_admin_plataforma', 'aprobacion_registro', 'rechazo_registro',
       'lectura_denuncia', 'mensaje_personal', 'asignacion', 'estado_en_instruccion', 'estado_resuelta',
       'estado_archivada', 'estado_inadmitida', 'estado_no_veraz', 'redaccion_denuncia', 'redaccion_mensaje',
@@ -27,6 +27,11 @@ describe('textos de la auditoría', () => {
     ];
     expect(acciones.filter((accion) => nombreAccion(accion) === accion)).toEqual([]);
     expect(nombreAccion('estado_resuelta')).toBe('Cambio de estado a Resuelta');
+    expect(nombreAccion('vinculacion_externa')).toBe('Vinculación de una cuenta externa');
+    // Las tres del acceso externo actúan sobre la cuenta (app/personal.py:
+    // objeto_id es el usuario).
+    expect(sobreQue(fila({ accion: 'acceso_externo', objeto_id: OTRA, cuenta_email: 'persona@empresa.test' })))
+      .toBe('persona@empresa.test');
     expect(nombreAccion('accion_nueva')).toBe('accion_nueva');
     expect(nombreAccion('toString')).toBe('toString');
   });

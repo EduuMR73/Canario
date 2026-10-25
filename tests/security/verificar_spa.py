@@ -5,8 +5,9 @@ el 8445 (spa/, proxy/Dockerfile y proxy/Caddyfile, docs/threat-model.md, 6.11).
 La pila entera con la imagen real del proxy, que compila la SPA en su primera
 etapa. Prueba:
 
-* a) arranque de la pila (con Mailpit) y alta de una empresa y de la
-  invitación de su primer admin. La API arranca con límites de petición
+* a) arranque de la pila (con Mailpit y el broker del login externo, con
+  Google sin configurar, como lo deja scripts/generar_secretos.py) y alta de
+  una empresa y de la invitación de su primer admin. La API arranca con límites de petición
   altos (CANARIO_LIMITES, en un compose adicional del directorio temporal) y
   el log debe decirlo: i) y l) hacen más de 10 accesos (login, activación y
   contraseña) en 5 minutos desde el mismo cliente, y el límite de producción
@@ -39,12 +40,14 @@ etapa. Prueba:
   se leen los certificados públicos, nunca una clave;
 * h) las pruebas unitarias de la SPA (Vitest, spa/src/app/**/*.spec.ts) en
   la etapa de compilación, sin red (control: con red, el mismo contenedor sí
-  sale). Control positivo de las pruebas: siete mutantes (el interceptor de
+  sale). Control positivo de las pruebas: diez mutantes (el interceptor de
   renovación sin la marca RENOVABLE y sin la renovación compartida, el guard
   de las páginas sin la comprobación del rol, el cliente de denuncias sin la
-  comprobación del uuid, "no veraz" ofrecido al instructor y la auditoría
+  comprobación del uuid, "no veraz" ofrecido al instructor, la auditoría
   con un hueco en vez del id de una cuenta que no se resuelve, en quién actúa
-  y en sobre qué) hacen fallar la prueba que los vigila;
+  y en sobre qué, y del acceso con Google, la URL del proveedor sin la
+  comprobación del origen, la vuelta sin la lista cerrada y el vínculo sin
+  releer /yo tras un 401) hacen fallar la prueba que los vigila;
 * i) el recorrido del personal en Chromium, con los formularios rellenados por
   su etiqueta (si un campo no la tiene, la prueba falla): activación desde el
   enlace con el token en el fragmento, que sale de la URL y no queda en la
@@ -54,7 +57,8 @@ etapa. Prueba:
   es un enlace con los colores del botón principal; foco al cambiar de paso
   y de página; cookies
   __Host- con HttpOnly, Secure y SameSite=Strict y document.cookie vacío; un
-  login fallido hace una sola petición y ninguna renovación (control: con el
+  login fallido hace una sola petición y ninguna renovación, después de la
+  lista de proveedores que pide /entrar al cargarse (control: con el
   acceso caducado, /yo sí renueva), y su error va dentro de la tarjeta sin
   caja propia, con la barra roja (control: con la caja de antes, fondo); un
   código de 5 cifras no sale de la página (control: el de 6 sí hace la
@@ -212,6 +216,26 @@ etapa. Prueba:
   select vuelve al nativo; ninguna página desborda (control: un bloque de
   400 px sí); ninguna violación de la CSP (control: una imagen de otro
   origen sí la deja).
+* r) el acceso con Google en Chromium (A1-b2, docs/threat-model.md, 6.19),
+  en dos partes. Con la pila real, donde los secretos de Google llevan su
+  marcador: la API no anuncia ningún proveedor, /entrar no tiene botón de
+  Google y Mi cuenta lo avisa sin formulario (control de los dos: con Google
+  anunciado sí); ?externo=cancelado y fallido dan su aviso con el foco, y un
+  valor fuera de la lista no pinta nada, y la URL queda limpia siempre;
+  /entrar/codigo sin ticket da el 401 uniforme con su texto, sin
+  WWW-Authenticate y sin renovar; ?vinculo=pendiente sin ticket hace un solo
+  POST, recibe 401, relee /yo antes de dar el error, deja la URL limpia y al
+  recargar no repite. Con respuestas simuladas por Playwright (route), con
+  los cuerpos de app/rutas_externo.py: con el broker caído (503), /entrar
+  no tiene botón ni aviso y Mi cuenta enseña el error sin role=alert; el
+  botón de Google va después de
+  "Entrar", type="button" y con la G decorativa; sin empresa no pide nada
+  (control: con ella, el inicio); el 409 sin dispositivo de confianza tiene
+  su texto; una URL de otro origen no se abre y lo dice (control: la de
+  Google, servida también por la prueba, sí); un pageshow con persisted
+  libera el botón ocupado (control: sin persisted sigue ocupado); el 409 al
+  completar el vínculo enseña el detalle de la API; ninguna violación de la
+  CSP ni error de JavaScript.
 
 Lo que no prueba: Trusted Types en Firefox y Safari, que no lo aplican de la
 misma forma (docs/threat-model.md, 8); el 8444 en Tor Browser, que en el
@@ -236,7 +260,12 @@ usan las mismas piezas que las del admin. Las patas del canario en la barra
 del tema oscuro: la barra y su texto tienen los mismos colores en los dos
 temas. Y que Geist tenga todos los
 caracteres del castellano: si le falta uno, el navegador lo pinta con la
-fuente del sistema.
+fuente del sistema. Del acceso con Google, la SPA contra Google real y el
+broker real (el flujo de la API lo prueba verificar_login_externo.py con
+un Google falso, y contra Google real se comprueba a mano en el paso 5 de
+A1-b2); la restauración real desde la bfcache, que se simula con el evento;
+el vínculo completado con éxito y desvincular en el navegador (sus textos y
+la relectura de /yo tienen prueba unitaria en cuenta/vinculos.spec.ts).
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -254,8 +283,8 @@ linux/amd64. Las secciones i) y j) esperan a veces al siguiente código TOTP:
 cada código vale una sola vez y cambia cada 30 segundos.
 
 Usa un proyecto de Docker propio (canario_spa). Necesita que el proyecto
-canario y las demás baterías estén parados: las subredes 10.88.0.0/28 y
-10.88.1.0/28 y los puertos 127.0.0.1:8443, 127.0.0.1:8444 y 127.0.0.1:8445 son
+canario y las demás baterías estén parados: las subredes 10.88.0.0/28,
+10.88.1.0/28 y 10.88.2.0/28 y los puertos 127.0.0.1:8443, 127.0.0.1:8444 y 127.0.0.1:8445 son
 fijos (si están en uso, PARADA). Al terminar lo borra todo (down -v, las
 imágenes construidas, las de los mutantes y la de las pruebas unitarias). No
 lee ningún secreto: el token de invitación es el que imprime gestion
@@ -314,6 +343,8 @@ PUERTO_WEB = 8444
 PUERTO_SPA = 8445
 SUBRED_APP = "10.88.0.0/28"
 SUBRED_EDGE = "10.88.1.0/28"
+# La red canje entre la API y el broker (docker-compose.yml).
+SUBRED_CANJE = "10.88.2.0/28"
 RAIZ_CA = "/data/caddy/pki/authorities/local/root.crt"
 INTERMEDIA_CA = "/data/caddy/pki/authorities/local/intermediate.crt"
 
@@ -471,6 +502,12 @@ PRUEBAS_UNITARIAS = (
     "la ve todo el personal, con el enlace que da la API, y es la última de la página",
     "copiar avisa en una región viva que ya estaba en la página",
     "si el navegador no deja copiar, lo dice y cómo seguir",
+    "la URL del proveedor solo vale si es https, de su origen exacto y sin usuario",
+    "el resultado de la vuelta sale de una lista cerrada",
+    "solo pasan los proveedores que la SPA conoce, y las rutas y los cuerpos son los de la API",
+    "al recargar ?vinculo=pendiente con el ticket gastado, relee /yo antes de dar el error",
+    "vincular no lleva a una URL que no sea de Google",
+    "sin proveedores avisa; vinculada enseña solo el proveedor y la fecha",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
 # Mutantes del interceptor, del guard, del cliente de denuncias y de los
@@ -498,6 +535,18 @@ MUTANTES_UNITARIOS = (
     ("un hueco en vez del id de la cuenta afectada", "src/app/auditoria/textos.ts",
      "      return fila.cuenta_email ?? `Cuenta ${objeto}`;", "      return fila.cuenta_email ?? '';",
      "sobre qué: la cuenta por su email, la denuncia por su id y la asignación con las dos"),
+    # A1-b2: el acceso con Google.
+    ("sin la comprobacion del origen del proveedor", "src/app/nucleo/api-externo.ts",
+     "  return destino.origin === PROVEEDORES[proveedor].origen && destino.username === '' && destino.password === '';",
+     "  return true;",
+     "la URL del proveedor solo vale si es https, de su origen exacto y sin usuario"),
+    ("un valor fuera de la lista cerrada de la vuelta", "src/app/nucleo/api-externo.ts",
+     "  return valor !== null && RESULTADOS.includes(valor) ? valor as Resultado : null;",
+     "  return valor as Resultado | null;",
+     "el resultado de la vuelta sale de una lista cerrada"),
+    ("sin releer /yo tras el 401 al completar el vinculo", "src/app/cuenta/vinculos.ts",
+     "        if (error instanceof HttpErrorResponse && error.status === 401) {", "        if (false) {",
+     "al recargar ?vinculo=pendiente con el ticket gastado, relee /yo antes de dar el error"),
 )
 # process.exit: el agente de Node mantiene viva la conexión y el proceso no
 # terminaría solo.
@@ -518,6 +567,9 @@ RUTA_YO = "/v1/personal/yo"
 RUTA_SESIONES = "/v1/personal/sesiones"
 RUTA_RENOVACION = "/v1/personal/sesiones/renovacion"
 RUTA_CIERRE = "/v1/personal/sesiones/actual"
+# Lo que pide /entrar al cargarse (A1-b2): la lista de proveedores externos,
+# que con Google sin configurar viene vacía. El login va después.
+CARGA_ENTRAR = [("GET", "/v1/personal/externo/proveedores", 200)]
 PASO_CODIGO = "Paso 2 de 2: configure la aplicación de autenticación"
 H1_INICIO = "Inicio"
 NOMBRE_ROL_ADMIN = "Admin"
@@ -592,6 +644,11 @@ PAREJAS_CONTRASTE = (
     # Pulido 2a: el botón de peligro en reposo, texto y borde rojos sobre el
     # fondo.
     ("--color-peligro", "--color-fondo", 4.5),
+    # A1-b2: el botón de Google (su texto en reposo y con el puntero encima,
+    # y su borde sobre la tarjeta de /entrar).
+    ("--color-externo-texto", "--color-externo-fondo", 4.5),
+    ("--color-externo-texto", "--color-externo-encima", 4.5),
+    ("--color-externo-borde", "--color-superficie", 3.0),
 )
 # Mutantes de la hoja para los controles de k).
 MUTANTE_GRIS = ("--color-texto-suave: #59636e;", "--color-texto-suave: #8a8a8a;")
@@ -642,12 +699,16 @@ ANCLA_CANARIO_8444 = '<svg class="canario" aria-hidden="true"'
 APP_SPA = RAIZ / "spa" / "src" / "app"
 BOTONES_OCUPADOS = {
     "acceso/activacion/activacion.ts": 2,
-    "acceso/entrar/entrar.ts": 1,
+    "acceso/codigo/codigo.ts": 1,
+    # "Entrar" y el botón de Google (A1-b2).
+    "acceso/entrar/entrar.ts": 2,
     "acceso/registro/registro.ts": 1,
     "acceso/verificacion/verificacion.ts": 1,
     "armazon/armazon.ts": 1,
     "auditoria/auditoria.ts": 3,
     "cuenta/cuenta.ts": 1,
+    # Vincular y desvincular, uno u otro según el estado.
+    "cuenta/vinculos.ts": 2,
     "cuentas/cuentas.ts": 5,
     "denuncias/denuncias.ts": 2,
     "denuncias/expediente.ts": 6,
@@ -746,7 +807,8 @@ TEXTO_PRINCIPIO = "Es el principio de la auditoría."
 # Los nombres de las acciones en la pantalla (spa/src/app/auditoria/textos.ts):
 # una celda "Qué" fuera de esta lista es una acción que la SPA no traduce.
 NOMBRES_ACCION = {
-    "Entrada", "Activación de la cuenta", "Cambio de contraseña", "Invitación", "Baja", "Anulación de la invitación",
+    "Entrada", "Entrada con una cuenta externa", "Vinculación de una cuenta externa",
+    "Desvinculación de una cuenta externa", "Activación de la cuenta", "Cambio de contraseña", "Invitación", "Baja", "Anulación de la invitación",
     "Invitación del primer admin", "Nueva invitación del primer admin", "Aprobación de una solicitud de registro",
     "Rechazo de una solicitud de registro", "Lectura", "Mensaje al denunciante", "Asignación",
     "Cambio de estado a En instrucción", "Cambio de estado a Resuelta", "Cambio de estado a Archivada",
@@ -837,6 +899,30 @@ TEXTO_DENUNCIA_WEB = "Denuncia de prueba del 8444, enviada desde Chromium a 320 
 # La primera familia de la hoja del 8444: la del sistema, sin fuente propia.
 FAMILIA_8444 = "system-ui"
 CANARIO_8444 = ["canario", "true", True]
+
+# r) El acceso con Google (A1-b2). Lo que anuncia la API sin Google
+# configurado, los botones de /entrar sin y con Google, los textos de la
+# página (escritos aquí a mano) y la ruta del login externo.
+PROVEEDORES_SIN_CONFIGURAR = {"proveedores": []}
+BOTON_ENTRAR = ["submit", "ancho-completo", "Entrar"]
+BOTONES_SIN_GOOGLE = [BOTON_ENTRAR]
+BOTONES_CON_GOOGLE = [BOTON_ENTRAR, ["button", "externo ancho-completo", "Iniciar sesión con Google"]]
+TEXTO_VUELTA_CANCELADO = "Ha cancelado el acceso con Google. Puede entrar con su contraseña o volver a intentarlo."
+TEXTO_VUELTA_FALLIDO = "No se ha podido completar el acceso con Google. Vuelva a intentarlo o entre con su contraseña."
+TEXTO_CODIGO_NO_VALIDO = "El código no es válido o el acceso con Google ha caducado. Si ha caducado, vuelva a empezar."
+TEXTO_SIN_PROVEEDORES = ("El acceso con cuentas externas no está configurado en este servidor: se entra con la "
+                         "contraseña y el código.")
+TEXTO_VINCULO_CADUCADO = ("No se ha podido completar la vinculación: el acceso con Google ha caducado. "
+                          "Vuelva a vincularla.")
+TEXTO_SIN_DISPOSITIVO = ("Este navegador aún no es de confianza para esa empresa. La primera vez entre con su "
+                         "contraseña y su código; después podrá vincular Google en Mi cuenta.")
+TEXTO_INESPERADO_SPA = "Ha ocurrido un error inesperado. Inténtelo de nuevo."
+TEXTO_NO_DISPONIBLE_SPA = "El servicio no está disponible ahora mismo. Inténtelo de nuevo en unos minutos."
+# app/rutas_externo.py, MENSAJES_DUPLICADO["identidad"]: la SPA lo enseña tal cual.
+DETALLE_DUPLICADO = "esa cuenta externa ya está vinculada a otra cuenta de la empresa"
+RUTA_SESION_EXTERNA = "/v1/personal/sesiones/externa"
+RUTA_VINCULO = "/v1/personal/externo/google/vinculo"
+ORIGEN_GOOGLE = "https://accounts.google.com/"
 
 # Script del navegador (se escribe en el directorio temporal). Recibe los dos
 # SPKI y escribe un JSON con lo que ve.
@@ -2396,6 +2482,233 @@ asyncio.run(ejecutar(spki, pasos))
 '''
 
 
+# r) El acceso con Google en Chromium. Recibe el SPKI, el identificador, el
+# email, la contraseña, el secreto TOTP y el último paso usado del admin. Dos
+# partes: con la pila real, donde Google no está configurado, y con
+# respuestas simuladas (route de Playwright) de las rutas que dependen de
+# Google, con los cuerpos copiados del contrato de app/rutas_externo.py. La
+# página de Google también se simula: ninguna petición sale a internet.
+NAVEGADOR_EXTERNO = NAVEGADOR_PERSONAL + r'''
+import urllib.parse
+spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin = sys.argv[1:7]
+usados[secreto_admin] = int(paso_admin)
+PROVEEDORES = "/v1/personal/externo/proveedores"
+INICIO = "/v1/personal/externo/google/inicio"
+SESION_EXTERNA = "/v1/personal/sesiones/externa"
+VINCULO = "/v1/personal/externo/google/vinculo"
+GOOGLE = "https://accounts.google.com/o/oauth2/v2/auth?client_id=prueba&state=prueba"
+AJENA = "https://evil.invalid/o/oauth2/v2/auth?state=prueba"
+# app/rutas_externo.py: MENSAJE_SIN_DISPOSITIVO y MENSAJES_DUPLICADO["identidad"].
+SIN_DISPOSITIVO = ("este navegador no es de confianza para esa empresa; "
+                   "la primera vez entre con su contraseña y su código")
+DUPLICADO = "esa cuenta externa ya está vinculada a otra cuenta de la empresa"
+# El 503 de la API con el broker parado (primera ejecución de r, 25 oct).
+NO_DISPONIBLE = "servicio ocupado; inténtelo de nuevo en unos segundos"
+# Los botones de primer nivel del formulario de /entrar, en orden: [tipo,
+# clases, texto]. El "Mostrar" va dentro de su campo y no cuenta.
+BOTONES = ("() => [...document.querySelectorAll('main form > button')]"
+           ".map((b) => [b.type, b.className, b.textContent.trim()])")
+# El aviso de la vuelta: [role, texto, si tiene el foco], o None.
+VUELTA = ("() => { const e = document.querySelector('#entrar-vuelta'); return e === null ? null : "
+          "[e.getAttribute('role'), e.textContent.trim(), document.activeElement === e]; }")
+URL = "() => location.pathname + location.search"
+OCUPADO = "() => document.querySelector('main button.externo').getAttribute('aria-disabled')"
+
+
+async def simular(pagina, ruta_api, estado, cuerpo):
+    async def servir(peticion_ruta):
+        await peticion_ruta.fulfill(status=estado, content_type="application/json",
+                                    body=json.dumps(cuerpo, ensure_ascii=False))
+
+    await pagina.context.unroute(ORIGEN + ruta_api)
+    await pagina.context.route(ORIGEN + ruta_api, servir)
+
+
+async def google_falso(peticion_ruta):
+    await peticion_ruta.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                body="<!doctype html><title>Google simulado</title><p>Google simulado</p>")
+
+
+def peticiones_api(marca):
+    return [[e["metodo"], e["ruta"]] for e in api_desde(marca) if e["tipo"] == "peticion"]
+
+
+def respuestas_api(marca):
+    return [[e["metodo"], e["ruta"], e["estado"]] for e in api_desde(marca) if e["tipo"] == "respuesta"]
+
+
+async def resultado_vinculo(pagina):
+    aviso = pagina.locator("#vinculos-resultado")
+    await aviso.wait_for()
+    return [await aviso.get_attribute("role"), (await aviso.inner_text()).strip()]
+
+
+async def pasos_externo(navegador):
+    # 1. La pila real: los secretos de Google llevan su marcador
+    # (scripts/generar_secretos.py) y la API no anuncia ningún proveedor.
+    real = await pagina_nueva(navegador, "real")
+    marca = len(eventos)
+    await real.goto(ORIGEN + "/entrar")
+    await h1(real)
+    await real.wait_for_load_state("networkidle")
+    res["proveedores_real"] = [e[2] for e in respuestas_api(marca) if e[1] == PROVEEDORES]
+    res["proveedores_cuerpo"] = await real.evaluate("fetch('" + PROVEEDORES + "').then((r) => r.json())")
+    res["botones_real"] = await real.evaluate(BOTONES)
+
+    # La vuelta: dos valores de la lista y dos que no están en ella.
+    for clave, valor in (("cancelado", "cancelado"), ("fallido", "fallido"),
+                         ("script", "<script>alert(1)</script>"), ("pendiente", "pendiente")):
+        await real.goto(ORIGEN + "/entrar?externo=" + urllib.parse.quote(valor))
+        await h1(real)
+        await asyncio.sleep(0.5)
+        res["vuelta_" + clave] = await real.evaluate(VUELTA)
+        res["url_" + clave] = await real.evaluate(URL)
+
+    # /entrar/codigo sin ticket: el 401 uniforme.
+    await real.goto(ORIGEN + "/entrar/codigo")
+    await h1(real)
+    marca = len(eventos)
+    async with real.expect_response(lambda r: ruta(r.url) == SESION_EXTERNA) as info:
+        await real.get_by_label(CODIGO).fill("000000")
+        await real.get_by_role("button", name="Entrar", exact=True).click()
+    respuesta = await info.value
+    res["codigo_estado"] = respuesta.status
+    res["codigo_www"] = await respuesta.header_value("www-authenticate")
+    await real.get_by_role("alert").wait_for()
+    res["codigo_alerta"] = (await real.get_by_role("alert").inner_text()).strip()
+    await asyncio.sleep(1)
+    res["codigo_api"] = peticiones_api(marca)
+
+    # Mi cuenta sin proveedores, y la vuelta de un vínculo sin ticket.
+    admin = await pagina_nueva(navegador, "admin")
+    await entrar(admin, email_admin, contrasena_admin, secreto_admin)
+    await abrir(admin, "/cuenta")
+    res["cuenta_avisos_real"] = await admin.locator("app-vinculos .aviso").all_inner_texts()
+    res["cuenta_formularios_real"] = await admin.locator("app-vinculos form").count()
+    marca = len(eventos)
+    await admin.goto(ORIGEN + "/cuenta?vinculo=pendiente")
+    await h1(admin)
+    res["pendiente_real"] = await resultado_vinculo(admin)
+    res["pendiente_url"] = await admin.evaluate(URL)
+    await admin.wait_for_load_state("networkidle")
+    res["pendiente_api"] = respuestas_api(marca)
+    # Recargar con la URL ya limpia no repite el POST.
+    marca = len(eventos)
+    await admin.reload()
+    await h1(admin)
+    await admin.wait_for_load_state("networkidle")
+    res["recarga_api"] = peticiones_api(marca)
+
+    # 2. Respuestas simuladas. El broker caído: la API da 503 a la lista
+    # (el cuerpo es el que da con el broker parado). /entrar no pinta botón
+    # ni error; Mi cuenta enseña el error sin role=alert.
+    await simular(admin, PROVEEDORES, 503, {"detalle": NO_DISPONIBLE})
+    await abrir(admin, "/cuenta")
+    lista = admin.locator("#vinculos-lista")
+    await lista.wait_for()
+    res["caida_cuenta"] = [(await lista.inner_text()).strip(), await lista.get_attribute("role"),
+                           await admin.locator("app-vinculos [role=alert]").count(),
+                           await admin.locator("app-vinculos form").count()]
+    caida = await pagina_nueva(navegador, "caida")
+    await simular(caida, PROVEEDORES, 503, {"detalle": NO_DISPONIBLE})
+    marca = len(eventos)
+    await caida.goto(ORIGEN + "/entrar")
+    await h1(caida)
+    await caida.wait_for_load_state("networkidle")
+    res["caida_entrar"] = [[e[2] for e in respuestas_api(marca) if e[1] == PROVEEDORES], await caida.evaluate(BOTONES),
+                           await caida.locator("main .error, main .aviso, main [role=alert]").count()]
+
+    # Mi cuenta con Google anunciado y un 409 al completar el vínculo.
+    await simular(admin, PROVEEDORES, 200, {"proveedores": ["google"]})
+    await simular(admin, VINCULO, 409, {"detalle": DUPLICADO})
+    await admin.goto(ORIGEN + "/cuenta?vinculo=pendiente")
+    await h1(admin)
+    res["vinculo_409"] = await resultado_vinculo(admin)
+    await admin.locator("app-vinculos form").first.wait_for()
+    res["cuenta_avisos_simulada"] = await admin.locator("app-vinculos .aviso").all_inner_texts()
+    res["cuenta_formularios_simulada"] = await admin.locator("app-vinculos form").count()
+
+    # /entrar con Google anunciado.
+    sim = await pagina_nueva(navegador, "simulada")
+    await simular(sim, PROVEEDORES, 200, {"proveedores": ["google"]})
+    await sim.goto(ORIGEN + "/entrar")
+    await h1(sim)
+    boton = sim.get_by_role("button", name="Iniciar sesión con Google")
+    await boton.wait_for()
+    res["botones_simulada"] = await sim.evaluate(BOTONES)
+    res["g_oculta"] = await sim.evaluate(
+        "document.querySelector('main button.externo svg')?.getAttribute('aria-hidden') ?? null")
+    # Sin empresa: el aviso nativo del campo y ninguna petición.
+    marca = len(eventos)
+    await boton.click()
+    await asyncio.sleep(0.5)
+    res["sin_empresa_api"] = peticiones_api(marca)
+    res["sin_empresa_falta"] = await sim.evaluate("document.querySelector('#entrar-empresa').validity.valueMissing")
+    # Con empresa y sin dispositivo de confianza: el 409.
+    await simular(sim, INICIO, 409, {"detalle": SIN_DISPOSITIVO})
+    await sim.get_by_label("Empresa").fill(identificador)
+    marca = len(eventos)
+    await boton.click()
+    await sim.get_by_role("alert").wait_for()
+    res["con_empresa_api"] = peticiones_api(marca)
+    res["inicio_409"] = (await sim.get_by_role("alert").inner_text()).strip()
+    # Una URL de otro origen: no se navega.
+    await simular(sim, INICIO, 200, {"url": AJENA})
+    marca = len(eventos)
+    await boton.click()
+    res["ajena_alerta"] = (await esperar_otro(sim, "main [role=alert]", res["inicio_409"])).strip()
+    await asyncio.sleep(0.5)
+    res["ajena_url"] = await sim.evaluate(URL)
+    res["ajena_salidas"] = [e["ruta"] for e in eventos[marca:]
+                            if e["tipo"] == "peticion" and e["ruta"].startswith("https://evil.invalid")]
+    # Control: la de Google sí (la página de Google es la simulada).
+    await simular(sim, INICIO, 200, {"url": GOOGLE})
+    await sim.context.route("https://accounts.google.com/**", google_falso)
+    await boton.click()
+    await sim.wait_for_url("https://accounts.google.com/**")
+    res["google_url"] = sim.url
+
+    # bfcache: el botón ocupado se libera con pageshow persisted. Se simula
+    # el evento: si Chromium restaura o no de la bfcache una página no-store
+    # no depende de la SPA.
+    bf = await pagina_nueva(navegador, "bfcache")
+    await simular(bf, PROVEEDORES, 200, {"proveedores": ["google"]})
+    retenidas = []
+
+    async def retener(peticion_ruta):
+        retenidas.append(peticion_ruta)
+
+    await bf.context.route(ORIGEN + INICIO, retener)
+    await bf.goto(ORIGEN + "/entrar")
+    await h1(bf)
+    await bf.get_by_role("button", name="Iniciar sesión con Google").wait_for()
+    await bf.get_by_label("Empresa").fill(identificador)
+    await bf.get_by_role("button", name="Iniciar sesión con Google").click()
+    # Con un locator y no con wait_for_function: una expresión en texto se
+    # evalúa con eval dentro de la página, y la CSP (sin 'unsafe-eval') y
+    # Trusted Types la bloquean.
+    await bf.locator("main button.externo[aria-disabled='true']").wait_for()
+    res["bf_ocupado"] = await bf.evaluate(OCUPADO)
+    await bf.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: false}))")
+    await asyncio.sleep(0.3)
+    res["bf_no_persistida"] = await bf.evaluate(OCUPADO)
+    await bf.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    await asyncio.sleep(0.3)
+    res["bf_persistida"] = await bf.evaluate(OCUPADO)
+    for retenida in retenidas:
+        await retenida.abort()
+
+    res["ultimo_paso_admin"] = usados[secreto_admin]
+    # Control de la consola: una conexión a otro origen sí deja su violación.
+    res["consola_antes_del_control"] = len(consola)
+    await admin.evaluate("fetch('https://ejemplo.invalid/').catch(() => null)")
+    await asyncio.sleep(1)
+
+
+asyncio.run(ejecutar_personal(pasos_externo))
+'''
+
+
 # ---------------------------------------------------------------------------
 # Utilidades de ejecución y de informe
 # ---------------------------------------------------------------------------
@@ -2664,8 +2977,10 @@ def seccion_a():
     global CA_LOCAL, IMAGEN_PROXY, IMAGEN_API, IDENTIFICADOR, INVITACION
     p("=== a) arranque de la pila (la imagen del proxy compila la SPA) y alta de la empresa y su admin")
     pasa(totp(b"12345678901234567890", 59 // 30, 8) == "94287082", "a) el TOTP de la bateria cumple RFC 6238")
-    r = dc("up", "-d", "--build", "--wait", "api", "caddy", "mailpit", timeout=1800)
-    p(f"up -d --build --wait api caddy mailpit -> codigo {r.rc}")
+    # El broker también: sin él, la API responde 503 a la lista de
+    # proveedores, y la pila no sería la de producción (r).
+    r = dc("up", "-d", "--build", "--wait", "api", "caddy", "mailpit", "broker", timeout=1800)
+    p(f"up -d --build --wait api caddy mailpit broker -> codigo {r.rc}")
     if r.rc != 0:
         p(r.todo.strip()[-1500:])
         raise Parada("no arranca la pila")
@@ -2941,8 +3256,9 @@ def seccion_i():
     pasa(control_renovacion and res.get("inicio_renovado") == res.get("inicio"),
          f"i) control: sin la cookie de acceso, /yo da 401, se renueva una vez y se repite ({renovacion})")
     api_fallido = fallido.get("api") or []
-    negativo(f"i) un login fallido hace una sola peticion y ninguna renovacion ({respuestas(api_fallido)})",
-             respuestas(api_fallido) == [("POST", RUTA_SESIONES, 401)]
+    negativo(f"i) un login fallido hace una sola peticion y ninguna renovacion, tras la carga de /entrar "
+             f"({respuestas(api_fallido)})",
+             respuestas(api_fallido) == CARGA_ENTRAR + [("POST", RUTA_SESIONES, 401)]
              and not any(e["ruta"] == RUTA_RENOVACION for e in api_fallido), control_renovacion)
     pasa(fallido.get("alerta") == ALERTA_LOGIN, f"i) el login fallido se anuncia con role=alert ({fallido.get('alerta')!r})")
 
@@ -2968,8 +3284,8 @@ def seccion_i():
     corto = res.get("codigo_corto") or {}
     negativo(f"i) un codigo de 5 cifras no sale de la pagina ({respuestas(corto.get('api') or [])}, "
              f"patternMismatch {corto.get('patron')})",
-             corto.get("api") == [] and corto.get("patron") is True,
-             respuestas(api_fallido) == [("POST", RUTA_SESIONES, 401)],
+             respuestas(corto.get("api") or []) == CARGA_ENTRAR and corto.get("patron") is True,
+             respuestas(api_fallido) == CARGA_ENTRAR + [("POST", RUTA_SESIONES, 401)],
              "control: el de 6 cifras de arriba si hace la peticion")
 
     # Login correcto.
@@ -4133,6 +4449,129 @@ def seccion_q():
              not senales_csp(consola[:corte]), control_csp, f"{senales_csp(consola[:corte])[:3]}")
 
 
+def seccion_r():
+    global ULTIMO_PASO
+    p("=== r) el acceso con Google en Chromium: boton, vuelta, codigo y vinculos, con la pila real y con respuestas "
+      "simuladas")
+    if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
+        sinc("r) sin el secreto TOTP del admin (i no termino) no se puede abrir Mi cuenta")
+        return
+    res = navegador("navegador_r", NAVEGADOR_EXTERNO,
+                    [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO)])
+    if res is None:
+        sinc("r) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"r) el recorrido se interrumpe: {res['excepcion']}")
+        p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ULTIMO_PASO = res.get("ultimo_paso_admin", ULTIMO_PASO)
+
+    # El botón: sin Google configurado no sale; con Google anunciado (control),
+    # sale después de "Entrar", type="button" y con la G decorativa.
+    pasa(res.get("proveedores_real") == [200] and res.get("proveedores_cuerpo") == PROVEEDORES_SIN_CONFIGURAR,
+         f"r) con los secretos de Google sin configurar, la API no anuncia ningun proveedor "
+         f"({res.get('proveedores_real')}, {res.get('proveedores_cuerpo')})")
+    control_boton = res.get("botones_simulada") == BOTONES_CON_GOOGLE
+    pasa(control_boton, f"r) control: con Google anunciado, su boton va despues de Entrar y es type=button "
+                        f"({res.get('botones_simulada')})")
+    negativo(f"r) sin proveedores, /entrar no tiene boton de Google ({res.get('botones_real')})",
+             res.get("botones_real") == BOTONES_SIN_GOOGLE, control_boton)
+    pasa(res.get("g_oculta") == "true", f"r) la G del boton es decorativa ({res.get('g_oculta')!r})")
+
+    # La vuelta: solo los valores de la lista pintan algo, y la URL se limpia
+    # siempre.
+    control_vuelta = (res.get("vuelta_cancelado") == ["status", TEXTO_VUELTA_CANCELADO, True]
+                      and res.get("url_cancelado") == "/entrar")
+    pasa(control_vuelta, f"r) control: ?externo=cancelado da su aviso con el foco y limpia la URL "
+                         f"({res.get('vuelta_cancelado')}, {res.get('url_cancelado')!r})")
+    pasa(res.get("vuelta_fallido") == ["alert", TEXTO_VUELTA_FALLIDO, True] and res.get("url_fallido") == "/entrar",
+         f"r) ?externo=fallido es un error ({res.get('vuelta_fallido')}, {res.get('url_fallido')!r})")
+    for clave in ("script", "pendiente"):
+        negativo(f"r) ?externo= con un valor fuera de la lista ({clave}) no pinta nada y limpia la URL "
+                 f"({res.get('vuelta_' + clave)}, {res.get('url_' + clave)!r})",
+                 res.get("vuelta_" + clave) is None and res.get("url_" + clave) == "/entrar", control_vuelta)
+
+    # /entrar/codigo sin ticket: el 401 uniforme, sin WWW-Authenticate y sin
+    # renovar (la petición ha llegado y ha dado 401: es el control).
+    control_codigo = res.get("codigo_estado") == 401
+    pasa(control_codigo and res.get("codigo_alerta") == TEXTO_CODIGO_NO_VALIDO,
+         f"r) /entrar/codigo sin ticket da el 401 con su texto ({res.get('codigo_estado')}, {res.get('codigo_alerta')!r})")
+    negativo(f"r) ese 401 no lleva WWW-Authenticate ni renueva la sesion ({res.get('codigo_www')!r}, "
+             f"{res.get('codigo_api')})",
+             res.get("codigo_www") is None and res.get("codigo_api") == [["POST", RUTA_SESION_EXTERNA]], control_codigo)
+
+    # Mi cuenta: sin proveedores avisa y no hay formulario; con Google
+    # anunciado (control), el formulario y sin aviso.
+    control_cuenta = res.get("cuenta_formularios_simulada") == 1 and res.get("cuenta_avisos_simulada") == []
+    pasa(control_cuenta, f"r) control: con Google anunciado, Mi cuenta tiene su formulario "
+                         f"({res.get('cuenta_formularios_simulada')}, {res.get('cuenta_avisos_simulada')})")
+    negativo(f"r) sin proveedores, Mi cuenta lo avisa y no tiene formulario ({res.get('cuenta_avisos_real')}, "
+             f"{res.get('cuenta_formularios_real')})",
+             res.get("cuenta_avisos_real") == [TEXTO_SIN_PROVEEDORES] and res.get("cuenta_formularios_real") == 0,
+             control_cuenta)
+
+    # El broker caído (503 simulado): /entrar sigue sin botón y sin ningún
+    # aviso, porque la entrada con contraseña no depende de la lista; Mi
+    # cuenta sí lo dice, visible y sin role=alert.
+    caida_entrar = res.get("caida_entrar") or []
+    control_caida = caida_entrar[:1] == [[503]]
+    pasa(control_caida, f"r) control: con el broker caido simulado, la lista da 503 ({caida_entrar[:1]})")
+    negativo(f"r) con el broker caido, /entrar no tiene boton de Google ni aviso ({caida_entrar[1:]})",
+             caida_entrar[1:] == [BOTONES_SIN_GOOGLE, 0], control_caida)
+    pasa(res.get("caida_cuenta") == [TEXTO_NO_DISPONIBLE_SPA, None, 0, 0],
+         f"r) con el broker caido, Mi cuenta lo dice sin role=alert y sin formulario ({res.get('caida_cuenta')})")
+
+    # La vuelta de un vínculo sin ticket: un solo POST, 401, y /yo releído
+    # después antes de dar el error; la URL limpia y recargar no lo repite.
+    pendiente = res.get("pendiente_api") or []
+    posts = [i for i, (metodo, ruta_api, _) in enumerate(pendiente) if metodo == "POST" and ruta_api == RUTA_VINCULO]
+    control_pendiente = len(posts) == 1 and pendiente[posts[0]][2] == 401
+    pasa(control_pendiente, f"r) control: ?vinculo=pendiente completa el vinculo una vez y la API da 401 sin ticket "
+                            f"({pendiente})")
+    releido = control_pendiente and ["GET", RUTA_YO, 200] in pendiente[posts[0] + 1:]
+    pasa(releido and not any(r[1] == RUTA_RENOVACION for r in pendiente),
+         "r) tras ese 401 relee /yo, sin renovar la sesion")
+    pasa(res.get("pendiente_real") == ["alert", TEXTO_VINCULO_CADUCADO] and res.get("pendiente_url") == "/cuenta",
+         f"r) y da el error con la URL limpia ({res.get('pendiente_real')}, {res.get('pendiente_url')!r})")
+    negativo(f"r) recargar /cuenta no repite el POST del vinculo ({res.get('recarga_api')})",
+             ["POST", RUTA_VINCULO] not in (res.get("recarga_api") or []), control_pendiente)
+    pasa(res.get("vinculo_409") == ["alert", DETALLE_DUPLICADO],
+         f"r) el 409 al completar el vinculo ensena el detalle de la API ({res.get('vinculo_409')})")
+
+    # El inicio: sin empresa no sale nada; con ella (control), sale el POST.
+    control_empresa = res.get("con_empresa_api") == [["POST", "/v1/personal/externo/google/inicio"]]
+    pasa(control_empresa, f"r) control: con la empresa, el boton pide el inicio ({res.get('con_empresa_api')})")
+    negativo(f"r) sin la empresa, el boton no pide nada y el campo se marca ({res.get('sin_empresa_api')}, "
+             f"{res.get('sin_empresa_falta')})",
+             res.get("sin_empresa_api") == [] and res.get("sin_empresa_falta") is True, control_empresa)
+    pasa(res.get("inicio_409") == TEXTO_SIN_DISPOSITIVO,
+         f"r) sin dispositivo de confianza, el 409 explica la primera vez ({res.get('inicio_409')!r})")
+    control_google = (res.get("google_url") or "").startswith(ORIGEN_GOOGLE)
+    pasa(control_google, f"r) control: una URL de Google si se abre ({res.get('google_url')!r})")
+    negativo(f"r) una URL de otro origen no se abre y lo dice ({res.get('ajena_url')!r}, {res.get('ajena_salidas')}, "
+             f"{res.get('ajena_alerta')!r})",
+             res.get("ajena_url") == "/entrar" and res.get("ajena_salidas") == []
+             and res.get("ajena_alerta") == TEXTO_INESPERADO_SPA, control_google)
+
+    # bfcache: pageshow con persisted libera el botón; sin persisted (control)
+    # sigue ocupado.
+    control_bf = res.get("bf_ocupado") == "true" and res.get("bf_no_persistida") == "true"
+    pasa(control_bf, f"r) control: el boton sigue ocupado tras un pageshow sin persisted "
+                     f"({res.get('bf_ocupado')!r}, {res.get('bf_no_persistida')!r})")
+    negativo(f"r) un pageshow persisted (bfcache) libera el boton ({res.get('bf_persistida')!r})",
+             res.get("bf_persistida") is None, control_bf)
+
+    # Consola.
+    consola, errores = res.get("consola") or [], res.get("errores") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    control_csp = bool(senales_csp(consola[corte:]))
+    pasa(control_csp, f"r) control: una conexion a otro origen deja su violacion de la CSP ({senales_csp(consola[corte:])[:1]})")
+    negativo(f"r) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
+             f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
+             not senales_csp(consola[:corte]) and not errores, control_csp,
+             f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
+
+
 def seccion_s():
     p("=== s) limpieza")
     r = limpiar()
@@ -4200,7 +4639,7 @@ def subredes_ocupadas():
         r = ejecutar(["docker", "network", "inspect", "--format",
                       "{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}", red])
         partes = r.out.split()
-        if partes and set(partes[1:]) & {SUBRED_APP, SUBRED_EDGE}:
+        if partes and set(partes[1:]) & {SUBRED_APP, SUBRED_EDGE, SUBRED_CANJE}:
             ocupadas.append(partes[0])
     return ocupadas
 
@@ -4235,7 +4674,8 @@ def main():
         terminar_con_parada()
     ocupadas = subredes_ocupadas()
     if ocupadas:
-        p(f"PARADA: las subredes {SUBRED_APP} o {SUBRED_EDGE} ya estan en uso por {ocupadas} (pare el proyecto canario)")
+        p(f"PARADA: las subredes {SUBRED_APP}, {SUBRED_EDGE} o {SUBRED_CANJE} ya estan en uso por {ocupadas} "
+          "(pare el proyecto canario)")
         terminar_con_parada()
     ocupados = puertos_ocupados()
     if ocupados:
@@ -4255,7 +4695,8 @@ def main():
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p, seccion_q):
+                        seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p, seccion_q,
+                        seccion_r):
             seccion()
     except Parada as e:
         parada = str(e)
