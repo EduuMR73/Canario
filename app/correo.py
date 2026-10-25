@@ -54,7 +54,8 @@ CORREOS_SIMULTANEOS = 4
 # este remitente ni suplantar un dominio real con él.
 REMITENTE = "Canario <no-responder@canario.invalid>"
 
-TIPOS = ("verificacion", "aviso_cuenta", "aviso_pendiente", "invitacion", "aviso_lecturas", "aviso_activacion")
+TIPOS = ("verificacion", "aviso_cuenta", "aviso_pendiente", "invitacion", "aviso_lecturas", "aviso_activacion",
+         "aviso_vinculo")
 
 _semaforo = threading.BoundedSemaphore(CORREOS_SIMULTANEOS)
 

@@ -16,11 +16,18 @@ Qué se avisa:
   saltaría creando cuentas: un admin malicioso, o quien le haya robado la
   sesión, invita a una cuenta que controla y lee otras tantas con ella
   (ATT&CK T1136, crear una cuenta; T1098, cuando es una recuperación).
+* Vínculos externos (app/personal.py): una cuenta vincula o desvincula su
+  cuenta de Google. Vincular añade una forma de entrar: si lo hace quien ha
+  robado la sesión, es su puerta de vuelta (ATT&CK T1098, manipular una
+  cuenta).
 
 A quién: a los admins y auditores activos y activados de la empresa, nunca
 a la cuenta de la que se avisa. Avisar al sospechoso no avisa a nadie. En la
 activación sí llega a quien invitó: si le robaron la sesión, se entera el
-titular (NIST SP 800-63B-4, 4.2.3, avisar de una recuperación).
+titular (NIST SP 800-63B-4, 4.2.3, avisar de una recuperación). La excepción
+son los vínculos: el aviso va primero al titular, porque NIST SP
+800-63B-4 lo exige al vincular un autenticador (4.1.2.1) y lo recomienda al
+quitarlo (4.5), y el titular es quien sabe si lo hizo él.
 
 Qué dice: la cuenta (su email) y el número, nunca un id ni un dato de una
 denuncia. Quien lo recibe ya puede leer la auditoría, que lo detalla.
@@ -67,6 +74,37 @@ def correos_lecturas(nombre, emails, cuenta, lecturas, tope):
                 f"{final}\n\n"
                 "Si no lo esperaba, revise en la auditoría qué denuncias ha leído y quién se las asignó, y dé "
                 "de baja la cuenta si no es de confianza.")) for email in emails)
+
+
+# Nombre del proveedor en los textos. Lista cerrada, como en app/externo.py.
+NOMBRES_PROVEEDOR = {"google": "Google"}
+
+
+def correos_vinculo(nombre, emails, titular, proveedor, vinculado):
+    """Un correo al titular y uno por destinatario: la cuenta ha vinculado
+    (vinculado True) o desvinculado su cuenta del proveedor. Al titular le
+    dice qué hacer si no fue él; a quien vigila, dónde comprobarlo."""
+    marca = NOMBRES_PROVEEDOR[proveedor]
+    if vinculado:
+        asunto = f"Aviso de Canario: se ha vinculado una cuenta de {marca}"
+        hecho = f"se ha vinculado una cuenta de {marca}"
+        efecto = ("Desde ahora se puede entrar con ella, siempre con el código de autenticación y desde un "
+                  "dispositivo de confianza.")
+    else:
+        asunto = f"Aviso de Canario: se ha desvinculado la cuenta de {marca}"
+        hecho = f"se ha desvinculado la cuenta de {marca}"
+        efecto = "Ya no se puede entrar con ella."
+    al_titular = correo.Correo(
+        tipo="aviso_vinculo", destinatario=titular, asunto=asunto,
+        cuerpo=(f"En su cuenta {titular} de {nombre} en Canario {hecho}. {efecto}\n\n"
+                "Si no ha sido usted, alguien ha usado su sesión: cambie su contraseña desde Mi cuenta (cierra "
+                "todas las sesiones y quita los vínculos) y avise a un admin de su empresa."))
+    a_quien_vigila = tuple(correo.Correo(
+        tipo="aviso_vinculo", destinatario=email, asunto=asunto,
+        cuerpo=(f"En la cuenta {titular} de {nombre} en Canario {hecho}. {efecto}\n\n"
+                "Si no lo esperaba, revise la auditoría y hable con su titular; si la cuenta no es de "
+                "confianza, dé de baja la cuenta.")) for email in emails)
+    return (al_titular,) + a_quien_vigila
 
 
 def correos_activacion(nombre, emails, cuenta, rol):

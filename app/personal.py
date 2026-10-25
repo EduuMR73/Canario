@@ -75,9 +75,26 @@ memoria (docker-compose.yml): un semáforo acota los hashes simultáneos y, si
 no hay hueco, se responde 503 en vez de agotar la memoria. Argon2 se calcula
 fuera de toda transacción, para no retener conexiones del pool.
 
-Orden de bloqueos en las escrituras: cuenta, invitación, dispositivos,
-sesiones y auditoría. La autenticación de una sesión es su propia
-transacción y solo bloquea la fila de la sesión.
+Login con un proveedor externo (docs/threat-model.md, 6.19): sustituye a la
+contraseña, nunca al TOTP, y solo desde un dispositivo de confianza vigente
+de la cuenta vinculada. El intento se reserva por ese dispositivo y por la
+huella de la cuenta externa en una sola sentencia
+(SQL_RESERVAR_DISPOSITIVO_EXTERNO), nunca por el email ni por el camino sin
+confianza, y Google nunca crea un dispositivo: la confianza solo nace de la
+contraseña y el TOTP. Una cuenta externa sin vincular, un dispositivo de otra
+cuenta o ninguno son cero filas: el mismo TOTP con un secreto aleatorio y el
+mismo fallo que un código malo, sin contar intentos en ninguna cuenta. El
+ticket de la vuelta (app/externo.py) se gasta al acertar, dentro de la
+transacción y antes de escribir nada. Vincular pide un TOTP recién escrito
+antes de ir al proveedor, y se completa en una petición posterior de la
+misma sesión; desvincular lo pide también. Las dos avisan al titular y a
+quienes vigilan (NIST SP 800-63B-4, 4.1.2.1 y 4.5). La baja, la activación
+(también una reactivación o recuperación), el cambio de contraseña y la
+reinvitación de plataforma revocan los vínculos de la cuenta.
+
+Orden de bloqueos en las escrituras: cuenta, invitación, vínculos externos,
+dispositivos, sesiones y auditoría. La autenticación de una sesión es su
+propia transacción y solo bloquea la fila de la sesión.
 
 Registro: los eventos de seguridad (logins fallidos, bloqueos, cierre del
 camino, retirada de un dispositivo, reutilización de una renovación,
@@ -86,6 +103,7 @@ códigos ni tokens. Cada login fallido deja EVENTO login_fallido (OWASP ASVS
 5.0.0, 16.3.1), con la misma llamada en todos los caminos de fallo; los
 correctos quedan en la auditoría (ACCION_ACCESO).
 """
+import datetime
 import logging
 import secrets
 import threading
@@ -99,7 +117,7 @@ import psycopg
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError
 
-from app import avisos, bd, cripto, denuncias, tokens
+from app import avisos, bd, cripto, denuncias, externo, tokens
 
 registro = logging.getLogger("canario.personal")
 
@@ -155,7 +173,14 @@ ACCION_BAJA = "baja"
 ACCION_ANULACION_INVITACION = "anulacion_invitacion"
 ACCION_INVITACION_PLATAFORMA = "invitacion_admin_plataforma"
 ACCION_REINVITACION_PLATAFORMA = "reinvitacion_admin_plataforma"
+# Login externo: acciones propias, para que la auditoría distinga el método
+# de entrada y quién vinculó o desvinculó una cuenta externa.
+ACCION_ACCESO_EXTERNO = "acceso_externo"
+ACCION_VINCULACION_EXTERNA = "vinculacion_externa"
+ACCION_REVOCACION_EXTERNA = "revocacion_externa"
 ACTOR_PLATAFORMA = "plataforma"
+# Camino de un login externo en EVENTO login_fallido.
+CAMINO_EXTERNO = "externo"
 
 _hasher = PasswordHasher(time_cost=ITERACIONES_ARGON2, memory_cost=MEMORIA_ARGON2_KIB,
                          parallelism=PARALELISMO_ARGON2, hash_len=32, salt_len=16, type=Type.ID)
@@ -224,6 +249,72 @@ SQL_RESERVAR_DISPOSITIVO_SESION = """
     returning d.id, u.id, u.rol, u.hash_contrasena, u.secreto_totp_cifrado, u.version_clave_totp,
               d.intentos_fallidos
 """
+# Reserva del login externo: el dispositivo de confianza del navegador, de la
+# cuenta vinculada a esa cuenta externa (vínculo sin revocar). Una sola
+# sentencia, como SQL_RESERVAR_DISPOSITIVO pero con la huella de la cuenta
+# externa en lugar del email: sin vínculo, con un dispositivo de otra cuenta o
+# sin dispositivo, cero filas y nada contado. No hay reserva por la cuenta:
+# el login externo no tiene camino sin confianza.
+SQL_RESERVAR_DISPOSITIVO_EXTERNO = """
+    update canal.dispositivo_personal d
+       set intentos_fallidos = d.intentos_fallidos + 1,
+           bloqueado_hasta = case when d.intentos_fallidos + 1 >= %(umbral)s
+               then now() + make_interval(mins => (least(%(espera_maxima)s,
+                    2 ^ least(d.intentos_fallidos + 1 - %(umbral)s, 6)))::integer) end
+      from canal.usuario_personal u, canal.identidad_externa i
+     where d.token_sha256 = %(huella)s
+       and i.empresa_id = d.empresa_id and i.usuario_id = d.usuario_id
+       and i.proveedor = %(proveedor)s and i.sub_hmac = %(sub_hmac)s and not i.revocada
+       and u.empresa_id = d.empresa_id and u.id = d.usuario_id
+       and u.activo and u.totp_activo
+       and not d.revocado and d.caduca > now()
+       and d.intentos_fallidos < %(tope_dispositivo)s
+       and (d.bloqueado_hasta is null or d.bloqueado_hasta <= now())
+    returning d.id, u.id, u.rol, u.hash_contrasena, u.secreto_totp_cifrado, u.version_clave_totp,
+              d.intentos_fallidos
+"""
+# Al confirmar el login externo, el vínculo sigue vigente. FOR SHARE: una
+# desvinculación simultánea espera o, si confirmó antes, la fila ya no casa
+# (READ COMMITTED vuelve a evaluar la condición sobre la versión nueva).
+SQL_VINCULO_VIGENTE = """
+    select id from canal.identidad_externa
+     where usuario_id = %(usuario)s and proveedor = %(proveedor)s and sub_hmac = %(sub_hmac)s and not revocada
+       for share
+"""
+# Antes de ir al proveedor: este navegador tiene un dispositivo de confianza
+# vigente de una cuenta activa de la empresa (la espera por fallos no cuenta:
+# esa la aplica la reserva, como en el login con contraseña).
+SQL_DISPOSITIVO_VIGENTE = """
+    select d.id from canal.dispositivo_personal d
+      join canal.usuario_personal u on u.empresa_id = d.empresa_id and u.id = d.usuario_id
+     where d.token_sha256 = %(huella)s and not d.revocado and d.caduca > now()
+       and d.intentos_fallidos < %(tope_dispositivo)s and u.activo and u.totp_activo
+"""
+# Un código TOTP recién escrito (vincular y desvincular): solo vale una vez.
+SQL_GASTAR_PASO_TOTP = """
+    update canal.usuario_personal set ultimo_paso_totp = %(paso)s
+     where id = %(usuario)s and activo and totp_activo
+       and (ultimo_paso_totp is null or ultimo_paso_totp < %(paso)s)
+    returning id
+"""
+SQL_SESION_VIGENTE = "select id from canal.sesion_personal where id = %s and not revocada and caduca > now()"
+SQL_VINCULO_DE = (
+    "select id from canal.identidad_externa where usuario_id = %s and proveedor = %s and not revocada"
+)
+SQL_NUEVO_VINCULO = (
+    "insert into canal.identidad_externa (empresa_id, usuario_id, proveedor, sub_hmac) values (%s, %s, %s, %s)"
+)
+SQL_REVOCAR_VINCULO = (
+    "update canal.identidad_externa set revocada = true "
+    "where usuario_id = %s and proveedor = %s and not revocada returning id"
+)
+SQL_REVOCAR_VINCULOS = "update canal.identidad_externa set revocada = true where usuario_id = %s and not revocada"
+SQL_VINCULOS = (
+    "select proveedor, creada from canal.identidad_externa where usuario_id = %s and not revocada order by proveedor"
+)
+# Nombres de los índices únicos de canal.identidad_externa (db/init/02_esquema.sql).
+INDICE_UNA_POR_IDENTIDAD = "identidad_externa_una_por_identidad"
+INDICE_UNA_POR_CUENTA = "identidad_externa_una_por_cuenta"
 # version = 0 nunca existe (CHECK version > 0): cero filas en los caminos sin
 # cuenta, con la misma sentencia.
 SQL_CLAVE_VERSION = "select clave_envuelta from canal.clave_empresa where version = %s"
@@ -440,6 +531,27 @@ class AltaAdminRechazada(Exception):
     """gestion alta-admin no puede invitar (ver alta_admin_plataforma)."""
 
 
+class SinDispositivo(Exception):
+    """El navegador no tiene un dispositivo de confianza vigente de la
+    empresa: el login externo no se inicia (la primera vez se entra con
+    contraseña)."""
+
+
+class VinculoNoValido(Exception):
+    """El ticket de vinculación no es de esta sesión, o la sesión ya no está
+    vigente, o el ticket ya se gastó."""
+
+
+class VinculoDuplicado(Exception):
+    """El vínculo no cabe: esa cuenta externa ya está vinculada a otra cuenta
+    de la empresa (identidad) o la cuenta ya tiene una de ese proveedor
+    (cuenta). 409."""
+
+    def __init__(self, motivo):
+        super().__init__(motivo)
+        self.motivo = motivo
+
+
 @dataclass(frozen=True)
 class Sesion:
     empresa_id: uuid.UUID
@@ -491,6 +603,20 @@ class Usuario:
 class Invitacion:
     usuario_id: uuid.UUID
     token_invitacion: str
+
+
+@dataclass(frozen=True)
+class Vinculo:
+    """Lo que el titular ve de un vínculo: el proveedor y el día. Nada que
+    identifique la cuenta externa (minimización)."""
+    proveedor: str
+    creada: datetime.date
+
+
+@dataclass(frozen=True)
+class CambioDeVinculo:
+    # Avisos al titular y a quienes vigilan (app/avisos.py).
+    correos: tuple
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +746,18 @@ def _comprobar_factores(claves, empresa_id, reservada, envuelta, contrasena, cod
     if reservada is None or not contrasena_ok or paso is None:
         return None
     return paso
+
+
+def _comprobar_codigo(claves, empresa_id, reservada, envuelta, codigo, instante):
+    """Solo el TOTP, con el mismo trabajo haya cuenta o no (un secreto
+    aleatorio si no la hay). Para lo que no pide la contraseña: el login
+    externo y los cambios de vínculo. Devuelve el paso aceptado o None."""
+    if reservada is not None and envuelta is not None:
+        secreto = _descifrar_secreto(claves, empresa_id, reservada[1], envuelta[0], reservada[5], reservada[4])
+    else:
+        secreto = cripto.generar_secreto_totp()
+    paso = cripto.verificar_totp(secreto, codigo, instante)
+    return None if reservada is None else paso
 
 
 # ---------------------------------------------------------------------------
@@ -767,6 +905,9 @@ def cambiar_contrasena(pool, claves, sesion, actual, nueva, codigo, instante=Non
             "nuevo": hash_nuevo, "paso": paso, "usuario": sesion.usuario_id, "hash": reservada[3]}).fetchone()
         if cambiada is None:
             raise CredencialesNoValidas
+        # Cambiar la contraseña es la respuesta a una sospecha: lo que se
+        # vinculara con la sesión de otro deja de valer.
+        conexion.execute(SQL_REVOCAR_VINCULOS, [sesion.usuario_id])
         conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])
         conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [sesion.usuario_id, sesion.dispositivo_id])
         conexion.execute(SQL_REVOCAR_SESIONES, [sesion.usuario_id, uuid.UUID(int=0)])
@@ -775,6 +916,193 @@ def cambiar_contrasena(pool, claves, sesion, actual, nueva, codigo, instante=Non
         conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_CAMBIO_CONTRASENA,
                                        sesion.usuario_id])
     return acceso
+
+
+# ---------------------------------------------------------------------------
+# Login con un proveedor externo y vínculos (docs/threat-model.md, 6.19)
+# ---------------------------------------------------------------------------
+
+def empresa_con_dispositivo(pool, identificador, token_dispositivo):
+    """Empresa de identificador si este navegador tiene un dispositivo de
+    confianza vigente de una de sus cuentas; si no, SinDispositivo. Se pide
+    antes de ir al proveedor: sin dispositivo, el login externo fallaría
+    siempre, y el error se ve aquí en vez de después de pasar por Google.
+    Solo dice algo del propio navegador: el identificador de una empresa es
+    público (el enlace del canal)."""
+    crudo = cripto.leer_token(token_dispositivo) if token_dispositivo is not None else None
+    if crudo is None:
+        raise SinDispositivo
+    empresa_id = resolver_empresa(pool, identificador)
+    if empresa_id is None:
+        raise SinDispositivo
+    with bd.transaccion_empresa(pool, empresa_id, solo_lectura=True) as conexion:
+        fila = conexion.execute(SQL_DISPOSITIVO_VIGENTE, {
+            "huella": cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo),
+            "tope_dispositivo": TOPE_DISPOSITIVO}).fetchone()
+    if fila is None:
+        raise SinDispositivo
+    return empresa_id
+
+
+def iniciar_sesion_externa(pool, claves, ticket, codigo, token_dispositivo, gastar_ticket, instante=None):
+    """Login con el ticket de una vuelta válida (externo.Ticket), el
+    dispositivo de confianza del navegador y un código TOTP. Devuelve Acceso
+    (sin dispositivo nuevo: Google nunca crea uno) o CredencialesNoValidas,
+    la misma excepción que el login con contraseña para cualquier fallo.
+
+    gastar_ticket() gasta el jti del ticket y devuelve True solo la primera
+    vez (app/limitador.py, consumir_una_vez). Se llama tras acertar el TOTP,
+    dentro de la transacción y antes de escribir: un ticket repetido no
+    escribe nada, y uno que no se ha podido gastar (Redis caído) tampoco."""
+    instante = time.time() if instante is None else instante
+    resuelta = resolver_empresa(pool, ticket.identificador)
+    # El ticket ata la empresa: si su identificador ya no es de ella (una
+    # empresa desactivada), contexto aleatorio y las mismas sentencias.
+    propia = resuelta if resuelta == ticket.empresa_id else None
+    empresa_id = propia or uuid.uuid4()
+    crudo = cripto.leer_token(token_dispositivo) if token_dispositivo is not None else None
+    huella = cripto.huella_token(cripto.ETIQUETA_DISPOSITIVO, crudo or secrets.token_bytes(cripto.LONGITUD_TOKEN))
+    vinculo = {"proveedor": ticket.proveedor, "sub_hmac": ticket.sub_hmac}
+
+    with bd.transaccion_empresa(pool, empresa_id) as conexion:
+        conexion.execute(SQL_RESERVA_ASINCRONA)
+        reservada = conexion.execute(SQL_RESERVAR_DISPOSITIVO_EXTERNO,
+                                     {**PARAMETROS_BLOQUEO, **vinculo, "huella": huella}).fetchone()
+        envuelta = conexion.execute(SQL_CLAVE_VERSION, [reservada[5] if reservada else 0]).fetchone()
+
+    paso = _comprobar_codigo(claves, empresa_id, reservada, envuelta, codigo, instante)
+    if paso is None:
+        _registrar_login_fallido(propia, reservada, CAMINO_EXTERNO)
+        _avisar_fallo(empresa_id, reservada, "dispositivo")
+        raise CredencialesNoValidas
+
+    dispositivo_id, usuario_id = reservada[0], reservada[1]
+    try:
+        with bd.transaccion_empresa(pool, empresa_id) as conexion:
+            if not gastar_ticket():
+                raise CredencialesNoValidas
+            confirmado = conexion.execute(SQL_CONFIRMAR_ACCESO, {
+                "paso": paso, "sin_confianza": False, "usuario": usuario_id, "hash": reservada[3]}).fetchone()
+            # Código ya usado, o la cuenta cambió entre la reserva y ahora.
+            if confirmado is None:
+                raise CredencialesNoValidas
+            # Desvinculada entre la reserva y ahora.
+            if conexion.execute(SQL_VINCULO_VIGENTE, {**vinculo, "usuario": usuario_id}).fetchone() is None:
+                raise CredencialesNoValidas
+            if conexion.execute(SQL_LIBERAR_DISPOSITIVO, [dispositivo_id]).fetchone() is None:
+                raise CredencialesNoValidas
+            acceso = _nueva_sesion(conexion, claves, empresa_id, ticket.identificador, usuario_id, dispositivo_id)
+            conexion.execute(SQL_AUDITAR, [empresa_id, _actor(usuario_id), ACCION_ACCESO_EXTERNO, usuario_id])
+    except CredencialesNoValidas:
+        _registrar_login_fallido(propia, reservada, CAMINO_EXTERNO)
+        raise
+    return acceso
+
+
+def _codigo_de_la_sesion(pool, claves, sesion, codigo, instante):
+    """Un código TOTP de la cuenta de la sesión, con el intento contado en su
+    dispositivo como en cambiar_contrasena. Devuelve el paso aceptado o
+    CredencialesNoValidas. El paso se gasta después, con lo que autoriza."""
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        conexion.execute(SQL_RESERVA_ASINCRONA)
+        reservada = conexion.execute(SQL_RESERVAR_DISPOSITIVO_SESION,
+                                     {**PARAMETROS_BLOQUEO, "dispositivo": sesion.dispositivo_id}).fetchone()
+        envuelta = conexion.execute(SQL_CLAVE_VERSION, [reservada[5] if reservada else 0]).fetchone()
+    paso = _comprobar_codigo(claves, sesion.empresa_id, reservada, envuelta, codigo, instante)
+    if paso is None:
+        _avisar_fallo(sesion.empresa_id, reservada, "dispositivo")
+        raise CredencialesNoValidas
+    return paso
+
+
+def _gastar_codigo(conexion, sesion, paso):
+    """Gasta el paso aceptado, que no vuelve a valer, en la transacción de lo
+    que autoriza. Va lo primero: la cuenta es la primera en el orden de
+    bloqueos. Quien llama libera después el dispositivo de la sesión."""
+    if conexion.execute(SQL_GASTAR_PASO_TOTP, {"paso": paso, "usuario": sesion.usuario_id}).fetchone() is None:
+        raise CredencialesNoValidas
+
+
+def _exigir_proveedor(proveedor):
+    if proveedor not in externo.CODIGOS_PROVEEDOR:
+        raise NoEncontrado
+
+
+def iniciar_vinculo(pool, claves, sesion, proveedor, codigo, instante=None):
+    """Primer paso de vincular una cuenta externa: un TOTP recién escrito,
+    antes de ir al proveedor. Quien tenga solo la sesión (un token robado)
+    no puede añadir su cuenta de Google. VinculoDuplicado si la cuenta ya
+    tiene una de ese proveedor: se dice antes de gastar el código."""
+    instante = time.time() if instante is None else instante
+    _exigir_proveedor(proveedor)
+    with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
+        if conexion.execute(SQL_VINCULO_DE, [sesion.usuario_id, proveedor]).fetchone() is not None:
+            raise VinculoDuplicado("cuenta")
+    paso = _codigo_de_la_sesion(pool, claves, sesion, codigo, instante)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        _gastar_codigo(conexion, sesion, paso)
+        conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])
+
+
+def completar_vinculo(pool, claves, sesion, ticket, gastar_ticket):
+    """Segundo paso: guarda el vínculo del ticket de la vuelta
+    (externo.Ticket con propósito vinculo). Solo si el ticket es de esta
+    misma sesión y empresa, y la sesión sigue viva. Avisa al titular y a
+    quienes vigilan. VinculoNoValido o VinculoDuplicado si no cabe."""
+    if ticket.sesion_id != sesion.sesion_id or ticket.empresa_id != sesion.empresa_id:
+        raise VinculoNoValido
+    try:
+        with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+            # La cuenta primero: un cambio de contraseña simultáneo (que
+            # revoca sesiones y vínculos) va antes o después, nunca a medias.
+            conexion.execute(SQL_BLOQUEAR_CUENTA, [sesion.usuario_id])
+            if conexion.execute(SQL_SESION_VIGENTE, [sesion.sesion_id]).fetchone() is None:
+                raise VinculoNoValido
+            if not gastar_ticket():
+                raise VinculoNoValido
+            conexion.execute(SQL_NUEVO_VINCULO, [sesion.empresa_id, sesion.usuario_id, ticket.proveedor,
+                                                 ticket.sub_hmac])
+            conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_VINCULACION_EXTERNA,
+                                           sesion.usuario_id])
+            nombre, emails = avisos.destinatarios(conexion, sesion.usuario_id)
+    except psycopg.Error as error:
+        # Los dos índices únicos parciales dicen cuál de las dos reglas no
+        # cabe; cualquier otro error sigue su camino (un 500 visible).
+        indice = error.diag.constraint_name if error.sqlstate == SQLSTATE_DUPLICADO else None
+        if indice == INDICE_UNA_POR_IDENTIDAD:
+            raise VinculoDuplicado("identidad") from None
+        if indice == INDICE_UNA_POR_CUENTA:
+            raise VinculoDuplicado("cuenta") from None
+        raise
+    return CambioDeVinculo(correos=avisos.correos_vinculo(nombre, emails, sesion.email, ticket.proveedor, True))
+
+
+def revocar_vinculo(pool, claves, sesion, proveedor, codigo, instante=None):
+    """Desvincula la cuenta externa de ese proveedor, con un TOTP recién
+    escrito. NoEncontrado si no hay vínculo (antes de gastar el código).
+    Avisa al titular y a quienes vigilan (NIST SP 800-63B-4, 4.5)."""
+    instante = time.time() if instante is None else instante
+    _exigir_proveedor(proveedor)
+    with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
+        if conexion.execute(SQL_VINCULO_DE, [sesion.usuario_id, proveedor]).fetchone() is None:
+            raise NoEncontrado
+    paso = _codigo_de_la_sesion(pool, claves, sesion, codigo, instante)
+    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+        _gastar_codigo(conexion, sesion, paso)
+        if conexion.execute(SQL_REVOCAR_VINCULO, [sesion.usuario_id, proveedor]).fetchone() is None:
+            raise NoEncontrado
+        conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])
+        conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_REVOCACION_EXTERNA,
+                                       sesion.usuario_id])
+        nombre, emails = avisos.destinatarios(conexion, sesion.usuario_id)
+    return CambioDeVinculo(correos=avisos.correos_vinculo(nombre, emails, sesion.email, proveedor, False))
+
+
+def vinculos(pool, sesion):
+    """Vínculos vigentes de la cuenta de la sesión, para /yo."""
+    with bd.transaccion_empresa(pool, sesion.empresa_id, solo_lectura=True) as conexion:
+        filas = conexion.execute(SQL_VINCULOS, [sesion.usuario_id]).fetchall()
+    return tuple(Vinculo(proveedor=f[0], creada=f[1]) for f in filas)
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +1181,9 @@ def confirmar_activacion(pool, claves, token, codigo, instante=None):
             raise InvitacionNoValida
         conexion.execute(SQL_ACTIVAR_CUENTA, {"hash": hash_pendiente, "secreto": cifrado, "version": version,
                                               "paso": paso, "usuario": usuario_id})
+        # Una reactivación o una recuperación empieza sin vínculos: los
+        # anteriores pudo hacerlos quien tenía la cuenta.
+        conexion.execute(SQL_REVOCAR_VINCULOS, [usuario_id])
         # id <> uuid nulo: se revocan todos.
         conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [usuario_id, uuid.UUID(int=0)])
         conexion.execute(SQL_REVOCAR_SESIONES, [usuario_id, uuid.UUID(int=0)])
@@ -973,8 +1304,8 @@ def anular_invitacion(pool, sesion, usuario_id):
 
 
 def dar_de_baja(pool, sesion, usuario_id):
-    """Desactiva una cuenta y revoca sus sesiones, dispositivos e
-    invitaciones. Nunca deja a la empresa sin un admin activado."""
+    """Desactiva una cuenta y revoca sus sesiones, dispositivos, vínculos
+    externos e invitaciones. Nunca deja a la empresa sin un admin activado."""
     exigir_admin(sesion)
     with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
         admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()
@@ -987,6 +1318,7 @@ def dar_de_baja(pool, sesion, usuario_id):
             raise UltimoAdmin
         conexion.execute(SQL_DAR_DE_BAJA, [usuario_id])
         conexion.execute(SQL_CERRAR_INVITACIONES, [usuario_id])
+        conexion.execute(SQL_REVOCAR_VINCULOS, [usuario_id])
         conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [usuario_id, uuid.UUID(int=0)])
         conexion.execute(SQL_REVOCAR_SESIONES, [usuario_id, uuid.UUID(int=0)])
         conexion.execute(SQL_AUDITAR, [sesion.empresa_id, _actor(sesion.usuario_id), ACCION_BAJA, usuario_id])
@@ -1072,6 +1404,7 @@ def reinvitar_admin_plataforma(conexion, empresa_id, identificador, email):
     # Orden de bloqueos: cuenta, invitación, dispositivos, sesiones, auditoría.
     conexion.execute(SQL_DAR_DE_BAJA, [usuario_id])
     token = _emitir_invitacion(conexion, empresa_id, identificador, usuario_id)
+    conexion.execute(SQL_REVOCAR_VINCULOS, [usuario_id])
     conexion.execute(SQL_REVOCAR_DISPOSITIVOS, [usuario_id, uuid.UUID(int=0)])
     conexion.execute(SQL_REVOCAR_SESIONES, [usuario_id, uuid.UUID(int=0)])
     conexion.execute(SQL_AUDITAR, [empresa_id, ACTOR_PLATAFORMA, ACCION_REINVITACION_PLATAFORMA, usuario_id])
