@@ -242,6 +242,46 @@ class CodigoDeSeguimiento(unittest.TestCase):
                 self.assertEqual(str(error.exception), "el codigo debe tener 20 bytes")
 
 
+class IdentidadExterna(unittest.TestCase):
+    SUB = "109876543210987654321"
+
+    def test_hmac_literal(self):
+        # HMAC-SHA256(bytes(range(32)), b"canario/identidad/v1" + empresa(16)
+        # + 0x06 "google" + 0x15 sub), calculado aparte con hmac y hashlib.
+        self.assertEqual(cripto.hmac_identidad(CLAVE, EMPRESA, "google", self.SUB).hex(),
+                         "801248867701d6f6c6913e5a5f61000e0404c81851ce93e53ac9f57ab137efe5")
+
+    def test_empresa_proveedor_y_clave_cambian_la_huella(self):
+        base = cripto.hmac_identidad(CLAVE, EMPRESA, "google", self.SUB)
+        self.assertEqual(base, cripto.hmac_identidad(CLAVE, EMPRESA, "google", self.SUB))  # control
+        for otra in (cripto.hmac_identidad(CLAVE, OTRA_EMPRESA, "google", self.SUB),
+                     cripto.hmac_identidad(CLAVE, EMPRESA, "github", self.SUB),
+                     cripto.hmac_identidad(OTRA_CLAVE, EMPRESA, "google", self.SUB)):
+            self.assertNotEqual(otra, base)
+        # Con la longitud delante, mover un carácter del proveedor al sub da
+        # otra huella.
+        self.assertNotEqual(cripto.hmac_identidad(CLAVE, EMPRESA, "ab", "c"),
+                            cripto.hmac_identidad(CLAVE, EMPRESA, "a", "bc"))
+
+    def test_partes_no_validas(self):
+        self.assertEqual(len(cripto.hmac_identidad(CLAVE, EMPRESA, "google", "x" * 255)), 32)  # control
+        for proveedor, sub in (("google", ""), ("", self.SUB), ("google", "x" * 256), ("google", "ñ"),
+                               ("google", b"123"), (None, self.SUB)):
+            with self.subTest(proveedor=proveedor, sub=sub):
+                with self.assertRaises(ValueError):
+                    cripto.hmac_identidad(CLAVE, EMPRESA, proveedor, sub)
+        with self.assertRaises(TypeError):
+            cripto.hmac_identidad(CLAVE, "00000000-0000-0000-0000-000000000001", "google", self.SUB)
+
+    def test_etiquetas_de_las_cookies(self):
+        self.assertEqual(cripto.ETIQUETA_FLUJO_EXTERNO, b"canario/flujo_externo/v1")
+        self.assertEqual(cripto.ETIQUETA_TICKET_EXTERNO, b"canario/ticket_externo/v1")
+        cifrado = cripto.cifrar(CLAVE, b"x", cripto.ETIQUETA_FLUJO_EXTERNO)
+        self.assertEqual(cripto.descifrar(CLAVE, cifrado, cripto.ETIQUETA_FLUJO_EXTERNO), b"x")  # control
+        with self.assertRaises(cripto.ErrorIntegridad):
+            cripto.descifrar(CLAVE, cifrado, cripto.ETIQUETA_TICKET_EXTERNO)
+
+
 class Totp(unittest.TestCase):
     def test_vectores_rfc4226(self):
         for contador, esperado in enumerate(HOTP_RFC4226):

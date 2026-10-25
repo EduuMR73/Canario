@@ -1,11 +1,15 @@
 """Pruebas unitarias de la lógica pura de app/limitador.py: qué regla limita
 cada ruta, el análisis estricto de CANARIO_LIMITES y la huella del cliente.
+De consumir_una_vez, las órdenes que manda (con un pipeline falso) y los
+argumentos que rechaza antes de llegar a Redis.
 
 Lo que habla con Redis (contar, caducar, fallar cerrado) lo prueba la batería
 tests/security/verificar_denuncia.py contra un Redis real.
 """
+import asyncio
 import unittest
 import uuid
+from unittest import mock
 
 from app import limitador
 
@@ -204,3 +208,73 @@ class SalDiaria(unittest.TestCase):
         segunda = sal.del_instante(86_400)
         self.assertNotEqual(primera, segunda)
         self.assertIs(sal.del_instante(172_799), segunda)
+
+
+class TuboFalso:
+    """Pipeline de redis-py con transacción: apunta las órdenes y devuelve un
+    resultado fijo al ejecutar."""
+
+    def __init__(self, resultado):
+        self.resultado = resultado
+        self.ordenes = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return False
+
+    def execute_command(self, *orden):
+        self.ordenes.append(orden)
+
+    async def execute(self):
+        return self.resultado
+
+
+class ConsumirUnaVez(unittest.TestCase):
+    JTI = "0123456789abcdef0123456789abcdef"
+
+    def consumir(self, resultado, espacio="ticket", identificador=JTI, segundos=300):
+        tubo = TuboFalso(resultado)
+        cliente = mock.Mock()
+        cliente.pipeline.return_value = tubo
+        objeto = limitador.Limitador.__new__(limitador.Limitador)
+        objeto._cliente = cliente
+        devuelto = asyncio.run(objeto.consumir_una_vez(espacio, identificador, segundos))
+        return devuelto, tubo.ordenes, cliente.pipeline.call_args
+
+    def test_solo_la_primera_vez(self):
+        # INCR devuelve 1 la primera vez; 2 o más, una repetición.
+        primera, ordenes, llamada = self.consumir([1, True])
+        self.assertIs(primera, True)
+        self.assertEqual(ordenes, [("INCR", f"limite:ticket:{self.JTI}"),
+                                   ("EXPIRE", f"limite:ticket:{self.JTI}", 300, "NX")])
+        self.assertEqual(llamada, mock.call(transaction=True))
+        self.assertIs(self.consumir([2, False])[0], False)
+        self.assertIs(self.consumir([7, False])[0], False)
+
+    def test_argumentos_no_validos_no_llegan_a_redis(self):
+        self.assertIs(self.consumir([1, True], segundos=3600)[0], True)  # control
+        for nombre, cambios in {"espacio fuera de la lista": {"espacio": "acceso"},
+                                "identificador con mayusculas": {"identificador": self.JTI.upper()},
+                                "identificador con dos puntos": {"identificador": self.JTI[:-1] + ":"},
+                                "segundos cero": {"segundos": 0}, "segundos de mas": {"segundos": 3601},
+                                "segundos bool": {"segundos": True}}.items():
+            with self.subTest(nombre):
+                with self.assertRaises(ValueError):
+                    self.consumir([1, True], **cambios)
+
+    def test_espacios_que_no_chocan_con_las_reglas(self):
+        # Las claves de las reglas son limite:<regla>:...: un espacio con el
+        # nombre de una regla compartiría sus claves.
+        self.assertEqual(limitador.ESPACIOS_UNA_VEZ, ("ticket",))
+        self.assertEqual(set(limitador.ESPACIOS_UNA_VEZ) & set(limitador.LIMITES_POR_DEFECTO), set())
+        self.assertEqual(set(limitador.ESPACIOS_UNA_VEZ) & {"arranque"}, set())
+
+    def test_redis_que_falla_es_no_disponible(self):
+        cliente = mock.Mock()
+        cliente.pipeline.side_effect = limitador.RedisError("caido")
+        objeto = limitador.Limitador.__new__(limitador.Limitador)
+        objeto._cliente = cliente
+        with self.assertRaises(limitador.NoDisponible):
+            asyncio.run(objeto.consumir_una_vez("ticket", self.JTI, 300))

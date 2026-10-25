@@ -61,14 +61,17 @@ PRUEBAS_POR_FICHERO = {
     "test_arranque": 4,
     "test_avisos": 5,
     "test_bd": 9,
+    "test_capas": 3,
     "test_claves": 7,
+    "test_cliente_broker": 12,
     "test_correo": 8,
-    "test_cripto": 38,
+    "test_cripto": 42,
     "test_denuncias": 10,
     "test_errores": 11,
+    "test_externo": 15,
     "test_frontera": 11,
     "test_instruccion": 33,
-    "test_limitador": 16,
+    "test_limitador": 20,
     "test_login": 8,
     "test_personal": 8,
     "test_proveedores_externos": 18,
@@ -78,7 +81,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 248
+TOTAL_PRUEBAS = 286
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -264,6 +267,37 @@ MUTANTES = [
     ("proveedores_externos.py", '        "code_challenge_method": "S256",\n', "",
      "test_proveedores_externos.Autorizacion.test_url_exacta",
      "la URL de autorizacion no fija S256 y el proveedor tomaria plain (RFC 7636, 4.3)"),
+    # Login externo en la API (bloque A1-b2): flujo, ticket, cliente del broker y capas.
+    ("externo.py", "if not isinstance(state, str) or not hmac.compare_digest(", "if not isinstance(state, str) or False and (",
+     "test_externo.ComprobarVuelta.test_rechazos_con_su_motivo",
+     "la vuelta se acepta con el state de otro flujo (CSRF del login, RFC 9700, 4.7)"),
+    ("externo.py", "    if iss != EMISORES_AUTORIZACION[flujo.proveedor]:", "    if iss is None:",
+     "test_externo.ComprobarVuelta.test_rechazos_con_su_motivo",
+     "la vuelta se acepta con cualquier iss (mix-up, RFC 9207)"),
+    ("externo.py", "if (proveedor is None or proposito is None or not ahora < caduca <= ahora + DURACION_FLUJO",
+     "if (proveedor is None or proposito is None or not caduca <= ahora + DURACION_FLUJO",
+     "test_externo.Flujo.test_caducidad", "un flujo caducado se sigue aceptando"),
+    ("externo.py", "leido is None or leido != proposito or ", "leido is None or ",
+     "test_externo.Ticket.test_proposito_caducidad_clave_y_flujo",
+     "un ticket de acceso sirve para completar una vinculacion"),
+    ("externo.py", "from app import cripto\n", "from fastapi import Request  # noqa: F401\nfrom app import cripto\n",
+     "test_capas.LaLogicaNoSabeDeHttp.test_ningun_modulo_de_la_logica_importa_transporte",
+     "la logica del login externo importa fastapi"),
+    ("cliente_broker.py", '            or not url.startswith(ENDPOINTS_AUTORIZACION[proveedor] + "?")):', "            ):",
+     "test_cliente_broker.Autorizar.test_url_que_no_es_la_del_proveedor",
+     "un broker comprometido manda al navegador a cualquier sitio"),
+    ("cliente_broker.py", "if not _semaforo.acquire(blocking=False):", "if not _semaforo.acquire(timeout=1):",
+     "test_cliente_broker.Simultaneas.test_sin_hueco_falla_en_el_acto_sin_enviar",
+     "sin hueco se espera a que se libere uno (los hilos se acumulan)"),
+    ("cliente_broker.py", "    vigilante.start()\n", "",
+     "test_cliente_broker.PlazoTotal.test_un_byte_cada_poco_se_corta_en_el_plazo_total",
+     "un broker que envia un byte cada poco retiene el hilo sin limite"),
+    ("cripto.py", "ETIQUETA_IDENTIDAD + empresa_id.bytes + _parte_identidad(proveedor)",
+     "ETIQUETA_IDENTIDAD + _parte_identidad(proveedor)",
+     "test_cripto.IdentidadExterna.test_hmac_literal",
+     "la huella de una cuenta externa no lleva la empresa (se cruza entre empresas)"),
+    ("limitador.py", "        return resultado[0] == 1\n", "        return resultado[0] >= 1\n",
+     "test_limitador.ConsumirUnaVez.test_solo_la_primera_vez", "un ticket de un solo uso vale varias veces"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest
