@@ -68,21 +68,22 @@ PRUEBAS_POR_FICHERO = {
     "test_cripto": 42,
     "test_denuncias": 10,
     "test_errores": 11,
-    "test_externo": 15,
-    "test_frontera": 11,
+    "test_externo": 16,
+    "test_frontera": 12,
     "test_instruccion": 33,
     "test_limitador": 20,
     "test_login": 8,
     "test_login_externo": 23,
     "test_personal": 8,
     "test_proveedores_externos": 18,
+    "test_rutas_externo": 20,
     "test_solicitudes": 9,
     "test_tokens": 10,
     "test_transporte": 18,
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 310
+TOTAL_PRUEBAS = 332
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -334,6 +335,42 @@ MUTANTES = [
     ("avisos.py", "    return (al_titular,) + a_quien_vigila\n", "    return a_quien_vigila\n",
      "test_avisos.Correos.test_vinculo_primero_al_titular",
      "el titular no se entera de que han vinculado una cuenta a la suya (NIST 800-63B-4, 4.1.2.1)"),
+    # Rutas del login externo (bloque A1-b2, paso 2a).
+    ("externo.py", "return hashlib.sha256(self.state_crudo).digest()[:LONGITUD_JTI]",
+     "return secrets.token_bytes(LONGITUD_JTI)",
+     "test_externo.Flujo.test_jti_del_state_y_segundos_restantes",
+     "el jti del flujo cambia en cada apertura: el flujo nunca se gasta"),
+    ("rutas_externo.py",
+     ('        if not _gastador(estado, "flujo", flujo.jti, flujo)():\n'
+      '            raise _Fallo(FALLIDO, "repetida")\n'),
+     '        _gastador(estado, "flujo", flujo.jti, flujo)()\n',
+     "test_rutas_externo.Vuelta.test_flujo_repetido_no_llega_al_broker",
+     "un flujo ya gastado vuelve a llegar al broker (state de un solo uso, RFC 9700, 2.1)"),
+    ("rutas_externo.py", "        externo.comprobar_vuelta(flujo, proveedor,", "        (lambda *argumentos: None)(flujo, proveedor,",
+     "test_rutas_externo.Vuelta.test_rechazos_no_llegan_al_broker",
+     "la vuelta canjea con el state de otro flujo (CSRF del login)"),
+    ("rutas_externo.py", 'return (cabeceras.get("sec-fetch-mode") == "navigate" and ', "return (",
+     "test_rutas_externo.Vuelta.test_rechazos_no_llegan_al_broker",
+     "la vuelta se acepta desde un fetch de otro sitio, no solo navegando"),
+    ("rutas_externo.py", 'SAMESITE_TICKET = "strict"', 'SAMESITE_TICKET = "lax"',
+     "test_rutas_externo.Vuelta.test_valida_deja_el_ticket_y_borra_el_flujo",
+     "el ticket viaja en las navegaciones desde otro sitio"),
+    ("rutas_externo.py", "    if not peticion.state.navegador:\n        raise rutas_personal.OrigenNoPermitido(None)\n", "",
+     "test_rutas_externo.SoloNavegador.test_cliente_sin_cookies_ni_fetch_metadata_403_con_evento",
+     "un cliente sin cookies ni Fetch Metadata usa las rutas del login externo"),
+    ("rutas_externo.py", "    no_valido = _manejador(401, rutas_personal.MENSAJE_CREDENCIALES)\n",
+     '    no_valido = _manejador(401, rutas_personal.MENSAJE_CREDENCIALES, {"WWW-Authenticate": "Bearer"})\n',
+     "test_rutas_externo.SesionExterna.test_401_uniforme_sin_www_authenticate",
+     "un ticket caducado parece una sesion caducada y la SPA echa a la persona a la entrada"),
+    ("rutas_externo.py", "cuerpo_error(409, MENSAJES_DUPLICADO[error.motivo])", "cuerpo_error(409)",
+     "test_rutas_externo.Vinculos.test_completar_rechazos",
+     "los dos motivos de un vinculo duplicado dan el mismo texto y la SPA no puede explicarlos"),
+    ("rutas_personal.py", "COOKIE_DISPOSITIVO, COOKIE_FLUJO, COOKIE_TICKET)", "COOKIE_DISPOSITIVO)",
+     "test_rutas_externo.Cookies.test_flujo_y_ticket_reales_pasan_el_filtro_de_cookies",
+     "una cookie de flujo repetida (inyectada desde otro puerto) no se detecta"),
+    ("frontera_http.py", "    destino = NAVEGACION.get(ruta)\n", "    destino = None\n",
+     "test_rutas_externo.FronteraEnLaVuelta.test_limitador_responde_303_en_la_vuelta",
+     "un 429 en la vuelta es un JSON en la pantalla, sin forma de volver"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest

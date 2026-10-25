@@ -223,7 +223,7 @@ TEXTO_EVENTO_LOGIN_FALLIDO = "EVENTO login_fallido: "
 # Una sesión de la batería renueva su acceso al construir una petición si
 # tiene más de 4 minutos: el acceso dura 5 y algunas secciones tardan más.
 RENOVAR_TRAS = 240
-CLAVES_YO = ["email", "enlace_canal", "invitacion_pendiente", "rol", "usuario_id"]
+CLAVES_YO = ["email", "enlace_canal", "invitacion_pendiente", "rol", "usuario_id", "vinculos"]
 # El enlace del canal en /yo: el origen del sitio del denunciante, el de por
 # defecto de la API porque la batería no fija CANARIO_ORIGEN_WEB (lo dice el
 # log del arranque), y la ruta del formulario de la empresa.

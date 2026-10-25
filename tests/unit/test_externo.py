@@ -131,6 +131,23 @@ class Flujo(unittest.TestCase):
                     externo.abrir_flujo(CLAVE, valor, ahora=AHORA)
 
 
+    def test_jti_del_state_y_segundos_restantes(self):
+        # Literal: los 16 primeros bytes del SHA-256 de un state de 32 ceros.
+        fijo = externo.Flujo(proveedor="google", proposito=externo.PROPOSITO_ACCESO, caduca=AHORA + 600,
+                             empresa_id=EMPRESA, identificador=IDENTIFICADOR, sesion_id=None,
+                             state_crudo=bytes(32), nonce_crudo=bytes(range(32)), verifier_crudo=bytes(range(32)))
+        self.assertEqual(fijo.jti.hex(), "66687aadf862bd776c8fc18b8e9f8e20")
+        # El mismo flujo abierto otra vez da el mismo jti (es lo que se gasta);
+        # otro flujo, otro.
+        uno = flujo()
+        self.assertEqual(externo.abrir_flujo(CLAVE, externo.sellar_flujo(CLAVE, uno), ahora=AHORA).jti, uno.jti)
+        self.assertNotEqual(flujo().jti, uno.jti)
+        self.assertEqual(fijo.segundos_restantes(AHORA), 600)
+        self.assertEqual(fijo.segundos_restantes(AHORA + 599), 1)
+        # Nunca 0: un TTL de 0 en EXPIRE borraría la clave en el acto.
+        self.assertEqual(fijo.segundos_restantes(AHORA + 700), 1)
+
+
 class ComprobarVuelta(unittest.TestCase):
     def setUp(self):
         self.flujo = flujo()

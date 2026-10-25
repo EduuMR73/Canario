@@ -39,6 +39,15 @@ class ReglaDeCadaRuta(unittest.TestCase):
             "/v1/personal/activacion": "acceso",
             "/v1/personal/activacion/confirmar": "acceso",
             "/v1/personal/contrasena": "acceso",
+            # Login externo (app/rutas_externo.py): todo lo que abre o cierra
+            # un flujo o pide un código. La lista de proveedores, en otras.
+            "/v1/personal/externo/google/inicio": "acceso",
+            "/v1/personal/externo/google/vuelta": "acceso",
+            "/v1/personal/sesiones/externa": "acceso",
+            "/v1/personal/externo/google/vinculo/inicio": "acceso",
+            "/v1/personal/externo/google/vinculo": "acceso",
+            "/v1/personal/externo/proveedores": "otras",
+            "/v1/personal/externo/github/vuelta": "otras",
             # Cada solicitud envía un correo: regla propia. La verificación,
             # sin correo y con un token de 256 bits, en otras.
             "/v1/personal/registro": "registro",
@@ -255,6 +264,7 @@ class ConsumirUnaVez(unittest.TestCase):
 
     def test_argumentos_no_validos_no_llegan_a_redis(self):
         self.assertIs(self.consumir([1, True], segundos=3600)[0], True)  # control
+        self.assertIs(self.consumir([1, True], espacio="flujo")[0], True)  # control: el del flujo externo
         for nombre, cambios in {"espacio fuera de la lista": {"espacio": "acceso"},
                                 "identificador con mayusculas": {"identificador": self.JTI.upper()},
                                 "identificador con dos puntos": {"identificador": self.JTI[:-1] + ":"},
@@ -267,7 +277,7 @@ class ConsumirUnaVez(unittest.TestCase):
     def test_espacios_que_no_chocan_con_las_reglas(self):
         # Las claves de las reglas son limite:<regla>:...: un espacio con el
         # nombre de una regla compartiría sus claves.
-        self.assertEqual(limitador.ESPACIOS_UNA_VEZ, ("ticket",))
+        self.assertEqual(limitador.ESPACIOS_UNA_VEZ, ("ticket", "flujo"))
         self.assertEqual(set(limitador.ESPACIOS_UNA_VEZ) & set(limitador.LIMITES_POR_DEFECTO), set())
         self.assertEqual(set(limitador.ESPACIOS_UNA_VEZ) & {"arranque"}, set())
 

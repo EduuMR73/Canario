@@ -240,7 +240,8 @@ class Respuestas(unittest.TestCase):
 
     def test_ruta_con_sesion_usa_la_cookie_de_acceso(self):
         with mock.patch.object(personal, "autenticar", return_value=SESION) as autenticar, \
-                mock.patch.object(personal, "invitacion_pendiente", return_value=False):
+                mock.patch.object(personal, "invitacion_pendiente", return_value=False), \
+                mock.patch.object(personal, "vinculos", return_value=()):
             estado, _, _ = llamar("GET", "/v1/personal/yo", con_cookies(LECTURA, acceso=JWT, renovacion="r.r"))
         self.assertEqual((estado, autenticar.call_args.args[2]), (200, JWT))
 

@@ -419,6 +419,13 @@ RUTAS_API = {"/salud": None, "/v1/empresas/x/denuncias": "denuncia", "/v1/seguim
              "/v1/personal/registro": "registro", "/v1/personal/registro/verificacion": "otras",
              "/v1/personal/solicitudes": "otras", "/v1/personal/solicitudes/x": "otras",
              "/v1/personal/solicitudes/x/aprobacion": "otras",
+             # Login externo (app/rutas_externo.py): lo que abre o cierra un
+             # flujo o pide un código, en acceso, como el login; la lista de
+             # proveedores, en otras.
+             "/v1/personal/externo/proveedores": "otras", "/v1/personal/externo/google/inicio": "acceso",
+             "/v1/personal/externo/google/vuelta": "acceso", "/v1/personal/sesiones/externa": "acceso",
+             "/v1/personal/externo/google/vinculo/inicio": "acceso",
+             "/v1/personal/externo/google/vinculo": "acceso",
              # Páginas del denunciante (app/rutas_web.py): cada acción, con la
              # misma regla que su ruta de /v1 (mismo contador); las que solo
              # muestran un formulario, en otras.

@@ -22,7 +22,8 @@ DETALLES = {400: "petición no válida", 413: "cuerpo de la petición demasiado 
 
 
 def peticion_http(cabeceras=()):
-    return {"type": "http", "headers": list(cabeceras)}
+    # Una ruta cualquiera de la API (la especificación ASGI siempre trae path).
+    return {"type": "http", "headers": list(cabeceras), "path": "/v1/seguimiento"}
 
 
 def receptor(*trozos, desconectar=False):
@@ -146,6 +147,22 @@ class ErroresInternos(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enviados[0]["status"], 500)
         self.assertEqual(enviados[1]["body"], b'{"detalle": "error interno"}')
         self.assertNotIn("secreto", repr(enviados))
+
+    async def test_500_en_la_vuelta_es_303_a_la_spa(self):
+        # La vuelta del login externo es una navegación: un JSON se vería en
+        # crudo (app/frontera_http.py, NAVEGACION). Control: el 500 de
+        # cualquier otra ruta, en la prueba anterior.
+        async def falla(scope, receive, send):
+            raise ValueError("x")
+
+        send, enviados = emisor()
+        with self.assertLogs("canario.api", "ERROR"):
+            await frontera_http.ErroresInternos(falla)(
+                {"type": "http", "headers": [], "path": "/v1/personal/externo/google/vuelta"}, None, send)
+        self.assertEqual(enviados, [
+            {"type": "http.response.start", "status": 303,
+             "headers": [(b"location", b"/entrar?externo=no_disponible"), (b"content-length", b"0")]},
+            {"type": "http.response.body", "body": b""}])
 
     async def test_respuesta_ya_empezada_no_envia_otra(self):
         async def falla_a_medias(scope, receive, send):
