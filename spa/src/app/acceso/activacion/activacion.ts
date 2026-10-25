@@ -21,6 +21,11 @@ import { qrDe } from '../../nucleo/qr';
 //
 // El pattern del código solo evita gastar un intento por una errata (5
 // cifras, un espacio): la API lo valida igual.
+//
+// La ayuda de Google Authenticator: esa aplicación puede guardar los
+// secretos TOTP en la cuenta de Google (support.google.com/accounts/answer/
+// 1066447). Con el acceso con Google (docs/threat-model.md, 6.19), robar esa
+// cuenta daría el primer factor y también el segundo.
 
 type Paso = 'sin-enlace' | 'contrasena' | 'codigo' | 'hecho';
 
@@ -71,6 +76,7 @@ const TEXTO_ENLACE_NO_VALIDO = 'El enlace no es válido o ha caducado. Pida a un
               <li>Escanee el código QR con la aplicación de autenticación de su móvil.</li>
               <li>Escriba abajo el código de 6 cifras que le muestra.</li>
             </ol>
+            <p class="ayuda">Si usa Google Authenticator con la copia en su cuenta de Google activada y además entra en Canario con Google, quien se haga con esa cuenta tendrá los dos factores. Desactive esa copia o use otra aplicación.</p>
             @if (qr(); as codigo) {
               <svg class="qr" role="img" aria-label="Código QR para la aplicación de autenticación"
                    [attr.viewBox]="'0 0 ' + codigo.lado + ' ' + codigo.lado" shape-rendering="crispEdges">

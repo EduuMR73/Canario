@@ -4,9 +4,9 @@ import { Observable } from 'rxjs';
 import { conSesion } from './contexto';
 
 // Cliente de la API del personal (app/rutas_personal.py) para el acceso y la
-// cuenta propia. Los clientes de la API (este y api-cuentas.ts) son las
-// únicas piezas que conocen las rutas y la forma de los cuerpos: las páginas
-// no llaman a HttpClient. Las peticiones van al mismo origen (connect-src
+// cuenta propia. Los clientes de la API (este y los api-*.ts de nucleo/) son
+// las únicas piezas que conocen las rutas y la forma de los cuerpos: las
+// páginas no llaman a HttpClient. Las peticiones van al mismo origen (connect-src
 // 'self'), así que el navegador añade solo las cookies __Host- de la sesión,
 // y también Sec-Fetch-Site y Origin, que son la defensa CSRF de la API.
 // Ningún token de sesión pasa por aquí: los guarda y los envía el navegador.
@@ -24,6 +24,16 @@ export interface Yo {
   // El formulario de denuncia de la empresa en el sitio del denunciante,
   // armado por la API (la SPA no conoce ese origen).
   enlace_canal: string;
+  // Las cuentas externas vinculadas: solo el proveedor y cuándo. Ni el email
+  // ni el identificador de la cuenta externa salen de la API (minimización,
+  // docs/threat-model.md, 6.19).
+  vinculos: Vinculo[];
+}
+
+export interface Vinculo {
+  proveedor: string;
+  // ISO 8601 con zona (app/rutas_personal.py, yo).
+  creada: string;
 }
 
 export interface DatosLogin {

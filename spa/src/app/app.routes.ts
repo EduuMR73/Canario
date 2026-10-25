@@ -1,5 +1,6 @@
 import { Routes } from '@angular/router';
 import { Activacion } from './acceso/activacion/activacion';
+import { Codigo } from './acceso/codigo/codigo';
 import { Entrar } from './acceso/entrar/entrar';
 import { Registro } from './acceso/registro/registro';
 import { Verificacion } from './acceso/verificacion/verificacion';
@@ -24,7 +25,9 @@ import { Solicitudes } from './solicitudes/solicitudes';
 // solo main-*.js, que es lo que comprueba tests/security/verificar_spa.py.
 //
 // /activacion y /registro/verificacion son las rutas de los enlaces de los
-// correos (app/solicitudes.py): si cambian aquí, cambian allí.
+// correos (app/solicitudes.py): si cambian aquí, cambian allí. Lo mismo
+// /entrar/codigo, /entrar y /cuenta, los destinos de la vuelta de Google
+// (app/rutas_externo.py, DESTINOS).
 //
 // Las páginas con sesión van dentro del armazón, y permitirPorRol comprueba
 // en cada una sus roles (data.roles, de nucleo/permisos.ts, MENU). Una página
@@ -33,6 +36,7 @@ import { Solicitudes } from './solicitudes/solicitudes';
 export const routes: Routes = [
   { path: '', pathMatch: 'full', redirectTo: 'entrar' },
   { path: 'entrar', component: Entrar, title: 'Entrar - Canario' },
+  { path: 'entrar/codigo', component: Codigo, title: 'Entrar con Google - Canario' },
   { path: 'registro', component: Registro, title: 'Solicitar acceso - Canario' },
   { path: 'registro/verificacion', component: Verificacion, title: 'Confirmar el email - Canario' },
   { path: 'activacion', component: Activacion, title: 'Activar la cuenta - Canario' },

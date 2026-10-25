@@ -11,7 +11,8 @@ import { Inicio } from './inicio';
 const ENLACE = 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef';
 
 function crear(rol: Rol, invitacion_pendiente = false): ComponentFixture<Inicio> {
-  const yo = signal({ usuario_id: 'u', email: 'persona@canario.test', rol, invitacion_pendiente, enlace_canal: ENLACE });
+  const yo = signal({ usuario_id: 'u', email: 'persona@canario.test', rol, invitacion_pendiente, enlace_canal: ENLACE,
+                      vinculos: [] });
   TestBed.configureTestingModule({ providers: [provideRouter([]), { provide: Sesion, useValue: { yo } }] });
   const pagina = TestBed.createComponent(Inicio);
   pagina.detectChanges();

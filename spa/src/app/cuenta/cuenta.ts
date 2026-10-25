@@ -4,15 +4,19 @@ import { ApiPersonal } from '../nucleo/api';
 import { detalleDe, textoDeError } from '../nucleo/errores';
 import { enfocarEncabezado } from '../nucleo/foco';
 import { MostrarContrasena } from '../nucleo/mostrar-contrasena';
+import { Vinculos } from './vinculos';
 
-// Mi cuenta: cambiar la contraseña (app/personal.py, cambiar_contrasena). Pide
+// Mi cuenta: cambiar la contraseña y, debajo, las cuentas externas
+// vinculadas (vinculos.ts).
+//
+// Cambiar la contraseña (app/personal.py, cambiar_contrasena) pide
 // la actual y un código TOTP, y cierra todas las demás sesiones y
 // dispositivos de confianza de la cuenta: es la respuesta a una contraseña
 // que puede conocer otra persona. Este navegador sigue dentro con la sesión
 // nueva que ponen las cookies de la respuesta.
 @Component({
   selector: 'app-cuenta',
-  imports: [MostrarContrasena, ReactiveFormsModule],
+  imports: [MostrarContrasena, ReactiveFormsModule, Vinculos],
   template: `
     <h1 tabindex="-1">Mi cuenta</h1>
     <h2>Cambiar la contraseña</h2>
@@ -60,6 +64,7 @@ import { MostrarContrasena } from '../nucleo/mostrar-contrasena';
     @if (hecho()) {
       <p class="aviso" id="cuenta-hecho" role="status" tabindex="-1">Contraseña cambiada. Se han cerrado sus otras sesiones y retirado los demás dispositivos de confianza.</p>
     }
+    <app-vinculos />
   `,
 })
 export class Cuenta {

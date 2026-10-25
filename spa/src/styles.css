@@ -90,6 +90,21 @@
   --color-canario-ala: #eab308;
   --color-canario-pico: #f97316;
   --color-canario-contorno: #1a1a1a;
+  /* El botón de acceso con Google, con los colores de su guía de marca
+     (Sign in with Google branding guidelines): blanco con borde gris en el
+     claro y casi negro en el oscuro, y la G con sus cuatro colores en los
+     dos. El texto va en Geist, como el resto de la SPA, y no en Google
+     Sans: el 8445 solo carga fuentes propias (font-src 'self'). El fondo
+     encima no está en la guía: es un gris un paso más oscuro, como el del
+     botón secundario. */
+  --color-externo-fondo: #ffffff;
+  --color-externo-texto: #1f1f1f;
+  --color-externo-borde: #747775;
+  --color-externo-encima: #f1f3f4;
+  --color-google-azul: #4285f4;
+  --color-google-verde: #34a853;
+  --color-google-amarillo: #fbbc05;
+  --color-google-rojo: #ea4335;
   --color-leila-pelo: #2b211d;
   --color-leila-naranja: #d9822b;
   --color-leila-canela: #b5621f;
@@ -164,6 +179,14 @@
     --color-canario-ala: #eab308;
     --color-canario-pico: #f97316;
     --color-canario-contorno: #1a1a1a;
+    --color-externo-fondo: #131314;
+    --color-externo-texto: #e3e3e3;
+    --color-externo-borde: #8e918f;
+    --color-externo-encima: #242526;
+    --color-google-azul: #4285f4;
+    --color-google-verde: #34a853;
+    --color-google-amarillo: #fbbc05;
+    --color-google-rojo: #ea4335;
     --color-leila-pelo: #2b211d;
     --color-leila-naranja: #d9822b;
     --color-leila-canela: #b5621f;
@@ -398,6 +421,49 @@ button.peligro {
   color: var(--color-peligro);
 }
 
+/* Entrar con un proveedor externo (acceso/entrar): el botón de su guía de
+   marca, con la G a la izquierda del texto. Va debajo de "Entrar" y del
+   separador, para que el principal siga siendo el amarillo. */
+button.externo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--espacio-3);
+  background: var(--color-externo-fondo);
+  color: var(--color-externo-texto);
+  border-color: var(--color-externo-borde);
+}
+
+.google-g {
+  display: block;
+  flex: none;
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+.google-azul {
+  fill: var(--color-google-azul);
+}
+
+.google-verde {
+  fill: var(--color-google-verde);
+}
+
+.google-amarillo {
+  fill: var(--color-google-amarillo);
+}
+
+.google-rojo {
+  fill: var(--color-google-rojo);
+}
+
+/* La "o" entre el botón de entrar y el del proveedor. */
+.separador {
+  margin: var(--espacio-3) 0;
+  text-align: center;
+  color: var(--color-texto-suave);
+}
+
 /* La acción principal de una tarjeta ocupa todo su ancho. Lo decide la
    plantilla con la clase, no el tipo del botón: "Confirmar mi email" es
    type="button" a propósito (acceso/verificacion) y también es la acción
@@ -427,6 +493,10 @@ button[aria-disabled="true"] {
 
   button.secundario:not([aria-disabled="true"]):hover {
     background: var(--color-secundario-encima);
+  }
+
+  button.externo:not([aria-disabled="true"]):hover {
+    background: var(--color-externo-encima);
   }
 
   button.peligro:not([aria-disabled="true"]):hover {
@@ -649,9 +719,11 @@ main.acceso {
   text-align: center;
 }
 
-/* El aviso de "no disponible": del ancho de la tarjeta, ni estirado a toda
-   la página ni encogido a su texto. */
-.acceso > .error {
+/* El aviso de "no disponible" y los de la vuelta de Google en /entrar: del
+   ancho de la tarjeta, ni estirados a toda la página ni encogidos a su
+   texto. */
+.acceso > .error,
+.acceso > .aviso {
   width: 100%;
   max-width: var(--ancho-tarjeta);
   margin: 0 0 var(--espacio-4);

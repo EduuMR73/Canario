@@ -1,11 +1,24 @@
-import { Component, inject, signal } from '@angular/core';
+import { Location } from '@angular/common';
+import { Component, Injector, inject, signal } from '@angular/core';
 import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
-import { Router, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Canario } from '../../marca/canario';
+import { Google } from '../../marca/google';
 import { ApiPersonal } from '../../nucleo/api';
-import { textoDeError } from '../../nucleo/errores';
+import { ApiExterno, NAVEGAR, PROVEEDORES, Proveedor, Resultado, resultadoDe, urlPermitida } from '../../nucleo/api-externo';
+import { TEXTO_INESPERADO, textoDeError } from '../../nucleo/errores';
+import { enfocarEncabezado } from '../../nucleo/foco';
 import { MostrarContrasena } from '../../nucleo/mostrar-contrasena';
 import { Sesion } from '../../nucleo/sesion';
+
+// Lo que dice la vuelta del proveedor en /entrar?externo=<resultado>
+// (app/rutas_externo.py). Cancelar es una decisión de la persona y va como
+// aviso; los otros dos son fallos.
+const TEXTOS_VUELTA: Record<Resultado, string> = {
+  cancelado: 'Ha cancelado el acceso con Google. Puede entrar con su contraseña o volver a intentarlo.',
+  no_disponible: 'El acceso con Google no está disponible ahora mismo. Entre con su contraseña o inténtelo más tarde.',
+  fallido: 'No se ha podido completar el acceso con Google. Vuelva a intentarlo o entre con su contraseña.',
+};
 
 // Login del personal: empresa, email, contraseña y código TOTP en una sola
 // petición (app/personal.py, iniciar_sesion). Cualquier fallo da el mismo
@@ -18,17 +31,32 @@ import { Sesion } from '../../nucleo/sesion';
 // el segundo. Mientras se envía, el botón lleva aria-disabled y no disabled: a
 // un botón disabled Chromium le quita el foco, y tras un fallo quien usa el
 // teclado no sabría dónde está (WCAG 2.2, 2.4.3).
+//
+// Entrar con Google (docs/threat-model.md, 6.19): solo se pinta el botón de
+// los proveedores que anuncia la API y la SPA conoce (nucleo/api-externo.ts).
+// Pide solo la empresa, porque Google nunca crea la confianza: hace falta un
+// dispositivo de confianza vigente de esa empresa en este navegador, y la
+// API responde 409 si no lo hay. Es type="button" y va después de "Entrar":
+// Enter en un campo envía el formulario con su primer botón de envío (envío
+// implícito), y así nunca lleva a Google por sorpresa. Cuando se vuelve con
+// "atrás" desde Google, el navegador puede restaurar la página de su caché
+// (bfcache) con el botón todavía ocupado: pageshow con persisted lo libera.
 @Component({
   selector: 'app-entrar',
-  imports: [Canario, MostrarContrasena, ReactiveFormsModule, RouterLink],
+  imports: [Canario, Google, MostrarContrasena, ReactiveFormsModule, RouterLink],
+  host: { '(window:pageshow)': 'alMostrar($event)' },
   template: `
     <main class="acceso">
       <app-canario />
       <h1 tabindex="-1">Entrar</h1>
+      @if (vuelta(); as resultado) {
+        <p id="entrar-vuelta" tabindex="-1" [class]="resultado === 'cancelado' ? 'aviso' : 'error'"
+           [attr.role]="resultado === 'cancelado' ? 'status' : 'alert'">{{ textosVuelta[resultado] }}</p>
+      }
       <form class="tarjeta" [formGroup]="formulario" (ngSubmit)="entrar()" ngNativeValidate>
         <p class="campo">
           <label for="entrar-empresa">Empresa</label>
-          <input id="entrar-empresa" formControlName="empresa" required autocomplete="organization"
+          <input #campoEmpresa id="entrar-empresa" formControlName="empresa" required autocomplete="organization"
                  autocapitalize="none" spellcheck="false" aria-describedby="entrar-empresa-ayuda">
           <span id="entrar-empresa-ayuda" class="ayuda">El identificador de su empresa en Canario.</span>
         </p>
@@ -55,6 +83,16 @@ import { Sesion } from '../../nucleo/sesion';
           <p class="error" role="alert">{{ texto }}</p>
         }
         <button type="submit" class="ancho-completo" [attr.aria-disabled]="enviando() || null">{{ enviando() ? 'Entrando...' : 'Entrar' }}</button>
+        @for (proveedor of proveedores(); track proveedor) {
+          <p class="separador">o</p>
+          <button type="button" class="externo ancho-completo" (click)="conProveedor(proveedor, campoEmpresa)"
+                  [attr.aria-disabled]="yendo() || null">
+            @if (proveedor === 'google') {
+              <app-google />
+            }
+            <span>{{ yendo() ? 'Abriendo ' + registro[proveedor].nombre + '...' : 'Iniciar sesión con ' + registro[proveedor].nombre }}</span>
+          </button>
+        }
       </form>
       <p class="tarjeta-pie">¿No tiene cuenta? <a routerLink="/registro">Solicitar acceso</a></p>
     </main>
@@ -64,6 +102,15 @@ export class Entrar {
   private readonly api = inject(ApiPersonal);
   private readonly router = inject(Router);
   private readonly sesion = inject(Sesion);
+  private readonly externo = inject(ApiExterno);
+  private readonly navegar = inject(NAVEGAR);
+
+  readonly registro = PROVEEDORES;
+  readonly textosVuelta = TEXTOS_VUELTA;
+  readonly proveedores = signal<Proveedor[]>([]);
+  readonly vuelta = signal<Resultado | null>(null);
+  // Un inicio cada vez, como el login: cada uno abre un flujo en la API.
+  readonly yendo = signal(false);
 
   readonly formulario = inject(NonNullableFormBuilder).group({
     empresa: '',
@@ -98,5 +145,72 @@ export class Entrar {
         }));
       },
     });
+  }
+
+  constructor() {
+    const injector = inject(Injector);
+    // La vuelta del proveedor: el texto sale de la lista cerrada y la URL se
+    // limpia siempre, también con un valor desconocido, para que recargar o
+    // compartir el enlace no repita el aviso. replaceState no navega: la
+    // página no se vuelve a crear.
+    const consulta = inject(ActivatedRoute).snapshot.queryParamMap;
+    if (consulta.has('externo')) {
+      this.vuelta.set(resultadoDe(consulta.get('externo')));
+      inject(Location).replaceState('/entrar');
+      if (this.vuelta() !== null) {
+        enfocarEncabezado(injector, '#entrar-vuelta');
+      }
+    }
+    // Sin la lista, no hay botones: la entrada con contraseña no depende de
+    // ella, y un error aquí sería un aviso rojo en la puerta por algo que no
+    // impide entrar. La caída del broker la registra la API
+    // (EVENTO broker_no_disponible).
+    this.externo.proveedores().subscribe({
+      next: (lista) => this.proveedores.set(lista),
+      error: () => this.proveedores.set([]),
+    });
+  }
+
+  conProveedor(proveedor: Proveedor, campoEmpresa: HTMLInputElement): void {
+    if (this.enviando() || this.yendo()) {
+      return;
+    }
+    // Solo la empresa: el email, la contraseña y el código no se usan aquí, y
+    // el aviso nativo de un campo vacío que no hace falta confundiría.
+    if (!campoEmpresa.reportValidity()) {
+      return;
+    }
+    this.yendo.set(true);
+    this.error.set(null);
+    const nombre = PROVEEDORES[proveedor].nombre;
+    this.externo.iniciar(proveedor, this.formulario.controls.empresa.value).subscribe({
+      next: (url) => {
+        if (urlPermitida(proveedor, url)) {
+          // yendo sigue en true hasta salir de la página.
+          this.navegar(url);
+          return;
+        }
+        this.yendo.set(false);
+        this.error.set(TEXTO_INESPERADO);
+      },
+      error: (error: unknown) => {
+        this.yendo.set(false);
+        this.error.set(textoDeError(error, {
+          409: 'Este navegador aún no es de confianza para esa empresa. La primera vez entre con su contraseña ' +
+            `y su código; después podrá vincular ${nombre} en Mi cuenta.`,
+          404: `El acceso con ${nombre} no está disponible.`,
+          422: 'Revise la empresa: no tiene un formato válido.',
+        }));
+      },
+    });
+  }
+
+  // Restaurada de la caché del navegador (bfcache) al volver desde Google:
+  // ningún inicio sigue en curso en esta página. $event llega como Event; el
+  // de pageshow es un PageTransitionEvent.
+  alMostrar(evento: Event): void {
+    if ((evento as PageTransitionEvent).persisted) {
+      this.yendo.set(false);
+    }
   }
 }

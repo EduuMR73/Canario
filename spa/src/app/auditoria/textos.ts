@@ -13,6 +13,9 @@ type Objeto = 'cuenta' | 'denuncia' | 'solicitud';
 // ids: se nota, no se esconde.
 const ACCIONES: Record<string, { nombre: string; objeto: Objeto }> = {
   acceso: { nombre: 'Entrada', objeto: 'cuenta' },
+  acceso_externo: { nombre: 'Entrada con una cuenta externa', objeto: 'cuenta' },
+  vinculacion_externa: { nombre: 'Vinculación de una cuenta externa', objeto: 'cuenta' },
+  revocacion_externa: { nombre: 'Desvinculación de una cuenta externa', objeto: 'cuenta' },
   activacion: { nombre: 'Activación de la cuenta', objeto: 'cuenta' },
   cambio_contrasena: { nombre: 'Cambio de contraseña', objeto: 'cuenta' },
   invitacion: { nombre: 'Invitación', objeto: 'cuenta' },

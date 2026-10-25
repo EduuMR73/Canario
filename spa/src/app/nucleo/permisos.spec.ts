@@ -12,7 +12,7 @@ const YO = '/v1/personal/yo';
 
 function cuenta(rol: Rol): object {
   return { usuario_id: 'u', email: 'persona@canario.test', rol, invitacion_pendiente: false,
-           enlace_canal: 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef' };
+           enlace_canal: 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef', vinculos: [] };
 }
 
 function ruta(roles?: Rol[]): ActivatedRouteSnapshot {
