@@ -27,8 +27,10 @@ a) Arranque, tres cuentas (un admin y dos instructores) y, de punta a punta,
    exactos, el formulario exacto del canje, la sesión con las mismas cookies
    que el login con contraseña y sin dispositivo nuevo. El login confirma con
    el vínculo bloqueado FOR SHARE (supuesto 1 de A1-b2: sin 500).
-b) El dispositivo de confianza: el inicio sin él es un 409 sin URL ni cookie.
-   Sin vínculo, con el dispositivo de otra cuenta o sin dispositivo, la
+b) El dispositivo de confianza: el inicio sin él es un 409 sin URL ni cookie,
+   con el mismo cuerpo byte a byte sin cookie, con una empresa que no existe
+   y con el dispositivo retirado, caducado o con 20 fallos (así no dice qué
+   identificadores son de una empresa). Sin vínculo, con el dispositivo de otra cuenta o sin dispositivo, la
    reserva no casa y no cuenta ningún intento (supuesto 3). Control: con la
    cuenta vinculada y su dispositivo, un código malo sí lo cuenta.
 c) La vuelta: sin la cookie del flujo, con el state de otro flujo, sin iss o
@@ -189,8 +191,9 @@ CANCELADO_VINCULO = "/cuenta?vinculo=cancelado"
 CUERPO_401 = '{"detalle": "credenciales no válidas"}'.encode()
 CUERPO_403 = b'{"detalle": "permiso denegado"}'
 CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
-CUERPO_409_SIN_DISPOSITIVO = ('{"detalle": "este navegador no es de confianza para esa empresa; '
-                              'la primera vez entre con su contraseña y su código"}').encode()
+CUERPO_409_SIN_DISPOSITIVO = ('{"detalle": "no se puede entrar con ese proveedor en esa empresa desde este '
+                              'navegador; revise la empresa o, la primera vez, entre con su contraseña y su '
+                              'código"}').encode()
 CUERPO_409_IDENTIDAD = '{"detalle": "esa cuenta externa ya está vinculada a otra cuenta de la empresa"}'.encode()
 CUERPO_409_CUENTA = '{"detalle": "su cuenta ya tiene vinculada una cuenta de ese proveedor"}'.encode()
 CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
@@ -943,6 +946,23 @@ def intentos():
     return int(dispositivos), int(cuentas)
 
 
+def dispositivos_de(cuenta):
+    """Las columnas de vigencia de los dispositivos de la cuenta, como texto:
+    (id, revocado, caduca, intentos_fallidos) por fila, en orden de id."""
+    filas = valor(f"select id || '|' || revocado || '|' || caduca || '|' || intentos_fallidos "
+                  f"from canal.dispositivo_personal where usuario_id = '{cuenta.usuario_id}' order by id;")
+    return [tuple(f.split("|")) for f in filas.splitlines()]
+
+
+def restaurar_dispositivos(cuenta, originales):
+    """Devuelve los dispositivos a los valores de dispositivos_de. Si no
+    quedan exactos, PARADA: las secciones siguientes dependen de ellos."""
+    valor("".join(f"update canal.dispositivo_personal set revocado = {r}, caduca = '{c}', intentos_fallidos = {i} "
+                  f"where id = '{d}';" for d, r, c, i in originales) + " select 1;")
+    if not originales or dispositivos_de(cuenta) != originales:
+        raise Parada(f"los dispositivos de {cuenta.nav.etiqueta} no han vuelto a su estado")
+
+
 def n_sesiones(cuenta):
     return int(valor(f"select count(*) from canal.sesion_personal where usuario_id = '{cuenta.usuario_id}';"))
 
@@ -1141,6 +1161,26 @@ def seccion_b():
         negativo(f"b) inicio {nombre}: 409 con su texto, sin URL ni cookie del flujo ({codigo}, {nombres(cab)})",
                  codigo == 409 and cuerpo == CUERPO_409_SIN_DISPOSITIVO and "set-cookie" not in cab, control,
                  f"cuerpo: {cuerpo[:120]!r}")
+    # Los tres estados en que un dispositivo deja de ser vigente
+    # (app/personal.py, SQL_DISPOSITIVO_VIGENTE), con el mismo navegador que
+    # en el control da 200. Las secciones siguientes usan los dispositivos de
+    # B: cada cambio se deshace al valor exacto y se comprueba.
+    originales = dispositivos_de(B)
+    for nombre, cambio in [("retirado", "revocado = true"), ("caducado", "caduca = now() - interval '1 second'"),
+                           ("con 20 fallos", "intentos_fallidos = 20")]:
+        try:
+            valor(f"update canal.dispositivo_personal set {cambio} where usuario_id = '{B.usuario_id}'; select 1;")
+            codigo, cab, cuerpo = pedir(B.nav.copia("B"), "POST", RUTA_INICIO, {"empresa": IDENTIFICADOR})
+        finally:
+            restaurar_dispositivos(B, originales)
+        negativo(f"b) inicio con el dispositivo {nombre}: 409 con su texto, sin URL ni cookie del flujo "
+                 f"({codigo}, {nombres(cab)})",
+                 codigo == 409 and cuerpo == CUERPO_409_SIN_DISPOSITIVO and "set-cookie" not in cab, control,
+                 f"cuerpo: {cuerpo[:120]!r}")
+    # Control de que se ha deshecho: con una copia, para no pisar el flujo de B.
+    despues = iniciar(B.nav.copia("B"))
+    pasa(despues[0][0] == 200 and despues[1] is not None,
+         f"b) control: con el dispositivo restaurado, el inicio vuelve a dar 200 ({despues[0][0]})")
 
     # Control: con la cuenta vinculada y su dispositivo, la reserva casa y un
     # código malo cuenta un intento en el dispositivo.

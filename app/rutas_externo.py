@@ -103,8 +103,12 @@ DESTINOS = {
 # proveedor: tiene su propio mensaje en la SPA. Cualquier otro es un fallo.
 ERROR_CANCELADO = "access_denied"
 
-MENSAJE_SIN_DISPOSITIVO = ("este navegador no es de confianza para esa empresa; "
-                           "la primera vez entre con su contraseña y su código")
+# Un solo texto para las tres causas de personal.SinDispositivo (sin cookie,
+# empresa que no existe y dispositivo no vigente): si fueran distintos, el 409
+# diría qué identificadores son de una empresa. Por eso nombra las dos salidas:
+# revisar la empresa y, la primera vez, entrar con contraseña.
+MENSAJE_SIN_DISPOSITIVO = ("no se puede entrar con ese proveedor en esa empresa desde este navegador; "
+                           "revise la empresa o, la primera vez, entre con su contraseña y su código")
 MENSAJE_NO_CONFIGURADO = "el acceso con ese proveedor no está disponible"
 # Un texto fijo por motivo (personal.VinculoDuplicado): la SPA elige el texto
 # por el código de estado, y los dos son 409.

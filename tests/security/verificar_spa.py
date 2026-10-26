@@ -924,8 +924,8 @@ TEXTO_SIN_PROVEEDORES = ("El acceso con cuentas externas no está configurado en
                          "contraseña y el código.")
 TEXTO_VINCULO_CADUCADO = ("No se ha podido completar la vinculación: el acceso con Google ha caducado. "
                           "Vuelva a vincularla.")
-TEXTO_SIN_DISPOSITIVO = ("Este navegador aún no es de confianza para esa empresa. La primera vez entre con su "
-                         "contraseña y su código; después podrá vincular Google en Mi cuenta.")
+TEXTO_SIN_DISPOSITIVO = ("No se puede entrar con Google en esa empresa desde este navegador. Revise la empresa "
+                         "o, la primera vez, entre con su contraseña y su código.")
 TEXTO_INESPERADO_SPA = "Ha ocurrido un error inesperado. Inténtelo de nuevo."
 TEXTO_NO_DISPONIBLE_SPA = "El servicio no está disponible ahora mismo. Inténtelo de nuevo en unos minutos."
 # app/rutas_externo.py, MENSAJES_DUPLICADO["identidad"]: la SPA lo enseña tal cual.
@@ -2509,8 +2509,8 @@ VINCULO = "/v1/personal/externo/google/vinculo"
 GOOGLE = "https://accounts.google.com/o/oauth2/v2/auth?client_id=prueba&state=prueba"
 AJENA = "https://evil.invalid/o/oauth2/v2/auth?state=prueba"
 # app/rutas_externo.py: MENSAJE_SIN_DISPOSITIVO y MENSAJES_DUPLICADO["identidad"].
-SIN_DISPOSITIVO = ("este navegador no es de confianza para esa empresa; "
-                   "la primera vez entre con su contraseña y su código")
+SIN_DISPOSITIVO = ("no se puede entrar con ese proveedor en esa empresa desde este navegador; "
+                   "revise la empresa o, la primera vez, entre con su contraseña y su código")
 DUPLICADO = "esa cuenta externa ya está vinculada a otra cuenta de la empresa"
 # El 503 de la API con el broker parado (primera ejecución de r, 25 oct).
 NO_DISPONIBLE = "servicio ocupado; inténtelo de nuevo en unos segundos"

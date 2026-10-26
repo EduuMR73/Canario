@@ -196,8 +196,10 @@ export class Entrar {
       error: (error: unknown) => {
         this.yendo.set(false);
         this.error.set(textoDeError(error, {
-          409: 'Este navegador aún no es de confianza para esa empresa. La primera vez entre con su contraseña ' +
-            `y su código; después podrá vincular ${nombre} en Mi cuenta.`,
+          // El mismo 409 si la empresa no existe o si el navegador no es de
+          // confianza (app/rutas_externo.py): el texto nombra las dos causas.
+          409: `No se puede entrar con ${nombre} en esa empresa desde este navegador. Revise la empresa o, ` +
+            'la primera vez, entre con su contraseña y su código.',
           404: `El acceso con ${nombre} no está disponible.`,
           422: 'Revise la empresa: no tiene un formato válido.',
         }));
