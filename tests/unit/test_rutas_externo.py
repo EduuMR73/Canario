@@ -51,8 +51,8 @@ IDENTIFICADOR = "0123456789abcdef0123456789abcdef"
 SESION_ID = uuid.UUID(int=9)
 SESION = personal.Sesion(empresa_id=EMPRESA, identificador=IDENTIFICADOR, sesion_id=SESION_ID,
                          usuario_id=uuid.UUID(int=2), dispositivo_id=uuid.UUID(int=8), rol="admin",
-                         email="titular@alfa.test", nombre_empresa="Alfa")
-SUB = "109876543210987654321"
+                         email="titular@alfa.test", nombre_empresa="Alfa", inactividad_en=843, caduca_en=27001)
+SUB ="109876543210987654321"
 CODE = "4/0AQSTgQ-codigo-de-prueba"
 URL_GOOGLE = "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&state=y"
 ISS = "https://accounts.google.com"
@@ -224,8 +224,8 @@ class Inicio(unittest.TestCase):
             respuesta = llamar("POST", "/v1/personal/externo/google/inicio", ESCRITURA, {"empresa": IDENTIFICADOR})
         self.assertEqual((respuesta.estado, respuesta.cookies), (409, []))
         self.assertEqual(json.loads(respuesta.cuerpo), {
-            "detalle": "este navegador no es de confianza para esa empresa; "
-                       "la primera vez entre con su contraseña y su código"})
+            "detalle": "no se puede entrar con ese proveedor en esa empresa desde este navegador; "
+                       "revise la empresa o, la primera vez, entre con su contraseña y su código"})
         autorizar.assert_not_called()
 
     def test_broker_caido_o_sin_configurar_sin_cookie(self):
@@ -416,14 +416,15 @@ class SesionExterna(unittest.TestCase):
         def iniciar(_pool, _claves, recibido, codigo, dispositivo, gastar):
             self.assertEqual((recibido, codigo, dispositivo), (abierto, "123456", DISPOSITIVO))
             self.assertIs(gastar(), True)
-            return personal.Acceso(JWT, RENOVACION, None)
+            return personal.Acceso(JWT, RENOVACION, 900, 28800, None)
 
         with mock.patch.object(personal, "iniciar_sesion_externa", side_effect=iniciar) as llamada:
             respuesta = llamar("POST", "/v1/personal/sesiones/externa",
                                con_cookies(ESCRITURA, ticket=texto, dispositivo=DISPOSITIVO),
                                {"codigo_totp": "123456"}, limitador_falso=falso)
         llamada.assert_called_once()
-        self.assertEqual((respuesta.estado, json.loads(respuesta.cuerpo)), (201, {"expira_en": 300}))
+        self.assertEqual((respuesta.estado, json.loads(respuesta.cuerpo)),
+                         (201, {"expira_en": 300, "inactividad_en": 900, "caduca_en": 28800}))
         self.assertEqual(respuesta.cookies[:2], [COOKIE_ACCESO, COOKIE_RENOVACION])
         self.assertEqual(borradas(respuesta), [("__Host-canario_ticket", "strict")])
         [(espacio, jti, segundos)] = falso.llamadas

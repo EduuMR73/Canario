@@ -6,14 +6,16 @@
   cuenta y devuelve el primer token de dispositivo de confianza.
 * POST /v1/personal/sesiones: login (empresa, email, contraseña, código y,
   si lo tiene, el token de dispositivo). Devuelve el JWT de acceso, el token
-  de renovación, los segundos que dura el acceso y, si el login fue sin
+  de renovación, los segundos que dura el acceso, los que faltan para el
+  cierre por inactividad y para las 8 horas y, si el login fue sin
   dispositivo de confianza, un token de dispositivo nuevo.
 * POST /v1/personal/sesiones/renovacion: con el token de renovación,
   devuelve un acceso y una renovación nuevos (app/personal.py, renovar).
 * DELETE /v1/personal/sesiones/actual: cierra la sesión.
 * GET /v1/personal/yo: cuenta de la sesión, con invitacion_pendiente (el
-  aviso de una reinvitación de esa cuenta) y sus cuentas externas vinculadas
-  (proveedor y día).
+  aviso de una reinvitación de esa cuenta), sus cuentas externas vinculadas
+  (proveedor y día) y los segundos que faltan para el cierre por inactividad
+  y para las 8 horas.
 * El login externo y los vínculos tienen sus rutas en app/rutas_externo.py.
 * POST /v1/personal/contrasena: cambia la contraseña (actual, nueva y código)
   y devuelve los tokens de una sesión nueva: la anterior queda revocada.
@@ -498,18 +500,21 @@ def confirmar_activacion(datos: Confirmacion, peticion: Request):
 
 def respuesta_con_tokens(peticion, acceso, codigo=200):
     """Respuesta con los tokens de una sesión. expira_en: segundos que dura
-    el acceso, para que el cliente renueve antes de que caduque. En el
-    navegador, los tokens van en sus cookies y el cuerpo solo lleva
-    expira_en: ningún script de la página los ve. La usa también el login
-    externo (app/rutas_externo.py): una sesión es la misma venga de donde
-    venga."""
+    el acceso, para que el cliente renueve antes de que caduque.
+    inactividad_en y caduca_en: segundos hasta el cierre por inactividad y
+    hasta las 8 horas, para que el cliente avise antes (WCAG 2.2, 2.2.1). En
+    el navegador, los tokens van en sus cookies y el cuerpo solo lleva los
+    segundos: ningún script de la página ve los tokens. La usa también el
+    login externo (app/rutas_externo.py): una sesión es la misma venga de
+    donde venga."""
+    tiempos = {"expira_en": tokens.DURACION_ACCESO, "inactividad_en": acceso.inactividad_en,
+               "caduca_en": acceso.caduca_en}
     if not peticion.state.navegador:
-        contenido = {"token_acceso": acceso.token_acceso, "token_renovacion": acceso.token_renovacion,
-                     "expira_en": tokens.DURACION_ACCESO}
+        contenido = {"token_acceso": acceso.token_acceso, "token_renovacion": acceso.token_renovacion, **tiempos}
         if codigo == 201:
             contenido["token_dispositivo"] = acceso.token_dispositivo
         return JSONResponse(status_code=codigo, content=contenido)
-    respuesta = JSONResponse(status_code=codigo, content={"expira_en": tokens.DURACION_ACCESO})
+    respuesta = JSONResponse(status_code=codigo, content=tiempos)
     _poner_cookie(respuesta, COOKIE_ACCESO, acceso.token_acceso, tokens.DURACION_ACCESO)
     _poner_cookie(respuesta, COOKIE_RENOVACION, acceso.token_renovacion, DURACION_RENOVACION)
     # Solo el login entrega dispositivo, y solo si entró sin uno de confianza.
@@ -578,9 +583,13 @@ def yo(peticion: Request, sesion: SesionPersonal):
     # única fuente de la SPA para pintarlas.
     vinculados = [{"proveedor": v.proveedor, "creada": v.creada.isoformat()}
                   for v in personal.vinculos(peticion.app.state.pool, sesion)]
+    # Lo que le queda a la sesión, como en respuesta_con_tokens: al cargar la
+    # SPA (o recargarla) no hay login ni renovación de donde sacarlo. Salen de
+    # la lectura que autentica la petición, sin otra consulta.
     return JSONResponse(content={"usuario_id": str(sesion.usuario_id), "email": sesion.email, "rol": sesion.rol,
                                  "invitacion_pendiente": pendiente, "enlace_canal": enlace_canal,
-                                 "vinculos": vinculados})
+                                 "vinculos": vinculados, "inactividad_en": sesion.inactividad_en,
+                                 "caduca_en": sesion.caduca_en})
 
 
 @router.post("/contrasena")

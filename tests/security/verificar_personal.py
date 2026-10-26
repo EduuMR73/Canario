@@ -210,8 +210,8 @@ CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde
 CUERPO_503_OCUPADO = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode()
 REINTENTAR_TRAS = "5"
 CLAVES_ACTIVACION = ["secreto_totp", "uri_totp"]
-CLAVES_LOGIN = ["expira_en", "token_acceso", "token_dispositivo", "token_renovacion"]
-CLAVES_TOKENS = ["expira_en", "token_acceso", "token_renovacion"]
+CLAVES_LOGIN = ["caduca_en", "expira_en", "inactividad_en", "token_acceso", "token_dispositivo", "token_renovacion"]
+CLAVES_TOKENS = ["caduca_en", "expira_en", "inactividad_en", "token_acceso", "token_renovacion"]
 # JWT de acceso (app/tokens.py), literales.
 CABECERA_JWT = {"alg": "HS256", "typ": "canario-acceso+jwt"}
 CLAIMS_JWT = ["aud", "emp", "exp", "iat", "iss", "sid", "sub"]
@@ -223,7 +223,8 @@ TEXTO_EVENTO_LOGIN_FALLIDO = "EVENTO login_fallido: "
 # Una sesión de la batería renueva su acceso al construir una petición si
 # tiene más de 4 minutos: el acceso dura 5 y algunas secciones tardan más.
 RENOVAR_TRAS = 240
-CLAVES_YO = ["email", "enlace_canal", "invitacion_pendiente", "rol", "usuario_id", "vinculos"]
+CLAVES_YO = ["caduca_en", "email", "enlace_canal", "inactividad_en", "invitacion_pendiente", "rol", "usuario_id",
+             "vinculos"]
 # El enlace del canal en /yo: el origen del sitio del denunciante, el de por
 # defecto de la API porque la batería no fija CANARIO_ORIGEN_WEB (lo dice el
 # log del arranque), y la ruta del formulario de la empresa.

@@ -1133,8 +1133,9 @@ def seccion_a():
     desde = marca()
     s = entrar(B)
     cookies = puestas(s[1])
-    pasa(s[0] == 201 and json_de(s[2]) == {"expira_en": 300},
-         f"a) la sesion externa: 201 con solo expira_en ({s[0]}, {s[2][:80]!r})")
+    # Una sesión recién creada, como la del login con contraseña.
+    pasa(s[0] == 201 and json_de(s[2]) == {"expira_en": 300, "inactividad_en": 900, "caduca_en": 28800},
+         f"a) la sesion externa: 201 con solo los segundos ({s[0]}, {s[2][:100]!r})")
     pasa(sorted(cookies) == sorted([ACCESO, RENOVACION]) and None not in cookies.values()
          and cookies[ACCESO][1] == ATRIBUTOS[ACCESO] and cookies[RENOVACION][1] == ATRIBUTOS[RENOVACION]
          and borradas(s[1]) == [(TICKET, "strict")],

@@ -73,7 +73,7 @@ PRUEBAS_POR_FICHERO = {
     "test_instruccion": 33,
     "test_limitador": 20,
     "test_login": 8,
-    "test_login_externo": 23,
+    "test_login_externo": 24,
     "test_personal": 8,
     "test_proveedores_externos": 18,
     "test_rutas_externo": 20,
@@ -83,7 +83,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 332
+TOTAL_PRUEBAS = 333
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes

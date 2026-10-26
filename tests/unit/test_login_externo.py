@@ -41,9 +41,13 @@ CIFRADO = cripto.cifrar(CLAVE_EMPRESA, SECRETO_RFC, cripto.aad_totp(EMPRESA, USU
 RESERVADA = (DISPOSITIVO, USUARIO, "admin", "$argon2id$hash-de-la-cuenta", CIFRADO, 1, 1)
 # Lo que devuelve un INSERT ... RETURNING id u otra sentencia sin fila propia.
 POR_DEFECTO = (uuid.UUID(int=99),)
+# Lo que devuelve SQL_NUEVA_SESION: el id y los segundos hasta el cierre por
+# inactividad y hasta las 8 horas.
+NUEVA_SESION = (uuid.UUID(int=98), 900, 28800)
 SESION_PERSONAL = personal.Sesion(empresa_id=EMPRESA, identificador=IDENTIFICADOR, sesion_id=SESION,
                                   usuario_id=USUARIO, dispositivo_id=DISPOSITIVO, rol="admin",
-                                  email="titular@empresa.es", nombre_empresa="Empresa")
+                                  email="titular@empresa.es", nombre_empresa="Empresa", inactividad_en=843,
+                                  caduca_en=27001)
 
 
 def ticket(proposito=externo.PROPOSITO_ACCESO, sesion_id=None, empresa_id=EMPRESA):
@@ -98,7 +102,8 @@ def parches(base, resuelta=EMPRESA):
 
 
 def filas_login(**cambios):
-    filas = {personal.SQL_RESERVAR_DISPOSITIVO_EXTERNO: RESERVADA, personal.SQL_CLAVE_VERSION: ENVUELTA}
+    filas = {personal.SQL_RESERVAR_DISPOSITIVO_EXTERNO: RESERVADA, personal.SQL_CLAVE_VERSION: ENVUELTA,
+             personal.SQL_NUEVA_SESION: NUEVA_SESION}
     filas.update(cambios)
     return filas
 
@@ -149,6 +154,14 @@ class LoginExterno(unittest.TestCase):
         reserva = llamadas[personal.SQL_RESERVAR_DISPOSITIVO_EXTERNO]
         self.assertEqual((reserva["proveedor"], reserva["sub_hmac"]), ("google", SUB_HMAC))
         self.assertIs(llamadas[personal.SQL_CONFIRMAR_ACCESO]["sin_confianza"], False)
+
+    def test_el_acceso_lleva_los_segundos_que_da_la_base(self):
+        # Los segundos restantes salen de la base de datos, que es la que
+        # decide, y no se recalculan aquí: con otra fila, otros segundos.
+        base = Base(filas_login(**{personal.SQL_NUEVA_SESION: (uuid.UUID(int=98), 897, 28000)}))
+        acceso = self.entrar(base)
+        self.assertEqual((acceso.inactividad_en, acceso.caduca_en), (897, 28000))
+        self.assertEqual(dict(base.llamadas)[personal.SQL_NUEVA_SESION]["inactividad"], 15)
 
     def test_sin_vinculo_el_mismo_trabajo_y_el_mismo_fallo(self):
         for nombre, filas in (("con vinculo", filas_login()),
@@ -369,7 +382,8 @@ class LoQueRevocaLosVinculos(unittest.TestCase):
         self.comprobar(base)
 
     def test_cambio_de_contrasena(self):
-        base = Base({personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA, personal.SQL_CLAVE_VERSION: ENVUELTA})
+        base = Base({personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA, personal.SQL_CLAVE_VERSION: ENVUELTA,
+                     personal.SQL_NUEVA_SESION: NUEVA_SESION})
         with parches(base), mock.patch.object(personal, "_comprobar_factores", return_value=5):
             personal.cambiar_contrasena(None, CLAVES, SESION_PERSONAL, "Contrasena-actual-1", "Contrasena-nueva-12",
                                         CODIGO, INSTANTE)

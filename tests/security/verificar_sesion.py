@@ -10,16 +10,19 @@ Sec-Fetch-Site y, si cambian algo, Origin. Prueba:
 * a) arranque y alta de la empresa y de la invitación del admin;
 * b) la activación por el 8445: el secreto TOTP en el cuerpo y el token de
   dispositivo solo en su cookie, con los atributos exactos;
-* c) el login: el cuerpo solo con expira_en y las cookies de acceso y
-  renovación con sus atributos exactos; el dispositivo, leído de su cookie
-  (no se emite otro). Control: el mismo login por el 8443 con Bearer devuelve
-  los tokens en el cuerpo y ninguna cookie;
+* c) el login: el cuerpo solo con los segundos (expira_en 300, y la sesión
+  recién creada con sus 900 de inactividad y sus 28800 de las 8 horas) y las
+  cookies de acceso y renovación con sus atributos exactos; el dispositivo,
+  leído de su cookie (no se emite otro). Control: el mismo login por el 8443
+  con Bearer devuelve los tokens en el cuerpo y ninguna cookie;
 * d) una ruta con sesión por la cookie, y los rechazos: la cookie por el 8443
   (el proxy la quita), sin Sec-Fetch-Site, desde otro puerto (same-site),
-  Bearer y cookie a la vez y una cookie repetida;
+  Bearer y cookie a la vez y una cookie repetida; /yo da lo que le queda a la
+  sesión, ya por debajo de lo del login;
 * e) la renovación: desde otro puerto (Origin del 8444) es un 403 con su
-  evento y sin gastar el token; desde la SPA rota las dos cookies; la cookie
-  de renovación ya usada revoca la sesión;
+  evento y sin gastar el token; desde la SPA rota las dos cookies y devuelve
+  la inactividad entera (900) y lo que queda de las 8 horas; la cookie de
+  renovación ya usada revoca la sesión;
 * f) que el 8443 no deja salir ningún Set-Cookie, aunque la API lo ponga (un
   login de navegador por el 8443);
 * g) el cierre de sesión: borra el acceso y la renovación (no el dispositivo)
@@ -410,8 +413,11 @@ def seccion_c():
     p("=== c) login de la SPA: tokens solo en cookies")
     respuesta = login_spa()
     SESION = sesion_de(respuesta)
-    pasa(respuesta[0] == 201 and json_de(respuesta[2]) == {"expira_en": 300},
-         f"c) el login responde 201 con solo expira_en ({respuesta[0]}, {sorted(json_de(respuesta[2]) or {})})")
+    # La sesión recién creada: ultimo_uso y caduca salen de now() en la misma
+    # sentencia que calcula los segundos, así que son exactos.
+    pasa(respuesta[0] == 201 and json_de(respuesta[2]) == {"expira_en": 300, "inactividad_en": 900,
+                                                            "caduca_en": 28800},
+         f"c) el login responde 201 con solo los segundos ({respuesta[0]}, {json_de(respuesta[2])})")
     pasa(SESION[0] is not None,
          f"c) acceso y renovacion en sus cookies, con sus atributos exactos, y ninguna mas ({nombres(respuesta[1])})")
     if SESION[0] is None:
@@ -422,7 +428,8 @@ def seccion_c():
              "codigo_totp": codigo_libre(SECRETO)}
     codigo, cab, cuerpo = peticion("POST", "/v1/personal/sesiones", puerto=PUERTO_API, cabeceras=CLIENTE, datos=datos)
     claves = sorted(json_de(cuerpo) or {})
-    pasa(codigo == 201 and claves == ["expira_en", "token_acceso", "token_dispositivo", "token_renovacion"]
+    pasa(codigo == 201 and claves == ["caduca_en", "expira_en", "inactividad_en", "token_acceso",
+                                      "token_dispositivo", "token_renovacion"]
          and "set-cookie" not in cab,
          f"c) control: por el 8443 con Bearer, los tokens en el cuerpo ({codigo}, {claves})")
 
@@ -451,6 +458,14 @@ def seccion_d():
     for nombre, (codigo, _, cuerpo), esperado, cuerpo_esperado in casos:
         negativo(f"d) {nombre} -> {esperado} ({codigo}, {cuerpo[:60]!r})",
                  (codigo, cuerpo) == (esperado, cuerpo_esperado), control)
+    # Desde el login ha pasado algo de tiempo y los segundos se redondean
+    # hacia abajo: los dos ya están por debajo de 900 y 28800, y por encima
+    # de 0.
+    datos = json_de(bien[2]) or {}
+    segundos = (datos.get("inactividad_en"), datos.get("caduca_en"))
+    pasa(control and isinstance(segundos[0], int) and isinstance(segundos[1], int)
+         and 0 < segundos[0] < 900 and 0 < segundos[1] < 28800,
+         f"d) /yo da lo que le queda a la sesion, por debajo de lo del login ({segundos})")
 
 
 def renovar(renovacion, origen=ORIGEN_SPA, sitio="same-origin"):
@@ -467,8 +482,14 @@ def seccion_e():
     # Control: la misma cookie desde la SPA renueva, así que el 403 no la gastó.
     bien = renovar(SESION[1])
     nueva = sesion_de(bien)
-    control = bien[0] == 200 and json_de(bien[2]) == {"expira_en": 300} and nueva[0] is not None
+    control = bien[0] == 200 and nueva[0] is not None
     pasa(control, f"e) control: desde la SPA la renovacion rota las dos cookies ({bien[0]}, {nombres(bien[1])})")
+    # La renovación pone ultimo_uso a now(): la inactividad vuelve entera. Las
+    # 8 horas no: siguen contando desde el login.
+    datos = json_de(bien[2]) or {}
+    pasa(sorted(datos) == ["caduca_en", "expira_en", "inactividad_en"] and datos["expira_en"] == 300
+         and datos["inactividad_en"] == 900 and isinstance(datos["caduca_en"], int) and 0 < datos["caduca_en"] < 28800,
+         f"e) la renovacion devuelve la inactividad entera y lo que queda de las 8 horas ({datos})")
     negativo(f"e) desde el 8444 (Origin y same-site) -> 403 sin cookies nuevas ({rechazo[0]})",
              (rechazo[0], rechazo[2]) == (403, CUERPO_403) and "set-cookie" not in rechazo[1], control)
     negativo("e) el rechazo deja el evento literal en el log de la API",
@@ -489,7 +510,7 @@ def seccion_f():
     # Un login de navegador por el 8443: la API lo trata como navegador
     # (Sec-Fetch-Site y Origin de la SPA) y pone las cookies; Caddy las quita.
     por_api = login_spa(PUERTO_API)
-    pasa(por_api[0] == 201 and json_de(por_api[2]) == {"expira_en": 300},
+    pasa(por_api[0] == 201 and json_de(por_api[2]) == {"expira_en": 300, "inactividad_en": 900, "caduca_en": 28800},
          f"f) la API responde como al navegador ({por_api[0]}, {sorted(json_de(por_api[2]) or {})})")
     # Control: por el 8445, el mismo login trae sus cookies.
     por_spa = login_spa()

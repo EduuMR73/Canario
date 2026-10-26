@@ -47,8 +47,9 @@ BORRADO = re.compile(r'(__Host-canario_[a-z]+)=""; expires=[A-Z][a-z]{2}, \d{2} 
 
 SESION = personal.Sesion(empresa_id=uuid.UUID(int=1), identificador="alfa", sesion_id=uuid.UUID(int=9),
                          usuario_id=uuid.UUID(int=2), dispositivo_id=uuid.UUID(int=8), rol="instructor",
-                         email="instructor@alfa.test", nombre_empresa="Alfa")
-LOGIN = {"empresa": "alfa", "email": "instructor@alfa.test", "contrasena": "una contraseña larga",
+                         email="instructor@alfa.test", nombre_empresa="Alfa", inactividad_en=843,
+                         caduca_en=27001)
+LOGIN ={"empresa": "alfa", "email": "instructor@alfa.test", "contrasena": "una contraseña larga",
          "codigo_totp": "123456"}
 
 
@@ -184,16 +185,18 @@ def con_cookies(cabeceras, **valores):
 
 class Respuestas(unittest.TestCase):
     def test_login_en_el_navegador_pone_las_tres_cookies(self):
-        acceso = personal.Acceso(JWT, RENOVACION, DISPOSITIVO)
+        acceso = personal.Acceso(JWT, RENOVACION, 900, 28800, DISPOSITIVO)
         with mock.patch.object(personal, "iniciar_sesion", return_value=acceso) as iniciar:
             estado, cuerpo, cookies = llamar("POST", "/v1/personal/sesiones", ESCRITURA, LOGIN)
-        self.assertEqual((estado, json.loads(cuerpo)), (201, {"expira_en": 300}))
+        # Los tokens, solo en las cookies; en el cuerpo, solo los segundos.
+        self.assertEqual((estado, json.loads(cuerpo)),
+                         (201, {"expira_en": 300, "inactividad_en": 900, "caduca_en": 28800}))
         self.assertEqual(cookies, [COOKIE_ACCESO, COOKIE_RENOVACION, COOKIE_DISPOSITIVO])
         # Sin cookie de dispositivo, entra sin dispositivo.
         self.assertIsNone(iniciar.call_args.args[6])
 
     def test_login_en_el_navegador_lee_el_dispositivo_de_su_cookie(self):
-        acceso = personal.Acceso(JWT, RENOVACION, None)
+        acceso = personal.Acceso(JWT, RENOVACION, 900, 28800, None)
         with mock.patch.object(personal, "iniciar_sesion", return_value=acceso) as iniciar:
             estado, _, cookies = llamar("POST", "/v1/personal/sesiones",
                                         con_cookies(ESCRITURA, dispositivo=DISPOSITIVO), LOGIN)
@@ -210,21 +213,25 @@ class Respuestas(unittest.TestCase):
 
     def test_login_del_cliente_sin_cookies_y_con_los_tokens_en_el_cuerpo(self):
         # Control de las anteriores: el cliente con Bearer no cambia.
-        acceso = personal.Acceso(JWT, RENOVACION, DISPOSITIVO)
+        acceso = personal.Acceso(JWT, RENOVACION, 900, 28800, DISPOSITIVO)
         with mock.patch.object(personal, "iniciar_sesion", return_value=acceso):
             estado, cuerpo, cookies = llamar("POST", "/v1/personal/sesiones", {}, LOGIN)
         self.assertEqual((estado, cookies), (201, []))
         self.assertEqual(json.loads(cuerpo), {"token_acceso": JWT, "token_renovacion": RENOVACION, "expira_en": 300,
+                                              "inactividad_en": 900, "caduca_en": 28800,
                                               "token_dispositivo": DISPOSITIVO})
 
     def test_renovacion_en_el_navegador_lee_su_cookie(self):
-        nuevo = personal.Acceso(JWT, RENOVACION)
+        # Una renovación a media sesión: la inactividad vuelve a sus 15
+        # minutos y las 8 horas siguen corriendo.
+        nuevo = personal.Acceso(JWT, RENOVACION, 900, 27001)
         with mock.patch.object(personal, "renovar", return_value=nuevo) as renovar:
             estado, cuerpo, cookies = llamar("POST", "/v1/personal/sesiones/renovacion",
                                              con_cookies(ESCRITURA, renovacion="viejo.token"), {})
         self.assertEqual(renovar.call_args.args[2], "viejo.token")
-        self.assertEqual((estado, json.loads(cuerpo), cookies), (200, {"expira_en": 300},
-                                                                  [COOKIE_ACCESO, COOKIE_RENOVACION]))
+        self.assertEqual((estado, json.loads(cuerpo), cookies),
+                         (200, {"expira_en": 300, "inactividad_en": 900, "caduca_en": 27001},
+                          [COOKIE_ACCESO, COOKIE_RENOVACION]))
 
     def test_renovacion_cada_token_en_su_sitio(self):
         with mock.patch.object(personal, "renovar") as renovar:
@@ -242,8 +249,11 @@ class Respuestas(unittest.TestCase):
         with mock.patch.object(personal, "autenticar", return_value=SESION) as autenticar, \
                 mock.patch.object(personal, "invitacion_pendiente", return_value=False), \
                 mock.patch.object(personal, "vinculos", return_value=()):
-            estado, _, _ = llamar("GET", "/v1/personal/yo", con_cookies(LECTURA, acceso=JWT, renovacion="r.r"))
+            estado, cuerpo, _ = llamar("GET", "/v1/personal/yo", con_cookies(LECTURA, acceso=JWT, renovacion="r.r"))
         self.assertEqual((estado, autenticar.call_args.args[2]), (200, JWT))
+        # Los segundos restantes de /yo salen de la sesión autenticada.
+        datos = json.loads(cuerpo)
+        self.assertEqual((datos["inactividad_en"], datos["caduca_en"]), (843, 27001))
 
     def test_cierre_en_el_navegador_borra_acceso_y_renovacion(self):
         with mock.patch.object(personal, "autenticar", return_value=SESION), \

@@ -348,19 +348,34 @@ SQL_LIBERAR_DISPOSITIVO = (
 SQL_NUEVO_DISPOSITIVO = (
     "insert into canal.dispositivo_personal (empresa_id, usuario_id, token_sha256) values (%s, %s, %s) returning id"
 )
-SQL_NUEVA_SESION = (
-    "insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256) "
-    "values (%s, %s, %s, %s) returning id"
-)
+# Los segundos que le quedan a una sesión antes de cerrarse por inactividad y
+# por las 8 horas, para que la SPA avise antes (WCAG 2.2, 2.2.1). Los calcula
+# la base de datos, que es la que decide, y se dan relativos y redondeados
+# hacia abajo: el reloj del cliente puede ir mal y nunca debe creer que le
+# queda más de lo que le queda. Con la sesión recién creada o renovada,
+# ultimo_uso es now() y la inactividad da sus 15 minutos enteros.
+SQL_NUEVA_SESION = """
+    insert into canal.sesion_personal (empresa_id, usuario_id, dispositivo_id, token_sha256)
+    values (%(empresa)s, %(usuario)s, %(dispositivo)s, %(huella)s)
+    returning id,
+              floor(extract(epoch from ultimo_uso + make_interval(mins => %(inactividad)s) - now()))::integer,
+              floor(extract(epoch from caduca - now()))::integer
+"""
 SQL_AUDITAR = (
     "insert into canal.registro_auditoria (empresa_id, actor, accion, objeto_id) values (%s, %s, %s, %s)"
 )
 
 # Autenticación de un JWT de acceso ya verificado: su sesión sigue viva, es
 # de la cuenta del token, la cuenta está activa y con TOTP y el dispositivo
-# no está revocado. Solo lectura: la inactividad se mide al renovar.
+# no está revocado. Solo lectura: la inactividad se mide al renovar. Con la
+# misma lectura salen los segundos restantes (SQL_NUEVA_SESION); el de la
+# inactividad, nunca negativo: un JWT vivo no implica que la sesión aún se
+# pueda renovar.
 SQL_AUTENTICAR = """
-    select s.dispositivo_id, u.rol, u.email, e.nombre
+    select s.dispositivo_id, u.rol, u.email, e.nombre,
+           greatest(0, floor(extract(epoch from s.ultimo_uso + make_interval(mins => %(inactividad)s)
+                                                - now())))::integer,
+           floor(extract(epoch from s.caduca - now()))::integer
       from canal.sesion_personal s
       join canal.usuario_personal u on u.empresa_id = s.empresa_id and u.id = s.usuario_id
       join canal.dispositivo_personal d on d.empresa_id = s.empresa_id and d.id = s.dispositivo_id
@@ -382,7 +397,9 @@ SQL_RENOVAR = """
        and cardinality(s.tokens_usados) < %(tope)s
        and u.empresa_id = s.empresa_id and u.id = s.usuario_id and u.activo and u.totp_activo
        and d.empresa_id = s.empresa_id and d.id = s.dispositivo_id and not d.revocado
-    returning s.id, s.usuario_id
+    returning s.id, s.usuario_id,
+              floor(extract(epoch from s.ultimo_uso + make_interval(mins => %(inactividad)s) - now()))::integer,
+              floor(extract(epoch from s.caduca - now()))::integer
 """
 # Reutilización: un token de renovación que ya se gastó revoca su sesión. El
 # operador @> usa el índice GIN de tokens_usados.
@@ -562,12 +579,20 @@ class Sesion:
     rol: str
     email: str
     nombre_empresa: str
+    # Segundos hasta el cierre por inactividad y hasta las 8 horas, en el
+    # momento de autenticar (SQL_AUTENTICAR).
+    inactividad_en: int
+    caduca_en: int
 
 
 @dataclass(frozen=True)
 class Acceso:
     token_acceso: str
     token_renovacion: str
+    # Segundos hasta el cierre por inactividad y hasta las 8 horas, recién
+    # creada o renovada la sesión (SQL_NUEVA_SESION).
+    inactividad_en: int
+    caduca_en: int
     # Solo si el login fue por el camino sin confianza: el dispositivo nuevo.
     token_dispositivo: str | None = None
 
@@ -726,11 +751,13 @@ def _registrar_login_fallido(empresa_id, reservada, camino):
 def _nueva_sesion(conexion, claves, empresa_id, identificador, usuario_id, dispositivo_id, token_dispositivo=None):
     """Crea una sesión en la transacción abierta y devuelve sus dos tokens."""
     token_renovacion, crudo = cripto.generar_token()
-    sesion_id = conexion.execute(SQL_NUEVA_SESION, [
-        empresa_id, usuario_id, dispositivo_id, cripto.huella_token(cripto.ETIQUETA_RENOVACION, crudo)]).fetchone()[0]
+    sesion_id, inactividad_en, caduca_en = conexion.execute(SQL_NUEVA_SESION, {
+        "empresa": empresa_id, "usuario": usuario_id, "dispositivo": dispositivo_id,
+        "huella": cripto.huella_token(cripto.ETIQUETA_RENOVACION, crudo),
+        "inactividad": INACTIVIDAD_SESION_MINUTOS}).fetchone()
     return Acceso(token_acceso=tokens.emitir(claves.firma_tokens, identificador, usuario_id, sesion_id),
                   token_renovacion=token_compuesto(identificador, token_renovacion),
-                  token_dispositivo=token_dispositivo)
+                  inactividad_en=inactividad_en, caduca_en=caduca_en, token_dispositivo=token_dispositivo)
 
 
 def _comprobar_factores(claves, empresa_id, reservada, envuelta, contrasena, codigo, instante):
@@ -832,14 +859,14 @@ def autenticar(pool, claves, token):
     if empresa_id is None:
         raise SesionNoValida
     with bd.transaccion_empresa(pool, empresa_id, solo_lectura=True) as conexion:
-        fila = conexion.execute(SQL_AUTENTICAR, {"sesion": portador.sesion_id,
-                                                 "usuario": portador.usuario_id}).fetchone()
+        fila = conexion.execute(SQL_AUTENTICAR, {"sesion": portador.sesion_id, "usuario": portador.usuario_id,
+                                                 "inactividad": INACTIVIDAD_SESION_MINUTOS}).fetchone()
     if fila is None:
         raise SesionNoValida
-    dispositivo_id, rol, email, nombre = fila
+    dispositivo_id, rol, email, nombre, inactividad_en, caduca_en = fila
     return Sesion(empresa_id=empresa_id, identificador=portador.identificador, sesion_id=portador.sesion_id,
                   usuario_id=portador.usuario_id, dispositivo_id=dispositivo_id, rol=rol, email=email,
-                  nombre_empresa=nombre)
+                  nombre_empresa=nombre, inactividad_en=inactividad_en, caduca_en=caduca_en)
 
 
 def renovar(pool, claves, token_renovacion):
@@ -867,9 +894,10 @@ def renovar(pool, claves, token_renovacion):
                          empresa_id, revocada[1], revocada[0])
     if fila is None:
         raise SesionNoValida
-    sesion_id, usuario_id = fila
+    sesion_id, usuario_id, inactividad_en, caduca_en = fila
     return Acceso(token_acceso=tokens.emitir(claves.firma_tokens, identificador, usuario_id, sesion_id),
-                  token_renovacion=token_compuesto(identificador, nuevo))
+                  token_renovacion=token_compuesto(identificador, nuevo),
+                  inactividad_en=inactividad_en, caduca_en=caduca_en)
 
 
 def cerrar_sesion(pool, sesion):

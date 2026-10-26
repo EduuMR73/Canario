@@ -131,7 +131,8 @@ class EventoDeRedaccion(unittest.TestCase):
 
 SESION = personal.Sesion(empresa_id=uuid.UUID(int=1), identificador="alfa", sesion_id=uuid.UUID(int=9),
                          usuario_id=uuid.UUID(int=2), dispositivo_id=uuid.UUID(int=8), rol="instructor",
-                         email="instructor@alfa.test", nombre_empresa="Alfa")
+                         email="instructor@alfa.test", nombre_empresa="Alfa", inactividad_en=843,
+                         caduca_en=27001)
 INICIO_EVENTO = ("WARNING:canario.personal:EVENTO acceso_denegado: empresa=00000000-0000-0000-0000-000000000001 "
                  "cuenta=00000000-0000-0000-0000-000000000002 ")
 
