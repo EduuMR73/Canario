@@ -4,39 +4,9 @@
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "last_updated": "2026-10-23T10:50:00Z",
-  "version": 3,
+  "last_updated": "2026-10-26T21:10:00Z",
+  "version": 4,
   "statements": [
-    {
-      "vulnerability": {"name": "CVE-2026-111943"},
-      "timestamp": "2026-10-23T10:50:00Z",
-      "products": [
-        {
-          "@id": "pkg:golang/caddy",
-          "subcomponents": [
-            {"@id": "pkg:golang/stdlib@v1.26.8"}
-          ]
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. En Caddy 2.11.7 eso pasa en la autenticación de clientes (modules/caddytls/connpolicy.go), en el admin remoto (admin.go), en todo cliente TLS (ACME, reverse_proxy a https://) y en la instalación de la raíz local en el almacén del sistema (modules/caddypki/crypto.go, trusted). La configuración adaptada no tiene ninguno: admin desactivado, install_trust en false, solo emisores internal, sin client_authentication y sin tls en ningún transporte (comprobado en verificar_escaneos.py, f, en lista blanca, con un Caddyfile de control que rompe cada condición). Se revisa al publicarse una imagen de Caddy con Go 1.26.10 o posterior."
-    },
-    {
-      "vulnerability": {"name": "CVE-2026-111943"},
-      "timestamp": "2026-10-23T10:50:00Z",
-      "products": [
-        {
-          "@id": "pkg:golang/github.com/axllent/mailpit",
-          "subcomponents": [
-            {"@id": "pkg:golang/stdlib@v1.27.2"}
-          ]
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. Mailpit solo abriría una conexión TLS hacia fuera con el reenvío SMTP o los webhooks, y no tiene ninguna variable de configuración (ni MP_ ni otra) y está solo en la red interna correo, sin salida (comprobado en verificar_escaneos.py, f, con un compose de control que añade una variable y otra red). Es solo de desarrollo (perfil desarrollo). Se retira al subir a mailpit 1.32.0 o posterior, que se adopta desde el 5 de noviembre de 2026 (regla de los 14 días, docs/threat-model.md, 6.17)."
-    },
     {
       "vulnerability": {"name": "CVE-2026-78669"},
       "timestamp": "2026-10-15T06:20:00Z",
@@ -82,6 +52,36 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "Agotamiento de memoria con referencias repetidas a extensiones exteriores de ECH en crypto/tls. En Go 1.26.8, processECHClientHello devuelve el ClientHello exterior sin descifrarlo si no hay claves ECH, y las referencias exteriores solo se procesan en decodeInnerClientHello, después de descifrar. Caddy 2.11.7 solo instala GetEncryptedClientHelloKeys con la opción global 'ech' (modules/caddytls/connpolicy.go), que el Caddyfile no usa (la configuración adaptada no contiene encrypted_client_hello, comprobado en verificar_escaneos.py)."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-92392"},
+      "timestamp": "2026-10-26T21:10:00Z",
+      "products": [
+        {"@id": "pkg:apk/alpine/libcurl@8.22.0-r0"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Uso tras liberar en libcurl al subir datos por HTTP/2. En la imagen de PostgreSQL, libcurl solo la enlaza /usr/local/lib/libpq-oauth-18.so, el módulo OAuth del lado cliente de libpq: el servidor no lo carga, ningún binario de /usr/local/bin enlaza libcurl y pg_hba.conf no tiene el método oauth (comprobado en verificar_escaneos.py, f, con ldd sobre la imagen y con el propio módulo como control). En la imagen de Caddy no está: proxy/Dockerfile quita curl. Se retira al publicarse una imagen de PostgreSQL con libcurl 8.23.0-r0 o posterior y 14 días."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-111497"},
+      "timestamp": "2026-10-26T21:10:00Z",
+      "products": [
+        {"@id": "pkg:apk/alpine/brotli-libs@1.2.0-r1"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Escritura fuera de límites en el decodificador de Brotli. En la imagen de PostgreSQL, brotli-libs solo la usa libcurl (apk info -r), para descomprimir respuestas HTTP, y libcurl solo la carga el módulo OAuth del lado cliente de libpq, que el servidor no usa (ver CVE-2026-92392, comprobado en verificar_escaneos.py, f). En la imagen de Caddy no está: se va con curl. Se retira al publicarse una imagen de PostgreSQL con brotli-libs 1.2.1-r0 o posterior y 14 días."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-109869"},
+      "timestamp": "2026-10-26T21:10:00Z",
+      "products": [
+        {"@id": "pkg:npm/undici@8.11.2"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
+      "impact_statement": "Caída del proceso de Node.js cuando un servidor malicioso responde a fetch() con más de cinco codificaciones de contenido y cierra la conexión. undici solo llega a la SPA por jsdom, el entorno de las pruebas unitarias de Vitest, que no está en el JavaScript compilado y que se ejecuta en un contenedor sin red (verificar_spa.py, h, con su control de red): ningún servidor ajeno puede responder. Va en este documento porque verificar_escaneos.py, j, lo aplica al escanear spa/package-lock.json. Se retira al adoptar undici 8.12.2 o posterior, publicada el 15 de octubre de 2026, desde el 29 de octubre (regla de los 14 días, docs/threat-model.md, 6.17)."
     }
   ]
 }

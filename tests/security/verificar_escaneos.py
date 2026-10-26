@@ -18,28 +18,33 @@ Qué prueba:
      como no explotable en tests/security/canario.openvex.json, ningún secreto,
      declaraciones VEX vigentes (30 días como máximo), con efecto y atadas a la
      versión exacta del componente; postgres sin gosu y sin root por defecto;
+     caddy sin curl, libcurl ni brotli-libs;
      las vulnerabilidades sin arreglo se listan (riesgo residual, sección 8 del
      modelo de amenazas);
   f) que lo que el VEX declara no alcanzable no lo es: Caddy solo con HTTP/1.1
      (configuración adaptada y ALPN real en los dos puertos), cada file_server
      detrás de la quita de la cabecera Range, sin ECH y sin verificar nunca
-     el certificado de otro (lista blanca sobre la configuración adaptada); y
-     mailpit sin configuración y solo en su red interna;
+     el certificado de otro (lista blanca sobre la configuración adaptada);
+     mailpit sin configuración y solo en su red interna; y en postgres, que
+     libcurl solo la enlaza el módulo OAuth del lado cliente de libpq y que
+     pg_hba.conf no tiene el método oauth;
   g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL);
   h) un SBOM CycloneDX por imagen, que se deja en el directorio temporal del
      sistema (canario_sbom);
   i) versiones de las herramientas y fecha de la base de datos de Trivy, para
      poder reproducir el resultado;
   j) Trivy sobre spa/package-lock.json, con las dependencias de desarrollo:
-     ninguna vulnerabilidad HIGH o CRITICAL con arreglo publicado. La imagen de
-     Caddy solo lleva el JavaScript compilado, sin package.json: Trivy no
-     sabría de qué paquetes viene, así que se escanea el lock. Las de
-     desarrollo cuentan porque se ejecutan al compilar (proxy/Dockerfile).
-     Además: el override de vite en spa/package.json es el que está en el
-     lock y sigue haciendo falta (falla cuando @angular/build ya trae una
-     vite arreglada, para retirarlo), y cada entrada del lock que cambia
-     respecto a HEAD se lista con su fecha de publicación y tiene al menos 14
-     días (la consulta al registro de npm es solo de metadatos, en JSON).
+     ninguna vulnerabilidad HIGH o CRITICAL con arreglo publicado que no esté
+     declarada en el mismo VEX (con su control y su atadura a la versión,
+     como en las imágenes). La imagen de Caddy solo lleva el JavaScript
+     compilado, sin package.json: Trivy no sabría de qué paquetes viene, así
+     que se escanea el lock. Las de desarrollo cuentan porque se ejecutan al
+     compilar (proxy/Dockerfile). Además: cada override de spa/package.json
+     (vite y zod) es el que está en el lock y sigue haciendo falta (falla
+     cuando el paquete que lo fija ya trae una versión arreglada, para
+     retirarlo), y cada entrada del lock que cambia respecto a HEAD se lista
+     con su fecha de publicación y tiene al menos 14 días (la consulta al
+     registro de npm es solo de metadatos, en JSON).
 Cada prueba negativa lleva su control positivo con datos sintéticos: si el
 control falla, el resultado es SIN CONCLUSION, nunca PASA. Los oráculos son
 literales.
@@ -140,13 +145,16 @@ LOCK_CONTROL = {
     "packages": {"": {"name": "control", "dependencies": {"@angular/common": "22.0.0"}},
                  "node_modules/@angular/common": {"version": "22.0.0"}},
 }
-# Override de vite (CVE-2026-112942, arreglada en la 8.3.3): @angular/build
-# 22.2.x fija vite 8.3.0 exacta. Se fuerza la 8.3.4, la que ya usa
-# @angular/build 22.3.0-next, con más de 14 días al fijarla.
-OVERRIDES_SPA = {"vite": "8.3.4"}
-VITE_ARREGLADA = (8, 3, 3)
-# Control del override: un @angular/build que ya declara una vite arreglada.
-VITE_DECLARADA_CONTROL = "8.3.4"
+# Overrides de spa/package.json: (paquete que fija la versión vulnerable,
+# dependencia, primera versión arreglada, versión que declararía un padre ya
+# arreglado, para el control). vite (CVE-2026-112942, arreglada en la 8.3.3):
+# @angular/build 22.2.x fija vite 8.3.0 exacta; se fuerza la 8.3.4, la que ya
+# usa @angular/build 22.3.0-next, con más de 14 días al fijarla. zod
+# (CVE-2023-54404, arreglada en la 4.6.6): @angular/cli 22.2.x fija zod 4.6.5
+# exacta; la 4.6.6 se publicó el 11 de octubre de 2026.
+OVERRIDES_SPA = {"vite": "8.3.4", "zod": "4.6.6"}
+OVERRIDES_MOTIVO = {"vite": ("@angular/build", (8, 3, 3), "8.3.4"),
+                    "zod": ("@angular/cli", (4, 6, 6), "4.6.6")}
 # Regla de los 14 días (docs/threat-model.md, 6.17) sobre lo que cambia en el
 # lock. Control: vite 8.3.4 (publicada el 8 de octubre) evaluada como si
 # hoy fuera el 9 de octubre tiene menos de 14 días.
@@ -161,6 +169,17 @@ SBOM_API_CONTROL = ("fastapi", "0.143.0")
 GOSU = "/usr/local/bin/gosu"
 USUARIO_POSTGRES = "70:70"
 IMG_POSTGRES_BASE = "postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+# Alcanzabilidad de libcurl en postgres (CVE-2026-92392 y CVE-2026-111497): el
+# único fichero que la enlaza, el módulo OAuth del lado cliente de libpq, y el
+# pg_hba.conf real. Control: una regla con el método oauth.
+LIBPQ_OAUTH = "/usr/local/lib/libpq-oauth-18.so"
+PG_HBA = RAIZ / "db" / "pg_hba.conf"
+PG_HBA_CONTROL = "host canario aplicacion samenet oauth issuer=https://idp.invalid scope=openid\n"
+
+# Caddy sin curl (proxy/Dockerfile): ni curl ni lo que solo él necesitaba, con
+# sus CVE (CVE-2026-92392 y CVE-2026-111497). Control: la imagen base los trae.
+IMG_CADDY_BASE = "caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
+PAQUETES_SIN_CURL = ("curl", "libcurl", "brotli-libs")
 
 # VEX
 VEX = RAIZ / "tests" / "security" / "canario.openvex.json"
@@ -170,13 +189,19 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
                            "vulnerable_code_cannot_be_controlled_by_adversary",
                            "inline_mitigations_already_exist"}
 # Lo que el VEX declara no explotable en cada imagen.
-CVES_VEX = {"caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031", "CVE-2026-111943"},
-            "mailpit": {"CVE-2026-111943"}}
+# CVE-2026-111943 se retiró el 26 de octubre de 2026: la base de datos de Trivy
+# lo bajó a MEDIUM y la declaración ya no suprimía nada.
+CVES_VEX = {"caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031"},
+            "postgres": {"CVE-2026-92392", "CVE-2026-111497"}}
+# Lo que el mismo VEX declara no explotable en spa/package-lock.json (j).
+CVES_VEX_LOCK = {"CVE-2026-109869"}
 # Para el control de atadura a la versión: las mismas declaraciones con la
 # versión siguiente del componente no deben suprimir nada.
 VERSIONES_VEX = {"pkg:golang/stdlib@v1.26.8": "pkg:golang/stdlib@v1.26.9",
                  "pkg:golang/golang.org/x/net@v0.59.0": "pkg:golang/golang.org/x/net@v0.60.0",
-                 "pkg:golang/stdlib@v1.27.2": "pkg:golang/stdlib@v1.27.3"}
+                 "pkg:apk/alpine/libcurl@8.22.0-r0": "pkg:apk/alpine/libcurl@8.23.0-r0",
+                 "pkg:apk/alpine/brotli-libs@1.2.0-r1": "pkg:apk/alpine/brotli-libs@1.2.1-r0",
+                 "pkg:npm/undici@8.11.2": "pkg:npm/undici@8.12.2"}
 
 # Caddy
 PROTOCOLOS_CADDY = ["h1"]
@@ -612,6 +637,19 @@ def seccion_e():
     negativo(f"e) postgres: la imagen declara USER {USUARIO_POSTGRES}", usuario(NOMBRES["postgres"]) == USUARIO_POSTGRES,
              usuario(IMG_POSTGRES_BASE) == "")
 
+    # Caddy sin curl, libcurl ni brotli-libs. Control: la imagen base los trae.
+    def paquetes_apk(imagen):
+        orden = "; ".join(f"apk info -e {n} >/dev/null && echo {n}" for n in PAQUETES_SIN_CURL)
+        r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                      "--user", "65534:65534", "--entrypoint", "sh", imagen, "-c", f"{orden}; true"])
+        return sorted(r.out.split())
+
+    ejecutar(["docker", "pull", "-q", IMG_CADDY_BASE], timeout=600)
+    en_base = paquetes_apk(IMG_CADDY_BASE)
+    en_caddy = paquetes_apk(NOMBRES["caddy"])
+    negativo(f"e) caddy: la imagen no contiene {list(PAQUETES_SIN_CURL)} ({en_caddy})", en_caddy == [],
+             en_base == sorted(PAQUETES_SIN_CURL), f"control: la base trae {en_base}")
+
     # Control de Trivy: rootfs sintético con Jinja2 2.10 y un token.
     token = token_sintetico()
     rfs = TEMPORAL / "control_rootfs"
@@ -641,17 +679,17 @@ def seccion_e():
         pasa(d.get("status") == "not_affected" and d.get("justification") in JUSTIFICACIONES_OPENVEX
              and len(d.get("impact_statement", "")) > 40,
              f"e) VEX {cve}: not_affected con justificacion OpenVEX valida ({d.get('justification')}) e impact_statement")
-        subcomponentes = [s["@id"] for prod in d["products"] for s in prod.get("subcomponents", [])]
+        # El componente vulnerable: el subcomponente de un binario (Go) o, en
+        # un paquete del sistema o de npm, el propio producto.
+        subcomponentes = ([s["@id"] for prod in d["products"] for s in prod.get("subcomponents", [])]
+                          or [prod["@id"] for prod in d["products"]])
         pasa(subcomponentes and all("@" in s for s in subcomponentes),
              f"e) VEX {cve}: atada a version exacta del componente {subcomponentes}")
 
     # Cada imagen con declaraciones: sin VEX (control: el VEX es lo que las
     # suprime) y con el VEX movido a la versión siguiente del componente
     # (control de atadura a la versión).
-    texto = VEX.read_text(encoding="utf-8")
-    for actual, siguiente in VERSIONES_VEX.items():
-        texto = texto.replace(actual, siguiente)
-    vex_movido = escribir(TEMPORAL / "vex_movido" / "movido.openvex.json", texto)
+    vex_movido = escribir_vex_movido()
     control_vex = {}
     for nombre, cves in sorted(CVES_VEX.items()):
         _, sin_vex = escanear(nombre)
@@ -686,6 +724,15 @@ def seccion_e():
         for cve in sorted(cves):
             negativo(f"e) VEX {cve}: suprime el hallazgo en {nombre} (una declaracion sin efecto se revisa y se retira)",
                      (nombre, cve) in suprimidas_total, control_vex[nombre])
+
+
+def escribir_vex_movido():
+    """El VEX con cada componente en su versión siguiente: no debe suprimir
+    nada (control de la atadura a la versión, e y j)."""
+    texto = VEX.read_text(encoding="utf-8")
+    for actual, siguiente in VERSIONES_VEX.items():
+        texto = texto.replace(actual, siguiente)
+    return escribir(TEMPORAL / "vex_movido" / "movido.openvex.json", texto)
 
 
 def json_de_texto(texto):
@@ -866,7 +913,7 @@ def adaptar(caddyfile=None):
 
 
 def seccion_f():
-    p("=== f) alcanzabilidad en Caddy (lo que sostiene el VEX)")
+    p("=== f) alcanzabilidad en Caddy y en PostgreSQL (lo que sostiene el VEX)")
     real = adaptar()
     control = adaptar(escribir(TEMPORAL / "caddy_adapt" / "Caddyfile", caddyfile_control([
         ("\tprotocols h1\n", "\tprotocols h1 h2\n"),
@@ -884,7 +931,9 @@ def seccion_f():
              False in control["file_server"], f"control: {control['file_server']}")
     negativo("f) configuracion adaptada: sin encrypted_client_hello (CVE-2026-97031)", not real["ech"], control["ech"])
     # CVE-2026-111943: Caddy no verifica ningún certificado ajeno. Control: el
-    # Caddyfile con un cambio que rompe cada condición.
+    # Caddyfile con un cambio que rompe cada condición. Desde el 26 de octubre
+    # de 2026 es MEDIUM y ya no está en el VEX, pero sigue sin arreglo en las
+    # imágenes de Caddy y mailpit: esto es lo que demuestra que no se alcanza.
     control_x509 = adaptar(escribir(TEMPORAL / "caddy_x509" / "Caddyfile", caddyfile_control(CONTROL_X509)))
     for condicion, cumple in real["x509"].items():
         negativo(f"f) configuracion adaptada: {condicion} (CVE-2026-111943)", cumple,
@@ -897,6 +946,19 @@ def seccion_f():
     control_mailpit = mailpit_sin_salida(["-f", str(compose_control)])
     for condicion, cumple in real_mailpit.items():
         negativo(f"f) mailpit: {condicion} (CVE-2026-111943)", cumple, control_mailpit[condicion] is False)
+
+    # CVE-2026-92392 y CVE-2026-111497 en postgres: libcurl (y brotli-libs, que
+    # solo usa libcurl) solo la enlaza el módulo OAuth del lado cliente de
+    # libpq; ningún binario del servidor. Control: ese módulo sí aparece, así
+    # que la búsqueda con ldd encuentra lo que busca.
+    enlazan = enlazan_libcurl(NOMBRES["postgres"])
+    control_ldd = LIBPQ_OAUTH in enlazan
+    pasa(control_ldd, f"f) postgres: control: ldd encuentra libcurl en {LIBPQ_OAUTH}")
+    negativo(f"f) postgres: solo {LIBPQ_OAUTH} enlaza libcurl, ningun binario del servidor ({enlazan})",
+             enlazan == [LIBPQ_OAUTH], control_ldd)
+    metodos = metodos_hba(PG_HBA.read_text(encoding="utf-8"))
+    negativo(f"f) postgres: db/pg_hba.conf sin el metodo oauth ({sorted(metodos)})", "oauth" not in metodos,
+             "oauth" in metodos_hba(PG_HBA_CONTROL))
 
     # ALPN real contra dos Caddy en marcha en una red interna: el de la imagen
     # y uno de control con "protocols h1 h2".
@@ -920,6 +982,29 @@ def seccion_f():
         negativo(f"f) ALPN en {puerto}: ofreciendo h2 y http/1.1, Caddy elige {ALPN_REAL}",
                  elegido.get(f"real:{puerto}") == ALPN_REAL, elegido.get("control:8443") == ALPN_CONTROL,
                  f"real={elegido.get(f'real:{puerto}')} control={elegido.get('control:8443')}")
+
+
+def enlazan_libcurl(imagen):
+    """Los ficheros de la imagen que enlazan libcurl, según ldd: los de
+    PostgreSQL (/usr/local) y los ejecutables del sistema."""
+    orden = ("find /usr/local /bin /sbin /usr/bin /usr/sbin -type f 2>/dev/null | while read -r f; do "
+             "ldd \"$f\" 2>/dev/null | grep -q libcurl && echo \"$f\"; done; true")
+    r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--user", "70:70",
+                  "--entrypoint", "sh", imagen, "-c", orden], timeout=300)
+    return sorted(r.out.split())
+
+
+def metodos_hba(texto):
+    """Los métodos de autenticación de un pg_hba.conf: el cuarto campo en las
+    reglas local y el quinto en las demás."""
+    metodos = set()
+    for linea in texto.splitlines():
+        campos = linea.split("#", 1)[0].split()
+        if campos:
+            indice = 3 if campos[0] == "local" else 4
+            if len(campos) > indice:
+                metodos.add(campos[indice])
+    return metodos
 
 
 # ---------------------------------------------------------------------------
@@ -951,13 +1036,18 @@ def seccion_g():
 # ---------------------------------------------------------------------------
 # j) Dependencias de npm de la SPA (Trivy fs sobre el lock)
 # ---------------------------------------------------------------------------
-def lock_npm(directorio):
+def lock_npm(directorio, vex=None):
     """Trivy sobre el package-lock.json de un directorio, sin red, con las
     dependencias de desarrollo y todas las severidades: el criterio se aplica
-    después, igual para el control y para el real."""
-    r = trivy(["fs", "/lock", "--scanners", "vuln", "--include-dev-deps", "--skip-db-update", "--offline-scan",
-               "--skip-version-check", "--no-progress", "-q", "--format", "json"],
-              montajes=[montaje(directorio, "/lock")])
+    después, igual para el control y para el real. Con vex, también lo que
+    suprime (--show-suppressed)."""
+    args = ["fs", "/lock", "--scanners", "vuln", "--include-dev-deps", "--skip-db-update", "--offline-scan",
+            "--skip-version-check", "--no-progress", "-q", "--format", "json"]
+    montajes = [montaje(directorio, "/lock")]
+    if vex is not None:
+        montajes.append(montaje(vex.parent, "/vex"))
+        args += ["--vex", f"/vex/{vex.name}", "--show-suppressed"]
+    r = trivy(args, montajes=montajes)
     return r, json_de_texto(r.out)
 
 
@@ -967,13 +1057,14 @@ def version(texto):
     return tuple(int(x) for x in m.groups()) if m else None
 
 
-def override_vite_necesario(lock):
-    """True si @angular/build declara una vite anterior a la arreglada: el
-    override hace falta. False si ya la trae arreglada: el override sobra y
-    se retira. None si el lock no permite decidirlo."""
-    declarada = version(((lock.get("packages") or {}).get("node_modules/@angular/build") or {})
-                        .get("dependencies", {}).get("vite"))
-    return None if declarada is None else declarada < VITE_ARREGLADA
+def override_necesario(lock, nombre):
+    """True si el paquete que fija la dependencia declara una versión anterior
+    a la arreglada: el override hace falta. False si ya la trae arreglada: el
+    override sobra y se retira. None si el lock no permite decidirlo."""
+    padre, arreglada, _ = OVERRIDES_MOTIVO[nombre]
+    declarada = version(((lock.get("packages") or {}).get(f"node_modules/{padre}") or {})
+                        .get("dependencies", {}).get(nombre))
+    return None if declarada is None else declarada < arreglada
 
 
 def entradas_cambiadas(lock, lock_antes):
@@ -1025,34 +1116,55 @@ def seccion_j():
     real_dir = TEMPORAL / "lock_spa"
     real_dir.mkdir()
     shutil.copyfile(RAIZ / "spa" / "package-lock.json", real_dir / "package-lock.json")
-    r, informe = lock_npm(real_dir)
+    # El VEX: sin él, Trivy reporta lo que declara (control), y movido a la
+    # versión siguiente no suprime nada (atadura a la versión).
+    def graves_de(informe):
+        return {v["VulnerabilityID"] for _, v in hallazgos(informe)[0]
+                if v.get("Severity") in SEVERIDADES.split(",") and v.get("FixedVersion")}
+
+    _, sin_vex = lock_npm(real_dir)
+    control_vex_lock = CVES_VEX_LOCK <= graves_de(sin_vex)
+    pasa(control_vex_lock, f"j) control: sin VEX, Trivy reporta en el lock {sorted(CVES_VEX_LOCK)}")
+    _, movido = lock_npm(real_dir, vex=escribir_vex_movido())
+    negativo("j) VEX atado a la version en el lock: con otra version del paquete no suprime nada",
+             CVES_VEX_LOCK <= graves_de(movido), control_vex_lock,
+             f"siguen {sorted(graves_de(movido) & CVES_VEX_LOCK)}")
+    r, informe = lock_npm(real_dir, vex=VEX)
     if informe is None:
         raise Parada(f"Trivy no produjo JSON para spa/package-lock.json: {r.err.strip()[-300:]}")
+    suprimidas = {m["Finding"]["VulnerabilityID"] for m in hallazgos(informe)[1]
+                  if m.get("Status") == "not_affected" and str(m.get("Source", "")).endswith(VEX.name)}
+    for cve in sorted(CVES_VEX_LOCK):
+        negativo(f"j) VEX {cve}: suprime el hallazgo en el lock (una declaracion sin efecto se revisa y se retira)",
+                 cve in suprimidas, control_vex_lock)
     paquetes = sum(len(res.get("Packages") or []) for res in informe.get("Results") or [])
     objetivos = [res.get("Target") for res in informe.get("Results") or []]
     pasa(objetivos == ["package-lock.json"] and paquetes > 0, f"j) Trivy analiza el lock ({objetivos}, {paquetes} paquetes)")
     vulns = hallazgos(informe)[0]
     graves = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("InstalledVersion"), v.get("FixedVersion"))
                      for _, v in vulns if v.get("Severity") in SEVERIDADES.split(",") and v.get("FixedVersion")})
-    negativo(f"j) spa/package-lock.json: ninguna vulnerabilidad {SEVERIDADES} con arreglo publicado",
-             not graves, control, str(graves))
+    negativo(f"j) spa/package-lock.json: ninguna vulnerabilidad {SEVERIDADES} con arreglo publicado sin declarar "
+             "en el VEX", not graves, control, str(graves))
     claves_graves = {g[:2] for g in graves}
     resto = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("Severity")) for _, v in vulns
                     if (v["VulnerabilityID"], v["PkgName"]) not in claves_graves})
     p(f"   resto de avisos (otras severidades o sin arreglo): {len(resto)}" + (f" -> {resto}" if resto else ""))
 
-    # Override de vite: el de package.json, el instalado según el lock, y que
-    # sigue haciendo falta. Control: un @angular/build que ya declara una vite
-    # arreglada hace que sobre.
+    # Cada override: el de package.json, el instalado según el lock (una sola
+    # copia), y que sigue haciendo falta. Control: un padre que ya declara la
+    # versión arreglada hace que sobre.
     paquete = json_de(RAIZ / "spa" / "package.json") or {}
     lock = json_de(RAIZ / "spa" / "package-lock.json") or {}
     pasa(paquete.get("overrides") == OVERRIDES_SPA, f"j) spa/package.json: overrides exactamente {OVERRIDES_SPA}")
-    instalada = ((lock.get("packages") or {}).get("node_modules/vite") or {}).get("version")
-    pasa(instalada == OVERRIDES_SPA["vite"], f"j) el lock instala la vite del override ({instalada})")
-    lock_control = {"packages": {"node_modules/@angular/build": {"dependencies": {"vite": VITE_DECLARADA_CONTROL}}}}
-    negativo("j) el override de vite sigue haciendo falta: @angular/build declara una vite anterior a la "
-             f"{'.'.join(map(str, VITE_ARREGLADA))} (si no, se retira)",
-             override_vite_necesario(lock) is True, override_vite_necesario(lock_control) is False)
+    for nombre, forzada in sorted(OVERRIDES_SPA.items()):
+        padre, arreglada, declarada_control = OVERRIDES_MOTIVO[nombre]
+        copias = sorted({datos.get("version") for ruta, datos in (lock.get("packages") or {}).items()
+                         if ruta == f"node_modules/{nombre}" or ruta.endswith(f"/node_modules/{nombre}")})
+        pasa(copias == [forzada], f"j) el lock instala solo el {nombre} del override ({copias})")
+        lock_control = {"packages": {f"node_modules/{padre}": {"dependencies": {nombre: declarada_control}}}}
+        negativo(f"j) el override de {nombre} sigue haciendo falta: {padre} declara una {nombre} anterior a la "
+                 f"{'.'.join(map(str, arreglada))} (si no, se retira)",
+                 override_necesario(lock, nombre) is True, override_necesario(lock_control, nombre) is False)
 
     # Lo que cambia en el lock respecto a HEAD, con su fecha, para revisarlo
     # en el commit, y la regla de los 14 días. Control: vite 8.3.4 evaluada

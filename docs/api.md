@@ -49,7 +49,7 @@ La imagen del proxy compila la SPA en una primera etapa con Node y copia solo el
   ```
 
   Después se copian `package.json` y `package-lock.json` a `spa/` y se commitean. `verificar_escaneos.py` (j) lista lo que cambió en el lock con su fecha y falla si algo tiene menos de 14 días.
-- `overrides` de `spa/package.json` fuerza vite 8.3.4: `@angular/build` 22.2.x fija la 8.3.0, con CVE-2026-112942. Se retira cuando una versión estable de `@angular/build` traiga vite 8.3.3 o posterior (la batería falla para avisarlo).
+- `overrides` de `spa/package.json` fuerza vite 8.3.4 y zod 4.6.6: `@angular/build` 22.2.x fija vite 8.3.0, con CVE-2026-112942, y `@angular/cli` 22.2.x fija zod 4.6.5, con CVE-2023-54404. Cada uno se retira cuando una versión estable del paquete que lo fija traiga la versión arreglada (la batería falla para avisarlo).
 - Ningún componente declara estilos: todo el CSS va en `spa/src/styles.css`. Angular inyectaría los estilos de un componente con `<style>`, y la CSP lo bloquea.
 - Ninguna ruta de la SPA lleva un punto: el proxy trata como fichero cualquier ruta con extensión y, si no existe, responde 404.
 - Nada de `bypassSecurityTrust*` ni de asignar texto a `innerHTML`: Trusted Types lo bloquea en el navegador.

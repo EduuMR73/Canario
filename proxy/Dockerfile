@@ -50,7 +50,15 @@ FROM caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f43
 #    0700. Un volumen con nombre nuevo hereda el dueño y el modo de la imagen.
 # 3. /config/caddy queda de root en 0755: con persist_config off nadie escribe
 #    ahí, y el sistema de ficheros raíz además es de solo lectura.
+# 4. Sin curl. La imagen oficial lo trae como utilidad, pero Caddy es un
+#    binario Go estático y no lo usa, ni nada de Canario (sin healthcheck que
+#    lo llame). Con él se van libcurl y brotli-libs, que solo dependen de curl
+#    (comprobado con apk info -r), y sus vulnerabilidades (CVE-2026-92392 y
+#    CVE-2026-111497, docs/threat-model.md, 6.17). Como con gosu en
+#    db/Dockerfile: se quita la causa en vez de declarar una excepción.
+#    --no-network: borrar no necesita descargar nada.
 RUN setcap -r /usr/bin/caddy \
+ && apk del --no-network curl \
  && chown 10002:10002 /data/caddy \
  && chmod 0700 /data/caddy \
  && chown root:root /config/caddy \
