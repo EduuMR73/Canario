@@ -21,6 +21,10 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `GET /v1/personal/auditoria`, `/auditoria/recientes` y `/auditoria/verificacion` | admin y auditor | Leer la auditoría desde el principio (`desde`) o desde lo más reciente (`antes`), con el email de quien actúa y de la cuenta afectada, y verificar su cadena |
 | `POST /v1/personal/registro` y `/registro/verificacion` | cualquiera | Pedir una cuenta del personal (empresa y email; siempre el mismo 202) y confirmar el email con el token del enlace |
 | `GET /v1/personal/solicitudes`, `POST .../{id}/aprobacion`, `DELETE .../{id}` | admin | Ver las solicitudes verificadas, aprobarlas con un rol (la invitación va solo al email) o rechazarlas |
+| `GET /v1/personal/externo/proveedores` | cualquiera (solo navegador) | Los proveedores externos configurados en el broker; la SPA solo pinta el botón de esos |
+| `POST /v1/personal/externo/google/inicio` y `GET .../google/vuelta` | personal (solo navegador) | Ir a Google con un dispositivo de confianza vigente de la empresa (sin él, 409) y volver: la vuelta comprueba el flujo de su cookie, canjea por medio del broker y responde siempre un 303 a una página fija de la SPA |
+| `POST /v1/personal/sesiones/externa` | personal (solo navegador) | Entrar con el ticket de la vuelta, el dispositivo y un código TOTP; las mismas cookies que el login con contraseña |
+| `POST /v1/personal/externo/google/vinculo/inicio`, `POST .../google/vinculo` y `DELETE .../google/vinculo` | personal con sesión (solo navegador) | Vincular la cuenta de Google (pide un código) y desvincularla (también); los dos avisan por correo al titular y a quienes vigilan |
 
 El código de seguimiento es lo único que identifica al denunciante: va en el cuerpo, nunca en la URL, para que no quede en ningún log.
 

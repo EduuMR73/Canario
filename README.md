@@ -141,6 +141,10 @@ Al activarse una cuenta, los admins y los auditores reciben un aviso sin enlace,
 
 En **Cuentas**, el admin ve todo el personal con su rol y su estado, invita, reinvita y da de baja.
 
+### 8. Entrar con Google (opcional)
+
+Solo si se ha configurado ([operacion.md](docs/operacion.md)); si no, el botón no aparece. En **Mi cuenta**, "Vincular Google" con un código. Después, en el mismo navegador, "Iniciar sesión con Google" en `/entrar` y el código: Google sustituye a la contraseña, no al código.
+
 ### Qué más se puede comprobar
 
 | Rol | Ve | No ve |
@@ -153,6 +157,7 @@ En **Cuentas**, el admin ve todo el personal con su rol y su estado, invita, rei
 - Un código de seguimiento inventado da 404, sin decir si alguna parte era correcta.
 - **Declarar no veraz (art. 32.3).** Con una segunda denuncia, porque no tiene vuelta atrás: el admin se la asigna, abre el expediente y pulsa "Declarar no veraz" y después "Confirmar: declarar no veraz". La denuncia desaparece del listado, y su código da en el 8444 el mismo "código de seguimiento no válido" que uno inventado. La destruye la siguiente supresión, que en producción se programa cada hora y en la demo se lanza a mano: `docker compose run --rm gestion suprimir-caducadas`, que responde con una línea `suprimidas: ... articulo=art32_3 denuncias=1`. En Auditoría quedan la declaración y la supresión.
 - Cinco intentos de entrada fallidos hacen esperar un minuto a quien entra desde un navegador nuevo, pero el titular sigue entrando desde el suyo.
+- Tras 13 minutos sin actividad, la SPA avisa de que la sesión se cerrará en menos de 2 minutos y deja seguir conectado. Si nadie responde, a los 15 lleva a `/entrar` y dice por qué.
 
 ## Fallos conocidos
 

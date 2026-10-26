@@ -35,7 +35,7 @@ Hay tres puertos publicados, todos solo en `127.0.0.1` y solo con el nombre `loc
 
 - `8443`: la API.
 - `8444`: el sitio del denunciante, en otro origen: `https://localhost:8444/` (las páginas, en [api.md](api.md)) y su hoja de estilos.
-- `8445`: la SPA del personal, en el suyo: `https://localhost:8445/`. Hoy tiene el acceso (entrar, activar una cuenta y solicitar el acceso, en [api.md](api.md)), el menú de cada rol, las pantallas del admin para las cuentas y las solicitudes, las de las denuncias para el admin y el instructor y la de la auditoría para el admin y el auditor, y reenvía la API del personal con la sesión en cookies.
+- `8445`: la SPA del personal, en el suyo: `https://localhost:8445/`. Hoy tiene el acceso (entrar, también con Google si está configurado, activar una cuenta y solicitar el acceso, en [api.md](api.md)), el menú de cada rol, las pantallas del admin para las cuentas y las solicitudes, las de las denuncias para el admin y el instructor y la de la auditoría para el admin y el auditor, y reenvía la API del personal con la sesión en cookies.
  Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
 
 Para parar sin perder datos:
@@ -47,6 +47,32 @@ docker compose down
 Nunca `docker compose down -v` en una instalación con datos: `-v` borra los volúmenes, es decir, la base de datos y la autoridad de certificación de Caddy.
 
 **Actualizar una instalación existente.** Canario no tiene migraciones: el esquema de `db/init/` solo se aplica con el volumen de la base de datos vacío. Si una versión nueva cambia el esquema (por ejemplo, la tabla `identidad_externa` del login externo), la API no arranca con la base de datos anterior y su log dice qué falta (`ARRANQUE BLOQUEADO: tablas: ...`, modelo de amenazas, 6.10): falla de forma visible, no a medias. Una instalación de prueba se pone al día recreando el volumen (`docker compose down -v` y arrancar), con lo que pierde sus datos. Para una con datos haría falta aplicar a mano la parte nueva del esquema como superusuario; ese procedimiento no está preparado (modelo de amenazas, 8).
+
+## Acceso con Google (opcional)
+
+Sin configurar nada, Google está desactivado: `generar_secretos.py` deja un marcador en `secrets/google_client_id.txt` y `secrets/google_client_secret.txt`, el log del broker lo dice al arrancar (`EVENTO proveedor_desactivado`) y la SPA no pinta el botón (modelo de amenazas, 6.19).
+
+Para activarlo:
+
+1. En Google Cloud Console, la pantalla de consentimiento (Google Auth Platform) de tipo Externo. Mientras esté en modo de pruebas, solo entran las cuentas añadidas como usuarios de prueba. Sin permisos extra: Canario solo pide `openid`, ni el email. Después, un cliente OAuth de tipo "Aplicación web" con la URI de redirección exacta `https://localhost:8445/v1/personal/externo/google/vuelta` (en otro despliegue, el origen de `CANARIO_ORIGEN_PERSONAL`) y sin orígenes de JavaScript.
+
+2. Escribir los dos valores en `secrets/`, sin que queden en el historial de PowerShell:
+
+   ```powershell
+   $id = Read-Host "Client ID"
+   [IO.File]::WriteAllText((Join-Path (Get-Location) "secrets\google_client_id.txt"), $id.Trim())
+   $secreto = Read-Host "Client secret"
+   [IO.File]::WriteAllText((Join-Path (Get-Location) "secrets\google_client_secret.txt"), $secreto.Trim())
+   Remove-Variable id, secreto
+   ```
+
+   `WriteAllText` escribe UTF-8 sin BOM y sin salto de línea; el broker solo acepta ASCII imprimible, de 1 a 255 caracteres, y `Set-Content` de PowerShell 5 añadiría un BOM. La ruta va completa porque `[IO.File]` usa el directorio del proceso y no el de PowerShell. El secreto se ve en pantalla al pegarlo. Hay que cambiar los dos: con uno solo, el broker no arranca (`ARRANQUE BLOQUEADO`), porque es un error de quien opera.
+
+3. Arrancar como siempre (`docker compose up -d --build --wait`). El log del broker dice `PROVEEDOR ACTIVADO` con la URI de redirección que usa.
+
+4. Usarlo: la primera vez se entra con contraseña y código, que deja el dispositivo de confianza en ese navegador. En **Mi cuenta**, "Vincular Google" pide un código y lleva a Google. Desde entonces, en ese navegador, "Iniciar sesión con Google" y el código. Google nunca sustituye al código ni crea la confianza.
+
+La cuenta de Google Cloud que administra el cliente necesita un segundo factor resistente (passkey o una aplicación, no SMS): quien la controle puede cambiar la URI de redirección y llevarse los códigos. Para comprobar el canje contra el Google real, `verificar_google_real.py` ([pruebas.md](pruebas.md)).
 
 ## Operación: `gestion`
 
