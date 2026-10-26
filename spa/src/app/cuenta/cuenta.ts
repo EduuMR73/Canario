@@ -1,6 +1,7 @@
 import { Component, Injector, inject, signal } from '@angular/core';
 import { NonNullableFormBuilder, ReactiveFormsModule } from '@angular/forms';
 import { ApiPersonal } from '../nucleo/api';
+import { Caducidad } from '../nucleo/caducidad';
 import { detalleDe, textoDeError } from '../nucleo/errores';
 import { enfocarEncabezado } from '../nucleo/foco';
 import { MostrarContrasena } from '../nucleo/mostrar-contrasena';
@@ -72,6 +73,7 @@ import { Vinculos } from './vinculos';
 })
 export class Cuenta {
   private readonly api = inject(ApiPersonal);
+  private readonly caducidad = inject(Caducidad);
   private readonly injector = inject(Injector);
 
   readonly formulario = inject(NonNullableFormBuilder).group({
@@ -101,7 +103,10 @@ export class Cuenta {
     this.enviando.set(true);
     this.error.set(null);
     this.api.cambiarContrasena({ contrasena_actual, contrasena_nueva, codigo_totp }).subscribe({
-      next: () => {
+      // La sesión es nueva (app/personal.py, cambiar_contrasena): su cuenta
+      // atrás empieza de cero, aquí y en las demás pestañas.
+      next: (tiempos) => {
+        this.caducidad.actualizar(tiempos);
         this.enviando.set(false);
         this.formulario.reset();
         this.hecho.set(true);

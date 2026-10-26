@@ -1,6 +1,7 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
-import { Observable } from 'rxjs';
+import { Observable, map } from 'rxjs';
+import { Tiempos, tiemposDe } from './caducidad';
 import { conSesion } from './contexto';
 
 // Cliente de la API del personal (app/rutas_personal.py) para el acceso y la
@@ -28,6 +29,10 @@ export interface Yo {
   // ni el identificador de la cuenta externa salen de la API (minimización,
   // docs/threat-model.md, 6.19).
   vinculos: Vinculo[];
+  // Segundos hasta el cierre por inactividad y hasta las 8 horas
+  // (nucleo/caducidad.ts). Pedir /yo no los alarga: solo renovar.
+  inactividad_en: number;
+  caduca_en: number;
 }
 
 export interface Vinculo {
@@ -98,7 +103,9 @@ export class ApiPersonal {
   // Revoca todas las sesiones de la cuenta y deja una nueva en este
   // navegador (app/personal.py, cambiar_contrasena): las cookies nuevas las
   // pone la respuesta.
-  cambiarContrasena(datos: CambioContrasena): Observable<unknown> {
-    return this.http.post(`${BASE}/contrasena`, datos, conSesion());
+  // El cuerpo trae los segundos que le quedan a la sesión nueva
+  // (nucleo/caducidad.ts); si no los trae, es un error, no un éxito callado.
+  cambiarContrasena(datos: CambioContrasena): Observable<Tiempos> {
+    return this.http.post(`${BASE}/contrasena`, datos, conSesion()).pipe(map(tiemposDe));
   }
 }

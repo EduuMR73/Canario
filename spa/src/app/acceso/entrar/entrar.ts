@@ -6,6 +6,7 @@ import { Canario } from '../../marca/canario';
 import { Google } from '../../marca/google';
 import { ApiPersonal } from '../../nucleo/api';
 import { ApiExterno, NAVEGAR, PROVEEDORES, Proveedor, Resultado, resultadoDe, urlPermitida } from '../../nucleo/api-externo';
+import { Caducidad } from '../../nucleo/caducidad';
 import { TEXTO_INESPERADO, textoDeError } from '../../nucleo/errores';
 import { enfocarEncabezado } from '../../nucleo/foco';
 import { MostrarContrasena } from '../../nucleo/mostrar-contrasena';
@@ -41,6 +42,11 @@ const TEXTOS_VUELTA: Record<Resultado, string> = {
 // implícito), y así nunca lleva a Google por sorpresa. Cuando se vuelve con
 // "atrás" desde Google, el navegador puede restaurar la página de su caché
 // (bfcache) con el botón todavía ocupado: pageshow con persisted lo libera.
+//
+// Si la sesión se acaba de cerrar sola (inactividad, las 8 horas o un 401
+// inesperado), el aviso dice por qué (nucleo/caducidad.ts). Es un aviso y no
+// un error: no lo ha causado la persona. Recibe el foco, como el de la vuelta
+// del proveedor, para que se lea antes que el formulario.
 @Component({
   selector: 'app-entrar',
   imports: [Canario, Google, MostrarContrasena, ReactiveFormsModule, RouterLink],
@@ -49,6 +55,9 @@ const TEXTOS_VUELTA: Record<Resultado, string> = {
     <main class="acceso">
       <app-canario />
       <h1 tabindex="-1">Entrar</h1>
+      @if (cierre(); as texto) {
+        <p id="entrar-cierre" tabindex="-1" class="aviso" role="status">{{ texto }}</p>
+      }
       @if (vuelta(); as resultado) {
         <p id="entrar-vuelta" tabindex="-1" [class]="resultado === 'cancelado' ? 'aviso' : 'error'"
            [attr.role]="resultado === 'cancelado' ? 'status' : 'alert'">{{ textosVuelta[resultado] }}</p>
@@ -109,6 +118,8 @@ export class Entrar {
   readonly textosVuelta = TEXTOS_VUELTA;
   readonly proveedores = signal<Proveedor[]>([]);
   readonly vuelta = signal<Resultado | null>(null);
+  // De un solo uso: recargar la página no lo repite.
+  readonly cierre = signal(inject(Caducidad).tomarAviso());
   // Un inicio cada vez, como el login: cada uno abre un flujo en la API.
   readonly yendo = signal(false);
 
@@ -160,6 +171,8 @@ export class Entrar {
       if (this.vuelta() !== null) {
         enfocarEncabezado(injector, '#entrar-vuelta');
       }
+    } else if (this.cierre() !== null) {
+      enfocarEncabezado(injector, '#entrar-cierre');
     }
     // Sin la lista, no hay botones: la entrada con contraseña no depende de
     // ella, y un error aquí sería un aviso rojo en la puerta por algo que no

@@ -5,7 +5,9 @@ import { Router, provideRouter } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiPersonal } from './api';
-import { CERROJO, Cerrojo, renovarSesion } from './renovacion';
+import { CANAL, Caducidad } from './caducidad';
+import { CERROJO, Cerrojo, Renovador, renovarSesion } from './renovacion';
+import { Sesion } from './sesion';
 
 // Oráculos literales: las rutas y la cabecera de la API
 // (app/rutas_personal.py), no las constantes del código que se prueba.
@@ -15,7 +17,11 @@ const RENOVACION = '/v1/personal/sesiones/renovacion';
 const CIERRE = '/v1/personal/sesiones/actual';
 const CON_BEARER = new HttpHeaders({ 'WWW-Authenticate': 'Bearer' });
 const CUENTA = { usuario_id: 'u', email: 'admin@canario.test', rol: 'admin', invitacion_pendiente: false,
-                 enlace_canal: 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef', vinculos: [] };
+                 enlace_canal: 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef', vinculos: [],
+                 inactividad_en: 900, caduca_en: 28800 };
+// Lo que responde la API al renovar en el navegador: solo los segundos, los
+// tokens van en sus cookies (app/rutas_personal.py, respuesta_con_tokens).
+const RENOVADA = { expira_en: 300, inactividad_en: 900, caduca_en: 28800 };
 const LOGIN = { empresa: 'e', email: 'admin@canario.test', contrasena: 'x', codigo_totp: '000000' };
 
 // Cerrojo falso con la misma semántica que Web Locks: un trabajo cada vez,
@@ -38,6 +44,11 @@ async function sinPendientes(): Promise<void> {
   }
 }
 
+// Canal entre pestañas falso: apunta lo que se envía y no recibe nada.
+function canalFalso(enviados: unknown[]): { enviar(m: unknown): void; alRecibir(): void; cerrar(): void } {
+  return { enviar: (mensaje) => enviados.push(mensaje), alRecibir: () => undefined, cerrar: () => undefined };
+}
+
 function sesionCaducada(): { status: number; statusText: string; headers: HttpHeaders } {
   return { status: 401, statusText: 'Unauthorized', headers: CON_BEARER };
 }
@@ -47,15 +58,18 @@ describe('renovación de la sesión', () => {
   let api: ApiPersonal;
   let router: Router;
   let nombres: string[];
+  let enviados: unknown[];
 
   beforeEach(() => {
     nombres = [];
+    enviados = [];
     TestBed.configureTestingModule({
       providers: [
         provideHttpClient(withInterceptors([renovarSesion])),
         provideHttpClientTesting(),
         provideRouter([]),
         { provide: CERROJO, useValue: cerrojoFalso(nombres) },
+        { provide: CANAL, useValue: canalFalso(enviados) },
       ],
     });
     http = TestBed.inject(HttpTestingController);
@@ -75,7 +89,7 @@ describe('renovación de la sesión', () => {
     const renovacion = http.expectOne(RENOVACION);
     expect(renovacion.request.method).toBe('POST');
     expect(renovacion.request.body).toEqual({});
-    renovacion.flush({ expira_en: 300 });
+    renovacion.flush(RENOVADA);
     await sinPendientes();
     http.expectOne(YO).flush(CUENTA);
     await expect(respuesta).resolves.toEqual(CUENTA);
@@ -86,7 +100,7 @@ describe('renovación de la sesión', () => {
     const respuesta = firstValueFrom(api.cerrarSesion());
     http.expectOne(CIERRE).flush(null, sesionCaducada());
     await sinPendientes();
-    http.expectOne(RENOVACION).flush({ expira_en: 300 });
+    http.expectOne(RENOVACION).flush(RENOVADA);
     await sinPendientes();
     const repetida = http.expectOne(CIERRE);
     expect(repetida.request.method).toBe('DELETE');
@@ -141,7 +155,7 @@ describe('renovación de la sesión', () => {
     expect(caducadas.length).toBe(2);
     caducadas.forEach((peticion) => peticion.flush(null, sesionCaducada()));
     await sinPendientes();
-    http.expectOne(RENOVACION).flush({ expira_en: 300 });
+    http.expectOne(RENOVACION).flush(RENOVADA);
     await sinPendientes();
     const repetidas = http.match(YO);
     expect(repetidas.length).toBe(2);
@@ -151,5 +165,48 @@ describe('renovación de la sesión', () => {
     await sinPendientes();
     http.expectNone(RENOVACION);
     expect(nombres).toEqual(['canario-renovacion']);
+  });
+
+  it('la renovación pone en marcha de nuevo la cuenta atrás y se la cuenta a las demás pestañas', async () => {
+    const renovada = TestBed.inject(Renovador).renovar();
+    await sinPendientes();
+    http.expectOne(RENOVACION).flush(RENOVADA);
+    await renovada;
+    expect(TestBed.inject(Caducidad).estado()).toBe('en_curso');
+    expect(enviados).toEqual([{ tipo: 'tiempos', inactividad_en: 900, caduca_en: 28800 }]);
+  });
+
+  it('una renovación sin los segundos falla de forma visible', async () => {
+    const renovada = TestBed.inject(Renovador).renovar();
+    await sinPendientes();
+    http.expectOne(RENOVACION).flush({ expira_en: 300 });
+    await expect(renovada).rejects.toThrow('la respuesta no trae los tiempos de la sesión');
+    expect(enviados).toEqual([]);
+  });
+
+  it('con la cuenta cargada, un 401 sin renovación deja en /entrar el aviso de sesión cerrada', async () => {
+    vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
+    const carga = TestBed.inject(Sesion).cargar();
+    http.expectOne(YO).flush(CUENTA);
+    await carga;
+    const respuesta = firstValueFrom(api.yo());
+    http.expectOne(YO).flush(null, sesionCaducada());
+    await sinPendientes();
+    http.expectOne(RENOVACION).flush({ detalle: 'sesión no válida' }, sesionCaducada());
+    await expect(respuesta).rejects.toMatchObject({ status: 401 });
+    const caducidad = TestBed.inject(Caducidad);
+    expect(caducidad.tomarAviso()).toBe('Su sesión se ha cerrado. Vuelva a entrar.');
+    expect(caducidad.tomarAviso()).toBeNull();
+    expect(caducidad.estado()).toBe('sin_sesion');
+  });
+
+  it('sin la cuenta cargada, el mismo 401 no deja ningún aviso (control del anterior)', async () => {
+    vi.spyOn(router, 'navigateByUrl').mockResolvedValue(true);
+    const respuesta = firstValueFrom(api.yo());
+    http.expectOne(YO).flush(null, sesionCaducada());
+    await sinPendientes();
+    http.expectOne(RENOVACION).flush({ detalle: 'sesión no válida' }, sesionCaducada());
+    await expect(respuesta).rejects.toMatchObject({ status: 401 });
+    expect(TestBed.inject(Caducidad).tomarAviso()).toBeNull();
   });
 });

@@ -17,7 +17,8 @@ const VINCULO = '/v1/personal/externo/google/vinculo';
 const INICIO_VINCULO = '/v1/personal/externo/google/vinculo/inicio';
 const CREADA = '2026-10-25T12:00:00+00:00';
 const CUENTA = { usuario_id: 'u', email: 'persona@canario.test', rol: 'admin', invitacion_pendiente: false,
-                 enlace_canal: 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef', vinculos: [] };
+                 enlace_canal: 'https://localhost:8444/empresas/0123456789abcdef0123456789abcdef', vinculos: [],
+                 inactividad_en: 900, caduca_en: 28800 };
 const VINCULADA = { ...CUENTA, vinculos: [{ proveedor: 'google', creada: CREADA }] };
 // El 401 de las credenciales, sin WWW-Authenticate (app/rutas_externo.py).
 const NO_VALIDO = { status: 401, statusText: 'Unauthorized' };

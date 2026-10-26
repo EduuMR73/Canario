@@ -520,6 +520,20 @@ PRUEBAS_UNITARIAS = (
     "al recargar ?vinculo=pendiente con el ticket gastado, relee /yo antes de dar el error",
     "vincular no lleva a una URL que no sea de Google",
     "sin proveedores avisa; vinculada enseña solo el proveedor y la fecha",
+    # El aviso de inactividad (nucleo/caducidad.ts y renovacion.ts).
+    "la renovación pone en marcha de nuevo la cuenta atrás y se la cuenta a las demás pestañas",
+    "una renovación sin los segundos falla de forma visible",
+    "con la cuenta cargada, un 401 sin renovación deja en /entrar el aviso de sesión cerrada",
+    "sin la cuenta cargada, el mismo 401 no deja ningún aviso (control del anterior)",
+    "avisa 2 minutos antes del cierre por inactividad, y no antes",
+    "al cierre por inactividad vence y deja para /entrar su aviso, una sola vez",
+    "el temporizador nunca renueva: ni en el aviso ni al vencer",
+    "renovar durante el aviso lo quita y la cuenta atrás vuelve a empezar",
+    "cerca de las 8 horas el aviso no ofrece ampliar, y al llegar dice por qué",
+    "los tiempos de otra pestaña valen; uno mal formado se descarta; sin cuenta no enciende nada",
+    "al volver a la pestaña recalcula: si ya pasó la hora, vence sin esperar al temporizador",
+    "el 401 de una sesión que aún no vencía no se atribuye a la inactividad",
+    "solo acepta como tiempos enteros de 0 a 8 horas",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
 # Mutantes del interceptor, del guard, del cliente de denuncias y de los
@@ -559,6 +573,26 @@ MUTANTES_UNITARIOS = (
     ("sin releer /yo tras el 401 al completar el vinculo", "src/app/cuenta/vinculos.ts",
      "        if (error instanceof HttpErrorResponse && error.status === 401) {", "        if (false) {",
      "al recargar ?vinculo=pendiente con el ticket gastado, relee /yo antes de dar el error"),
+    # El aviso de inactividad. El primero es el riesgo de fondo: un
+    # temporizador que renueva mantendría viva una pestaña olvidada.
+    ("el temporizador renueva", "src/app/nucleo/caducidad.ts",
+     "      this.temporizador = setTimeout(() => this.programar(), restante);",
+     "      void fetch('/v1/personal/sesiones/renovacion', { method: 'POST' });"
+     " this.temporizador = setTimeout(() => this.programar(), restante);",
+     "el temporizador nunca renueva: ni en el aviso ni al vencer"),
+    ("sin descartar los mensajes mal formados de otra pestana", "src/app/nucleo/caducidad.ts",
+     "      tiempos = tiemposDe(datos);", "      tiempos = datos as Tiempos;",
+     "los tiempos de otra pestaña valen; uno mal formado se descarta; sin cuenta no enciende nada"),
+    ("sin recalcular al volver a la pestana", "src/app/nucleo/caducidad.ts",
+     "    documento.addEventListener('visibilitychange', alVolver);", "    void alVolver;",
+     "al volver a la pestaña recalcula: si ya pasó la hora, vence sin esperar al temporizador"),
+    ("el 401 de una sesion viva atribuido a la inactividad", "src/app/nucleo/caducidad.ts",
+     "    this.aviso = cierre !== null && cierre <= this.reloj() ? this.motivo() : AVISO_CERRADA;",
+     "    this.aviso = this.motivo();",
+     "el 401 de una sesión que aún no vencía no se atribuye a la inactividad"),
+    ("sin el aviso del 401 con la cuenta cargada", "src/app/nucleo/renovacion.ts",
+     "              caducidad.anunciarCierre();", "              void caducidad;",
+     "con la cuenta cargada, un 401 sin renovación deja en /entrar el aviso de sesión cerrada"),
 )
 # process.exit: el agente de Node mantiene viva la conexión y el proceso no
 # terminaría solo.
@@ -719,7 +753,8 @@ BOTONES_OCUPADOS = {
     "acceso/entrar/entrar.ts": 2,
     "acceso/registro/registro.ts": 1,
     "acceso/verificacion/verificacion.ts": 1,
-    "armazon/armazon.ts": 1,
+    # "Cerrar la sesión" y "Seguir conectado" del aviso de inactividad.
+    "armazon/armazon.ts": 2,
     "auditoria/auditoria.ts": 3,
     "cuenta/cuenta.ts": 1,
     # Vincular y desvincular, uno u otro según el estado.
@@ -2529,6 +2564,124 @@ async def pasos(contexto):
 
 asyncio.run(ejecutar(spki, pasos))
 '''
+
+
+# s) El aviso de inactividad en Chromium. Recibe el SPKI, el identificador,
+# el email, la contraseña, el secreto TOTP y el último paso usado del admin.
+# El reloj de las páginas es el de Playwright (clock.install, antes de abrir
+# ninguna): avanza solo y fast_forward lo adelanta. El del servidor no se
+# toca: la sesión sigue viva en la base de datos y "Seguir conectado" renueva
+# de verdad. Dos pestañas del mismo contexto comparten las cookies y el
+# BroadcastChannel, como dos pestañas del mismo navegador.
+NAVEGADOR_INACTIVIDAD = NAVEGADOR_PERSONAL + r'''
+spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin = sys.argv[1:7]
+usados[secreto_admin] = int(paso_admin)
+RENOVACION = "/v1/personal/sesiones/renovacion"
+CIERRE = "/v1/personal/sesiones/actual"
+DIALOGO = "dialog.aviso-sesion"
+# El elemento con el foco: etiqueta, id y texto (el del <body>, vacío).
+ACTIVO = ("() => { const e = document.activeElement; "
+          "return e === null ? null : [e.tagName, e.id, e === document.body ? '' : e.textContent.trim()]; }")
+
+
+def contar(marca, metodo, ruta_api):
+    return len([e for e in eventos[marca:]
+                if e["tipo"] == "peticion" and e["metodo"] == metodo and e["ruta"] == ruta_api])
+
+
+async def abierto(pagina):
+    return await pagina.evaluate("(s) => { const d = document.querySelector(s); return d === null ? null : d.open; }",
+                                 DIALOGO)
+
+
+async def esperar_abierto(pagina, valor):
+    # Lo que haya al cabo de 10 s: si no llega, el informe dice qué había.
+    try:
+        await pagina.wait_for_function(
+            "([s, v]) => { const d = document.querySelector(s); return d !== null && d.open === v; }",
+            arg=[DIALOGO, valor], timeout=10000)
+    except Exception:
+        pass
+    return await abierto(pagina)
+
+
+async def aviso_entrar(pagina):
+    await pagina.wait_for_url(ORIGEN + "/entrar", timeout=15000)
+    aviso = pagina.locator("#entrar-cierre")
+    await aviso.wait_for()
+    try:
+        await pagina.wait_for_function(
+            "() => document.activeElement !== null && document.activeElement.id === 'entrar-cierre'", timeout=5000)
+    except Exception:
+        pass
+    return [await aviso.get_attribute("role"), await aviso.inner_text(), await pagina.evaluate(ACTIVO)]
+
+
+async def pasos_inactividad(navegador):
+    contexto = await navegador.new_context()
+    await contexto.clock.install()
+    a = await contexto.new_page()
+    vigilar(a, "a")
+    paginas["a"] = a
+    b = await contexto.new_page()
+    vigilar(b, "b")
+    paginas["b"] = b
+    await entrar(a, email_admin, contrasena_admin, secreto_admin)
+    res["inicio_b"] = await abrir(b, "/inicio")
+
+    # 12:50 sin peticiones: aún no hay aviso. 13:05: en las dos pestañas.
+    marca = len(eventos)
+    await contexto.clock.fast_forward(770000)
+    await asyncio.sleep(1)
+    res["antes"] = [await abierto(a), await abierto(b)]
+    await contexto.clock.fast_forward(15000)
+    await a.bring_to_front()
+    res["aviso"] = [await esperar_abierto(a, True), await esperar_abierto(b, True)]
+    res["dialogo"] = await a.get_by_role("dialog", name="¿Sigue ahí?").count()
+    res["texto_aviso"] = await a.locator("#aviso-sesion-texto").inner_text()
+    res["foco_aviso"] = await a.evaluate(ACTIVO)
+    res["renovaciones_solas"] = contar(marca, "POST", RENOVACION)
+
+    # "Seguir conectado" en a: una renovación, y el aviso se va de las dos.
+    marca = len(eventos)
+    await a.get_by_role("button", name="Seguir conectado", exact=True).click()
+    res["tras_seguir"] = [await esperar_abierto(a, False), await esperar_abierto(b, False)]
+    res["renovaciones_seguir"] = contar(marca, "POST", RENOVACION)
+    res["rutas_tras_seguir"] = [ruta(a.url), ruta(b.url)]
+
+    # Pasados los 15 minutos desde esa renovación: las dos a /entrar.
+    marca = len(eventos)
+    await contexto.clock.fast_forward(901000)
+    res["vencida_a"] = await aviso_entrar(a)
+    res["vencida_b"] = await aviso_entrar(b)
+    res["vencida_peticiones"] = [contar(marca, "POST", RENOVACION), contar(marca, "DELETE", CIERRE)]
+    await a.reload()
+    await h1(a)
+    res["tras_recargar"] = await a.locator("#entrar-cierre").count()
+
+    # Una sesión cerrada por otra causa: la cierra a propósito la pestaña a.
+    await entrar(a, email_admin, contrasena_admin, secreto_admin)
+    res["control_b"] = await abrir(b, "/denuncias")
+    await a.get_by_role("button", name="Cerrar la sesión", exact=True).click()
+    await a.wait_for_url(ORIGEN + "/entrar")
+    await h1(a)
+    res["cierre_propio"] = await a.locator("#entrar-cierre").count()
+    await ir_por_menu(b, "Auditoría")
+    res["cerrada_b"] = await aviso_entrar(b)
+    res["ultimo_paso_admin"] = usados[secreto_admin]
+
+    # Control de la consola: una conexión a otro origen sí deja su violación.
+    res["consola_antes_del_control"] = len(consola)
+    await a.evaluate("fetch('https://ejemplo.invalid/').catch(() => null)")
+    await asyncio.sleep(1)
+
+
+asyncio.run(ejecutar_personal(pasos_inactividad))
+'''
+# Los textos, literales (spa/src/app/armazon y nucleo/caducidad.ts).
+TEXTO_AVISO_S = "Por inactividad, su sesión se cerrará en menos de 2 minutos."
+AVISO_INACTIVIDAD_S = "Su sesión se ha cerrado por inactividad. Vuelva a entrar."
+AVISO_CERRADA_S = "Su sesión se ha cerrado. Vuelva a entrar."
 
 
 # r) El acceso con Google en Chromium. Recibe el SPKI, el identificador, el
@@ -4629,7 +4782,74 @@ def seccion_r():
 
 
 def seccion_s():
-    p("=== s) limpieza")
+    global ULTIMO_PASO
+    p("=== s) aviso de inactividad en Chromium: el aviso 2 minutos antes, 'Seguir conectado', el cierre y su aviso "
+      "en /entrar")
+    if not PATRON_SECRETO_TOTP.fullmatch(SECRETO_ADMIN):
+        sinc("s) sin el secreto TOTP del admin (i no termino) no se puede entrar")
+        return
+    res = navegador("navegador_s", NAVEGADOR_INACTIVIDAD,
+                    [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO)])
+    if res is None:
+        sinc("s) no se pudo ejecutar el navegador")
+        return
+    if "excepcion" in res:
+        pasa(False, f"s) el recorrido se interrumpe: {res['excepcion']}")
+        p(f"   avisos a la vista en cada pagina: {res.get('avisos_visibles')}")
+    ULTIMO_PASO = res.get("ultimo_paso_admin", ULTIMO_PASO)
+
+    # El aviso: a las 13:05 sí y a las 12:50 no, cada uno control del otro.
+    aviso = res.get("aviso") == [True, True]
+    antes = res.get("antes") == [False, False]
+    pasa(aviso and res.get("dialogo") == 1 and res.get("texto_aviso") == TEXTO_AVISO_S
+         and res.get("foco_aviso") == ["BUTTON", "", "Seguir conectado"],
+         f"s) a los 13 minutos sin renovar, las dos pestanas avisan en un dialogo con nombre y el foco en "
+         f"'Seguir conectado' ({res.get('aviso')}, {res.get('dialogo')}, {res.get('texto_aviso')!r}, "
+         f"{res.get('foco_aviso')})")
+    negativo(f"s) a los 12:50 no avisa ninguna ({res.get('antes')})", antes, aviso)
+
+    # El temporizador no renueva; la persona sí.
+    control_renovar = res.get("renovaciones_seguir") == 1
+    pasa(control_renovar, f"s) control: 'Seguir conectado' hace una renovacion ({res.get('renovaciones_seguir')})")
+    negativo(f"s) hasta el aviso, el temporizador no renueva ({res.get('renovaciones_solas')} renovaciones)",
+             res.get("renovaciones_solas") == 0, control_renovar)
+    pasa(res.get("tras_seguir") == [False, False] and res.get("rutas_tras_seguir") == ["/inicio", "/inicio"],
+         f"s) tras renovar en una pestana, el aviso se cierra en las dos y siguen dentro "
+         f"({res.get('tras_seguir')}, {res.get('rutas_tras_seguir')})")
+
+    # Al vencer: /entrar dice por qué, sin DELETE (el acceso ya caducó) ni
+    # renovación.
+    esperado = ["status", AVISO_INACTIVIDAD_S, ["P", "entrar-cierre", AVISO_INACTIVIDAD_S]]
+    vencida = res.get("vencida_a") == esperado and res.get("vencida_b") == esperado
+    pasa(vencida, f"s) a los 15 minutos, las dos pestanas van a /entrar con el aviso y el foco en el "
+                  f"({res.get('vencida_a')}, {res.get('vencida_b')})")
+    negativo(f"s) al vencer no se llama a la API: ni renovacion ni DELETE ({res.get('vencida_peticiones')})",
+             res.get("vencida_peticiones") == [0, 0], control_renovar)
+    negativo(f"s) recargar /entrar no repite el aviso ({res.get('tras_recargar')})",
+             res.get("tras_recargar") == 0, vencida)
+
+    # Una sesión cerrada por otra causa.
+    control_b = (res.get("control_b") or {}).get("h1") == "Denuncias"
+    pasa(control_b, f"s) control: con la sesion abierta, la otra pestana abre Denuncias ({res.get('control_b')})")
+    pasa(res.get("cerrada_b") == ["status", AVISO_CERRADA_S, ["P", "entrar-cierre", AVISO_CERRADA_S]],
+         f"s) cerrada la sesion en una pestana, la otra va a /entrar con su aviso al pedir algo "
+         f"({res.get('cerrada_b')})")
+    negativo(f"s) quien cierra la sesion a proposito no ve aviso ({res.get('cierre_propio')})",
+             res.get("cierre_propio") == 0, vencida)
+
+    # Consola.
+    consola, errores = res.get("consola") or [], res.get("errores") or []
+    corte = res.get("consola_antes_del_control", len(consola))
+    control_csp = bool(senales_csp(consola[corte:]))
+    pasa(control_csp, f"s) control: una conexion a otro origen deja su violacion de la CSP ({senales_csp(consola[corte:])[:1]})")
+    negativo(f"s) en todo el recorrido, ninguna violacion de la CSP ni error de JavaScript "
+             f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
+             not senales_csp(consola[:corte]) and not errores, control_csp,
+             f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
+
+
+def seccion_t():
+    p("=== t) limpieza")
     r = limpiar()
     p(f"down -v --rmi local -> codigo {r.rc}")
     for etiqueta, orden in [
@@ -4639,13 +4859,13 @@ def seccion_s():
         ("imagen", ["docker", "image", "ls", "--format", "{{.Repository}}"]),
     ]:
         restos = [n for n in ejecutar(orden).out.split() if n.startswith(PROYECTO)]
-        pasa(not restos, f"s) ningun {etiqueta} con prefijo {PROYECTO} {restos if restos else ''}".strip())
+        pasa(not restos, f"t) ningun {etiqueta} con prefijo {PROYECTO} {restos if restos else ''}".strip())
     final = estado_git()
     if ESTADO_GIT_ARRANQUE is None or final is None:
-        sinc("s) no se pudo comparar el estado de Git (git no disponible, fallo o el directorio no es un repositorio)")
+        sinc("t) no se pudo comparar el estado de Git (git no disponible, fallo o el directorio no es un repositorio)")
     else:
         iguales = final == ESTADO_GIT_ARRANQUE
-        pasa(iguales, "s) la bateria no ha modificado el repo (git status igual al del arranque)")
+        pasa(iguales, "t) la bateria no ha modificado el repo (git status igual al del arranque)")
         if not iguales:
             p(f"   al arrancar: {ESTADO_GIT_ARRANQUE}")
             p(f"   al terminar: {final}")
@@ -4718,7 +4938,7 @@ ESTADO_GIT_ARRANQUE = None
 
 def main():
     global ESTADO_GIT_ARRANQUE, TEMPORAL
-    # Estado de Git al arrancar, antes de levantar Docker: s) lo compara con el final.
+    # Estado de Git al arrancar, antes de levantar Docker: t) lo compara con el final.
     ESTADO_GIT_ARRANQUE = estado_git()
     # Precondiciones: si fallan, no se limpia nada (podrían ser recursos ajenos).
     if ejecutar(["docker", "info", "--format", "{{.ServerVersion}}"]).rc != 0:
@@ -4764,7 +4984,7 @@ def main():
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
                         seccion_j, seccion_k, seccion_l, seccion_m, seccion_n, seccion_o, seccion_p, seccion_q,
-                        seccion_r):
+                        seccion_r, seccion_s):
             seccion()
     except Parada as e:
         parada = str(e)
@@ -4776,7 +4996,7 @@ def main():
         if parada is not None:
             limpiar()
         else:
-            seccion_s()
+            seccion_t()
         shutil.rmtree(TEMPORAL, ignore_errors=True)
     if parada is not None:
         estado["falla"] = True

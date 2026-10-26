@@ -26,7 +26,7 @@ El código de seguimiento es lo único que identifica al denunciante: va en el c
 
 ### La sesión del personal en el navegador (8445)
 
-La SPA del personal entra por `https://localhost:8445`, que solo reenvía `/v1/personal/*` a la API (modelo de amenazas, 6.3 y 6.11). Ahí los tokens no viajan en el cuerpo ni en `Authorization`, sino en tres cookies `__Host-` con `HttpOnly`, `Secure` y `SameSite=Strict`: ningún script de la página las lee. El cuerpo del login y de la renovación solo dice cuánto dura el acceso (`expira_en`). Para la SPA:
+La SPA del personal entra por `https://localhost:8445`, que solo reenvía `/v1/personal/*` a la API (modelo de amenazas, 6.3 y 6.11). Ahí los tokens no viajan en el cuerpo ni en `Authorization`, sino en tres cookies `__Host-` con `HttpOnly`, `Secure` y `SameSite=Strict`: ningún script de la página las lee. El cuerpo del login y de la renovación solo lleva segundos: cuánto dura el acceso (`expira_en`) y cuánto le queda a la sesión hasta el cierre por inactividad y hasta las 8 horas (`inactividad_en`, `caduca_en`), para avisar antes. `/yo` y el cambio de contraseña también dan estos dos últimos. Para la SPA:
 
 - Toda petición lleva `Sec-Fetch-Site: same-origin` (la pone el navegador) y, si no es GET ni HEAD, `Origin: https://localhost:8445`. Sin ellas, 403.
 - La renovación se pide con `{}` en el cuerpo: el token va en su cookie. De una en una, también entre pestañas.

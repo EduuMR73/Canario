@@ -63,6 +63,9 @@
   --color-error-texto: #7f1d1d;
   --color-error-fondo: #fef2f2;
   --color-aviso-fondo: #eff6ff;
+  /* El velo detrás del aviso de la sesión (armazon/armazon.ts): oscurece
+     la página inerte sin taparla. Decorativo, sin pareja de contraste. */
+  --color-velo: #1f232899;
   --color-etiqueta-fondo: #fef3c7;
   --color-etiqueta-texto: #78350f;
 
@@ -160,6 +163,7 @@
     --color-error-texto: #fecaca;
     --color-error-fondo: #2a1212;
     --color-aviso-fondo: #0f1d33;
+    --color-velo: #000000b3;
     --color-etiqueta-fondo: #3d2e05;
     --color-etiqueta-texto: #fde68a;
 
@@ -943,6 +947,20 @@ thead th {
 .mono {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 0.875rem;
+}
+
+/* El aviso de la sesión: un <dialog> modal con el aspecto de una tarjeta.
+   Sin estos colores, el navegador le pone los suyos (Canvas y CanvasText),
+   que no siguen al tema de la SPA. El ancho de la tarjeta no cabe en una
+   pantalla de 320 px con su margen: el diálogo se queda dentro. */
+dialog.aviso-sesion {
+  max-width: min(var(--ancho-tarjeta), calc(100% - 2 * var(--espacio-4)));
+  color: var(--color-texto);
+  border-color: var(--color-separador);
+}
+
+dialog.aviso-sesion::backdrop {
+  background: var(--color-velo);
 }
 
 /* Botones de una fila o de un aviso: se parten en líneas si no caben. En
