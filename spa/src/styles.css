@@ -761,6 +761,14 @@ main.acceso {
   text-align: center;
 }
 
+/* Mi cuenta: una tarjeta por tarea, del ancho de los formularios del
+   armazón (la de /entrar es más estrecha). Va después de .tarjeta para
+   ganarle el max-width con la misma especificidad. */
+.seccion-cuenta {
+  max-width: var(--ancho-formulario);
+  margin-bottom: var(--espacio-6);
+}
+
 /* Armazón: la barra con la marca, el menú del rol, la cuenta y el cierre.
    Oscura en los dos temas. Se parte en líneas en pantallas estrechas, sin
    desbordar a 320 px. */

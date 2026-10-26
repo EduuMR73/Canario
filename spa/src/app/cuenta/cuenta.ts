@@ -7,7 +7,8 @@ import { MostrarContrasena } from '../nucleo/mostrar-contrasena';
 import { Vinculos } from './vinculos';
 
 // Mi cuenta: cambiar la contraseña y, debajo, las cuentas externas
-// vinculadas (vinculos.ts).
+// vinculadas (vinculos.ts). Cada una en su tarjeta: las dos piden un
+// código de autenticación, y separadas no se escribe en el que no toca.
 //
 // Cambiar la contraseña (app/personal.py, cambiar_contrasena) pide
 // la actual y un código TOTP, y cierra todas las demás sesiones y
@@ -19,51 +20,53 @@ import { Vinculos } from './vinculos';
   imports: [MostrarContrasena, ReactiveFormsModule, Vinculos],
   template: `
     <h1 tabindex="-1">Mi cuenta</h1>
-    <h2>Cambiar la contraseña</h2>
-    <p>Al cambiarla se cierran sus sesiones en otros navegadores y se retiran los demás dispositivos de confianza.</p>
-    <form class="formulario" [formGroup]="formulario" (ngSubmit)="cambiar()" ngNativeValidate>
-      <p class="campo">
-        <label for="cuenta-actual">Contraseña actual</label>
-        <span class="con-mostrar">
-          <input #campoActual id="cuenta-actual" type="password" formControlName="contrasena_actual" required
-                 autocomplete="current-password">
-          <button class="mostrar" [appMostrarContrasena]="campoActual" nombre="Mostrar la contraseña actual"></button>
-        </span>
-      </p>
-      <p class="campo">
-        <label for="cuenta-nueva">Contraseña nueva</label>
-        <span class="con-mostrar">
-          <input #campoNueva id="cuenta-nueva" type="password" formControlName="contrasena_nueva" required
-                 autocomplete="new-password" aria-describedby="cuenta-nueva-ayuda">
-          <button class="mostrar" [appMostrarContrasena]="campoNueva" nombre="Mostrar la contraseña nueva"></button>
-        </span>
-        <span id="cuenta-nueva-ayuda" class="ayuda">Entre 12 y 128 caracteres. Una frase larga es más fácil de recordar.</span>
-      </p>
-      <p class="campo">
-        <label for="cuenta-repetir">Repita la contraseña nueva</label>
-        <span class="con-mostrar">
-          <input #campoRepetir id="cuenta-repetir" type="password" formControlName="repetir" required
-                 autocomplete="new-password">
-          <button class="mostrar" [appMostrarContrasena]="campoRepetir" nombre="Mostrar la contraseña nueva repetida"></button>
-        </span>
-      </p>
-      <p class="campo">
-        <label for="cuenta-codigo">Código de autenticación</label>
-        <input id="cuenta-codigo" formControlName="codigo_totp" required inputmode="numeric"
-               pattern="[0-9]{6}" title="Las 6 cifras, sin espacios."
-               autocomplete="one-time-code" aria-describedby="cuenta-codigo-ayuda">
-        <span id="cuenta-codigo-ayuda" class="ayuda">Las 6 cifras que muestra su aplicación.</span>
-      </p>
-      @if (error(); as texto) {
-        <p class="error" role="alert">{{ texto }}</p>
+    <section class="tarjeta seccion-cuenta" aria-labelledby="cuenta-titulo">
+      <h2 id="cuenta-titulo">Cambiar la contraseña</h2>
+      <p>Al cambiarla se cierran sus sesiones en otros navegadores y se retiran los demás dispositivos de confianza.</p>
+      <form class="formulario" [formGroup]="formulario" (ngSubmit)="cambiar()" ngNativeValidate>
+        <p class="campo">
+          <label for="cuenta-actual">Contraseña actual</label>
+          <span class="con-mostrar">
+            <input #campoActual id="cuenta-actual" type="password" formControlName="contrasena_actual" required
+                   autocomplete="current-password">
+            <button class="mostrar" [appMostrarContrasena]="campoActual" nombre="Mostrar la contraseña actual"></button>
+          </span>
+        </p>
+        <p class="campo">
+          <label for="cuenta-nueva">Contraseña nueva</label>
+          <span class="con-mostrar">
+            <input #campoNueva id="cuenta-nueva" type="password" formControlName="contrasena_nueva" required
+                   autocomplete="new-password" aria-describedby="cuenta-nueva-ayuda">
+            <button class="mostrar" [appMostrarContrasena]="campoNueva" nombre="Mostrar la contraseña nueva"></button>
+          </span>
+          <span id="cuenta-nueva-ayuda" class="ayuda">Entre 12 y 128 caracteres. Una frase larga es más fácil de recordar.</span>
+        </p>
+        <p class="campo">
+          <label for="cuenta-repetir">Repita la contraseña nueva</label>
+          <span class="con-mostrar">
+            <input #campoRepetir id="cuenta-repetir" type="password" formControlName="repetir" required
+                   autocomplete="new-password">
+            <button class="mostrar" [appMostrarContrasena]="campoRepetir" nombre="Mostrar la contraseña nueva repetida"></button>
+          </span>
+        </p>
+        <p class="campo">
+          <label for="cuenta-codigo">Código de autenticación</label>
+          <input id="cuenta-codigo" formControlName="codigo_totp" required inputmode="numeric"
+                 pattern="[0-9]{6}" title="Las 6 cifras, sin espacios."
+                 autocomplete="one-time-code" aria-describedby="cuenta-codigo-ayuda">
+          <span id="cuenta-codigo-ayuda" class="ayuda">Las 6 cifras que muestra su aplicación.</span>
+        </p>
+        @if (error(); as texto) {
+          <p class="error" role="alert">{{ texto }}</p>
+        }
+        <button type="submit" [attr.aria-disabled]="enviando() || null">
+          {{ enviando() ? 'Cambiando...' : 'Cambiar la contraseña' }}
+        </button>
+      </form>
+      @if (hecho()) {
+        <p class="aviso" id="cuenta-hecho" role="status" tabindex="-1">Contraseña cambiada. Se han cerrado sus otras sesiones y retirado los demás dispositivos de confianza.</p>
       }
-      <button type="submit" [attr.aria-disabled]="enviando() || null">
-        {{ enviando() ? 'Cambiando...' : 'Cambiar la contraseña' }}
-      </button>
-    </form>
-    @if (hecho()) {
-      <p class="aviso" id="cuenta-hecho" role="status" tabindex="-1">Contraseña cambiada. Se han cerrado sus otras sesiones y retirado los demás dispositivos de confianza.</p>
-    }
+    </section>
     <app-vinculos />
   `,
 })

@@ -117,6 +117,8 @@ etapa. Prueba:
   sesión del auditor (control: antes de la baja entraba) y la propia cuenta
   no tiene botón de baja; los tres campos de contraseña de /cuenta tienen
   su botón "Mostrar" (pulido 2c; control: la instructora abre /cuenta);
+  /cuenta va en dos tarjetas, la contraseña y la cuenta externa, cada una
+  con un solo campo de código (el mismo control);
   los tres roles ven en /inicio la tarjeta del canal con el enlace de su
   empresa en el 8444 y "Abrir el formulario" con pestaña nueva y rel
   noopener noreferrer, y el clic abre ese formulario con un 200;
@@ -602,6 +604,9 @@ MOSTRAR_ENTRAR_PULSADO = [["entrar-contrasena", "text", ["button", "true", "Most
 MOSTRAR_CUENTA = [["cuenta-actual", "password", ["button", "false", "Mostrar la contraseña actual"]],
                   ["cuenta-nueva", "password", ["button", "false", "Mostrar la contraseña nueva"]],
                   ["cuenta-repetir", "password", ["button", "false", "Mostrar la contraseña nueva repetida"]]]
+# /cuenta: [h2, campos "Código de autenticación"] de cada tarjeta, en orden, y
+# los de toda la página. Los dos códigos, cada uno en la suya.
+TARJETAS_CUENTA = {"tarjetas": [["Cambiar la contraseña", 1], ["Entrar con una cuenta externa", 1]], "codigos": 2}
 SALIDA_ACTIVADA = ["A", "/entrar", "rgb(250, 204, 21)"]
 SALIDA_VERIFICADA = "/entrar"
 TEXTO_VERIFICADO = ("Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá "
@@ -1009,6 +1014,13 @@ MOSTRAR = ("() => [...document.querySelectorAll('main input')].map((c) => "
            "[c, document.querySelector('main button[aria-controls=\"' + c.id + '\"]')])"
            ".filter(([c, b]) => c.type === 'password' || b !== null).map(([c, b]) => "
            "[c.id, c.type, b === null ? null : [b.type, b.getAttribute('aria-pressed'), b.textContent.trim()]])")
+# Las tarjetas de main: [texto del h2, cuántos campos de código tiene], y los
+# campos de código de toda la página.
+TARJETAS = ("() => { const codigos = (r) => [...r.querySelectorAll('label')]"
+            ".filter((e) => e.textContent.trim() === 'Código de autenticación').length; "
+            "return {tarjetas: [...document.querySelectorAll('main .tarjeta')]"
+            ".map((t) => [t.querySelector('h2')?.textContent.trim() ?? null, codigos(t)]), "
+            "codigos: codigos(document.querySelector('main'))}; }")
 res = {}
 eventos, consola, errores = [], [], []
 ultimo = {"paso": -1}
@@ -1323,6 +1335,20 @@ ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9
 # El último paso TOTP usado por cada secreto: cada cuenta lleva el suyo, así
 # que no hay que esperar al código de otra.
 usados = {}
+# La pila de la batería no configura Google: l) y r) simulan esta lista.
+PROVEEDORES = "/v1/personal/externo/proveedores"
+
+
+# Responde a una ruta de la API con un estado y un cuerpo fijos (route de
+# Playwright en el contexto de la página). Está aquí, y no en r), porque cada
+# sección es un script aparte y l) también la usa.
+async def simular(pagina, ruta_api, estado, cuerpo):
+    async def servir(peticion_ruta):
+        await peticion_ruta.fulfill(status=estado, content_type="application/json",
+                                    body=json.dumps(cuerpo, ensure_ascii=False))
+
+    await pagina.context.unroute(ORIGEN + ruta_api)
+    await pagina.context.route(ORIGEN + ruta_api, servir)
 
 
 async def codigo_de(secreto):
@@ -1534,8 +1560,21 @@ async def pasos_roles(navegador):
     res["menu_instructora"] = await menu(instructora)
     res["instructora_cuentas"] = await abrir(instructora, "/cuentas")
     res["instructora_solicitudes"] = await abrir(instructora, "/solicitudes")
+    # La pila de la batería no anuncia Google (r): sin él, la tarjeta de la
+    # cuenta externa no tiene formulario y no habría segundo código que medir.
+    # Se simula solo mientras se mide: más abajo, el cambio de contraseña busca
+    # el único campo de código de la página.
+    await simular(instructora, PROVEEDORES, 200, {"proveedores": ["google"]})
     res["instructora_cuenta"] = await abrir(instructora, "/cuenta")
     res["mostrar_cuenta"] = await instructora.evaluate(MOSTRAR)
+    # La tarjeta de la cuenta externa se rellena al llegar la lista de
+    # proveedores. Si no llega, se mide igual y la prueba lo dirá.
+    try:
+        await instructora.wait_for_selector("#vinculos-codigo-google", timeout=10000)
+    except Exception:
+        pass
+    res["tarjetas_cuenta"] = await instructora.evaluate(TARJETAS)
+    await instructora.context.unroute(ORIGEN + PROVEEDORES)
     res["usuarios_instructora"] = await estado_api(instructora, USUARIOS)
 
     # Auditor: igual.
@@ -2502,7 +2541,6 @@ NAVEGADOR_EXTERNO = NAVEGADOR_PERSONAL + r'''
 import urllib.parse
 spki, identificador, email_admin, contrasena_admin, secreto_admin, paso_admin = sys.argv[1:7]
 usados[secreto_admin] = int(paso_admin)
-PROVEEDORES = "/v1/personal/externo/proveedores"
 INICIO = "/v1/personal/externo/google/inicio"
 SESION_EXTERNA = "/v1/personal/sesiones/externa"
 VINCULO = "/v1/personal/externo/google/vinculo"
@@ -2523,15 +2561,6 @@ VUELTA = ("() => { const e = document.querySelector('#entrar-vuelta'); return e 
           "[e.getAttribute('role'), e.textContent.trim(), document.activeElement === e]; }")
 URL = "() => location.pathname + location.search"
 OCUPADO = "() => document.querySelector('main button.externo').getAttribute('aria-disabled')"
-
-
-async def simular(pagina, ruta_api, estado, cuerpo):
-    async def servir(peticion_ruta):
-        await peticion_ruta.fulfill(status=estado, content_type="application/json",
-                                    body=json.dumps(cuerpo, ensure_ascii=False))
-
-    await pagina.context.unroute(ORIGEN + ruta_api)
-    await pagina.context.route(ORIGEN + ruta_api, servir)
 
 
 async def google_falso(peticion_ruta):
@@ -3663,6 +3692,8 @@ def seccion_l():
     pasa(control_guard, f"l) control: la instructora abre /cuenta por su URL ({propia})")
     negativo(f"l) en /cuenta, cada campo de contrasena tiene su boton Mostrar, sin pulsar ({res.get('mostrar_cuenta')})",
              res.get("mostrar_cuenta") == MOSTRAR_CUENTA, control_guard)
+    negativo(f"l) /cuenta va en dos tarjetas, cada una con un solo campo de codigo ({res.get('tarjetas_cuenta')})",
+             res.get("tarjetas_cuenta") == TARJETAS_CUENTA, control_guard)
     for clave, ruta_pedida in (("instructora_cuentas", "/cuentas"), ("instructora_solicitudes", "/solicitudes"),
                                ("auditor_cuentas", "/cuentas")):
         negativo(f"l) {clave.split('_')[0]} pide {ruta_pedida} por su URL y vuelve a /inicio ({res.get(clave)})",

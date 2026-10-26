@@ -53,44 +53,46 @@ export function diaDe(iso: string): string {
   imports: [ReactiveFormsModule],
   host: { '(window:pageshow)': 'alMostrar($event)' },
   template: `
-    <h2>Entrar con una cuenta externa</h2>
-    @if (resultado(); as r) {
-      <p id="vinculos-resultado" tabindex="-1" [class]="r.tipo" [attr.role]="r.tipo === 'aviso' ? 'status' : 'alert'">{{ r.texto }}</p>
-    }
-    @if (errorLista(); as texto) {
-      <p class="error" id="vinculos-lista">{{ texto }}</p>
-    } @else if (proveedores(); as lista) {
-      @if (lista.length === 0) {
-        <p class="aviso">El acceso con cuentas externas no está configurado en este servidor: se entra con la contraseña y el código.</p>
+    <section class="tarjeta seccion-cuenta" aria-labelledby="vinculos-titulo">
+      <h2 id="vinculos-titulo">Entrar con una cuenta externa</h2>
+      @if (resultado(); as r) {
+        <p id="vinculos-resultado" tabindex="-1" [class]="r.tipo" [attr.role]="r.tipo === 'aviso' ? 'status' : 'alert'">{{ r.texto }}</p>
       }
-      @for (proveedor of lista; track proveedor) {
-        <h3>{{ registro[proveedor].nombre }}</h3>
-        @if (vinculoDe(proveedor); as vinculo) {
-          <p>Vinculada el {{ dia(vinculo.creada) }}. Puede entrar con {{ registro[proveedor].nombre }} y su código desde un navegador de confianza.</p>
-        } @else {
-          <p>Sin vincular. Al vincularla podrá entrar con {{ registro[proveedor].nombre }} y su código, sin escribir la contraseña, desde un navegador de confianza.</p>
+      @if (errorLista(); as texto) {
+        <p class="error" id="vinculos-lista">{{ texto }}</p>
+      } @else if (proveedores(); as lista) {
+        @if (lista.length === 0) {
+          <p class="aviso">El acceso con cuentas externas no está configurado en este servidor: se entra con la contraseña y el código.</p>
         }
-        <p class="ayuda">Al vincularla o desvincularla le avisaremos por correo, y también a los admins y auditores de su empresa.</p>
-        <form class="formulario" [formGroup]="formularios[proveedor]" (ngSubmit)="cambiar(proveedor)" ngNativeValidate>
-          <p class="campo">
-            <label [for]="'vinculos-codigo-' + proveedor">Código de autenticación</label>
-            <input [id]="'vinculos-codigo-' + proveedor" formControlName="codigo_totp" required inputmode="numeric"
-                   pattern="[0-9]{6}" title="Las 6 cifras, sin espacios."
-                   autocomplete="one-time-code" [attr.aria-describedby]="'vinculos-codigo-ayuda-' + proveedor">
-            <span [id]="'vinculos-codigo-ayuda-' + proveedor" class="ayuda">Las 6 cifras que muestra su aplicación.</span>
-          </p>
-          @if (vinculoDe(proveedor)) {
-            <button type="submit" class="peligro" [attr.aria-disabled]="enviando() || null">
-              {{ enviando() ? 'Desvinculando...' : 'Desvincular ' + registro[proveedor].nombre }}
-            </button>
+        @for (proveedor of lista; track proveedor) {
+          <h3>{{ registro[proveedor].nombre }}</h3>
+          @if (vinculoDe(proveedor); as vinculo) {
+            <p>Vinculada el {{ dia(vinculo.creada) }}. Puede entrar con {{ registro[proveedor].nombre }} y su código desde un navegador de confianza.</p>
           } @else {
-            <button type="submit" [attr.aria-disabled]="enviando() || null">
-              {{ enviando() ? 'Abriendo ' + registro[proveedor].nombre + '...' : 'Vincular ' + registro[proveedor].nombre }}
-            </button>
+            <p>Sin vincular. Al vincularla podrá entrar con {{ registro[proveedor].nombre }} y su código, sin escribir la contraseña, desde un navegador de confianza.</p>
           }
-        </form>
+          <p class="ayuda">Al vincularla o desvincularla le avisaremos por correo, y también a los admins y auditores de su empresa.</p>
+          <form class="formulario" [formGroup]="formularios[proveedor]" (ngSubmit)="cambiar(proveedor)" ngNativeValidate>
+            <p class="campo">
+              <label [for]="'vinculos-codigo-' + proveedor">Código de autenticación</label>
+              <input [id]="'vinculos-codigo-' + proveedor" formControlName="codigo_totp" required inputmode="numeric"
+                     pattern="[0-9]{6}" title="Las 6 cifras, sin espacios."
+                     autocomplete="one-time-code" [attr.aria-describedby]="'vinculos-codigo-ayuda-' + proveedor">
+              <span [id]="'vinculos-codigo-ayuda-' + proveedor" class="ayuda">Las 6 cifras que muestra su aplicación.</span>
+            </p>
+            @if (vinculoDe(proveedor)) {
+              <button type="submit" class="peligro" [attr.aria-disabled]="enviando() || null">
+                {{ enviando() ? 'Desvinculando...' : 'Desvincular ' + registro[proveedor].nombre }}
+              </button>
+            } @else {
+              <button type="submit" [attr.aria-disabled]="enviando() || null">
+                {{ enviando() ? 'Abriendo ' + registro[proveedor].nombre + '...' : 'Vincular ' + registro[proveedor].nombre }}
+              </button>
+            }
+          </form>
+        }
       }
-    }
+    </section>
   `,
 })
 export class Vinculos {
