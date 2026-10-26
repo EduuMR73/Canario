@@ -6,7 +6,10 @@ La pila entera con la imagen real del proxy, que compila la SPA en su primera
 etapa. Prueba:
 
 * a) arranque de la pila (con Mailpit y el broker del login externo, con
-  Google sin configurar, como lo deja scripts/generar_secretos.py) y alta de
+  Google sin configurar: los dos secretos de Google son los marcadores de
+  scripts/generar_secretos.py, escritos en el directorio temporal en un compose
+  adicional, sea cual sea el contenido de secrets/; si docker compose no los
+  resuelve ahí, PARADA antes de arrancar nada) y alta de
   una empresa y de la invitación de su primer admin. La API arranca con límites de petición
   altos (CANARIO_LIMITES, en un compose adicional del directorio temporal) y
   el log debe decirlo: i) y l) hacen más de 10 accesos (login, activación y
@@ -345,6 +348,13 @@ SUBRED_APP = "10.88.0.0/28"
 SUBRED_EDGE = "10.88.1.0/28"
 # La red canje entre la API y el broker (docker-compose.yml).
 SUBRED_CANJE = "10.88.2.0/28"
+# Los marcadores de Google sin configurar (scripts/generar_secretos.py). La
+# batería los monta siempre en el broker: con las credenciales reales de
+# secrets/, r) mediría la máquina y no el código, y el client_secret real
+# llegaría a una pila de pruebas.
+MARCADOR_CLIENT_ID = "sin-configurar:client-id"
+MARCADOR_CLIENT_SECRET = "sin-configurar:client-secret"
+SECRETOS_GOOGLE = ("google_client_id", "google_client_secret")
 RAIZ_CA = "/data/caddy/pki/authorities/local/root.crt"
 INTERMEDIA_CA = "/data/caddy/pki/authorities/local/intermediate.crt"
 
@@ -2977,6 +2987,21 @@ def seccion_a():
     global CA_LOCAL, IMAGEN_PROXY, IMAGEN_API, IDENTIFICADOR, INVITACION
     p("=== a) arranque de la pila (la imagen del proxy compila la SPA) y alta de la empresa y su admin")
     pasa(totp(b"12345678901234567890", 59 // 30, 8) == "94287082", "a) el TOTP de la bateria cumple RFC 6238")
+    # Antes de arrancar: los secretos de Google salen del directorio temporal
+    # y no de secrets/. Si no, PARADA y no se levanta nada, para que las
+    # credenciales reales no lleguen a la pila de pruebas. Solo se imprimen
+    # las dos rutas, nunca la configuración entera.
+    r = dc("config", "--format", "json")
+    try:
+        definidos = json.loads(r.out)["secrets"]
+        rutas = {nombre: definidos[nombre]["file"] for nombre in SECRETOS_GOOGLE}
+    except (ValueError, KeyError, TypeError):
+        raise Parada(f"docker compose config no da los secretos de Google: {r.err.strip()[-300:]!r}") from None
+    temporales = all(pathlib.Path(ruta).resolve() == (TEMPORAL / "secretos_google" / nombre).resolve()
+                      for nombre, ruta in rutas.items())
+    if not temporales:
+        raise Parada(f"los secretos de Google no salen del directorio temporal: {rutas}")
+    pasa(True, f"a) el broker monta los marcadores de Google del directorio temporal ({sorted(rutas)})")
     # El broker también: sin él, la API responde 503 a la lista de
     # proveedores, y la pila no sería la de producción (r).
     r = dc("up", "-d", "--build", "--wait", "api", "caddy", "mailpit", "broker", timeout=1800)
@@ -4692,6 +4717,18 @@ def main():
     limites.write_text(f"services:\n  api:\n    environment:\n      CANARIO_LIMITES: \"{LIMITES_PRUEBA}\"\n",
                        encoding="utf-8", newline="\n")
     BASE.extend(["-f", str(limites)])
+    # Google sin configurar, sea cual sea secrets/ (ver a). Sin salto final:
+    # el broker exige ASCII imprimible (app/proveedores_externos.py). Mismo
+    # patrón que verificar_login_externo.py.
+    secretos_google = TEMPORAL / "secretos_google"
+    secretos_google.mkdir()
+    lineas = ["secrets:"]
+    for nombre, valor in zip(SECRETOS_GOOGLE, (MARCADOR_CLIENT_ID, MARCADOR_CLIENT_SECRET)):
+        (secretos_google / nombre).write_bytes(valor.encode("ascii"))
+        lineas += [f"  {nombre}:", f"    file: \"{(secretos_google / nombre).as_posix()}\""]
+    marcadores = TEMPORAL / "secretos_google.yml"
+    marcadores.write_text("\n".join(lineas) + "\n", encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(marcadores)])
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,
