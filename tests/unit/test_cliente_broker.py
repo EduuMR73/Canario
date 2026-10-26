@@ -41,9 +41,9 @@ class Proveedores(unittest.TestCase):
     def test_forma_no_valida(self):
         for cuerpo in ({"proveedores": ["google", "otro"]}, {"proveedores": "google"}, {"proveedores": [1]},
                        {"proveedores": ["google"], "mas": 1}, {}, ["google"]):
-            with self.subTest(cuerpo=cuerpo):
-                with self.assertRaises(cliente_broker.BrokerNoDisponible), self.assertLogs("canario.cliente_broker"):
-                    cliente_broker.proveedores(responde(200, cuerpo))
+            with self.subTest(cuerpo=cuerpo), self.assertRaises(cliente_broker.BrokerNoDisponible), \
+                    self.assertLogs("canario.cliente_broker"):
+                cliente_broker.proveedores(responde(200, cuerpo))
 
 
 class Autorizar(unittest.TestCase):
@@ -63,9 +63,9 @@ class Autorizar(unittest.TestCase):
                     "https://accounts.google.com/o/oauth2/v2/auth?x=1\r\nSet-Cookie: a=b",
                     "https://accounts.google.com/o/oauth2/v2/auth?" + "x" * 2048,
                     "javascript:alert(1)"):
-            with self.subTest(url=url):
-                with self.assertRaises(cliente_broker.BrokerNoDisponible), self.assertLogs("canario.cliente_broker"):
-                    cliente_broker.autorizar("google", VALOR, VALOR, VALOR, responde(200, {"url": url}))
+            with self.subTest(url=url), self.assertRaises(cliente_broker.BrokerNoDisponible), \
+                    self.assertLogs("canario.cliente_broker"):
+                cliente_broker.autorizar("google", VALOR, VALOR, VALOR, responde(200, {"url": url}))
         self.assertEqual(cliente_broker.autorizar("google", VALOR, VALOR, VALOR, responde(200, {"url": URL})),
                          URL)  # control
 
@@ -89,23 +89,22 @@ class Canjear(unittest.TestCase):
                  503: cliente_broker.BrokerNoDisponible, 500: cliente_broker.BrokerNoDisponible,
                  302: cliente_broker.BrokerNoDisponible}
         for estado, excepcion in casos.items():
-            with self.subTest(estado=estado):
-                with self.assertRaises(excepcion):
-                    if excepcion is cliente_broker.BrokerNoDisponible:
-                        # Un broker que no responde como debe deja su evento.
-                        with self.assertLogs("canario.cliente_broker", "WARNING"):
-                            cliente_broker.canjear("google", CODE, VALOR, VALOR, responde(estado, {"detalle": "x"}))
-                    else:
+            with self.subTest(estado=estado), self.assertRaises(excepcion):
+                if excepcion is cliente_broker.BrokerNoDisponible:
+                    # Un broker que no responde como debe deja su evento.
+                    with self.assertLogs("canario.cliente_broker", "WARNING"):
                         cliente_broker.canjear("google", CODE, VALOR, VALOR, responde(estado, {"detalle": "x"}))
+                else:
+                    cliente_broker.canjear("google", CODE, VALOR, VALOR, responde(estado, {"detalle": "x"}))
 
     def test_forma_no_valida(self):
         for cuerpo in ({"proveedor": "github", "sub": SUB}, {"proveedor": "google", "sub": "con espacio"},
                        {"proveedor": "google", "sub": "x" * 256}, {"proveedor": "google", "sub": 123},
                        {"proveedor": "google"}, {"proveedor": "google", "sub": SUB, "email": "a@b.c"},
                        b"no es json", b"[" * 100_000):
-            with self.subTest(cuerpo=str(cuerpo)[:40]):
-                with self.assertRaises(cliente_broker.BrokerNoDisponible), self.assertLogs("canario.cliente_broker"):
-                    cliente_broker.canjear("google", CODE, VALOR, VALOR, responde(200, cuerpo))
+            with self.subTest(cuerpo=str(cuerpo)[:40]), self.assertRaises(cliente_broker.BrokerNoDisponible), \
+                    self.assertLogs("canario.cliente_broker"):
+                cliente_broker.canjear("google", CODE, VALOR, VALOR, responde(200, cuerpo))
 
     def test_el_log_no_lleva_valores(self):
         with self.assertRaises(cliente_broker.BrokerNoDisponible), \

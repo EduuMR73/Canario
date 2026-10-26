@@ -577,8 +577,8 @@ MUTANTES_UNITARIOS = (
     # temporizador que renueva mantendría viva una pestaña olvidada.
     ("el temporizador renueva", "src/app/nucleo/caducidad.ts",
      "      this.temporizador = setTimeout(() => this.programar(), restante);",
-     "      void fetch('/v1/personal/sesiones/renovacion', { method: 'POST' });"
-     " this.temporizador = setTimeout(() => this.programar(), restante);",
+     ("      void fetch('/v1/personal/sesiones/renovacion', { method: 'POST' });"
+      " this.temporizador = setTimeout(() => this.programar(), restante);"),
      "el temporizador nunca renueva: ni en el aviso ni al vencer"),
     ("sin descartar los mensajes mal formados de otra pestana", "src/app/nucleo/caducidad.ts",
      "      tiempos = tiemposDe(datos);", "      tiempos = datos as Tiempos;",

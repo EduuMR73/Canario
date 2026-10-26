@@ -90,17 +90,15 @@ class Flujo(unittest.TestCase):
             "empresa como texto": ("google", externo.PROPOSITO_ACCESO, str(EMPRESA), IDENTIFICADOR, None),
         }
         for nombre, argumentos in casos.items():
-            with self.subTest(nombre):
-                with self.assertRaises(ValueError):
-                    externo.nuevo_flujo(*argumentos, ahora=AHORA)
+            with self.subTest(nombre), self.assertRaises(ValueError):
+                externo.nuevo_flujo(*argumentos, ahora=AHORA)
 
     def test_caducidad(self):
         texto = externo.sellar_flujo(CLAVE, flujo())
         self.assertEqual(externo.abrir_flujo(CLAVE, texto, ahora=AHORA + 599).caduca, AHORA + 600)  # control
         for ahora in (AHORA + 600, AHORA + 10_000):
-            with self.subTest(ahora=ahora):
-                with self.assertRaises(externo.FlujoNoValido):
-                    externo.abrir_flujo(CLAVE, texto, ahora=ahora)
+            with self.subTest(ahora=ahora), self.assertRaises(externo.FlujoNoValido):
+                externo.abrir_flujo(CLAVE, texto, ahora=ahora)
         # Con más vida de la que se le da al emitirlo: solo lo haría quien
         # tuviera la clave o un reloj que va hacia atrás; no se acepta.
         with self.assertRaises(externo.FlujoNoValido):
@@ -113,9 +111,8 @@ class Flujo(unittest.TestCase):
         for nombre, clave, valor in (("principio", CLAVE, alterar(texto, 0)), ("medio", CLAVE, alterar(texto, 120)),
                                      ("tag", CLAVE, alterar(texto, len(texto) - 2)),
                                      ("otra clave", OTRA_CLAVE, texto), ("un ticket", CLAVE, ticket)):
-            with self.subTest(nombre):
-                with self.assertRaises(externo.FlujoNoValido):
-                    externo.abrir_flujo(clave, valor, ahora=AHORA)
+            with self.subTest(nombre), self.assertRaises(externo.FlujoNoValido):
+                externo.abrir_flujo(clave, valor, ahora=AHORA)
 
     def test_solo_la_forma_exacta(self):
         texto = externo.sellar_flujo(CLAVE, flujo())
@@ -126,9 +123,8 @@ class Flujo(unittest.TestCase):
                  ("con barra", "/" + texto[1:]), ("corto", texto[:-4]), ("largo", texto + "AAAA"), ("vacio", ""),
                  ("no texto", None)]
         for nombre, valor in casos:
-            with self.subTest(nombre):
-                with self.assertRaises(externo.FlujoNoValido):
-                    externo.abrir_flujo(CLAVE, valor, ahora=AHORA)
+            with self.subTest(nombre), self.assertRaises(externo.FlujoNoValido):
+                externo.abrir_flujo(CLAVE, valor, ahora=AHORA)
 
 
     def test_jti_del_state_y_segundos_restantes(self):
@@ -223,9 +219,8 @@ class Ticket(unittest.TestCase):
             "no texto": (CLAVE, None, externo.PROPOSITO_ACCESO, AHORA),
         }
         for nombre, (clave, valor, proposito, ahora) in casos.items():
-            with self.subTest(nombre):
-                with self.assertRaises(externo.TicketNoValido):
-                    externo.abrir_ticket(clave, valor, proposito, ahora=ahora)
+            with self.subTest(nombre), self.assertRaises(externo.TicketNoValido):
+                externo.abrir_ticket(clave, valor, proposito, ahora=ahora)
 
     def test_segundos_restantes(self):
         ticket = externo.abrir_ticket(CLAVE, externo.emitir_ticket(CLAVE, CLAVE_IDENTIDADES, flujo(), SUB, ahora=AHORA),

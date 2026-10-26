@@ -173,7 +173,7 @@ class LoginExterno(unittest.TestCase):
                         with self.assertRaises(personal.CredencialesNoValidas), \
                                 self.assertLogs("canario.personal", "WARNING") as registro:
                             self.entrar(base)
-                        self.assertIn("EVENTO login_fallido: empresa=%s usuario=- camino=externo" % EMPRESA,
+                        self.assertIn(f"EVENTO login_fallido: empresa={EMPRESA} usuario=- camino=externo",
                                       registro.output[0])
                         self.assertNotIn("gastar_ticket", base.registro)
                     else:
@@ -232,14 +232,16 @@ class EmpresaConDispositivo(unittest.TestCase):
                 ("sin cookie", Base(), None, EMPRESA), ("cookie mal formada", Base(), "x" * 43, EMPRESA),
                 ("empresa que no resuelve", Base(), token, None),
                 ("dispositivo no vigente", Base({personal.SQL_DISPOSITIVO_VIGENTE: None}), token, EMPRESA)):
-            with self.subTest(nombre):
-                with self.assertRaises(personal.SinDispositivo):
-                    self.consultar(base, valor, resuelta)
+            with self.subTest(nombre), self.assertRaises(personal.SinDispositivo):
+                self.consultar(base, valor, resuelta)
 
 
 class Vincular(unittest.TestCase):
-    FILAS = {personal.SQL_VINCULO_DE: None, personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA,
-             personal.SQL_CLAVE_VERSION: ENVUELTA}
+    # De solo lectura: las pruebas de la clase la comparten, así que cada una
+    # trabaja sobre su copia. Si alguna la modificara, fallaría en vez de
+    # contaminar en silencio a las demás.
+    FILAS = types.MappingProxyType({personal.SQL_VINCULO_DE: None, personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA,
+                                    personal.SQL_CLAVE_VERSION: ENVUELTA})
 
     def iniciar(self, base, proveedor="google", codigo=CODIGO):
         with parches(base):
@@ -326,8 +328,10 @@ class Vincular(unittest.TestCase):
 
 
 class Desvincular(unittest.TestCase):
-    FILAS = {personal.SQL_VINCULO_DE: POR_DEFECTO, personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA,
-             personal.SQL_CLAVE_VERSION: ENVUELTA, personal.avisos.SQL_NOMBRE_EMPRESA: ("Empresa",)}
+    # De solo lectura, por lo mismo que Vincular.FILAS.
+    FILAS = types.MappingProxyType({
+        personal.SQL_VINCULO_DE: POR_DEFECTO, personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA,
+        personal.SQL_CLAVE_VERSION: ENVUELTA, personal.avisos.SQL_NOMBRE_EMPRESA: ("Empresa",)})
 
     def revocar(self, base, codigo=CODIGO):
         with parches(base):

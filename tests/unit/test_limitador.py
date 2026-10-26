@@ -270,9 +270,8 @@ class ConsumirUnaVez(unittest.TestCase):
                                 "identificador con dos puntos": {"identificador": self.JTI[:-1] + ":"},
                                 "segundos cero": {"segundos": 0}, "segundos de mas": {"segundos": 3601},
                                 "segundos bool": {"segundos": True}}.items():
-            with self.subTest(nombre):
-                with self.assertRaises(ValueError):
-                    self.consumir([1, True], **cambios)
+            with self.subTest(nombre), self.assertRaises(ValueError):
+                self.consumir([1, True], **cambios)
 
     def test_espacios_que_no_chocan_con_las_reglas(self):
         # Las claves de las reglas son limite:<regla>:...: un espacio con el

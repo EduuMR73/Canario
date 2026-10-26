@@ -197,8 +197,8 @@ class SoloNavegador(unittest.TestCase):
         self.assertEqual((control.estado, json.loads(control.cuerpo)), (200, {"proveedores": ["google"]}))
         self.assertEqual((rechazo.estado, rechazo.cuerpo), (403, b'{"detalle": "permiso denegado"}'))
         self.assertEqual(proveedores.call_count, 1)
-        self.assertEqual(registro.output, ["WARNING:canario.personal:EVENTO origen_rechazado: metodo=GET "
-                                           "ruta=/v1/personal/externo/proveedores sitio=-"])
+        self.assertEqual(registro.output, [("WARNING:canario.personal:EVENTO origen_rechazado: metodo=GET "
+                                            "ruta=/v1/personal/externo/proveedores sitio=-")])
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +508,7 @@ class Vinculos(unittest.TestCase):
                                        409, '{"detalle": "esa cuenta externa ya está vinculada a otra cuenta de '
                                             'la empresa"}'.encode()),
             "cuenta con vinculo": (ticket(externo.PROPOSITO_VINCULO), personal.VinculoDuplicado("cuenta"), 409,
-                                   '{"detalle": "su cuenta ya tiene vinculada una cuenta de ese proveedor"}'.encode()),
+                                   b'{"detalle": "su cuenta ya tiene vinculada una cuenta de ese proveedor"}'),
         }
         for nombre, (texto, error, codigo, cuerpo) in casos.items():
             with self.subTest(nombre):

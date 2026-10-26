@@ -195,7 +195,7 @@ CUERPO_409_SIN_DISPOSITIVO = ('{"detalle": "no se puede entrar con ese proveedor
                               'navegador; revise la empresa o, la primera vez, entre con su contraseña y su '
                               'código"}').encode()
 CUERPO_409_IDENTIDAD = '{"detalle": "esa cuenta externa ya está vinculada a otra cuenta de la empresa"}'.encode()
-CUERPO_409_CUENTA = '{"detalle": "su cuenta ya tiene vinculada una cuenta de ese proveedor"}'.encode()
+CUERPO_409_CUENTA = b'{"detalle": "su cuenta ya tiene vinculada una cuenta de ese proveedor"}'
 CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
 CUERPO_503 = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode()
 REINTENTAR_TRAS = "5"

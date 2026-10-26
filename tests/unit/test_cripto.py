@@ -267,9 +267,8 @@ class IdentidadExterna(unittest.TestCase):
         self.assertEqual(len(cripto.hmac_identidad(CLAVE, EMPRESA, "google", "x" * 255)), 32)  # control
         for proveedor, sub in (("google", ""), ("", self.SUB), ("google", "x" * 256), ("google", "ñ"),
                                ("google", b"123"), (None, self.SUB)):
-            with self.subTest(proveedor=proveedor, sub=sub):
-                with self.assertRaises(ValueError):
-                    cripto.hmac_identidad(CLAVE, EMPRESA, proveedor, sub)
+            with self.subTest(proveedor=proveedor, sub=sub), self.assertRaises(ValueError):
+                cripto.hmac_identidad(CLAVE, EMPRESA, proveedor, sub)
         with self.assertRaises(TypeError):
             cripto.hmac_identidad(CLAVE, "00000000-0000-0000-0000-000000000001", "google", self.SUB)
 
