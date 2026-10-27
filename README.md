@@ -113,7 +113,7 @@ Si se abre `https://localhost:8444/` sin el enlace, la página pide usar el que 
 1. Entra en `https://localhost:8445/entrar` con el identificador de la empresa, el email, la contraseña y el código de la aplicación.
 2. En el **Inicio** está el enlace del canal de la empresa, con el botón "Copiar el enlace" y el enlace "Abrir el formulario".
 3. En **Denuncias**, asígnate la denuncia (el desplegable de su fila y "Asignar"). Solo entonces aparece su enlace: el contenido solo lo lee quien la tiene asignada.
-4. Abre la denuncia, pulsa "Abrir el expediente", cambia su estado y escribe al denunciante. La respuesta se ve en el 8444 al consultar con el código de seguimiento.
+4. Abre la denuncia, pulsa "Abrir el expediente", cambia su estado y escribe al denunciante. La respuesta se ve en el 8444 al consultar con el código de seguimiento. Mejor a "En instrucción": si se cierra (resuelta, archivada o inadmitida), en la sección 5 el instructor ya no puede escribir al denunciante.
 
 **Por qué se entra con el identificador y no con el nombre de la empresa:** el nombre no es único, cambia (una fusión, una nueva razón social) y se escribe de varias formas ("S.L." o "SL"). Buscar por nombre, además, dejaría averiguar qué empresas usan Canario. El identificador no es secreto: es el mismo del enlace público del canal.
 
@@ -166,6 +166,7 @@ Errores reconocidos que no se han corregido antes de la entrega:
 - **Texto bidireccional sin aislar en la SPA.** El texto libre de una denuncia se guarda tal cual, también los caracteres de formato como U+202E, que invierte lo que le sigue. La SPA lo escapa, pero no lo aísla, así que un texto preparado se puede ver desordenado (ATT&CK T1036.002).
 - **Avisos que un lector de pantalla puede no anunciar.** Algunos mensajes de la SPA (por ejemplo "Copiado" en Cuentas o la confirmación del registro) se crean a la vez que su región viva. No se ha comprobado con un lector de pantalla real.
 - **La redacción no tiene pantalla.** Tachar una parte de una denuncia (art. 32.2) solo se puede hacer por la API.
+- **Renovación fallida una vez.** En una prueba a mano, "Seguir conectado" respondió "No hay conexión con el servidor" con el servicio en marcha. No se ha vuelto a reproducir ni se sabe la causa. Si ocurre, basta con volver a entrar.
 
 ## Límites aceptados
 
