@@ -40,6 +40,13 @@ recuperación guardados: recuperarían un factor sin que la empresa se
 enterase. Toda reinvitación se ve: fila de auditoría, invitacion_pendiente en
 /yo y en la lista de cuentas, y un admin puede anularla (anular_invitacion).
 
+Operaciones de admin que dan o quitan el acceso (invitar, reinvitar, dar de
+baja y aprobar una solicitud, en app/solicitudes.py): piden un TOTP recién
+escrito en la misma petición (transaccion_con_codigo; OWASP ASVS 5.0.0,
+7.5.3). Con una sesión de admin robada sola no se crea un admin propio ni se
+da de baja al legítimo (docs/threat-model.md, 8). Anular una invitación y
+rechazar una solicitud no lo piden: solo cierran, no dan acceso.
+
 Bloqueo sin denegación de servicio (OWASP, "Slow Down Online Guessing Attacks
 with Device Cookies"; Microsoft Entra Smart Lockout; NIST SP 800-63B-4,
 3.2.2):
@@ -93,8 +100,10 @@ quienes vigilan (NIST SP 800-63B-4, 4.1.2.1 y 4.5). La baja, la activación
 reinvitación de plataforma revocan los vínculos de la cuenta.
 
 Orden de bloqueos en las escrituras: cuenta, invitación, vínculos externos,
-dispositivos, sesiones y auditoría. La autenticación de una sesión es su
-propia transacción y solo bloquea la fila de la sesión.
+dispositivos, sesiones y auditoría. Las operaciones de admin con código
+bloquean antes todos los admins activos por id (transaccion_con_codigo). La
+autenticación de una sesión es su propia transacción y solo bloquea la fila
+de la sesión.
 
 Registro: los eventos de seguridad (logins fallidos, bloqueos, cierre del
 camino, retirada de un dispositivo, reutilización de una renovación,
@@ -1046,7 +1055,8 @@ def _codigo_de_la_sesion(pool, claves, sesion, codigo, instante):
 def _gastar_codigo(conexion, sesion, paso):
     """Gasta el paso aceptado, que no vuelve a valer, en la transacción de lo
     que autoriza. Va lo primero: la cuenta es la primera en el orden de
-    bloqueos. Quien llama libera después el dispositivo de la sesión."""
+    bloqueos (en transaccion_con_codigo, justo después de los admins, que ya
+    la incluyen). Quien llama libera después el dispositivo de la sesión."""
     if conexion.execute(SQL_GASTAR_PASO_TOTP, {"paso": paso, "usuario": sesion.usuario_id}).fetchone() is None:
         raise CredencialesNoValidas
 
@@ -1296,19 +1306,60 @@ def traducir_alta():
         raise
 
 
-def invitar(pool, sesion, email, rol):
-    """Crea una cuenta sin credenciales y su invitación."""
+# Lo que puede rechazar una operación de admin después de aceptar su código:
+# el código era bueno, así que no es un intento fallido.
+RECHAZOS_DE_NEGOCIO = (NoEncontrado, UltimoAdmin, EmailDuplicado, ValueError)
+
+
+@contextmanager
+def transaccion_con_codigo(pool, claves, sesion, codigo, instante):
+    """Transacción de una operación de admin que da o quita el acceso de una
+    cuenta, con un TOTP recién escrito en la misma petición. Es el modo sudo
+    de GitHub, pero por operación: el código no abre una ventana que una
+    sesión robada pueda aprovechar (OWASP ASVS 5.0.0, 7.5.3). Da
+    (conexion, admins).
+
+    * Prohibido antes de nada si la sesión no es de admin: un rol
+      insuficiente no cuenta intentos.
+    * El código cuenta en el dispositivo de la sesión, con su bloqueo, como
+      en revocar_vinculo: la sesión robada no puede probar los 6 dígitos.
+    * Orden de bloqueos: todos los admins activos por id, como dar_de_baja y
+      asignar, y después el paso de la propia cuenta, que ya está entre
+      ellos. Con el paso primero, dos bajas simultáneas se interbloquearían:
+      cada admin tendría su fila y esperaría la del otro.
+    * Si la operación se rechaza por negocio (RECHAZOS_DE_NEGOCIO), la
+      transacción se deshace, el código queda sin gastar y el dispositivo se
+      libera aparte: un código bueno no es un intento fallido. Un código
+      repetido sí lo es (_gastar_codigo), y no se libera."""
     exigir_admin(sesion)
-    with traducir_alta(), bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+    instante = time.time() if instante is None else instante
+    paso = _codigo_de_la_sesion(pool, claves, sesion, codigo, instante)
+    try:
+        with traducir_alta(), bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+            admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()
+            _gastar_codigo(conexion, sesion, paso)
+            yield conexion, admins
+            conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])
+    except RECHAZOS_DE_NEGOCIO:
+        with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+            conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])
+        raise
+
+
+def invitar(pool, claves, sesion, email, rol, codigo, instante=None):
+    """Crea una cuenta sin credenciales y su invitación, con un TOTP recién
+    escrito (transaccion_con_codigo)."""
+    with transaccion_con_codigo(pool, claves, sesion, codigo, instante) as (conexion, _):
         return crear_cuenta_invitada(conexion, sesion, email, rol, ACCION_INVITACION)
 
 
-def reinvitar(pool, sesion, usuario_id):
+def reinvitar(pool, claves, sesion, usuario_id, codigo, instante=None):
     """Nueva invitación para una cuenta (recuperar el acceso, cerrar el camino
-    sin confianza o reactivarla tras una baja). La anterior se cierra. La
-    cuenta sigue funcionando con sus credenciales hasta que se confirme."""
-    exigir_admin(sesion)
-    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+    sin confianza o reactivarla tras una baja), con un TOTP recién escrito
+    (transaccion_con_codigo): el token vuelve a quien la pide, así que con la
+    sesión sola se tomaría cualquier cuenta. La anterior se cierra. La cuenta
+    sigue funcionando con sus credenciales hasta que se confirme."""
+    with transaccion_con_codigo(pool, claves, sesion, codigo, instante) as (conexion, _):
         if conexion.execute(SQL_USUARIO, [usuario_id]).fetchone() is None:
             raise NoEncontrado
         token = _emitir_invitacion(conexion, sesion.empresa_id, sesion.identificador, usuario_id)
@@ -1331,12 +1382,11 @@ def anular_invitacion(pool, sesion, usuario_id):
                                        usuario_id])
 
 
-def dar_de_baja(pool, sesion, usuario_id):
+def dar_de_baja(pool, claves, sesion, usuario_id, codigo, instante=None):
     """Desactiva una cuenta y revoca sus sesiones, dispositivos, vínculos
-    externos e invitaciones. Nunca deja a la empresa sin un admin activado."""
-    exigir_admin(sesion)
-    with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
-        admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()
+    externos e invitaciones, con un TOTP recién escrito
+    (transaccion_con_codigo). Nunca deja a la empresa sin un admin activado."""
+    with transaccion_con_codigo(pool, claves, sesion, codigo, instante) as (conexion, admins):
         fila = conexion.execute(SQL_USUARIO, [usuario_id]).fetchone()
         if fila is None:
             raise NoEncontrado

@@ -15,12 +15,12 @@ Sin `/docs`, `/redoc` ni `/openapi.json`: no se publica el esquema de la API.
 | `POST /v1/personal/activacion` y `/activacion/confirmar` | personal | Activar la cuenta con la invitación: contraseña y TOTP |
 | `POST /v1/personal/sesiones`, `POST /v1/personal/sesiones/renovacion`, `DELETE /v1/personal/sesiones/actual` | personal | Entrar (JWT de acceso de 5 minutos y token de renovación), renovar y salir |
 | `GET /v1/personal/yo`, `POST /v1/personal/contrasena` | personal | Datos de la propia cuenta, con el enlace del canal de su empresa, y cambio de contraseña (devuelve tokens nuevos) |
-| `/v1/personal/usuarios...` | admin | Invitar, reinvitar, anular invitaciones y dar de baja |
+| `/v1/personal/usuarios...` | admin | Invitar, reinvitar, anular invitaciones y dar de baja; invitar, reinvitar y dar de baja llevan `codigo_totp` en el cuerpo |
 | `/v1/personal/denuncias...` | admin e instructor (asignar, solo admin) | Listar, leer, asignar, cambiar de estado y escribir mensajes |
 | `POST /v1/personal/denuncias/{id}/redaccion` y `.../mensajes/{secuencia}/redaccion` | admin con la denuncia asignada | Tachar datos que no deben conservarse (art. 32.2) |
 | `GET /v1/personal/auditoria`, `/auditoria/recientes` y `/auditoria/verificacion` | admin y auditor | Leer la auditoría desde el principio (`desde`) o desde lo más reciente (`antes`), con el email de quien actúa y de la cuenta afectada, y verificar su cadena |
 | `POST /v1/personal/registro` y `/registro/verificacion` | cualquiera | Pedir una cuenta del personal (empresa y email; siempre el mismo 202) y confirmar el email con el token del enlace |
-| `GET /v1/personal/solicitudes`, `POST .../{id}/aprobacion`, `DELETE .../{id}` | admin | Ver las solicitudes verificadas, aprobarlas con un rol (la invitación va solo al email) o rechazarlas |
+| `GET /v1/personal/solicitudes`, `POST .../{id}/aprobacion`, `DELETE .../{id}` | admin | Ver las solicitudes verificadas, aprobarlas con un rol y `codigo_totp` (la invitación va solo al email) o rechazarlas |
 | `GET /v1/personal/externo/proveedores` | cualquiera (solo navegador) | Los proveedores externos configurados en el broker; la SPA solo pinta el botón de esos |
 | `POST /v1/personal/externo/google/inicio` y `GET .../google/vuelta` | personal (solo navegador) | Ir a Google con un dispositivo de confianza vigente de la empresa (sin él, 409) y volver: la vuelta comprueba el flujo de su cookie, canjea por medio del broker y responde siempre un 303 a una página fija de la SPA |
 | `POST /v1/personal/sesiones/externa` | personal (solo navegador) | Entrar con el ticket de la vuelta, el dispositivo y un código TOTP; las mismas cookies que el login con contraseña |
@@ -78,7 +78,7 @@ La imagen del proxy compila la SPA en una primera etapa con Node y copia solo el
 | `/auditoria` | Admin y auditor: quién hizo qué, lo más reciente primero, con emails; cargar las anteriores, actualizar y verificar la cadena |
 | `/cuenta` | Con sesión, para todos los roles: cambiar la contraseña, que cierra las demás sesiones |
 
-Un límite que conviene conocer: invitar, reinvitar y dar de baja solo piden la sesión del admin, así que quien robe esa sesión puede crear un admin suyo y dar de baja al legítimo. Se detecta (el aviso de activación por correo y la auditoría), pero no se impide. Pedir el código TOTP otra vez antes de esas operaciones es el primer trabajo pendiente tras la entrega (modelo de amenazas, 8).
+Invitar, reinvitar, dar de baja y aprobar una solicitud piden en el cuerpo un código TOTP recién escrito (`codigo_totp`): con la sesión del admin sola ya no se crea un admin propio ni se da de baja al legítimo (modelo de amenazas, 6.3). Cada código vale una sola vez, así que dos operaciones seguidas esperan al código siguiente. Un código malo o repetido da 401 sin `WWW-Authenticate` (no falla la sesión, sino el código) y cuenta para el bloqueo del dispositivo.
 
 El token de los enlaces de correo sale de la URL en cuanto se abre la página y solo vive en memoria: si se recarga a mitad de la activación, hay que volver a abrir el enlace. Lo mismo el expediente de una denuncia: al recargar, hay que volver a abrirlo. La redacción (tachar una parte del texto, modelo de amenazas, 6.18) no tiene pantalla todavía: se hace por la API.
 

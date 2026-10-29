@@ -21,11 +21,14 @@
   y devuelve los tokens de una sesión nueva: la anterior queda revocada.
 * GET y POST /v1/personal/usuarios, POST y DELETE .../{usuario_id}/invitacion
   (reinvitar y anular la invitación abierta) y POST .../{usuario_id}/baja:
-  administración de cuentas, solo admin.
+  administración de cuentas, solo admin. Invitar, reinvitar y dar de baja
+  llevan codigo_totp en el cuerpo (personal.transaccion_con_codigo); anular
+  no, porque solo cierra.
 * Registro "primero el email" (app/solicitudes.py): POST /v1/personal/registro
   (empresa y email; siempre el mismo 202) y POST .../registro/verificacion
   (el token del enlace), sin sesión. GET /v1/personal/solicitudes (las
-  verificadas), POST .../{solicitud_id}/aprobacion (con el rol) y DELETE
+  verificadas), POST .../{solicitud_id}/aprobacion (con el rol y
+  codigo_totp) y DELETE
   .../{solicitud_id} (rechazo): solo admin. Los correos salen después de
   responder (BackgroundTask, app/correo.py); en el registro, también todo el
   trabajo con la base de datos (solicitudes.procesar). La aprobación NO
@@ -317,11 +320,20 @@ class CambioContrasena(BaseModel):
     codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
 
 
+class CodigoTotp(BaseModel):
+    """Solo el código: reinvitar, dar de baja y, en app/rutas_externo.py, el
+    login externo y los vínculos."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
+
+
 class NuevoUsuario(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     email: TextoLinea
     rol: Literal[personal.ROLES]
+    codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
 
     @field_validator("email")
     @classmethod
@@ -353,6 +365,7 @@ class AprobacionSolicitud(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     rol: Literal[personal.ROLES]
+    codigo_totp: TextoLinea = Field(max_length=LONGITUD_MAXIMA_CODIGO)
 
 
 def _texto_no_vacio(texto):
@@ -613,8 +626,9 @@ def listar_usuarios(peticion: Request, sesion: SesionPersonal):
 
 @router.post("/usuarios", status_code=201)
 def invitar(datos: NuevoUsuario, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
     try:
-        invitacion = personal.invitar(peticion.app.state.pool, sesion, datos.email, datos.rol)
+        invitacion = personal.invitar(estado.pool, estado.claves, sesion, datos.email, datos.rol, datos.codigo_totp)
     except ValueError:
         return _error(422)
     return JSONResponse(status_code=201, content={"usuario_id": str(invitacion.usuario_id),
@@ -622,8 +636,9 @@ def invitar(datos: NuevoUsuario, peticion: Request, sesion: SesionPersonal):
 
 
 @router.post("/usuarios/{usuario_id}/invitacion", status_code=201)
-def reinvitar(usuario_id: str, peticion: Request, sesion: SesionPersonal):
-    invitacion = personal.reinvitar(peticion.app.state.pool, sesion, _uuid(usuario_id))
+def reinvitar(usuario_id: str, datos: CodigoTotp, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
+    invitacion = personal.reinvitar(estado.pool, estado.claves, sesion, _uuid(usuario_id), datos.codigo_totp)
     return JSONResponse(status_code=201, content={"usuario_id": str(invitacion.usuario_id),
                                                   "token_invitacion": invitacion.token_invitacion})
 
@@ -635,8 +650,9 @@ def anular_invitacion(usuario_id: str, peticion: Request, sesion: SesionPersonal
 
 
 @router.post("/usuarios/{usuario_id}/baja", status_code=204)
-def dar_de_baja(usuario_id: str, peticion: Request, sesion: SesionPersonal):
-    personal.dar_de_baja(peticion.app.state.pool, sesion, _uuid(usuario_id))
+def dar_de_baja(usuario_id: str, datos: CodigoTotp, peticion: Request, sesion: SesionPersonal):
+    estado = peticion.app.state
+    personal.dar_de_baja(estado.pool, estado.claves, sesion, _uuid(usuario_id), datos.codigo_totp)
     return Response(status_code=204)
 
 
@@ -687,8 +703,8 @@ def listar_solicitudes(peticion: Request, sesion: SesionPersonal):
 def aprobar_solicitud(solicitud_id: str, datos: AprobacionSolicitud, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
     try:
-        aprobacion = solicitudes.aprobar(estado.pool, sesion, estado.origen_personal, _uuid(solicitud_id),
-                                         datos.rol)
+        aprobacion = solicitudes.aprobar(estado.pool, estado.claves, sesion, estado.origen_personal,
+                                         _uuid(solicitud_id), datos.rol, datos.codigo_totp)
     except ValueError:
         return _error(422)
     # Sin token_invitacion: solo lo recibe el email verificado.

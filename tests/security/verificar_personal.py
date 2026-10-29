@@ -36,6 +36,17 @@ y 6.9). Qué prueba:
   admin 409; el cambio de contraseña revoca todas las sesiones, también la
   actual, y los demás dispositivos, y devuelve tokens nuevos (ASVS 7.2.4);
   la auditoría registra cada acción y su cadena es válida.
+* Step-up TOTP (m): invitar, reinvitar y dar de baja piden codigo_totp, el
+  de la cuenta de la sesión. Sin él, 422; malo o ya gastado en el mismo paso,
+  401 sin WWW-Authenticate y la operación no ocurre (comprobado en la base de
+  datos: la cuenta no existe, la invitación no se añade, la baja no se aplica);
+  el código malo cuenta en el dispositivo de la sesión y el bueno lo libera;
+  un rechazo de negocio (404, 409) con código bueno deja los intentos a 0 y no
+  gasta el código (el mismo vale después); un instructor con código bueno
+  recibe 403 sin contar intentos; dos bajas simultáneas de dos admins a dos
+  cuentas distintas dan 204 y 204 sin interbloqueo. Cada operación de admin
+  que sale bien gasta un paso de 30 s de su cuenta, así que la batería espera
+  al siguiente (codigo_libre) y es más lenta.
 * Enlace del canal: /yo da a cada rol el formulario de su empresa en el sitio
   del denunciante, y el de una cuenta de B es el de B.
 * Recuperación: una reinvitación se ve (invitacion_pendiente en /yo y en la
@@ -855,6 +866,44 @@ def sesion_de(cuenta, dispositivo="propio"):
     return Sesion(cuenta, datos)
 
 
+# Invitar, reinvitar y dar de baja piden un TOTP recién escrito de la cuenta
+# de la sesión (step-up por operación, ASVS 5.0.0, 7.5.3), y cada paso de 30 s
+# vale UNA vez por cuenta. Por eso cada operación de un admin que sale bien
+# necesita su propio paso: codigo_libre espera al siguiente si el actual ya se
+# usó. Si la operación se rechaza (403, 404, 409, 422, 401), la API no gasta el
+# paso y la batería tampoco lo anota, así que el mismo código sirve después.
+RUTA_USUARIOS = "/v1/personal/usuarios"
+
+
+def pt_totp(metodo, ruta, token, datos=None, codigo=None):
+    """Petición de administración con codigo_totp en el cuerpo. Sin código, el
+    siguiente libre de la cuenta de la sesión (no anota el paso: eso lo hace
+    quien sabe si la operación salió bien, ver una_totp)."""
+    if codigo is None:
+        codigo = codigo_libre(token.cuenta.secreto)[0]
+    return pt(metodo, ruta, {**(datos or {}), "codigo_totp": codigo}, token=token)
+
+
+def una_totp(metodo, ruta, token, datos=None):
+    """Una operación de admin con un código libre de la cuenta de la sesión.
+    Si sale bien (2xx), el paso queda gastado en ULTIMO_PASO."""
+    secreto = token.cuenta.secreto
+    codigo, paso = codigo_libre(secreto)
+    respuesta = una(pt_totp(metodo, ruta, token, datos, codigo))
+    if respuesta.get("estado") in (200, 201, 204):
+        ULTIMO_PASO[secreto] = paso
+    return respuesta
+
+
+def preparar_totp(metodo, ruta, token, nombre, datos=None):
+    """preparar() para una operación de admin con código: si falla, PARADA."""
+    respuesta = una_totp(metodo, ruta, token, datos)
+    if respuesta.get("estado") not in (200, 201, 204):
+        raise Parada(f"preparacion fallida ({nombre}): {respuesta.get('estado')} "
+                     f"{respuesta.get('cuerpo', b'')[:200]!r}")
+    return respuesta
+
+
 def parte_jwt(objeto):
     return base64.urlsafe_b64encode(json.dumps(objeto, separators=(",", ":")).encode()).rstrip(b"=").decode()
 
@@ -1058,7 +1107,7 @@ def seccion_b():
 
 
 def invitar(admin_token, etiqueta, email, rol="instructor", empresa="A"):
-    r = una(pt("POST", "/v1/personal/usuarios", {"email": email, "rol": rol}, token=admin_token))
+    r = una_totp("POST", RUTA_USUARIOS, admin_token, {"email": email, "rol": rol})
     datos = json_de(r)
     if r.get("estado") != 201 or not datos:
         raise Parada(f"no se pudo invitar a {email}: {r}")
@@ -1165,7 +1214,7 @@ def seccion_d():
     pendiente, _ = invitar(token_admin, "pendiente", "pendiente@alfa.test")
     baja, _ = invitar(token_admin, "de_baja", "debaja@alfa.test")
     preparar_cuenta(baja)
-    una(pt("POST", f"/v1/personal/usuarios/{baja.usuario_id}/baja", token=token_admin))
+    una_totp("POST", f"/v1/personal/usuarios/{baja.usuario_id}/baja", token_admin)
     codigo, _ = codigo_libre(instr.secreto)
     casos = {
         "empresa inexistente": login(instr, codigo=codigo, empresa="0123456789abcdef0123456789abcdef"),
@@ -1310,7 +1359,7 @@ def seccion_e():
     pasa(fila.get("camino_sin_confianza_cerrado") is True and sorted(fila) == CLAVES_USUARIO,
          "e6) el admin ve el camino cerrado en la lista de cuentas (sin hashes ni contadores)")
     # e7) La reinvitación lo reabre.
-    r = una(pt("POST", f"/v1/personal/usuarios/{victima.usuario_id}/invitacion", token=token_admin))
+    r = una_totp("POST", f"/v1/personal/usuarios/{victima.usuario_id}/invitacion", token_admin)
     victima.invitacion = (json_de(r) or {}).get("token_invitacion")
     activar(victima)
     r = login_correcto(victima, dispositivo=None)
@@ -1514,22 +1563,29 @@ def seccion_g():
     instr = CUENTAS["instructor"]
     token_instr = sesion_de(instr)
     ctl_lista = una(pt("GET", "/v1/personal/usuarios", token=token_admin))
+    # Con un código bien formado: el 403 tiene que salir del rol, no de la forma.
+    forma = codigo_erroneo(instr.secreto)
     prohibidas = http([pt("GET", "/v1/personal/usuarios", token=token_instr),
-                       pt("POST", "/v1/personal/usuarios", {"email": "x@alfa.test", "rol": "admin"}, token=token_instr),
-                       pt("POST", f"/v1/personal/usuarios/{admin.usuario_id}/invitacion", token=token_instr),
-                       pt("POST", f"/v1/personal/usuarios/{admin.usuario_id}/baja", token=token_instr)])
+                       pt_totp("POST", RUTA_USUARIOS, token_instr, {"email": "x@alfa.test", "rol": "admin"}, forma),
+                       pt_totp("POST", f"/v1/personal/usuarios/{admin.usuario_id}/invitacion", token_instr,
+                               codigo=forma),
+                       pt_totp("POST", f"/v1/personal/usuarios/{admin.usuario_id}/baja", token_instr,
+                               codigo=forma)])
     negativo("g) un instructor recibe 403 en las 4 rutas de administracion",
              all(x.get("estado") == 403 and x.get("cuerpo") == CUERPO_403 for x in prohibidas),
              ctl_lista.get("estado") == 200, f"estados: {[x.get('estado') for x in prohibidas]}")
     pasa(valor("select count(*) from canal.usuario_personal where email = 'x@alfa.test';") == "0",
          "g) el instructor no ha creado ninguna cuenta")
     ajeno = admin_b.usuario_id
-    control = una(pt("POST", f"/v1/personal/usuarios/{instr.usuario_id}/invitacion", token=token_admin))
+    control = una_totp("POST", f"/v1/personal/usuarios/{instr.usuario_id}/invitacion", token_admin)
     instr_inv = (json_de(control) or {}).get("token_invitacion")
-    respuestas = http([pt("POST", f"/v1/personal/usuarios/{ajeno}/invitacion", token=token_admin),
-                       pt("POST", f"/v1/personal/usuarios/{ajeno}/baja", token=token_admin),
-                       pt("POST", f"/v1/personal/usuarios/{uuid.uuid4()}/baja", token=token_admin),
-                       pt("POST", "/v1/personal/usuarios/no-es-un-uuid/baja", token=token_admin)])
+    # Los cuatro son rechazos de negocio (404): ninguno gasta el paso, así que
+    # comparten código.
+    libre = codigo_libre(admin.secreto)[0]
+    respuestas = http([pt_totp("POST", f"/v1/personal/usuarios/{ajeno}/invitacion", token_admin, codigo=libre),
+                       pt_totp("POST", f"/v1/personal/usuarios/{ajeno}/baja", token_admin, codigo=libre),
+                       pt_totp("POST", f"/v1/personal/usuarios/{uuid.uuid4()}/baja", token_admin, codigo=libre),
+                       pt_totp("POST", "/v1/personal/usuarios/no-es-un-uuid/baja", token_admin, codigo=libre)])
     negativo("g) una cuenta de otra empresa, una inexistente y un id mal formado dan el mismo 404",
              all(x.get("estado") == 404 and x.get("cuerpo") == CUERPO_404 for x in respuestas),
              control.get("estado") == 201, f"estados: {[x.get('estado') for x in respuestas]}")
@@ -1541,32 +1597,33 @@ def seccion_g():
     valor(f"update canal.invitacion_personal set cerrada = true where cerrada = false "
           f"and usuario_id = '{instr.usuario_id}'; select 1;")
     del instr_inv
-    duplicado = una(pt("POST", "/v1/personal/usuarios", {"email": instr.email, "rol": "instructor"}, token=token_admin))
-    mayusculas = una(pt("POST", "/v1/personal/usuarios", {"email": instr.email.upper(), "rol": "admin"},
-                        token=token_admin))
-    invalidos = http([pt("POST", "/v1/personal/usuarios", {"email": e, "rol": "instructor"}, token=token_admin)
+    # 409 y 422 tampoco gastan el paso: el código libre vale para todos.
+    duplicado = una_totp("POST", RUTA_USUARIOS, token_admin, {"email": instr.email, "rol": "instructor"})
+    mayusculas = una_totp("POST", RUTA_USUARIOS, token_admin, {"email": instr.email.upper(), "rol": "admin"})
+    libre = codigo_libre(admin.secreto)[0]
+    invalidos = http([pt_totp("POST", RUTA_USUARIOS, token_admin, {"email": e, "rol": "instructor"}, libre)
                       for e in ("sin-arroba", "@alfa.test", "con espacio@alfa.test", "ñ@alfa.test")]
-                     + [pt("POST", "/v1/personal/usuarios", {"email": "rol@alfa.test", "rol": "superadmin"},
-                           token=token_admin)])
+                     + [pt_totp("POST", RUTA_USUARIOS, token_admin, {"email": "rol@alfa.test", "rol": "superadmin"},
+                                libre)])
     pasa(duplicado.get("estado") == 409 and duplicado.get("cuerpo") == CUERPO_409_DUPLICADO
          and mayusculas.get("cuerpo") == CUERPO_409_DUPLICADO,
          "g) un email ya usado en la empresa (tambien en mayusculas) da 409")
     pasa(all(x.get("estado") == 422 and x.get("cuerpo") == CUERPO_422 for x in invalidos),
          "g) emails mal formados o no ASCII y un rol desconocido dan 422 sin eco")
     # La baja del último admin activado se rechaza; con otro admin, se acepta.
-    ultimo = una(pt("POST", f"/v1/personal/usuarios/{admin.usuario_id}/baja", token=token_admin))
+    ultimo = una_totp("POST", f"/v1/personal/usuarios/{admin.usuario_id}/baja", token_admin)
     pasa(ultimo.get("estado") == 409 and ultimo.get("cuerpo") == CUERPO_409_ULTIMO,
          "g) la baja del unico admin activado da 409")
     admin2, _ = invitar(token_admin, "admin2", "admin2@alfa.test", rol="admin")
     preparar_cuenta(admin2)
     token_admin2 = sesion_de(admin2)
-    baja = una(pt("POST", f"/v1/personal/usuarios/{admin.usuario_id}/baja", token=token_admin2))
+    baja = una_totp("POST", f"/v1/personal/usuarios/{admin.usuario_id}/baja", token_admin2)
     tras = http([yo(token_admin), login(admin, codigo=codigo_libre(admin.secreto)[0])])
     negativo("g) con otro admin activado, la baja se acepta (204), revoca sus sesiones y el login da 401",
              es_401(tras[0], CUERPO_401_SESION) and es_401(tras[1]), baja.get("estado") == 204,
              f"baja: {baja.get('estado')}, tras: {[x.get('estado') for x in tras]}")
     # Reactivar = reinvitar y activar.
-    r = una(pt("POST", f"/v1/personal/usuarios/{admin.usuario_id}/invitacion", token=token_admin2))
+    r = una_totp("POST", f"/v1/personal/usuarios/{admin.usuario_id}/invitacion", token_admin2)
     admin.invitacion = (json_de(r) or {}).get("token_invitacion")
     activar(admin)
     pasa(es_201_login(login_correcto(admin), False),
@@ -1654,7 +1711,7 @@ def seccion_j():
 
     # Aviso (NIST SP 800-63B-4, 4.2.3): el titular y los admins ven la reinvitación.
     antes = json_de(una(yo(token_instr))) or {}
-    reinvitacion = una(pt("POST", rutas, token=token_admin2))
+    reinvitacion = una_totp("POST", rutas, token_admin2)
     token_inv = (json_de(reinvitacion) or {}).get("token_invitacion")
     despues = json_de(una(yo(token_instr))) or {}
     en_lista = fila_lista(token_admin2, instr.usuario_id)
@@ -2212,7 +2269,7 @@ def seccion_k():
     # k9) Baja de una cuenta con denuncias asignadas, y paginación.
     preparar(asignar_peticion(tokens["admin2"], den2, instr2.usuario_id), "asignar den2 a instr2")
     activa = fila_lista_denuncia(tokens["admin2"], den2).get("asignada_activa")
-    preparar(pt("POST", f"/v1/personal/usuarios/{instr2.usuario_id}/baja", token=tokens["admin2"]), "baja instr2")
+    preparar_totp("POST", f"/v1/personal/usuarios/{instr2.usuario_id}/baja", tokens["admin2"], "baja instr2")
     tras_baja = fila_lista_denuncia(tokens["admin2"], den2)
     negativo("k9) tras la baja de su instructor, la denuncia sigue asignada y el listado la marca como inactiva",
              tras_baja.get("asignada_a") == str(instr2.usuario_id) and tras_baja.get("asignada_activa") is False,
@@ -2605,8 +2662,8 @@ def seccion_k_auditor():
         "asignar": asignar_peticion(tok, den, auditor.usuario_id),
         "redactar": redaccion_peticion(tok, den, [{"desde": 0, "texto": texto[:4]}]),
         "listar las cuentas": pt("GET", "/v1/personal/usuarios", token=tok),
-        "invitar": pt("POST", "/v1/personal/usuarios", {"email": "ka.invitada@alfa.test", "rol": "auditor"},
-                      token=tok),
+        "invitar": pt_totp("POST", RUTA_USUARIOS, tok, {"email": "ka.invitada@alfa.test", "rol": "auditor"},
+                           codigo_erroneo(auditor.secreto)),
         "listar las solicitudes de registro": pt("GET", "/v1/personal/solicitudes", token=tok),
     }
     respuestas = http(list(prohibidas.values()))
@@ -2793,6 +2850,175 @@ def seccion_k_lecturas():
     desde = json_de(una(pt("GET", f"/v1/personal/auditoria?desde={s2[-1] if s2 else 1}", token=token_admin2))) or {}
     negativo("kl5) la segunda pagina coincide fila a fila con el listado desde el principio",
              list(reversed(p2.get("filas", []))) == desde.get("filas", [])[:len(s2)] and len(s2) > 0, control_p1)
+
+
+def existe_cuenta(email):
+    return valor(f"select count(*) from canal.usuario_personal where email = '{email}';") != "0"
+
+
+def cuenta_activa(usuario_id):
+    return valor(f"select activo from canal.usuario_personal where id = '{usuario_id}';") == "t"
+
+
+def filas_invitacion(usuario_id):
+    """Todas las invitaciones de la cuenta, abiertas y cerradas: reinvitar
+    cierra la anterior y añade una."""
+    return int(valor(f"select count(*) from canal.invitacion_personal where usuario_id = '{usuario_id}';"))
+
+
+def es_401_sin_reto(respuesta):
+    """El 401 de credenciales de un código malo o repetido, sin la cabecera
+    WWW-Authenticate: no es un desafío de autenticación, la sesión sigue viva."""
+    return es_401(respuesta) and "www-authenticate" not in respuesta.get("cabeceras", {})
+
+
+def seccion_m():
+    p("=== m) step-up TOTP: invitar, reinvitar y dar de baja piden un codigo recien escrito")
+    cuenta_a, instr = CUENTAS["admin2"], CUENTAS["instructor"]
+    ta = sesion_de(cuenta_a)
+    cuenta_b, _ = invitar(ta, "admin_stepup", "admin.stepup@alfa.test", rol="admin")
+    preparar_cuenta(cuenta_b)
+    tb = sesion_de(cuenta_b)
+    ti = sesion_de(instr)
+    poner_dispositivo(cuenta_a, 0)
+    poner_dispositivo(instr, 0)
+
+    # m1) Invitar. El control es la misma operación con un código bueno.
+    email_sin, email_malo, email_t1, email_rep = (f"m1.{n}@alfa.test" for n in ("sin", "malo", "control", "repetido"))
+    sin = una(pt("POST", RUTA_USUARIOS, {"email": email_sin, "rol": "instructor"}, token=ta))
+    malo = una(pt_totp("POST", RUTA_USUARIOS, ta, {"email": email_malo, "rol": "instructor"},
+                       codigo_erroneo(cuenta_a.secreto)))
+    intentos_malo = contadores_dispositivo(cuenta_a)[0]
+    codigo, paso = codigo_libre(cuenta_a.secreto)
+    control = una(pt_totp("POST", RUTA_USUARIOS, ta, {"email": email_t1, "rol": "instructor"}, codigo))
+    if control.get("estado") == 201:
+        ULTIMO_PASO[cuenta_a.secreto] = paso
+    intentos_bueno = contadores_dispositivo(cuenta_a)[0]
+    repetido = una(pt_totp("POST", RUTA_USUARIOS, ta, {"email": email_rep, "rol": "instructor"}, codigo))
+    t1 = (json_de(control) or {}).get("usuario_id")
+    control_m1 = control.get("estado") == 201 and t1 is not None and existe_cuenta(email_t1)
+    pasa(control_m1, f"m1) control: invitar con un codigo bueno da 201 y la cuenta existe ({control.get('estado')})")
+    negativo("m1) invitar sin codigo_totp da 422 y no crea la cuenta",
+             sin.get("estado") == 422 and sin.get("cuerpo") == CUERPO_422 and not existe_cuenta(email_sin),
+             control_m1, f"respuesta: {sin.get('estado')}")
+    negativo("m1) invitar con un codigo malo da 401 sin WWW-Authenticate y no crea la cuenta",
+             es_401_sin_reto(malo) and not existe_cuenta(email_malo), control_m1, f"respuesta: {malo}")
+    negativo("m1) el codigo malo cuenta en el dispositivo de la sesion (1 intento) y el bueno lo libera (0)",
+             intentos_malo == 1 and intentos_bueno == 0, control_m1, f"intentos: {intentos_malo}, {intentos_bueno}")
+    negativo("m1) el mismo codigo otra vez (mismo paso) da 401 sin WWW-Authenticate y no crea la cuenta",
+             es_401_sin_reto(repetido) and not existe_cuenta(email_rep), control_m1, f"respuesta: {repetido}")
+    if not control_m1:
+        raise Parada(f"no se pudo invitar a {email_t1} con un codigo bueno: {control.get('estado')}")
+    # Objetivos de las pruebas siguientes. tb los invita en el paso en curso,
+    # que ta ya gastó, para no esperar otro por cada uno.
+    t3, _ = invitar(tb, "stepup_t3", "m.t3@alfa.test")
+    t3 = t3.usuario_id
+
+    # m2) Reinvitar. T1 tiene una sola invitación; reinvitar cierra la anterior y añade otra.
+    ruta_inv = f"{RUTA_USUARIOS}/{t1}/invitacion"
+    antes = filas_invitacion(t1)
+    sin = una(pt("POST", ruta_inv, {}, token=ta))
+    malo = una(pt_totp("POST", ruta_inv, ta, codigo=codigo_erroneo(cuenta_a.secreto)))
+    tras_rechazos = filas_invitacion(t1)
+    codigo, paso = codigo_libre(cuenta_a.secreto)
+    control = una(pt_totp("POST", ruta_inv, ta, codigo=codigo))
+    if control.get("estado") == 201:
+        ULTIMO_PASO[cuenta_a.secreto] = paso
+    tras_control = filas_invitacion(t1)
+    repetido = una(pt_totp("POST", ruta_inv, ta, codigo=codigo))
+    control_m2 = (control.get("estado") == 201 and antes == 1 and tras_control == 2
+                  and isinstance((json_de(control) or {}).get("token_invitacion"), str))
+    pasa(control_m2, f"m2) control: reinvitar con un codigo bueno da 201 y una invitacion nueva ({antes} -> {tras_control})")
+    negativo("m2) reinvitar sin codigo_totp da 422 y no crea ninguna invitacion",
+             sin.get("estado") == 422 and sin.get("cuerpo") == CUERPO_422 and tras_rechazos == 1, control_m2,
+             f"respuesta: {sin.get('estado')}, filas: {tras_rechazos}")
+    negativo("m2) reinvitar con un codigo malo da 401 sin WWW-Authenticate y no crea ninguna invitacion",
+             es_401_sin_reto(malo) and tras_rechazos == 1, control_m2, f"respuesta: {malo}, filas: {tras_rechazos}")
+    negativo("m2) el mismo codigo otra vez da 401 sin WWW-Authenticate y no crea otra invitacion",
+             es_401_sin_reto(repetido) and filas_invitacion(t1) == 2, control_m2, f"respuesta: {repetido}")
+    t4, _ = invitar(tb, "stepup_t4", "m.t4@alfa.test")
+    t4 = t4.usuario_id
+
+    # m3) Un rechazo de negocio con un código bueno no es un intento fallido:
+    #     deshace la transaccion, libera el dispositivo y NO gasta el codigo.
+    #     Se parte de 3 intentos para que "0" solo pueda venir de la liberacion.
+    poner_dispositivo(cuenta_a, 3)
+    codigo, paso = codigo_libre(cuenta_a.secreto)
+    inexistente = una(pt_totp("POST", f"{RUTA_USUARIOS}/{uuid.uuid4()}/invitacion", ta, codigo=codigo))
+    intentos_404 = contadores_dispositivo(cuenta_a)[0]
+    poner_dispositivo(cuenta_a, 3)
+    duplicado = una(pt_totp("POST", RUTA_USUARIOS, ta, {"email": email_t1, "rol": "instructor"}, codigo))
+    intentos_409 = contadores_dispositivo(cuenta_a)[0]
+    email_t2 = "m.t2@alfa.test"
+    gemelo = una(pt_totp("POST", RUTA_USUARIOS, ta, {"email": email_t2, "rol": "instructor"}, codigo))
+    if gemelo.get("estado") == 201:
+        ULTIMO_PASO[cuenta_a.secreto] = paso
+    t2 = (json_de(gemelo) or {}).get("usuario_id")
+    control_m3 = gemelo.get("estado") == 201 and t2 is not None and existe_cuenta(email_t2)
+    pasa(control_m3, "m3) control: tras los dos rechazos, el MISMO codigo vale para invitar (201): no se gasto "
+                     f"({gemelo.get('estado')})")
+    negativo("m3) reinvitar una cuenta que no existe, con un codigo bueno, da 404 y deja los intentos a 0",
+             inexistente.get("estado") == 404 and inexistente.get("cuerpo") == CUERPO_404 and intentos_404 == 0,
+             control_m3, f"respuesta: {inexistente.get('estado')}, intentos: {intentos_404}")
+    negativo("m3) invitar un email repetido, con un codigo bueno, da 409 y deja los intentos a 0",
+             duplicado.get("estado") == 409 and duplicado.get("cuerpo") == CUERPO_409_DUPLICADO and intentos_409 == 0,
+             control_m3, f"respuesta: {duplicado.get('estado')}, intentos: {intentos_409}")
+    if not control_m3:
+        raise Parada(f"no se pudo invitar a {email_t2} con un codigo bueno: {gemelo.get('estado')}")
+
+    # m4) Un instructor con un código bueno sigue recibiendo 403 y no cuenta intentos.
+    email_instr = "m6.instructor@alfa.test"
+    codigo = codigo_libre(instr.secreto)[0]
+    antes_instr = contadores_dispositivo(instr)
+    filas_t4 = filas_invitacion(t4)
+    respuestas = http([pt_totp("POST", RUTA_USUARIOS, ti, {"email": email_instr, "rol": "instructor"}, codigo),
+                       pt_totp("POST", f"{RUTA_USUARIOS}/{t4}/invitacion", ti, codigo=codigo),
+                       pt_totp("POST", f"{RUTA_USUARIOS}/{t4}/baja", ti, codigo=codigo)])
+    negativo("m4) un instructor con un codigo bueno recibe 403 al invitar, reinvitar y dar de baja, y nada cambia",
+             all(r.get("estado") == 403 and r.get("cuerpo") == CUERPO_403 for r in respuestas)
+             and not existe_cuenta(email_instr) and filas_invitacion(t4) == filas_t4 and cuenta_activa(t4),
+             control_m1, f"estados: {[r.get('estado') for r in respuestas]}")
+    negativo("m4) el 403 del instructor no cuenta ningun intento en su dispositivo",
+             contadores_dispositivo(instr)[0] == antes_instr[0] == 0, control_m1,
+             f"antes: {antes_instr}, despues: {contadores_dispositivo(instr)}")
+
+    # m5) Dar de baja. T1 es el objetivo; T2 recibe el intento con el código ya gastado.
+    ruta_baja = f"{RUTA_USUARIOS}/{t1}/baja"
+    sin = una(pt("POST", ruta_baja, {}, token=ta))
+    malo = una(pt_totp("POST", ruta_baja, ta, codigo=codigo_erroneo(cuenta_a.secreto)))
+    activa_tras_rechazos = cuenta_activa(t1)
+    codigo, paso = codigo_libre(cuenta_a.secreto)
+    control = una(pt_totp("POST", ruta_baja, ta, codigo=codigo))
+    if control.get("estado") == 204:
+        ULTIMO_PASO[cuenta_a.secreto] = paso
+    repetido = una(pt_totp("POST", f"{RUTA_USUARIOS}/{t2}/baja", ta, codigo=codigo))
+    control_m5 = control.get("estado") == 204 and activa_tras_rechazos and not cuenta_activa(t1)
+    pasa(control_m5, f"m5) control: dar de baja con un codigo bueno da 204 y la cuenta queda inactiva ({control.get('estado')})")
+    negativo("m5) dar de baja sin codigo_totp da 422 y la cuenta sigue activa",
+             sin.get("estado") == 422 and sin.get("cuerpo") == CUERPO_422 and activa_tras_rechazos, control_m5,
+             f"respuesta: {sin.get('estado')}")
+    negativo("m5) dar de baja con un codigo malo da 401 sin WWW-Authenticate y la cuenta sigue activa",
+             es_401_sin_reto(malo) and activa_tras_rechazos, control_m5, f"respuesta: {malo}")
+    negativo("m5) el mismo codigo otra vez (otra cuenta) da 401 sin WWW-Authenticate y esa cuenta sigue activa",
+             es_401_sin_reto(repetido) and cuenta_activa(t2), control_m5, f"respuesta: {repetido}")
+
+    # m6) Dos admins dan de baja a la vez a dos cuentas distintas (como k7: un
+    #     grupo en paralelo). Si cada baja bloqueara primero la fila de su propio
+    #     admin, cada una esperaría la del otro; con todos los admins bloqueados
+    #     por id antes de nada, no hay interbloqueo.
+    (codigo_a, paso_a), (codigo_b, paso_b) = codigo_libre(cuenta_a.secreto), codigo_libre(cuenta_b.secreto)
+    simultaneas = http([{"grupo": [pt_totp("POST", f"{RUTA_USUARIOS}/{t3}/baja", ta, codigo=codigo_a),
+                                   pt_totp("POST", f"{RUTA_USUARIOS}/{t4}/baja", tb, codigo=codigo_b)]}])
+    if len(simultaneas) == 2 and all("estado" in r for r in simultaneas):
+        if simultaneas[0]["estado"] == 204:
+            ULTIMO_PASO[cuenta_a.secreto] = paso_a
+        if simultaneas[1]["estado"] == 204:
+            ULTIMO_PASO[cuenta_b.secreto] = paso_b
+        pasa([r["estado"] for r in simultaneas] == [204, 204] and not cuenta_activa(t3) and not cuenta_activa(t4),
+             f"m6) dos bajas simultaneas de dos admins a dos cuentas distintas: ambas 204, sin 5xx ni "
+             f"interbloqueo ({[r['estado'] for r in simultaneas]})")
+    else:
+        sinc(f"m6) dos bajas simultaneas: el cliente HTTP no devolvio las dos respuestas ({simultaneas})")
 
 
 def seccion_l():
@@ -3072,7 +3298,7 @@ def main():
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
                         seccion_k, seccion_k_no_veraz, seccion_k_redaccion, seccion_k_auditor, seccion_k_lecturas,
-                        seccion_l, seccion_i,
+                        seccion_m, seccion_l, seccion_i,
                         seccion_h):
             seccion()
     except Parada as e:

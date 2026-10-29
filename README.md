@@ -172,7 +172,7 @@ Errores reconocidos que no se han corregido antes de la entrega:
 
 Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de amenazas](docs/threat-model.md):
 
-- **Una sesión de admin robada basta para quedarse con la empresa:** invitar, reinvitar y dar de baja no piden un segundo factor. Se detecta (aviso por correo y auditoría), pero no se impide.
+- **Un admin malicioso** puede crear cuentas y dar de baja con su propio código: contra él solo hay detección (aviso por correo y auditoría).
 - **El TOTP no resiste el phishing con un proxy en medio**, porque el código no está atado al origen.
 - **El código de seguimiento no se puede recuperar.** Es el precio del anonimato.
 - **Los correos solo salen a Mailpit.** No hay salida SMTP de producción en esta entrega.
@@ -183,16 +183,15 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 
 ## Mejoras futuras
 
-1. **Pedir el código TOTP otra vez** antes de invitar, reinvitar y dar de baja (OWASP ASVS 5.0.0, 7.5.3). Es lo primero tras la entrega.
-2. **Aislar el texto libre** en la SPA (`<bdi>` o `unicode-bidi: isolate`).
-3. **Regiones vivas** que existan antes que su texto, para los lectores de pantalla.
-4. **Pantalla de redacción** en la SPA.
-5. **Adjuntos** y **avisos al personal** de las denuncias nuevas.
-6. **Salida de correo de producción**, con SPF, DKIM y DMARC.
-7. **Autenticación resistente al phishing** (WebAuthn o passkeys).
-8. **Cuatro ojos** para declarar una denuncia no veraz y para tachar, que hoy hace un solo admin.
-9. **Cambiar el nombre de una empresa** desde `gestion`, con verificación fuera de banda.
-10. **Cifrado de extremo a extremo** y borrado criptográfico, una clave por denuncia.
+1. **Aislar el texto libre** en la SPA (`<bdi>` o `unicode-bidi: isolate`).
+2. **Regiones vivas** que existan antes que su texto, para los lectores de pantalla.
+3. **Pantalla de redacción** en la SPA.
+4. **Adjuntos** y **avisos al personal** de las denuncias nuevas.
+5. **Salida de correo de producción**, con SPF, DKIM y DMARC.
+6. **Autenticación resistente al phishing** (WebAuthn o passkeys).
+7. **Cuatro ojos** para declarar una denuncia no veraz y para tachar, que hoy hace un solo admin.
+8. **Cambiar el nombre de una empresa** desde `gestion`, con verificación fuera de banda.
+9. **Cifrado de extremo a extremo** y borrado criptográfico, una clave por denuncia.
 
 ## Documentación
 

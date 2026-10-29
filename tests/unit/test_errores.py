@@ -11,6 +11,7 @@ personal.autenticar, que necesita la base de datos): así se comprueba que la
 sesión que deja la dependencia llega al manejador.
 """
 import asyncio
+import json
 import types
 import unittest
 import uuid
@@ -183,17 +184,22 @@ def aplicacion_completa():
     return app
 
 
-def llamar(app, metodo, ruta):
+def llamar(app, metodo, ruta, cuerpo=None):
     """Una petición por la aplicación ASGI, como la entregaría uvicorn: con la
-    ruta ya decodificada (un %0A llega como salto de línea)."""
+    ruta ya decodificada (un %0A llega como salto de línea). cuerpo, si lo
+    hay, va como JSON."""
+    cabeceras = [(b"authorization", b"Bearer token")]
+    datos = b""
+    if cuerpo is not None:
+        datos = json.dumps(cuerpo).encode()
+        cabeceras += [(b"content-type", b"application/json"), (b"content-length", str(len(datos)).encode())]
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": metodo,
              "scheme": "http", "path": ruta, "raw_path": ruta.encode("utf-8"), "root_path": "",
-             "query_string": b"", "headers": [(b"authorization", b"Bearer token")], "client": None,
-             "server": ("api", 8000)}
+             "query_string": b"", "headers": cabeceras, "client": None, "server": ("api", 8000)}
     mensajes = []
 
     async def recibir():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": datos, "more_body": False}
 
     async def enviar(mensaje):
         mensajes.append(mensaje)
@@ -207,10 +213,14 @@ class AccesoDenegadoPorLaAplicacion(unittest.TestCase):
     """De la dependencia de sesión al manejador, con el router real."""
 
     def test_instructor_en_ruta_de_admin(self):
+        # La baja lleva el código en el cuerpo (step-up): sin él, FastAPI da
+        # 422 al validar el cuerpo, antes de la ruta. Con él, el 403 sale de
+        # exigir_admin, que va antes de mirar el código: este nunca se comprueba.
         with mock.patch.object(personal, "autenticar", return_value=SESION), \
                 self.assertLogs("canario.personal", "WARNING") as registro:
             respuesta = llamar(aplicacion_completa(), "POST",
-                               "/v1/personal/usuarios/00000000-0000-0000-0000-000000000003/baja")
+                               "/v1/personal/usuarios/00000000-0000-0000-0000-000000000003/baja",
+                               {"codigo_totp": "000000"})
         self.assertEqual(respuesta, (403, detalle("permiso denegado")))
         self.assertEqual(registro.output, [
             INICIO_EVENTO + ("codigo=403 metodo=POST ruta=/v1/personal/usuarios/{usuario_id}/baja "
@@ -229,6 +239,9 @@ class AccesoDenegadoPorLaAplicacion(unittest.TestCase):
         # Sin sesión no hay cuenta a la que atribuir nada: 401 y ninguna línea.
         with mock.patch.object(personal, "autenticar", side_effect=personal.SesionNoValida), \
                 self.assertNoLogs("canario.personal", "DEBUG"):
+            # Con un cuerpo válido, como en la prueba anterior: el 401 no
+            # depende de en qué orden valide FastAPI la sesión y el cuerpo.
             respuesta = llamar(aplicacion_completa(), "POST",
-                               "/v1/personal/usuarios/00000000-0000-0000-0000-000000000003/baja")
+                               "/v1/personal/usuarios/00000000-0000-0000-0000-000000000003/baja",
+                               {"codigo_totp": "000000"})
         self.assertEqual(respuesta, (401, detalle("sesión no válida")))

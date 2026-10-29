@@ -124,10 +124,8 @@ class InicioExterno(BaseModel):
     empresa: TextoLinea = Field(max_length=rutas_personal.LONGITUD_MAXIMA_IDENTIFICADOR)
 
 
-class CodigoTotp(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    codigo_totp: TextoLinea = Field(max_length=rutas_personal.LONGITUD_MAXIMA_CODIGO)
+# El mismo modelo que reinvitar y dar de baja: un solo sitio para el código.
+CodigoTotp = rutas_personal.CodigoTotp
 
 
 async def _solo_navegador(peticion: Request):

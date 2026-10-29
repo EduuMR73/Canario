@@ -782,11 +782,18 @@ def asegurar_sesion(cuenta):
 
 
 def invitar(cuenta):
+    """Invitación de un admin. La API pide el TOTP de la cuenta de la sesión
+    (step-up, app/personal.py, transaccion_con_codigo): se escribe un código
+    libre del admin A, que espera al siguiente paso si el actual ya se usó, y
+    solo se anota como gastado si la invitación se acepta (201)."""
     asegurar_sesion(A)
-    codigo, _, cuerpo = pedir(A.nav, "POST", "/v1/personal/usuarios", {"email": cuenta.email, "rol": "instructor"})
+    totp_codigo, paso = codigo_libre(A)
+    codigo, _, cuerpo = pedir(A.nav, "POST", "/v1/personal/usuarios",
+                              {"email": cuenta.email, "rol": "instructor", "codigo_totp": totp_codigo})
     datos = json_de(cuerpo) or {}
     if codigo != 201 or not isinstance(datos.get("token_invitacion"), str):
         raise Parada(f"el admin no pudo invitar a {cuenta.etiqueta} ({codigo})")
+    gastado(A, paso)
     cuenta.usuario_id = datos["usuario_id"]
     return datos["token_invitacion"]
 

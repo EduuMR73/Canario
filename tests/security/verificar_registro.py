@@ -30,7 +30,13 @@ Qué prueba:
   un 422, la aprobación entre empresas es un 404 con su evento, un instructor
   recibe 403, un email que ya tiene cuenta da 409, el rechazo cierra y se
   audita, una solicitud verificada no se sustituye (sale un aviso), y se
-  puede aprobar con el rol auditor;
+  puede aprobar con el rol auditor. Las aprobaciones y las altas de admin
+  llevan el codigo_totp de la cuenta de la sesión (step-up);
+* m) el step-up TOTP de la aprobación: sin codigo_totp es un 422, con un
+  código malo o ya usado es un 401 sin WWW-Authenticate, y en los tres la
+  solicitud sigue abierta, sin cuenta nueva ni correo de invitación; el
+  control positivo, con un código bueno: 201, la cuenta existe y llega el
+  correo;
 * g) CR, LF y NUL en el email: 422 sin crear nada ni enviar correo;
 * h) el límite por destinatario con su valor de producción (3 en 15
   minutos): el cuarto es 429 con Retry-After y otro email sigue pasando; un
@@ -141,6 +147,7 @@ CUERPO_202 = ('{"mensaje":"si los datos son correctos, recibirá un correo en un
               'si no le llega, vuelva a solicitarlo más tarde"}').encode()
 CUERPO_401 = '{"detalle": "solicitud no válida"}'.encode()
 CUERPO_401_INVITACION = '{"detalle": "invitación no válida"}'.encode()
+CUERPO_401_CREDENCIALES = '{"detalle": "credenciales no válidas"}'.encode()
 CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
 CUERPO_409 = b'{"detalle": "ya existe una cuenta con ese email"}'
 CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
@@ -522,6 +529,20 @@ def iniciar_sesion(cuenta):
     return Sesion(json_de(r))
 
 
+def con_totp(cuenta, datos=None):
+    """Cuerpo con el codigo_totp de ESA cuenta (el step-up de las operaciones de
+    admin pide el TOTP de la cuenta de la sesión) y el paso que usa. El paso
+    solo se anota con gastar() cuando la API lo consume: si la operación se
+    rechaza por negocio (404, 409) o por el rol (422, 403), el código queda
+    sin gastar."""
+    codigo, paso = codigo_libre(cuenta.secreto)
+    return dict(datos or {}, codigo_totp=codigo), paso
+
+
+def gastar(cuenta, paso):
+    ULTIMO_PASO[cuenta.secreto] = paso
+
+
 def listado(sesion):
     return json_de(una(pt("GET", "/v1/personal/solicitudes", token=sesion))) or {}
 
@@ -649,7 +670,10 @@ def seccion_c():
     pasa(len(filas) == 1 and sorted(filas[0]) == CLAVES_SOLICITUD and filas[0]["email"] == email,
          f"c) verificada, aparece en el listado del admin con solo id y email ({despues})")
     solicitud = filas[0]["solicitud_id"] if filas else "x"
-    r = una(pt("POST", f"/v1/personal/solicitudes/{solicitud}/aprobacion", {"rol": "instructor"}, token=SESIONES["A"]))
+    cuerpo, paso = con_totp(ADMINS["A"], {"rol": "instructor"})
+    r = una(pt("POST", f"/v1/personal/solicitudes/{solicitud}/aprobacion", cuerpo, token=SESIONES["A"]))
+    if r.get("estado") == 201:
+        gastar(ADMINS["A"], paso)
     datos = json_de(r) or {}
     pasa(r.get("estado") == 201 and sorted(datos) == CLAVES_APROBACION,
          f"c) aprobacion -> 201 con solo el id de la cuenta, sin token de invitacion ({r.get('estado')}, {sorted(datos)})")
@@ -830,21 +854,27 @@ def seccion_f():
     visto_b = [s["email"] for s in listado(SESIONES["B"]).get("solicitudes", [])]
     negativo(f"f) el admin de B no ve las solicitudes de A ({visto_b})", not set(visto_b) & set(emails), control)
     eventos_antes = log_de("api").count(TEXTO_EVENTO_DENEGADO)
-    r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", {"rol": "admin"}, token=SESIONES["B"]))
+    cuerpo, _ = con_totp(ADMINS["B"], {"rol": "admin"})  # el código es bueno: el 404 no lo gasta
+    r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", cuerpo, token=SESIONES["B"]))
     negativo(f"f) aprobar desde B una solicitud de A -> 404 ({r.get('estado')})", es(r, 404, CUERPO_404), control)
     negativo("f) y deja EVENTO acceso_denegado", log_de("api").count(TEXTO_EVENTO_DENEGADO) > eventos_antes, control)
     sigue = id_de(SESIONES["A"], emails[0]) is not None
     negativo("f) la solicitud sigue pendiente en A", sigue, control)
     # Un instructor no administra solicitudes.
     instructor = Cuenta(ident, "f.instructor@registro.test")
-    r = una(pt("POST", "/v1/personal/usuarios", {"email": instructor.email, "rol": "instructor"}, token=SESIONES["A"]))
+    cuerpo, paso = con_totp(ADMINS["A"], {"email": instructor.email, "rol": "instructor"})
+    r = una(pt("POST", "/v1/personal/usuarios", cuerpo, token=SESIONES["A"]))
+    if r.get("estado") == 201:
+        gastar(ADMINS["A"], paso)
     token_inv = (json_de(r) or {}).get("token_invitacion")
     sesion_instr = iniciar_sesion(instructor) if token_inv and activar(instructor, token_inv) else None
     if sesion_instr is None:
         sinc("f) no se pudo preparar la cuenta del instructor")
     else:
         lista = una(pt("GET", "/v1/personal/solicitudes", token=sesion_instr))
-        aprueba = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", {"rol": "admin"},
+        # Con un código bueno de la propia cuenta: el 403 llega antes de mirarlo.
+        cuerpo, _ = con_totp(instructor, {"rol": "admin"})
+        aprueba = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", cuerpo,
                          token=sesion_instr))
         rechaza = una(pt("DELETE", f"/v1/personal/solicitudes/{ids[emails[0]]}", token=sesion_instr))
         pasa(all(x.get("estado") == 403 for x in (lista, aprueba, rechaza)),
@@ -853,8 +883,8 @@ def seccion_f():
     # Rechazo: 204, se audita, y después ni aprobar ni rechazar (404).
     r = una(pt("DELETE", f"/v1/personal/solicitudes/{ids[emails[1]]}", token=SESIONES["A"]))
     pasa(r.get("estado") == 204, f"f) rechazar -> 204 ({r.get('estado')})")
-    otra = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[1]]}/aprobacion", {"rol": "instructor"},
-                  token=SESIONES["A"]))
+    cuerpo, _ = con_totp(ADMINS["A"], {"rol": "instructor"})  # el 404 no gasta el código
+    otra = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[1]]}/aprobacion", cuerpo, token=SESIONES["A"]))
     negativo(f"f) una rechazada ya no se aprueba (404, {otra.get('estado')})", es(otra, 404, CUERPO_404),
              r.get("estado") == 204)
     filas = (json_de(una(pt("GET", "/v1/personal/auditoria", token=SESIONES["A"]))) or {}).get("filas", [])
@@ -863,8 +893,12 @@ def seccion_f():
     pasa(correos_para(emails[1]) and all(c["asunto"] == ASUNTO_VERIFICACION for c in correos_para(emails[1])),
          "f) el rechazo no envia correo (solo esta el de verificacion)")
     # Un email que ya tiene cuenta: 409 y la solicitud sigue.
-    r = una(pt("POST", "/v1/personal/usuarios", {"email": emails[2], "rol": "instructor"}, token=SESIONES["A"]))
-    duplicada = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[2]]}/aprobacion", {"rol": "instructor"},
+    cuerpo, paso = con_totp(ADMINS["A"], {"email": emails[2], "rol": "instructor"})
+    r = una(pt("POST", "/v1/personal/usuarios", cuerpo, token=SESIONES["A"]))
+    if r.get("estado") == 201:
+        gastar(ADMINS["A"], paso)
+    cuerpo, _ = con_totp(ADMINS["A"], {"rol": "instructor"})  # el 409 no gasta el código
+    duplicada = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[2]]}/aprobacion", cuerpo,
                        token=SESIONES["A"]))
     negativo(f"f) aprobar un email que ya tiene cuenta -> 409 ({duplicada.get('estado')})",
              es(duplicada, 409, CUERPO_409), r.get("estado") == 201)
@@ -891,15 +925,89 @@ def seccion_f():
         negativo(f"f) repetir una sin verificar invalida el enlace anterior ({r_viejo.get('estado')})",
                  es(r_viejo, 401, CUERPO_401), r_nuevo.get("estado") == 204, f"nuevo: {r_nuevo.get('estado')}")
     # Aprobación con un rol que no existe: 422.
-    r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", {"rol": "superadmin"},
-               token=SESIONES["A"]))
+    cuerpo, _ = con_totp(ADMINS["A"], {"rol": "superadmin"})  # el 422 llega antes del código
+    r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", cuerpo, token=SESIONES["A"]))
     pasa(es(r, 422, CUERPO_422), f"f) aprobar con un rol que no existe -> 422 ({r.get('estado')})")
     # El tercer rol, auditor, tambien se aprueba: la cuenta nace con ese rol.
-    r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", {"rol": "auditor"},
-               token=SESIONES["A"]))
+    cuerpo, paso = con_totp(ADMINS["A"], {"rol": "auditor"})
+    r = una(pt("POST", f"/v1/personal/solicitudes/{ids[emails[0]]}/aprobacion", cuerpo, token=SESIONES["A"]))
+    if r.get("estado") == 201:
+        gastar(ADMINS["A"], paso)
     rol = valor(f"select rol from canal.usuario_personal where email = '{emails[0]}';")
     pasa(r.get("estado") == 201 and rol == "auditor",
          f"f) aprobar con el rol auditor -> 201 y la cuenta nace con ese rol ({r.get('estado')}, {rol!r})")
+
+
+def seccion_m():
+    p("=== m) step-up TOTP de la aprobacion: sin codigo, con codigo malo y con codigo repetido no se aprueba")
+    buzon("borrar")
+    ident = EMPRESAS["A"][1]
+    email = "m.stepup@registro.test"
+    http([registro(ident, email)])
+    correos = esperar_correos(email, 1)
+    token = token_de(correos[0], PATRON_VERIFICACION) if correos else None
+    if token is None or una(verificacion(token)).get("estado") != 204:
+        sinc("m) no se pudo preparar la solicitud verificada")
+        return
+    solicitud = id_de(SESIONES["A"], email)
+    control = solicitud is not None
+    pasa(control, "m) control: la solicitud verificada aparece al admin de A")
+    if not control:
+        return
+    ruta = f"/v1/personal/solicitudes/{solicitud}/aprobacion"
+
+    def sin_efecto(nombre, r, estado_http, cuerpo_http):
+        """El código HTTP y el cuerpo esperados, y que nada cambió: la solicitud
+        sigue abierta, no hay cuenta nueva y no ha salido correo de invitación."""
+        abiertas = id_de(SESIONES["A"], email) == solicitud
+        cuentas = valor(f"select count(*) from canal.usuario_personal where email = '{email}';")
+        invitaciones = [c for c in correos_para(email) if c["asunto"] == ASUNTO_INVITACION]
+        negativo(f"m) {nombre} -> {estado_http} ({r.get('estado')})", es(r, estado_http, cuerpo_http), control)
+        negativo(f"m) {nombre}: la solicitud sigue abierta, sin cuenta nueva ni correo de invitacion "
+                 f"({abiertas}, {cuentas} cuentas, {len(invitaciones)} correos)",
+                 abiertas and cuentas == "0" and not invitaciones, control)
+
+    # Sin codigo_totp: 422 (falta un campo del cuerpo).
+    r = una(pt("POST", ruta, {"rol": "instructor"}, token=SESIONES["A"]))
+    sin_efecto("aprobar sin codigo_totp", r, 422, CUERPO_422)
+    # Código malo: se elige uno que no sea el del paso anterior, el actual ni el siguiente.
+    validos = {totp(ADMINS["A"].secreto, int(time.time()) // 30 + d) for d in (-1, 0, 1)}
+    malo = next(c for c in ("000000", "111111", "222222") if c not in validos)
+    r = una(pt("POST", ruta, {"rol": "instructor", "codigo_totp": malo}, token=SESIONES["A"]))
+    sin_efecto("aprobar con un codigo_totp malo", r, 401, CUERPO_401_CREDENCIALES)
+    negativo("m) el 401 del codigo malo no lleva WWW-Authenticate",
+             "www-authenticate" not in (r.get("cabeceras") or {}), control and r.get("estado") == 401,
+             f"cabeceras {sorted(r.get('cabeceras') or {})}")
+    # Control positivo: con un código bueno se aprueba (201), la cuenta existe y llega la invitación.
+    cuerpo, paso = con_totp(ADMINS["A"], {"rol": "instructor"})
+    bueno = una(pt("POST", ruta, cuerpo, token=SESIONES["A"]))
+    if bueno.get("estado") == 201:
+        gastar(ADMINS["A"], paso)
+    cuentas = valor(f"select count(*) from canal.usuario_personal where email = '{email}';")
+    invitaciones = [c for c in esperar_correos(email, 2) if c["asunto"] == ASUNTO_INVITACION]
+    control_repetido = bueno.get("estado") == 201 and cuentas == "1" and len(invitaciones) == 1
+    pasa(control_repetido,
+         f"m) control: con un codigo bueno se aprueba (201), la cuenta existe y llega la invitacion "
+         f"({bueno.get('estado')}, {cuentas} cuentas, {len(invitaciones)} correos)")
+    # Código repetido: el que acaba de gastarse, sobre otra solicitud verificada.
+    otro = "m.repetido@registro.test"
+    http([registro(ident, otro)])
+    correos = esperar_correos(otro, 1)
+    token = token_de(correos[0], PATRON_VERIFICACION) if correos else None
+    otra = id_de(SESIONES["A"], otro) if token and una(verificacion(token)).get("estado") == 204 else None
+    if otra is None:
+        sinc("m) no se pudo preparar la segunda solicitud para el codigo repetido")
+        return
+    repetido = una(pt("POST", f"/v1/personal/solicitudes/{otra}/aprobacion", cuerpo, token=SESIONES["A"]))
+    cuentas = valor(f"select count(*) from canal.usuario_personal where email = '{otro}';")
+    invitaciones = [c for c in correos_para(otro) if c["asunto"] == ASUNTO_INVITACION]
+    abierta = id_de(SESIONES["A"], otro) == otra
+    negativo(f"m) aprobar con un codigo ya usado -> 401 sin WWW-Authenticate ({repetido.get('estado')})",
+             es(repetido, 401, CUERPO_401_CREDENCIALES) and "www-authenticate" not in (repetido.get("cabeceras") or {}),
+             control_repetido)
+    negativo(f"m) el codigo repetido no aprueba: la solicitud sigue abierta, sin cuenta ni correo "
+             f"({abierta}, {cuentas} cuentas, {len(invitaciones)} correos)",
+             abierta and cuentas == "0" and not invitaciones, control_repetido)
 
 
 def seccion_g():
@@ -1218,7 +1326,7 @@ def main():
         # l va antes de i: necesita la API y PostgreSQL sanos (k, la última,
         # deja el pool reconectando) y para Mailpit, que borra su buzón; i
         # también lo para y no depende de correos anteriores.
-        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h,
+        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_m, seccion_g, seccion_h,
                         seccion_l, seccion_i, seccion_j, seccion_k):
             seccion()
     except Parada as e:

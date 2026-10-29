@@ -185,11 +185,14 @@ CAMPOS_TEXTO = {
     "Login.empresa", "Login.email", "Login.contrasena", "Login.codigo_totp", "Login.token_dispositivo",
     "Renovacion.token_renovacion",
     "CambioContrasena.contrasena_actual", "CambioContrasena.contrasena_nueva", "CambioContrasena.codigo_totp",
-    "NuevoUsuario.email", "MensajePersonal.texto", "CambioEstado.mensaje", "Asignacion.usuario_id",
-    "Tramo.texto",
+    "NuevoUsuario.email", "NuevoUsuario.codigo_totp", "MensajePersonal.texto", "CambioEstado.mensaje",
+    "Asignacion.usuario_id", "Tramo.texto",
     "SolicitudRegistro.empresa", "SolicitudRegistro.email", "VerificacionRegistro.token",
+    "AprobacionSolicitud.codigo_totp",
+    # Reinvitar, dar de baja, el login externo y los vínculos.
+    "CodigoTotp.codigo_totp",
     # Login externo (app/rutas_externo.py).
-    "InicioExterno.empresa", "CodigoTotp.codigo_totp",
+    "InicioExterno.empresa",
 }
 CONTROL_MODELOS = {"Control.sin_tipo": False, "Control.con_tipo": True, "Control.opcional_sin_tipo": False}
 
@@ -568,6 +571,18 @@ def codigo_libre(secreto):
         time.sleep(30 - time.time() % 30 + 0.5)
 
 
+def invitar(token, cuenta_admin, email, codigo=None, paso=None):
+    """Petición de invitación de un admin (POST /v1/personal/usuarios). Pide
+    el TOTP de la cuenta de la sesión (step-up, app/personal.py,
+    transaccion_con_codigo). Sin código dado usa uno libre de ese admin; el
+    llamador anota el paso en ULTIMO_PASO solo si la API acepta (201): un
+    rechazo de negocio o un 422 no gastan el código. Da (petición, paso)."""
+    if codigo is None:
+        codigo, paso = codigo_libre(cuenta_admin.secreto)
+    return pt("POST", "/v1/personal/usuarios", {"email": email, "rol": "instructor", "codigo_totp": codigo},
+              token=token), paso
+
+
 class Cuenta:
     def __init__(self, etiqueta, identificador, email):
         self.etiqueta, self.identificador, self.email = etiqueta, identificador, email
@@ -821,10 +836,11 @@ def seccion_b():
     empresa_id, identificador = alta_empresa("Empresa Inyeccion S.L.")
     admin = admin_por_gestion("admin", identificador, "admin@inyeccion.test")
     token = sesion_de(admin)
-    r = una(pt("POST", "/v1/personal/usuarios", {"email": "instructor@inyeccion.test", "rol": "instructor"},
-               token=token))
+    peticion, paso = invitar(token, admin, "instructor@inyeccion.test")
+    r = una(peticion)
     if r.get("estado") != 201:
         raise Parada(f"no se pudo invitar al instructor: {r.get('estado')}")
+    ULTIMO_PASO[admin.secreto] = paso
     instructor = Cuenta("instructor", identificador, "instructor@inyeccion.test")
     instructor.invitacion = json_de(r)["token_invitacion"]
     instructor.usuario_id = json_de(r)["usuario_id"]
@@ -1024,6 +1040,22 @@ def campos():
     identificador, codigo, denuncia = ESTADO["identificador"], ESTADO["codigo"], ESTADO["denuncia_id"]
     sin_cuenta = secrets.token_hex(16)
     contador = iter(range(10_000))
+    admin = ESTADO["admin"]
+
+    def usuarios_email(v):
+        """Invitación con el email v. Solo el benigno (el control) lleva un
+        TOTP real del admin; la API lo acepta y lo gasta, así que se anota el
+        paso. Los valores con NUL, surrogate o tipo erróneo llevan un código
+        con formato válido pero falso: Pydantic valida el cuerpo entero antes
+        de comprobar el código, así que el 422 solo puede venir del email (si
+        la validación fallase, la API llegaría al código y daría 401, y el
+        oráculo lo vería). Y como no se llega al código, no se gasta ni
+        cuenta intento en el dispositivo."""
+        if isinstance(v, str) and v.startswith(PREFIJO_BENIGNO):
+            peticion, paso = invitar(token, admin, v)
+            PASO_INVITACION[0] = paso
+            return peticion
+        return invitar(token, admin, v, codigo="000000")[0]
 
     def login(**cambios):
         datos = {"empresa": identificador, "email": "nadie@inyeccion.test", "contrasena": "equivocada",
@@ -1063,9 +1095,7 @@ def campos():
         ("contrasena.actual", lambda v: contrasena(contrasena_actual=v), "equivocada", {401}),
         ("contrasena.nueva", lambda v: contrasena(contrasena_nueva=v), "otra-contrasena-larga", {401}),
         ("contrasena.codigo_totp", lambda v: contrasena(codigo_totp=v), "000000", {401}),
-        ("usuarios.email", lambda v: pt("POST", "/v1/personal/usuarios", {"email": v, "rol": "instructor"},
-                                        token=token),
-         None, {201}),
+        ("usuarios.email", usuarios_email, None, {201}),
         ("personal_mensaje.texto", lambda v: pt("POST", f"/v1/personal/denuncias/{denuncia}/mensajes",
                                                 {"texto": v}, token=token), "texto benigno", {201}),
         ("estado.mensaje", lambda v: pt("POST", f"/v1/personal/denuncias/{denuncia}/estado",
@@ -1084,7 +1114,7 @@ def campos():
         ("redaccion.texto", lambda v: pt("POST", f"/v1/personal/denuncias/{denuncia}/redaccion",
                                          {"tramos": [{"desde": 0, "texto": v}]}, token=token),
          "texto benigno", {409}),
-    ], (lambda: f"benigno{next(contador)}@inyeccion.test")
+    ], (lambda: f"{PREFIJO_BENIGNO}{next(contador)}@inyeccion.test")
 
 
 # TextoLibre solo rechaza NUL y surrogates: estos controles se guardan en una
@@ -1095,6 +1125,14 @@ TEXTO_CON_CONTROLES = "a\tb\nc\r\nd\x0be\x0cf\x1b[31mg\x85h"
 # su escape corto, así que solo se exige el \uXXXX de los que no lo tienen).
 CONTROLES_C0 = [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1b]
 CONTROLES_C0_ESCAPADOS = [0x0b, 0x1b]
+
+# Los emails benignos de la sección e) empiezan así; usuarios_email (campos)
+# los distingue de los valores con NUL, surrogate o tipo erróneo, que se
+# construyen insertando el carácter en la posición 1 (NUL entre la "b" y el resto).
+PREFIJO_BENIGNO = "benigno"
+# Paso TOTP del último control de invitación construido (lista de un
+# elemento para poder asignarlo desde la función interna de campos).
+PASO_INVITACION = [None]
 
 # Campos donde además se prueban tipos que no son texto (los obligatorios
 # que llegan al SQL o a un id).
@@ -1135,6 +1173,9 @@ def seccion_e():
         control = una(construir(benigno_de()))
         control_ok = control.get("estado") in esperados
         pasa(control_ok, f"e) control {nombre}: el valor benigno responde {control.get('estado')}")
+        if nombre == "usuarios.email" and control.get("estado") == 201:
+            # La invitación aceptada gastó el paso TOTP del admin.
+            ULTIMO_PASO[ESTADO["admin"].secreto] = PASO_INVITACION[0]
         pruebas = {"NUL": con_insercion(benigno_de(), "\x00"), "surrogate": con_insercion(benigno_de(), "\ud800")}
         if nombre in CAMPOS_TIPOS:
             pruebas.update({f"tipo {json.dumps(t)}": t for t in TIPOS_NO_TEXTO})
@@ -1198,10 +1239,18 @@ def seccion_f():
          "f) la cuenta con ese email activa, entra y /yo devuelve el email exacto")
 
     lentos, creados = [], {}
-    respuestas = http([pt("POST", "/v1/personal/usuarios", {"email": e, "rol": "instructor"}, token=token)
-                       for e in EMAILS_SEGUNDO_ORDEN])
-    for email, respuesta in zip(EMAILS_SEGUNDO_ORDEN, respuestas):
+    # Cada invitación pide un TOTP del admin y cada paso de 30 s vale una vez
+    # por cuenta (ultimo_paso_totp): en paralelo solo pasaría una. Van de una
+    # en una, cada una con su paso (invitar espera al siguiente si hace
+    # falta, unos 30 s por email). Lo que se comprueba es lo mismo: que la
+    # API acepta cada email, que no tarda y que se guarda byte a byte. El
+    # acceso dura 5 minutos y el bucle puede tardar cerca de 4: se renueva
+    # antes de cada petición.
+    for email in EMAILS_SEGUNDO_ORDEN:
+        peticion, paso = invitar(acceso_nuevo(admin), admin, email)
+        respuesta = una(peticion)
         if respuesta.get("estado") == 201:
+            ULTIMO_PASO[admin.secreto] = paso
             creados[email] = json_de(respuesta)["usuario_id"]
         if respuesta.get("ms", 0) >= MS_MAXIMO_SIN_SLEEP:
             lentos.append((email, round(respuesta.get("ms", 0))))
@@ -1210,6 +1259,7 @@ def seccion_f():
     pasa(not lentos, f"f) ninguna invitacion tarda {MS_MAXIMO_SIN_SLEEP} ms o mas ({lentos})")
     distintos = [e for e, i in creados.items() if hex_de("usuario_personal", "email", i) != e.encode("utf-8").hex()]
     pasa(not distintos, f"f) cada email se guarda byte a byte ({distintos})")
+    token = acceso_nuevo(admin)
     r = una(pt("GET", "/v1/personal/usuarios", token=token))
     listados = sorted(u["email"] for u in (json_de(r) or {}).get("usuarios", []))
     pasa(listados == sorted([EMAIL_GESTION_SQL, *EMAILS_SEGUNDO_ORDEN]),

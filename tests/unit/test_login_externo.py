@@ -1,5 +1,7 @@
-"""Pruebas unitarias del login externo y de los vínculos en app/personal.py:
-qué sentencias se ejecutan, en qué orden y qué se rechaza antes de escribir.
+"""Pruebas unitarias del login externo, de los vínculos y del código que
+piden las operaciones de admin (personal.transaccion_con_codigo) en
+app/personal.py: qué sentencias se ejecutan, en qué orden y qué se rechaza
+antes de escribir.
 
 La base de datos se sustituye por una conexión falsa que devuelve filas fijas
 y apunta cada sentencia; el ticket se gasta con una función de la prueba que
@@ -19,7 +21,7 @@ from unittest import mock
 
 import psycopg
 
-from app import claves, cripto, externo, personal
+from app import claves, cripto, externo, personal, solicitudes
 
 MAESTRA = bytes(range(32))
 CLAVE_EMPRESA = bytes([7]) * 32
@@ -371,10 +373,11 @@ class LoQueRevocaLosVinculos(unittest.TestCase):
 
     def test_baja(self):
         base = Base({personal.SQL_BLOQUEAR_ADMINS: [(USUARIO, True), (uuid.UUID(int=8), True)],
-                     personal.SQL_USUARIO: (USUARIO, "admin", True, True)})
+                     personal.SQL_USUARIO: (USUARIO, "admin", True, True),
+                     personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA, personal.SQL_CLAVE_VERSION: ENVUELTA})
         otro_admin = dataclasses.replace(SESION_PERSONAL, usuario_id=uuid.UUID(int=8))
         with parches(base):
-            personal.dar_de_baja(None, otro_admin, USUARIO)
+            personal.dar_de_baja(None, CLAVES, otro_admin, USUARIO, CODIGO, INSTANTE)
         self.assertTrue(base.antes(personal.SQL_CERRAR_INVITACIONES, personal.SQL_REVOCAR_VINCULOS))
         self.comprobar(base)
 
@@ -402,6 +405,110 @@ class LoQueRevocaLosVinculos(unittest.TestCase):
             personal.confirmar_activacion(None, CLAVES, "token", CODIGO, INSTANTE)
         self.assertTrue(base.antes(personal.SQL_ACTIVAR_CUENTA, personal.SQL_REVOCAR_VINCULOS))
         self.comprobar(base)
+
+
+class CodigoAntesDeAdministrar(unittest.TestCase):
+    """Invitar, reinvitar, dar de baja y aprobar una solicitud piden un TOTP
+    recién escrito (personal.transaccion_con_codigo). Lo que depende de
+    PostgreSQL (los bloqueos reales, el contador del dispositivo, que no se
+    haya escrito nada) lo prueban verificar_personal.py y
+    verificar_registro.py."""
+
+    OTRO = uuid.UUID(int=8)
+    # De solo lectura, por lo mismo que Vincular.FILAS.
+    FILAS = types.MappingProxyType({
+        personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA, personal.SQL_CLAVE_VERSION: ENVUELTA,
+        personal.SQL_BLOQUEAR_ADMINS: [(USUARIO, True)],
+        personal.SQL_USUARIO: (OTRO, "instructor", True, True),
+        solicitudes.SQL_BLOQUEAR_SOLICITUD: ("nueva@empresa.es",)})
+    # Lo que escribe cada operación: con un código malo no aparece ninguna.
+    ESCRITURAS = (personal.SQL_NUEVO_USUARIO, personal.SQL_NUEVA_INVITACION, personal.SQL_DAR_DE_BAJA,
+                  solicitudes.SQL_CERRAR)
+
+    def operaciones(self, codigo, sesion=SESION_PERSONAL):
+        """(nombre, primera sentencia propia de la operación, llamada)."""
+        otro = self.OTRO
+        return (
+            ("invitar", personal.SQL_NUEVO_USUARIO,
+             lambda: personal.invitar(None, CLAVES, sesion, "nueva@empresa.es", "admin", codigo, INSTANTE)),
+            ("reinvitar", personal.SQL_USUARIO,
+             lambda: personal.reinvitar(None, CLAVES, sesion, otro, codigo, INSTANTE)),
+            ("dar de baja", personal.SQL_USUARIO,
+             lambda: personal.dar_de_baja(None, CLAVES, sesion, otro, codigo, INSTANTE)),
+            ("aprobar", solicitudes.SQL_BLOQUEAR_SOLICITUD,
+             lambda: solicitudes.aprobar(None, CLAVES, sesion, "https://localhost:8445", otro, "admin", codigo,
+                                         INSTANTE)),
+        )
+
+    def test_con_codigo_en_su_orden(self):
+        # Orden de bloqueos: los admins por id antes que el paso de la propia
+        # cuenta; con el paso primero, dos bajas simultáneas se interbloquean.
+        orden_esperado = ("reserva", "admins", "paso", "operacion", "liberar")
+        for nombre, propia, operar in self.operaciones(CODIGO):
+            with self.subTest(nombre):
+                base = Base(dict(self.FILAS))
+                with parches(base):
+                    operar()
+                sentencias = {"reserva": personal.SQL_RESERVAR_DISPOSITIVO_SESION,
+                              "admins": personal.SQL_BLOQUEAR_ADMINS, "paso": personal.SQL_GASTAR_PASO_TOTP,
+                              "operacion": propia, "liberar": personal.SQL_LIBERAR_DISPOSITIVO}
+                orden = sorted(orden_esperado, key=lambda clave: base.registro.index(sentencias[clave]))
+                self.assertEqual(tuple(orden), orden_esperado)
+        # Control: con un código malo no se bloquea, ni se gasta, ni se escribe.
+        for nombre, propia, operar in self.operaciones("162583"):
+            with self.subTest(nombre, codigo="malo"):
+                base = Base(dict(self.FILAS))
+                with parches(base), self.assertRaises(personal.CredencialesNoValidas):
+                    operar()
+                for sentencia in (personal.SQL_BLOQUEAR_ADMINS, personal.SQL_GASTAR_PASO_TOTP, propia,
+                                  personal.SQL_LIBERAR_DISPOSITIVO, *self.ESCRITURAS):
+                    self.assertNotIn(sentencia, base.registro)
+
+    def test_sin_ser_admin_no_cuenta_intentos(self):
+        instructor = dataclasses.replace(SESION_PERSONAL, rol="instructor")
+        for nombre, _, operar in self.operaciones(CODIGO, instructor):
+            with self.subTest(nombre):
+                base = Base(dict(self.FILAS))
+                with parches(base), self.assertRaises(personal.Prohibido):
+                    operar()
+                # Ni la reserva del intento: un rol insuficiente no toca la base.
+                self.assertEqual(base.registro, [])
+
+    def test_rechazo_de_negocio_libera_el_dispositivo(self):
+        class Duplicado(psycopg.Error):
+            sqlstate = "23505"
+
+        unico_admin = {personal.SQL_USUARIO: (USUARIO, "admin", True, True)}
+        casos = (
+            ("cuenta que no existe", {personal.SQL_USUARIO: None}, {}, personal.NoEncontrado,
+             lambda: personal.reinvitar(None, CLAVES, SESION_PERSONAL, self.OTRO, CODIGO, INSTANTE)),
+            ("ultimo admin", unico_admin, {}, personal.UltimoAdmin,
+             lambda: personal.dar_de_baja(None, CLAVES, SESION_PERSONAL, USUARIO, CODIGO, INSTANTE)),
+            ("email con cuenta", {}, {personal.SQL_NUEVO_USUARIO: Duplicado("duplicate key")},
+             personal.EmailDuplicado,
+             lambda: personal.invitar(None, CLAVES, SESION_PERSONAL, "ya@empresa.es", "admin", CODIGO, INSTANTE)),
+            ("solicitud cerrada", {solicitudes.SQL_BLOQUEAR_SOLICITUD: None}, {}, personal.NoEncontrado,
+             lambda: solicitudes.aprobar(None, CLAVES, SESION_PERSONAL, "https://localhost:8445", self.OTRO,
+                                         "admin", CODIGO, INSTANTE)),
+        )
+        for nombre, filas, errores, error, operar in casos:
+            with self.subTest(nombre):
+                base = Base({**self.FILAS, **filas}, errores)
+                with parches(base), self.assertRaises(error):
+                    operar()
+                # El código era bueno: el dispositivo se libera después del
+                # rechazo, en su propia transacción, y no se escribe nada.
+                self.assertTrue(base.antes(personal.SQL_GASTAR_PASO_TOTP, personal.SQL_LIBERAR_DISPOSITIVO))
+                self.assertEqual(base.registro[-1], personal.SQL_LIBERAR_DISPOSITIVO)
+                for sentencia in self.ESCRITURAS[2:]:
+                    self.assertNotIn(sentencia, base.registro)
+        # Control: un código ya usado (el paso no se gasta) es un intento
+        # fallido y no libera el dispositivo.
+        base = Base({**self.FILAS, personal.SQL_GASTAR_PASO_TOTP: None})
+        with parches(base), self.assertRaises(personal.CredencialesNoValidas):
+            personal.reinvitar(None, CLAVES, SESION_PERSONAL, self.OTRO, CODIGO, INSTANTE)
+        self.assertNotIn(personal.SQL_LIBERAR_DISPOSITIVO, base.registro)
+        self.assertNotIn(personal.SQL_NUEVA_INVITACION, base.registro)
 
 
 if __name__ == "__main__":

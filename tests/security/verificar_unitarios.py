@@ -73,7 +73,7 @@ PRUEBAS_POR_FICHERO = {
     "test_instruccion": 33,
     "test_limitador": 20,
     "test_login": 8,
-    "test_login_externo": 24,
+    "test_login_externo": 27,
     "test_personal": 8,
     "test_proveedores_externos": 18,
     "test_rutas_externo": 20,
@@ -83,7 +83,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 333
+TOTAL_PRUEBAS = 336
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -332,6 +332,35 @@ MUTANTES = [
       "        conexion.execute(SQL_REVOCAR_VINCULOS, [usuario_id])\n"),
      "        conexion.execute(SQL_CERRAR_INVITACIONES, [usuario_id])\n",
      "test_login_externo.LoQueRevocaLosVinculos.test_baja", "una cuenta dada de baja conserva sus vinculos"),
+    # Step-up de las operaciones de admin (personal.transaccion_con_codigo).
+    ("personal.py",
+     "    paso = _codigo_de_la_sesion(pool, claves, sesion, codigo, instante)\n    try:\n",
+     "    paso = cripto.paso_totp(instante)\n    try:\n",
+     "test_login_externo.CodigoAntesDeAdministrar.test_con_codigo_en_su_orden",
+     "se invita, reinvita, da de baja o aprueba con la sesion sola, sin codigo TOTP"),
+    ("personal.py",
+     ("            admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()\n"
+      "            _gastar_codigo(conexion, sesion, paso)\n"),
+     ("            _gastar_codigo(conexion, sesion, paso)\n"
+      "            admins = conexion.execute(SQL_BLOQUEAR_ADMINS).fetchall()\n"),
+     "test_login_externo.CodigoAntesDeAdministrar.test_con_codigo_en_su_orden",
+     "el paso se gasta antes de bloquear los admins: dos bajas simultaneas se interbloquean"),
+    ("personal.py",
+     ("    except RECHAZOS_DE_NEGOCIO:\n"
+      "        with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:\n"
+      "            conexion.execute(SQL_LIBERAR_DISPOSITIVO, [sesion.dispositivo_id])\n"
+      "        raise\n"),
+     "    except RECHAZOS_DE_NEGOCIO:\n        raise\n",
+     "test_login_externo.CodigoAntesDeAdministrar.test_rechazo_de_negocio_libera_el_dispositivo",
+     "un codigo bueno con la operacion rechazada cuenta como intento fallido y acaba bloqueando al admin"),
+    ("personal.py",
+     ("    exigir_admin(sesion)\n"
+      "    instante = time.time() if instante is None else instante\n"
+      "    paso = _codigo_de_la_sesion("),
+     ("    instante = time.time() if instante is None else instante\n"
+      "    paso = _codigo_de_la_sesion("),
+     "test_login_externo.CodigoAntesDeAdministrar.test_sin_ser_admin_no_cuenta_intentos",
+     "un rol que no es admin cuenta intentos en su dispositivo antes del 403"),
     ("avisos.py", "    return (al_titular,) + a_quien_vigila\n", "    return a_quien_vigila\n",
      "test_avisos.Correos.test_vinculo_primero_al_titular",
      "el titular no se entera de que han vinculado una cuenta a la suya (NIST 800-63B-4, 4.1.2.1)"),

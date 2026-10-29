@@ -10,7 +10,8 @@ Flujo:
 2. Le llega un enlace; al abrirlo, la SPA del personal manda el token por POST
    (verificar). Así demuestra que el email es suyo.
 3. Un admin de la empresa ve solo las solicitudes verificadas (listar) y
-   aprueba una con un rol (aprobar) o la rechaza (rechazar).
+   aprueba una con un rol y su código TOTP (aprobar) o la rechaza
+   (rechazar, sin código: solo cierra).
 4. La aprobación crea la cuenta por el camino de siempre
    (personal.crear_cuenta_invitada) y la invitación va SOLO al email ya
    verificado, nunca al admin: el admin decide quién entra, no conoce el
@@ -122,7 +123,8 @@ SQL_LISTAR = """
      order by email, id
      limit %s
 """
-# Orden de bloqueos al aprobar: la solicitud y después lo de
+# Orden de bloqueos al aprobar: los admins y el paso del código
+# (personal.transaccion_con_codigo), la solicitud y después lo de
 # personal.crear_cuenta_invitada (cuenta, invitación, auditoría).
 SQL_BLOQUEAR_SOLICITUD = """
     select email from canal.solicitud_registro
@@ -307,15 +309,18 @@ def listar(pool, sesion):
                    hay_mas=len(filas) > MAXIMO_LISTADO)
 
 
-def aprobar(pool, sesion, origen, solicitud_id, rol):
+def aprobar(pool, claves, sesion, origen, solicitud_id, rol, codigo, instante=None):
     """Crea la cuenta de una solicitud verificada con el rol que elige el
-    admin y devuelve el correo de invitación para su email. NoEncontrado si
-    la solicitud no existe, es de otra empresa (RLS), no está verificada o ya
-    se cerró; EmailDuplicado si el email ya tiene cuenta."""
+    admin y devuelve el correo de invitación para su email. Pide un TOTP
+    recién escrito (personal.transaccion_con_codigo): con la sesión sola, un
+    atacante pediría un registro con un email suyo y se aprobaría como admin.
+    NoEncontrado si la solicitud no existe, es de otra empresa (RLS), no está
+    verificada o ya se cerró; EmailDuplicado si el email ya tiene cuenta."""
     personal.exigir_admin(sesion)
+    # Antes del código: un rol que no existe no cuenta un intento.
     if rol not in personal.ROLES:
         raise ValueError("rol desconocido")
-    with personal.traducir_alta(), bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
+    with personal.transaccion_con_codigo(pool, claves, sesion, codigo, instante) as (conexion, _):
         fila = conexion.execute(SQL_BLOQUEAR_SOLICITUD, [solicitud_id]).fetchone()
         if fila is None:
             raise personal.NoEncontrado
