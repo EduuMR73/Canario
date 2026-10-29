@@ -71,8 +71,8 @@ La imagen del proxy compila la SPA en una primera etapa con Node y copia solo el
 | `/registro` | Solicitar el acceso con la empresa y el email |
 | `/registro/verificacion#<token>` | Confirmar el email desde el enlace del correo, al pulsar el botón |
 | `/inicio` | Con sesión, para todos los roles: los accesos de su rol, en tarjetas con una descripción, y el aviso si tiene una invitación abierta. El admin y el instructor ven además los plazos de la Ley 2/2023 (respuesta, art. 9.2.d, y supresión, art. 32.4). El email, el rol y cerrar la sesión van en la barra de todas las páginas con sesión |
-| `/cuentas` | Solo admin: invitar (el enlace de activación se muestra una vez, para entregarlo a mano), reinvitar, anular una invitación y dar de baja |
-| `/solicitudes` | Solo admin: aprobar con un rol o rechazar las solicitudes con el email confirmado |
+| `/cuentas` | Solo admin: invitar (el enlace de activación se muestra una vez, para entregarlo a mano), reinvitar, anular una invitación y dar de baja. Invitar lleva el código TOTP en su formulario; reinvitar y dar de baja, en una confirmación en la fila |
+| `/solicitudes` | Solo admin: aprobar con un rol o rechazar las solicitudes con el email confirmado. Aprobar pasa por una confirmación con el rol elegido y el código TOTP |
 | `/denuncias` | Admin e instructor: el listado con filtro por estado. El admin ve todas y las asigna; el instructor, las suyas |
 | `/denuncias/<id>` | Admin e instructor, con la denuncia asignada: abrir el expediente con un botón (cada lectura queda en la auditoría y cuenta para el tope diario), escribir al denunciante, cambiar el estado y, solo el admin, declararla no veraz |
 | `/auditoria` | Admin y auditor: quién hizo qué, lo más reciente primero, con emails; cargar las anteriores, actualizar y verificar la cadena |

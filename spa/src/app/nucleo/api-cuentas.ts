@@ -8,6 +8,11 @@ import { conSesion } from './contexto';
 // (app/rutas_personal.py; solo admin, el resto recibe 403). Los ids van en la
 // ruta tal como los da la API: un uuid no lleva nada que escapar, y uno que
 // no lo sea es un 404 de la API.
+//
+// Invitar, reinvitar, dar de baja y aprobar llevan un código TOTP recién
+// escrito (codigo_totp): con la sesión sola, un token robado no crea cuentas
+// ni las toma ni echa a nadie (docs/threat-model.md, 6.3). Anular y rechazar
+// no lo llevan: solo cierran.
 
 // GET /v1/personal/usuarios: la lista explícita de campos de la API.
 export interface Cuenta {
@@ -47,20 +52,21 @@ export class ApiCuentas {
     return this.http.get<{ usuarios: Cuenta[] }>(`${BASE}/usuarios`, conSesion()).pipe(map((r) => r.usuarios));
   }
 
-  invitar(email: string, rol: Rol): Observable<Invitacion> {
-    return this.http.post<Invitacion>(`${BASE}/usuarios`, { email, rol }, conSesion());
+  invitar(email: string, rol: Rol, codigoTotp: string): Observable<Invitacion> {
+    return this.http.post<Invitacion>(`${BASE}/usuarios`, { email, rol, codigo_totp: codigoTotp }, conSesion());
   }
 
-  reinvitar(usuarioId: string): Observable<Invitacion> {
-    return this.http.post<Invitacion>(`${BASE}/usuarios/${usuarioId}/invitacion`, {}, conSesion());
+  reinvitar(usuarioId: string, codigoTotp: string): Observable<Invitacion> {
+    return this.http.post<Invitacion>(`${BASE}/usuarios/${usuarioId}/invitacion`, { codigo_totp: codigoTotp },
+      conSesion());
   }
 
   anularInvitacion(usuarioId: string): Observable<unknown> {
     return this.http.delete(`${BASE}/usuarios/${usuarioId}/invitacion`, conSesion());
   }
 
-  darDeBaja(usuarioId: string): Observable<unknown> {
-    return this.http.post(`${BASE}/usuarios/${usuarioId}/baja`, {}, conSesion());
+  darDeBaja(usuarioId: string, codigoTotp: string): Observable<unknown> {
+    return this.http.post(`${BASE}/usuarios/${usuarioId}/baja`, { codigo_totp: codigoTotp }, conSesion());
   }
 
   solicitudes(): Observable<ListadoSolicitudes> {
@@ -68,8 +74,9 @@ export class ApiCuentas {
   }
 
   // Sin token en la respuesta: la invitación va solo al email verificado.
-  aprobar(solicitudId: string, rol: Rol): Observable<unknown> {
-    return this.http.post(`${BASE}/solicitudes/${solicitudId}/aprobacion`, { rol }, conSesion());
+  aprobar(solicitudId: string, rol: Rol, codigoTotp: string): Observable<unknown> {
+    return this.http.post(`${BASE}/solicitudes/${solicitudId}/aprobacion`, { rol, codigo_totp: codigoTotp },
+      conSesion());
   }
 
   rechazar(solicitudId: string): Observable<unknown> {

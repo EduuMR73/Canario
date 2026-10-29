@@ -325,6 +325,12 @@ textarea {
   color: var(--color-texto-suave);
 }
 
+/* Un campo con un error: el borde lo marca, pero no solo el color, porque
+   el texto del error va debajo (WCAG 2.2, 1.4.1). */
+input[aria-invalid="true"] {
+  border-color: var(--color-peligro);
+}
+
 /* a.boton: un enlace con el aspecto del botón principal, cuando es la única
    salida de una página (la activación terminada, la 404). Sigue siendo un
    enlace, porque navega, como el "start button" de GOV.UK. Comparte estas
@@ -540,7 +546,12 @@ button[aria-disabled="true"] {
    tarjeta, en un móvil quedaba fuera de la pantalla y el foco sigue en el
    botón). No depende solo del color: lo dice el texto, lo marca la barra y
    va en role="alert". */
-.tarjeta .error {
+/* El error de un campo (el código de una acción de admin: cuentas y
+   solicitudes) tampoco: va debajo del campo, con la misma barra. Sin
+   role="alert": el foco vuelve al campo, que lo lleva en aria-describedby, y
+   el lector lo dice al llegar. */
+.tarjeta .error,
+.error.error-campo {
   padding: 0 0 0 var(--espacio-3);
   border: 0;
   border-inline-start: 3px solid var(--color-peligro);
@@ -977,12 +988,6 @@ td.acciones > * {
   margin: var(--espacio-1) var(--espacio-2) var(--espacio-1) 0;
 }
 
-/* La pregunta de una confirmación, en su línea, y los botones debajo: si
-   los botones siguieran al texto, la fila cambiaría de forma con el ancho. */
-td.acciones > .pregunta {
-  display: block;
-}
-
 .etiqueta {
   display: inline-block;
   margin: var(--espacio-1) var(--espacio-1) 0 0;
@@ -1057,12 +1062,13 @@ td.acciones > .pregunta {
   gap: var(--espacio-2);
 }
 
-/* Invitar a una persona (cuentas): el email, el rol y el botón en una
-   fila, como el filtro: la acción junto a los datos que envía. Cada campo
-   lleva su etiqueta encima y los controles se alinean por abajo (miden lo
-   mismo, 38). El email conserva el ancho de un formulario y encoge si no
-   cabe; el rol mide lo que su opción más larga. Si no caben los tres, el
-   rol y el botón bajan a la línea siguiente, también a 320 px. */
+/* Invitar a una persona (cuentas): el email, el rol, el código y el botón
+   en una fila, como el filtro: la acción junto a los datos que envía. Cada
+   campo lleva su etiqueta encima y los controles se alinean por abajo
+   (miden lo mismo, 38). El email parte de 24rem y encoge si no cabe: con
+   los 34 de un formulario, los cuatro no caben en los 64 de la página. El
+   rol mide lo que su opción más larga. Si no caben, los de la derecha bajan
+   a la línea siguiente, también a 320 px. */
 .invitar {
   display: flex;
   flex-wrap: wrap;
@@ -1076,7 +1082,28 @@ td.acciones > .pregunta {
 }
 
 .invitar .campo:first-child {
-  flex: 0 1 var(--ancho-formulario);
+  flex: 0 1 24rem;
+}
+
+/* La ayuda y el error del código, cada uno en su línea debajo de la fila:
+   dentro del campo lo harían más alto que los demás y los controles dejarían
+   de alinearse. Los anuncia aria-describedby. */
+.invitar > .ayuda,
+.invitar > .error-campo {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* La confirmación con código en una fila (cuentas, solicitudes): la
+   pregunta, el campo y los botones, uno debajo de otro. Con un ancho máximo,
+   para que la ayuda se parta en líneas y no ensanche la columna de la tabla
+   hasta el largo de la frase. */
+.confirmacion {
+  max-width: 20rem;
+}
+
+.confirmacion > p {
+  margin: var(--espacio-2) 0;
 }
 
 /* Un campo de contraseña con su botón "Mostrar" pegado a la derecha

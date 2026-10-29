@@ -108,14 +108,19 @@ etapa. Prueba:
   una página de otro rol abierta por su URL lleva a /inicio (control: la del
   propio rol se abre) y la API responde 403 aunque la SPA se saltara
   (control: el admin, 200); el admin aprueba la solicitud de j con un rol
-  elegido (sin rol no envía nada) y la invitación llega al correo, sin que el
-  token pase por la página; invita a dos cuentas y el enlace se muestra como
+  elegido (sin rol no envía nada), fijado al abrir la confirmación aunque
+  después cambie el desplegable, y la invitación llega al correo, sin que el
+  token pase por la página; invitar, aprobar y dar de baja piden un código
+  TOTP: con uno malo, el error va junto al campo, que queda vacío, con el
+  foco y aria-invalid, la confirmación sigue abierta y sale una sola
+  petición (el 401), sin renovar ni ir a /entrar (control: con el código
+  bueno, cada una se hace); invita a dos cuentas y el enlace se muestra como
   texto, nunca como enlace, sin quedar en la URL ni en el almacenamiento, y
   desaparece al salir de la página (control: antes de salir está); con esos
   enlaces se activan una instructora y un auditor; reinvitar avisa al titular
-  en /inicio, anular quita el aviso, la baja pide confirmación y cierra la
-  sesión del auditor (control: antes de la baja entraba) y la propia cuenta
-  no tiene botón de baja; los tres campos de contraseña de /cuenta tienen
+  en /inicio, anular quita el aviso, la baja pide confirmación (con el foco
+  en el campo del código) y cierra la sesión del auditor (control: antes de
+  la baja entraba) y la propia cuenta no tiene botón de baja; los tres campos de contraseña de /cuenta tienen
   su botón "Mostrar" (pulido 2c; control: la instructora abre /cuenta);
   /cuenta va en dos tarjetas, la contraseña y la cuenta externa, cada una
   con un solo campo de código (el mismo control);
@@ -188,7 +193,7 @@ etapa. Prueba:
   colores forzados el select vuelve a la apariencia nativa (control: sin
   ellos, no), un select de tabla deja a la derecha sitio para su flecha
   (control: con el atajo de relleno de antes, no), y en /cuentas el email,
-  el rol e Invitar van en una fila de 38 px (control: apilados, no), el h1 de /entrar va a 600 (control: con el
+  el rol, el código e Invitar van en una fila de 38 px (control: apilados, no), el h1 de /entrar va a 600 (control: con el
   300 de antes, no), el canario de la barra está centrado con las
   mayúsculas de "Canario" (control: con el viewBox de antes, no), el h1 de
   /cuentas empieza 24 px por debajo del borde de
@@ -199,9 +204,9 @@ etapa. Prueba:
   la regla de antes, relleno; sin ese botón, SIN CONCLUSION), con su
   confirmación abierta ningún email de la tabla se parte en dos líneas
   (control: con overflow-wrap: anywhere, alguno sí; si ninguno, SIN
-  CONCLUSION), "Confirmar la baja" lleva como descripción la pregunta con el
-  email de su fila, y la pregunta va en su línea con los botones debajo
-  (control: con la pregunta en línea, no), el texto de la
+  CONCLUSION), el campo del código de esa confirmación lleva como primera
+  descripción la pregunta con el email de su fila, a 320 px la confirmación
+  abierta no desborda la página (el control del ancho), el texto de la
   lista vacía reparte sus líneas (control: sin text-wrap: balance, la última
   queda corta; si no queda, SIN CONCLUSION) y la entradilla de /solicitudes
   no pasa de 65ch (control: sin el límite, sí); ninguna violación de la CSP
@@ -534,6 +539,9 @@ PRUEBAS_UNITARIAS = (
     "al volver a la pestaña recalcula: si ya pasó la hora, vence sin esperar al temporizador",
     "el 401 de una sesión que aún no vencía no se atribuye a la inactividad",
     "solo acepta como tiempos enteros de 0 a 8 horas",
+    # El código TOTP de las acciones de admin (nucleo/api-cuentas.ts).
+    "invitar, reinvitar, dar de baja y aprobar mandan el código, con la sesión renovable",
+    "anular y rechazar no llevan código: solo cierran",
 )
 ORDEN_PRUEBAS = "npx ng test --watch=false --reporters=verbose"
 # Mutantes del interceptor, del guard, del cliente de denuncias y de los
@@ -593,6 +601,12 @@ MUTANTES_UNITARIOS = (
     ("sin el aviso del 401 con la cuenta cargada", "src/app/nucleo/renovacion.ts",
      "              caducidad.anunciarCierre();", "              void caducidad;",
      "con la cuenta cargada, un 401 sin renovación deja en /entrar el aviso de sesión cerrada"),
+    # El código TOTP de las acciones de admin: la API respondería 422 a la
+    # baja sin él, pero la prueba lo tiene que ver antes.
+    ("la baja sin el codigo", "src/app/nucleo/api-cuentas.ts",
+     "    return this.http.post(`${BASE}/usuarios/${usuarioId}/baja`, { codigo_totp: codigoTotp }, conSesion());",
+     "    return this.http.post(`${BASE}/usuarios/${usuarioId}/baja`, {}, conSesion());",
+     "invitar, reinvitar, dar de baja y aprobar mandan el código, con la sesión renovable"),
 )
 # process.exit: el agente de Node mantiene viva la conexión y el proceso no
 # terminaría solo.
@@ -762,7 +776,8 @@ BOTONES_OCUPADOS = {
     "cuentas/cuentas.ts": 5,
     "denuncias/denuncias.ts": 2,
     "denuncias/expediente.ts": 6,
-    "solicitudes/solicitudes.ts": 3,
+    # Aprobar y rechazar, y la confirmación de cada uno.
+    "solicitudes/solicitudes.ts": 4,
 }
 PATRON_DISABLED = re.compile(r"\[(?:attr\.)?disabled\]")
 PATRON_ARIA_DISABLED = re.compile(r"\[attr\.aria-disabled\]")
@@ -796,6 +811,14 @@ H1_MI_CUENTA = "Mi cuenta"
 PATRON_ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
 TEXTO_SIN_ROL = f"Elija el rol de {EMAIL_REGISTRO} antes de aprobar."
 TEXTO_APROBADA = f"Aprobada: {EMAIL_REGISTRO} recibirá un correo para activar su cuenta como Auditor."
+# La confirmación de la aprobación, con el rol que se eligió al abrirla.
+PREGUNTA_APROBAR = f"¿Aprobar a {EMAIL_REGISTRO} como Auditor? Recibirá un correo para activar su cuenta."
+# Un código de admin que no vale (spa/src/app/nucleo/codigo-admin.ts), y lo
+# que queda en su campo: [valor, aria-invalid, aria-describedby].
+TEXTO_CODIGO_NO_VALE = "El código no es correcto o ya se ha usado. Espere a que su aplicación muestre uno nuevo."
+CAMPO_MALO_INVITAR = ["", "true", "cuentas-invitar-codigo-error cuentas-invitar-codigo-ayuda"]
+CAMPO_MALO_FILA = ["", "true", "cuentas-pregunta cuentas-codigo-error cuentas-codigo-ayuda"]
+CAMPO_MALO_SOLICITUD = ["", "true", "solicitudes-pregunta solicitudes-codigo-error solicitudes-codigo-ayuda"]
 TEXTO_SIN_SOLICITUDES = "No hay solicitudes pendientes."
 FOCO_ENLACE = f"Enlace de activación para {EMAIL_INSTRUCTORA}"
 TEXTO_DUPLICADA = "Ya existe una cuenta con ese email."
@@ -925,8 +948,8 @@ PELIGRO_ENCIMA = ["rgb(185, 28, 28)", "rgb(255, 255, 255)"]
 ULTIMA_LINEA_MINIMA = 0.5
 MEDIDA_ENTRADILLA = "65ch"
 LINEAS_EMAIL = 1
-# La pregunta de la baja, que describe "Confirmar la baja", con el email de
-# su fila.
+# La pregunta de la baja, que describe el campo del código de su
+# confirmación, con el email de su fila.
 PREGUNTA_BAJA = "¿Dar de baja a {}? Se cerrarán sus sesiones."
 DESCUADRE_MARCA = 1
 VIEWBOX_ANTERIOR = "0 0 48 48"
@@ -1395,6 +1418,26 @@ async def codigo_de(secreto):
         await asyncio.sleep(30 - time.time() % 30 + 0.5)
 
 
+def codigo_malo(secreto):
+    # Un código que la API no acepta ahora: ninguno de los pasos que admite
+    # (app/personal.py, DESFASE_TOTP = 1), con uno más a cada lado. No gasta
+    # ningún paso: no se anota en usados.
+    actual = int(time.time()) // 30
+    validos = {totp(secreto, actual + d) for d in range(-2, 3)}
+    return next(c for c in ("000000", "111111", "222222", "333333", "444444", "555555") if c not in validos)
+
+
+# El campo de un código tras la respuesta: [valor, aria-invalid,
+# aria-describedby], o None si no está.
+ESTADO_CODIGO = ("(s) => { const e = document.querySelector(s); return e === null ? null : "
+                 "[e.value, e.getAttribute('aria-invalid'), e.getAttribute('aria-describedby')]; }")
+
+
+async def foco_id(pagina):
+    # El id del elemento con el foco: un campo no tiene texto que leer.
+    return await pagina.evaluate("document.activeElement ? document.activeElement.id : null")
+
+
 paginas = {}
 
 
@@ -1479,9 +1522,12 @@ async def fila(pagina, email):
     return await pagina.get_by_role("row").filter(has_text=email).inner_text()
 
 
-async def invitar(pagina, email, rol):
+async def invitar(pagina, email, rol, secreto):
     await pagina.get_by_label("Email").fill(email)
     await pagina.get_by_label("Rol", exact=True).select_option(rol)
+    # Por su id: con una confirmación abierta en la tabla hay dos campos
+    # "Código de autenticación".
+    await pagina.locator("#cuentas-invitar-codigo").fill(await codigo_de(secreto))
     await pagina.get_by_role("button", name="Invitar", exact=True).click()
 
 
@@ -1558,8 +1604,28 @@ async def pasos_roles(navegador):
     await asyncio.sleep(1)
     res["sin_rol_api"] = api_desde(marca)
     await admin.get_by_label("Rol para " + email_registro).select_option("auditor")
-    marca = len(eventos)
     await admin.get_by_role("button", name="Aprobar a " + email_registro, exact=True).click()
+    await admin.get_by_role("button", name="Aprobar a " + email_registro, exact=True).wait_for(state="detached")
+    res["foco_aprobar"] = await foco_id(admin)
+    res["pregunta_aprobar"] = (await admin.locator("#solicitudes-pregunta").inner_text()).strip()
+    # El rol se fija al abrir: cambiar el desplegable no cambia lo que se
+    # aprueba (TEXTO_APROBADA dice Auditor).
+    await admin.get_by_label("Rol para " + email_registro).select_option("instructor")
+    # Con un código que no vale: la confirmación sigue abierta.
+    marca = len(eventos)
+    await admin.locator("#solicitudes-codigo").fill(codigo_malo(secreto_admin))
+    await admin.get_by_role("button", name="Confirmar la aprobación", exact=True).click()
+    res["aprobar_malo"] = await esperar_texto(admin, "#solicitudes-codigo-error")
+    await asyncio.sleep(1)
+    res["aprobar_malo_api"] = api_desde(marca)
+    res["aprobar_malo_campo"] = await admin.evaluate(ESTADO_CODIGO, "#solicitudes-codigo")
+    res["aprobar_malo_foco"] = await foco_id(admin)
+    res["aprobar_malo_ruta"] = ruta(admin.url)
+    res["aprobar_malo_abierta"] = await admin.get_by_role("button", name="Confirmar la aprobación",
+                                                          exact=True).count()
+    marca = len(eventos)
+    await admin.locator("#solicitudes-codigo").fill(await codigo_de(secreto_admin))
+    await admin.get_by_role("button", name="Confirmar la aprobación", exact=True).click()
     res["aprobada"] = await esperar_texto(admin, "#solicitudes-hecho")
     await admin.get_by_text("No hay solicitudes pendientes.").wait_for()
     res["aprobada_api"] = api_desde(marca)
@@ -1567,14 +1633,26 @@ async def pasos_roles(navegador):
 
     # Cuentas: dos invitaciones con su enlace a la vista.
     res["h1_cuentas"] = await ir_por_menu(admin, "Cuentas")
-    await invitar(admin, email_instructora, "instructor")
+    # Con un código que no vale: el email y el rol se quedan.
+    await admin.get_by_label("Email").fill(email_instructora)
+    await admin.get_by_label("Rol", exact=True).select_option("instructor")
+    await admin.locator("#cuentas-invitar-codigo").fill(codigo_malo(secreto_admin))
+    marca = len(eventos)
+    await admin.get_by_role("button", name="Invitar", exact=True).click()
+    res["invitar_malo"] = await esperar_texto(admin, "#cuentas-invitar-codigo-error")
+    await asyncio.sleep(1)
+    res["invitar_malo_api"] = api_desde(marca)
+    res["invitar_malo_campo"] = await admin.evaluate(ESTADO_CODIGO, "#cuentas-invitar-codigo")
+    res["invitar_malo_foco"] = await foco_id(admin)
+    res["invitar_malo_email"] = await admin.get_by_label("Email").input_value()
+    await invitar(admin, email_instructora, "instructor", secreto_admin)
     enlace_instructora = await esperar_texto(admin, "#cuentas-enlace")
     res["foco_enlace"] = await foco(admin)
     res["enlace_instructora"] = bool(ENLACE.fullmatch(enlace_instructora))
     res["enlaces_a"] = await admin.locator("a[href*='activacion']").count()
     res["ruta_con_enlace"] = ruta(admin.url) + ("#" if "#" in admin.url else "")
     res["almacen_admin"] = await almacenamiento(admin)
-    await invitar(admin, email_auditor, "auditor")
+    await invitar(admin, email_auditor, "auditor", secreto_admin)
     await admin.get_by_role("heading", name="Enlace de activación para " + email_auditor).wait_for()
     enlace_auditor = await admin.locator("#cuentas-enlace").inner_text()
     res["enlace_auditor"] = bool(ENLACE.fullmatch(enlace_auditor))
@@ -1584,7 +1662,7 @@ async def pasos_roles(navegador):
     await ir_por_menu(admin, "Cuentas")
     await admin.get_by_role("row").filter(has_text=email_auditor).wait_for()
     res["token_tras_salir"] = token in await html(admin)
-    await invitar(admin, email_instructora, "instructor")
+    await invitar(admin, email_instructora, "instructor", secreto_admin)
     res["duplicada"] = await admin.get_by_role("alert").inner_text()
     res["usuarios_admin"] = await estado_api(admin, USUARIOS)
 
@@ -1641,6 +1719,8 @@ async def pasos_roles(navegador):
     res["baja_propia"] = await admin.get_by_role("button", name="Dar de baja a " + email_admin, exact=True).count()
     res["baja_otra"] = await admin.get_by_role("button", name="Dar de baja a " + email_auditor, exact=True).count()
     await admin.get_by_role("button", name="Reinvitar a " + email_instructora, exact=True).click()
+    await admin.locator("#cuentas-codigo").fill(await codigo_de(secreto_admin))
+    await admin.get_by_role("button", name="Confirmar la reinvitación", exact=True).click()
     res["reinvitada_enlace"] = bool(ENLACE.fullmatch(await esperar_texto(admin, "#cuentas-enlace")))
     await admin.get_by_role("button", name="Anular la invitación de " + email_instructora, exact=True).wait_for()
     res["fila_reinvitada"] = await fila(admin, email_instructora)
@@ -1658,7 +1738,20 @@ async def pasos_roles(navegador):
     # así que cuando el botón ha desaparecido el foco ya está donde lo dejó la
     # página.
     await admin.get_by_role("button", name="Dar de baja a " + email_auditor, exact=True).wait_for(state="detached")
-    res["foco_confirmar"] = await foco(admin)
+    res["foco_confirmar"] = await foco_id(admin)
+    # Con un código que no vale: la confirmación sigue abierta y el auditor,
+    # dentro (auditor_inicio_despues lo dice tras la baja buena).
+    marca = len(eventos)
+    await admin.locator("#cuentas-codigo").fill(codigo_malo(secreto_admin))
+    await admin.get_by_role("button", name="Confirmar la baja", exact=True).click()
+    res["baja_malo"] = await esperar_texto(admin, "#cuentas-codigo-error")
+    await asyncio.sleep(1)
+    res["baja_malo_api"] = api_desde(marca)
+    res["baja_malo_campo"] = await admin.evaluate(ESTADO_CODIGO, "#cuentas-codigo")
+    res["baja_malo_foco"] = await foco_id(admin)
+    res["baja_malo_ruta"] = ruta(admin.url)
+    res["baja_malo_abierta"] = await admin.get_by_role("button", name="Confirmar la baja", exact=True).count()
+    await admin.locator("#cuentas-codigo").fill(await codigo_de(secreto_admin))
     await admin.get_by_role("button", name="Confirmar la baja", exact=True).click()
     # El aviso de la anulación sigue a la vista hasta que la baja lo cambia.
     await admin.wait_for_function(
@@ -1754,7 +1847,7 @@ async def pasos_denuncias(navegador):
 
     # Un instructor propio de m: l no devuelve el secreto TOTP de los suyos.
     await ir_por_menu(admin, "Cuentas")
-    await invitar(admin, email_instructor, "instructor")
+    await invitar(admin, email_instructor, "instructor", secreto_admin)
     enlace = await esperar_texto(admin, "#cuentas-enlace")
     instructor = await pagina_nueva(navegador, "instructor")
     secreto_instructor = await activar(instructor, enlace)
@@ -1961,9 +2054,9 @@ async def pasos_auditoria(navegador):
 
     # Un auditor y un instructor nuevos: el auditor de l está de baja.
     await ir_por_menu(admin, "Cuentas")
-    await invitar(admin, email_auditor, "auditor")
+    await invitar(admin, email_auditor, "auditor", secreto_admin)
     enlace_auditor = await esperar_texto(admin, "#cuentas-enlace")
-    await invitar(admin, email_instructor, "instructor")
+    await invitar(admin, email_instructor, "instructor", secreto_admin)
     await admin.get_by_role("heading", name="Enlace de activación para " + email_instructor).wait_for()
     enlace_instructor = await admin.locator("#cuentas-enlace").inner_text()
     auditor = await pagina_nueva(navegador, "auditor")
@@ -2006,7 +2099,7 @@ async def pasos_auditoria(navegador):
 
     # Actualizar: una fila nueva del admin llega arriba, y el foco sigue en el botón.
     await ir_por_menu(admin, "Cuentas")
-    await invitar(admin, email_otra, "instructor")
+    await invitar(admin, email_otra, "instructor", secreto_admin)
     await admin.get_by_role("heading", name="Enlace de activación para " + email_otra).wait_for()
     await auditor.get_by_role("button", name="Actualizar", exact=True).click()
     res["actualizada"] = await esperar_otro(auditor, "#auditoria-hecho", hecho or "")
@@ -2290,9 +2383,10 @@ SELECT_TABLA = ("() => { const t = document.createElement('table'); const s = do
                 "const r = [parseFloat(c.paddingInlineStart), parseFloat(c.paddingInlineEnd)]; t.remove(); return r; }")
 MUTANTE_SELECT_TABLA = "td select { padding: var(--espacio-1) var(--espacio-3); }"
 APARIENCIA = "() => getComputedStyle(document.querySelector('main select')).appearance"
-# El formulario de invitar: el borde de arriba y el alto del email, del rol
-# y del botón.
-INVITAR = ("() => ['#cuentas-email', '#cuentas-rol', 'form.invitar button[type=submit]'].map((s) => { "
+# El formulario de invitar: el borde de arriba y el alto del email, del rol,
+# del código y del botón.
+INVITAR = ("() => ['#cuentas-email', '#cuentas-rol', '#cuentas-invitar-codigo', "
+           "'form.invitar button[type=submit]'].map((s) => { "
            "const r = document.querySelector(s).getBoundingClientRect(); "
            "return [Math.round(r.top * 100) / 100, Math.round(r.height * 100) / 100]; })")
 MUTANTE_INVITAR = ".invitar { display: block; }"
@@ -2303,15 +2397,13 @@ MUTANTE_PELIGRO = "button.peligro { background: var(--color-peligro); color: var
 MUTANTE_LINEAS = ".vacio-texto { text-wrap: wrap; }"
 MUTANTE_ENTRADILLA = ".entradilla { max-width: none; }"
 MUTANTE_EMAILS = ".dato { overflow-wrap: anywhere; }"
-# [la descripción de "Confirmar la baja" (aria-describedby), el email de su
-# fila, lo que hay del final de la pregunta al principio del botón]: si el
-# botón sigue a la pregunta en su misma línea, sale negativo.
-PREGUNTA = ("() => { const b = document.querySelector('#cuentas-confirmar'); "
-            "const d = document.getElementById(b.getAttribute('aria-describedby') || ''); "
-            "const p = b.closest('td').querySelector('.pregunta'); "
-            "return [d === null ? null : d.textContent.trim(), b.closest('tr').querySelector('th').textContent.trim(), "
-            "Math.round((b.getBoundingClientRect().top - p.getBoundingClientRect().bottom) * 100) / 100]; }")
-MUTANTE_PREGUNTA = "td.acciones > .pregunta { display: inline; }"
+# [la primera descripción del campo del código de la confirmación
+# (aria-describedby), el email de su fila]. La pregunta, el campo y los
+# botones van en párrafos de un formulario: cada uno en su línea por
+# estructura, sin regla que medir.
+PREGUNTA = ("() => { const c = document.querySelector('#cuentas-codigo'); "
+            "const d = document.getElementById((c.getAttribute('aria-describedby') || '').split(' ')[0]); "
+            "return [d === null ? null : d.textContent.trim(), c.closest('tr').querySelector('th').textContent.trim()]; }")
 
 
 async def con_regla(pagina, regla, medida, argumento=None):
@@ -2359,6 +2451,15 @@ async def pasos_estetica(navegador):
         # abrir() espera a que la red se calme: la lista ya está pintada.
         if ruta_pedida == "/solicitudes":
             res["solicitudes_vacia"] = await claro.evaluate(VACIO)
+        if ruta_pedida == "/cuentas" and await claro.locator(PELIGRO).count() > 0:
+            # Con la confirmación de una baja abierta (pregunta, campo, ayuda
+            # y botones en la celda): la tabla se desplaza dentro de su
+            # región, la página no. Se cancela sin dar de baja a nadie.
+            await claro.locator(PELIGRO).first.click()
+            await claro.locator("#cuentas-codigo").wait_for()
+            res["ancho_confirmacion"] = await claro.evaluate(ANCHO)
+            await claro.locator("main tbody button.secundario", has_text="Cancelar").click()
+            await claro.locator("#cuentas-codigo").wait_for(state="detached")
         if ruta_pedida == "/denuncias":
             # Pulido 2c: el select y su botón, a 38 como los demás
             # controles; con la apariencia nativa, Chromium le fuerza
@@ -2413,7 +2514,6 @@ async def pasos_estetica(navegador):
         res["emails"] = await claro.evaluate(EMAILS)
         res["emails_mutante"] = await con_regla(claro, MUTANTE_EMAILS, EMAILS)
         res["pregunta"] = await claro.evaluate(PREGUNTA)
-        res["pregunta_mutante"] = await con_regla(claro, MUTANTE_PREGUNTA, PREGUNTA)
         await claro.locator("main tbody button.secundario", has_text="Cancelar").click()
         await claro.locator("#cuentas-confirmar").wait_for(state="detached")
     # La lista vacía y la entradilla, al ancho en que se veía la palabra
@@ -3878,6 +3978,11 @@ def seccion_l():
              res.get("sin_rol") == TEXTO_SIN_ROL and res.get("sin_rol_api") == [], control_aprobar)
     negativo("l) el token de la invitacion aprobada no pasa por la pagina", res.get("aprobada_token") is False,
              control_aprobar)
+    pasa(res.get("foco_aprobar") == "solicitudes-codigo" and res.get("pregunta_aprobar") == PREGUNTA_APROBAR,
+         f"l) aprobar pide confirmacion con el rol elegido y el foco va al campo del codigo "
+         f"({res.get('foco_aprobar')!r}, {res.get('pregunta_aprobar')!r})")
+    codigo_malo_ok("l) aprobar", res, "aprobar_malo", CAMPO_MALO_SOLICITUD, "solicitudes-codigo",
+                   "/solicitudes", "/aprobacion", control_aprobar)
     enlace_correo = None
     for _ in range(30):
         for correo in buzon():
@@ -3900,6 +4005,10 @@ def seccion_l():
     negativo("l) al salir de la pagina y volver, el enlace ya no esta", res.get("token_tras_salir") is False,
              res.get("token_antes_de_salir") is True, "control: antes de salir no estaba en la pagina")
     pasa(res.get("duplicada") == TEXTO_DUPLICADA, f"l) invitar un email que ya tiene cuenta ({res.get('duplicada')!r})")
+    codigo_malo_ok("l) invitar", res, "invitar_malo", CAMPO_MALO_INVITAR, "cuentas-invitar-codigo", "/cuentas",
+                   "/v1/personal/usuarios", res.get("enlace_instructora") is True)
+    pasa(res.get("invitar_malo_email") == EMAIL_INSTRUCTORA,
+         f"l) con el codigo malo, el email de la invitacion se queda ({res.get('invitar_malo_email')!r})")
 
     # Reinvitar, anular y dar de baja.
     pasa("Activa" in (res.get("fila_instructora") or ""), f"l) la instructora sale activa ({res.get('fila_instructora')!r})")
@@ -3912,10 +4021,12 @@ def seccion_l():
              control_reinvitada)
     negativo(f"l) la propia cuenta no tiene boton de baja ({res.get('baja_propia')})", res.get("baja_propia") == 0,
              res.get("baja_otra") == 1, f"control: la del auditor tiene {res.get('baja_otra')}")
-    pasa(res.get("foco_confirmar") == "Confirmar la baja",
-         f"l) la baja pide confirmacion y el foco va a ella ({res.get('foco_confirmar')!r})")
-    pasa(res.get("baja") == TEXTO_BAJA and "Desactivada" in (res.get("fila_baja") or ""),
-         f"l) la baja se confirma y la cuenta sale desactivada ({res.get('baja')!r})")
+    pasa(res.get("foco_confirmar") == "cuentas-codigo",
+         f"l) la baja pide confirmacion y el foco va al campo del codigo ({res.get('foco_confirmar')!r})")
+    control_baja_hecha = res.get("baja") == TEXTO_BAJA and "Desactivada" in (res.get("fila_baja") or "")
+    pasa(control_baja_hecha, f"l) la baja se confirma y la cuenta sale desactivada ({res.get('baja')!r})")
+    codigo_malo_ok("l) la baja", res, "baja_malo", CAMPO_MALO_FILA, "cuentas-codigo", "/cuentas", "/baja",
+                   control_baja_hecha)
     antes = res.get("auditor_inicio_antes") or {}
     control_baja = antes == {"ruta": "/inicio", "h1": H1_INICIO}
     negativo(f"l) tras la baja, el auditor no entra y va a /entrar ({res.get('auditor_inicio_despues')})",
@@ -3940,6 +4051,24 @@ def seccion_l():
              f"({len(senales_csp(consola[:corte]))}, {len(errores)})",
              not senales_csp(consola[:corte]) and not errores, control_csp,
              f"{senales_csp(consola[:corte])[:3]} {errores[:3]}")
+
+
+def codigo_malo_ok(nombre, res, clave, campo, foco_esperado, ruta_esperada, fin_ruta, control):
+    """Una acción de admin con un código que no vale (l): el texto junto al
+    campo, el campo vacío, con aria-invalid y el error en su descripción, el
+    foco en él, la confirmación abierta (si la hay), la página en su sitio y
+    una sola petición, el 401, sin renovar la sesión. El control: la misma
+    acción con el código bueno se hace."""
+    api = respuestas(res.get(clave + "_api") or [])
+    una = len(api) == 1 and api[0][0] == "POST" and api[0][1].endswith(fin_ruta) and api[0][2] == 401
+    abierta = res.get(clave + "_abierta", 1) == 1
+    negativo(f"{nombre} con un codigo malo: lo dice junto al campo, lo vacia y deja el foco en el, sin salir "
+             f"({res.get(clave)!r}, {res.get(clave + '_campo')}, {res.get(clave + '_foco')!r}, "
+             f"{res.get(clave + '_ruta', ruta_esperada)!r}, {api})",
+             res.get(clave) == TEXTO_CODIGO_NO_VALE and res.get(clave + "_campo") == campo
+             and res.get(clave + "_foco") == foco_esperado and abierta
+             and res.get(clave + "_ruta", ruta_esperada) == ruta_esperada and una,
+             control, "control: con el codigo bueno no se hizo")
 
 
 def ids_denuncias(acceso):
@@ -4173,8 +4302,12 @@ def seccion_n():
         codigo, _, _ = peticion("GET", ruta_denuncia, puerto=PUERTO_API, cabeceras=cabeceras)
         if codigo != 200:
             raise Parada(f"n) no se pudo leer la denuncia de relleno ({codigo})")
+    # Invitar pide un código TOTP recién escrito (app/personal.py,
+    # transaccion_con_codigo): el del login ya está gastado.
+    codigo_totp = codigo_tras(SECRETO_ADMIN, ULTIMO_PASO)
+    ULTIMO_PASO = int(time.time()) // 30
     codigo, _, cuerpo = peticion("POST", "/v1/personal/usuarios", puerto=PUERTO_API, cabeceras=cabeceras,
-                                 datos={"email": EMAIL_XSS, "rol": "instructor"})
+                                 datos={"email": EMAIL_XSS, "rol": "instructor", "codigo_totp": codigo_totp})
     if codigo != 201:
         # Si la API lo rechaza, la suposición (validar_email admite este
         # email) es falsa y la prueba no tiene sentido: se para y se dice.
@@ -4426,6 +4559,12 @@ def seccion_p():
     negativo(f"p) a 320 px ninguna pagina desborda en horizontal ({len(anchos)} de {len(mirar)}) "
              f"{anchas if anchas else ''}".rstrip(),
              sorted(anchos) == sorted(mirar) and not anchas, control_ancho, f"{anchos}")
+    confirmacion = res.get("ancho_confirmacion")
+    if confirmacion is None:
+        sinc("p) en /cuentas no hay ningun \"Dar de baja\" a 320 px: no se puede mirar la confirmacion abierta")
+    else:
+        negativo(f"p) a 320 px, /cuentas con la confirmacion de una baja abierta no desborda ({confirmacion})",
+                 0 < confirmacion[0] <= confirmacion[1], control_ancho)
 
     # Leila en la lista vacía: decorativa (aria-hidden) y a la vista. Solo
     # se puede mirar si la lista de solicitudes está vacía de verdad.
@@ -4500,9 +4639,9 @@ def seccion_p():
     invitar, invitar_mutante = res.get("invitar"), res.get("invitar_mutante")
     en_fila = (isinstance(invitar, list) and len({t for t, _ in invitar}) == 1
                and all(a == ALTO_CONTROL for _, a in invitar))
-    negativo(f"p) en /cuentas, el email, el rol e Invitar van en una fila y miden {ALTO_CONTROL} px "
+    negativo(f"p) en /cuentas, el email, el rol, el codigo e Invitar van en una fila y miden {ALTO_CONTROL} px "
              f"([arriba, alto] {invitar})", en_fila,
-             isinstance(invitar_mutante, list) and len({t for t, _ in invitar_mutante}) == 3,
+             isinstance(invitar_mutante, list) and len({t for t, _ in invitar_mutante}) == 4,
              f"control: apilados, {invitar_mutante}")
     peso, peso_mutante = res.get("peso_h1"), res.get("peso_h1_mutante")
     negativo(f"p) el h1 de /entrar va a {PESO_H1_ACCESO} ({peso!r})", peso == PESO_H1_ACCESO,
@@ -4543,13 +4682,10 @@ def seccion_p():
             pasa(isinstance(emails, list) and len(emails) > 0 and all(n == LINEAS_EMAIL for n in emails),
                  f"p) con la confirmacion de una baja abierta, cada email de /cuentas sigue en una linea "
                  f"({emails}; control con anywhere: {emails_mutante})")
-        pregunta, pregunta_mutante = res.get("pregunta"), res.get("pregunta_mutante")
+        pregunta = res.get("pregunta")
         pasa(isinstance(pregunta, list) and pregunta[0] == PREGUNTA_BAJA.format(pregunta[1]),
-             f"p) \"Confirmar la baja\" lleva la pregunta con el email de su fila como descripcion ({pregunta})")
-        negativo(f"p) la pregunta de la baja va en su linea y los botones debajo ({pregunta})",
-                 isinstance(pregunta, list) and pregunta[2] >= 0,
-                 isinstance(pregunta_mutante, list) and pregunta_mutante[2] < 0,
-                 f"control: con la pregunta en linea, el boton empieza {pregunta_mutante} px por debajo de su final")
+             f"p) el campo del codigo de la baja lleva la pregunta con el email de su fila como descripcion "
+             f"({pregunta})")
     lineas, lineas_mutante = res.get("lineas"), res.get("lineas_mutante")
     corta = (isinstance(lineas_mutante, list) and len(lineas_mutante) >= 2
              and lineas_mutante[-1] < ULTIMA_LINEA_MINIMA * lineas_mutante[0])

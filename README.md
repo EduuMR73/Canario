@@ -141,6 +141,8 @@ Al activarse una cuenta, los admins y los auditores reciben un aviso sin enlace,
 
 En **Cuentas**, el admin ve todo el personal con su rol y su estado, invita, reinvita y da de baja.
 
+Invitar, reinvitar, dar de baja y aprobar una solicitud piden además un código de la aplicación de autenticación: con la sesión sola, alguien que la robara no podría crear cuentas ni quitar el acceso a nadie. Cada código vale una sola vez, así que para dos acciones seguidas hay que esperar al siguiente (hasta 30 segundos). Si el código no vale, la página lo dice junto al campo y deja la confirmación abierta para escribir otro. Anular una invitación y rechazar una solicitud no lo piden: solo cierran.
+
 ### 8. Entrar con Google (opcional)
 
 Solo si se ha configurado ([operacion.md](docs/operacion.md)); si no, el botón no aparece. En **Mi cuenta**, "Vincular Google" con un código. Después, en el mismo navegador, "Iniciar sesión con Google" en `/entrar` y el código: Google sustituye a la contraseña, no al código.
