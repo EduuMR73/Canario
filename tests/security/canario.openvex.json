@@ -4,8 +4,8 @@
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "last_updated": "2026-10-26T21:10:00Z",
-  "version": 4,
+  "last_updated": "2026-10-29T12:45:00Z",
+  "version": 6,
   "statements": [
     {
       "vulnerability": {"name": "CVE-2026-78669"},
@@ -74,14 +74,49 @@
       "impact_statement": "Escritura fuera de límites en el decodificador de Brotli. En la imagen de PostgreSQL, brotli-libs solo la usa libcurl (apk info -r), para descomprimir respuestas HTTP, y libcurl solo la carga el módulo OAuth del lado cliente de libpq, que el servidor no usa (ver CVE-2026-92392, comprobado en verificar_escaneos.py, f). En la imagen de Caddy no está: se va con curl. Se retira al publicarse una imagen de PostgreSQL con brotli-libs 1.2.1-r0 o posterior y 14 días."
     },
     {
-      "vulnerability": {"name": "CVE-2026-109869"},
-      "timestamp": "2026-10-26T21:10:00Z",
+      "vulnerability": {"name": "CVE-2026-111943"},
+      "timestamp": "2026-10-29T12:45:00Z",
       "products": [
-        {"@id": "pkg:npm/undici@8.11.2"}
+        {
+          "@id": "pkg:golang/caddy",
+          "subcomponents": [
+            {"@id": "pkg:golang/stdlib@v1.26.8"}
+          ]
+        }
       ],
       "status": "not_affected",
-      "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
-      "impact_statement": "Caída del proceso de Node.js cuando un servidor malicioso responde a fetch() con más de cinco codificaciones de contenido y cierra la conexión. undici solo llega a la SPA por jsdom, el entorno de las pruebas unitarias de Vitest, que no está en el JavaScript compilado y que se ejecuta en un contenedor sin red (verificar_spa.py, h, con su control de red): ningún servidor ajeno puede responder. Va en este documento porque verificar_escaneos.py, j, lo aplica al escanear spa/package-lock.json. Se retira al adoptar undici 8.12.2 o posterior, publicada el 15 de octubre de 2026, desde el 29 de octubre (regla de los 14 días, docs/threat-model.md, 6.17)."
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. En Caddy 2.11.7 eso pasa en la autenticación de clientes (modules/caddytls/connpolicy.go), en el admin remoto (admin.go), en todo cliente TLS (ACME, reverse_proxy a https://) y en la instalación de la raíz local en el almacén del sistema (modules/caddypki/crypto.go, trusted). La configuración adaptada no tiene ninguno: admin desactivado, install_trust en false, solo emisores internal, sin client_authentication y sin tls en ningún transporte (comprobado en verificar_escaneos.py, f, en lista blanca, con un Caddyfile de control que rompe cada condición). Se revisa al publicarse una imagen de Caddy con Go 1.26.10 o posterior. (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-111943"},
+      "timestamp": "2026-10-29T12:45:00Z",
+      "products": [
+        {
+          "@id": "pkg:golang/github.com/axllent/mailpit",
+          "subcomponents": [
+            {"@id": "pkg:golang/stdlib@v1.27.2"}
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. Mailpit solo abriría una conexión TLS hacia fuera con el reenvío SMTP o los webhooks, y no tiene ninguna variable de configuración (ni MP_ ni otra) y está solo en la red interna correo, sin salida (comprobado en verificar_escaneos.py, f, con un compose de control que añade una variable y otra red). Es solo de desarrollo (perfil desarrollo). Se retira al subir a mailpit 1.32.0 o posterior, que se adopta desde el 5 de noviembre de 2026 (regla de los 14 días, docs/threat-model.md, 6.17). (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-116587"},
+      "timestamp": "2026-10-29T12:45:00Z",
+      "products": [
+        {
+          "@id": "pkg:golang/caddy",
+          "subcomponents": [
+            {"@id": "pkg:golang/github.com/go-jose/go-jose/v4@v4.1.5"}
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Consumo de CPU sin límite al validar la clave RSA de una JWK manipulada (GHSA-mgcc-cww5-fp2q): solo afecta a quien parsea JWK que llegan de fuera. En Caddy 2.11.7, go-jose es una dependencia indirecta (go.mod); el cliente ACME (acmez 3.1.7) solo la trae para sus pruebas y certmagic 0.25.6 no la trae; el CA interno (modules/caddypki/ca.go) no la importa y carga sus claves en PEM. El único que procesa JWS y JWK de clientes es el manejador http.handlers.acme_server (modules/caddypki/acmeserver), que monta los endpoints ACME de smallstep. La configuración adaptada no lo tiene y el admin está desactivado, así que nadie puede añadirlo en caliente (comprobado en verificar_escaneos.py, f, con un Caddyfile de control que lo añade). Se revisa al publicarse una imagen de Caddy con go-jose 4.1.6 o posterior. (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
     }
   ]
 }

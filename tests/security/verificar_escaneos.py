@@ -23,8 +23,9 @@ Qué prueba:
      modelo de amenazas);
   f) que lo que el VEX declara no alcanzable no lo es: Caddy solo con HTTP/1.1
      (configuración adaptada y ALPN real en los dos puertos), cada file_server
-     detrás de la quita de la cabecera Range, sin ECH y sin verificar nunca
-     el certificado de otro (lista blanca sobre la configuración adaptada);
+     detrás de la quita de la cabecera Range, sin ECH, sin el servidor ACME
+     (acme_server) y sin verificar nunca el certificado de otro (lista blanca
+     sobre la configuración adaptada);
      mailpit sin configuración y solo en su red interna; y en postgres, que
      libcurl solo la enlaza el módulo OAuth del lado cliente de libpq y que
      pg_hba.conf no tiene el método oauth;
@@ -78,6 +79,7 @@ el resultado global es OK.
 
 Solo usa la biblioteca estándar.
 """
+import collections
 import datetime
 import json
 import pathlib
@@ -189,19 +191,25 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
                            "vulnerable_code_cannot_be_controlled_by_adversary",
                            "inline_mitigations_already_exist"}
 # Lo que el VEX declara no explotable en cada imagen.
-# CVE-2026-111943 se retiró el 26 de octubre de 2026: la base de datos de Trivy
-# lo bajó a MEDIUM y la declaración ya no suprimía nada.
-CVES_VEX = {"caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031"},
+# CVE-2026-111943 se retiró el 26 de octubre de 2026, cuando la base de datos
+# de Trivy la bajó a MEDIUM, y se volvió a declarar el 29, cuando la subió
+# otra vez a HIGH. CVE-2026-116587 (go-jose) entró el 29 de octubre de 2026.
+CVES_VEX = {"caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031", "CVE-2026-111943",
+                      "CVE-2026-116587"},
+            "mailpit": {"CVE-2026-111943"},
             "postgres": {"CVE-2026-92392", "CVE-2026-111497"}}
 # Lo que el mismo VEX declara no explotable en spa/package-lock.json (j).
-CVES_VEX_LOCK = {"CVE-2026-109869"}
+# CVE-2026-109869 (undici 8.11.2) se retiró el 29 de octubre de 2026 al
+# adoptar undici 8.12.2, que la arregla, cumplidos los 14 días.
+CVES_VEX_LOCK = set()
 # Para el control de atadura a la versión: las mismas declaraciones con la
 # versión siguiente del componente no deben suprimir nada.
 VERSIONES_VEX = {"pkg:golang/stdlib@v1.26.8": "pkg:golang/stdlib@v1.26.9",
+                 "pkg:golang/stdlib@v1.27.2": "pkg:golang/stdlib@v1.27.3",
                  "pkg:golang/golang.org/x/net@v0.59.0": "pkg:golang/golang.org/x/net@v0.60.0",
+                 "pkg:golang/github.com/go-jose/go-jose/v4@v4.1.5": "pkg:golang/github.com/go-jose/go-jose/v4@v4.1.6",
                  "pkg:apk/alpine/libcurl@8.22.0-r0": "pkg:apk/alpine/libcurl@8.23.0-r0",
-                 "pkg:apk/alpine/brotli-libs@1.2.0-r1": "pkg:apk/alpine/brotli-libs@1.2.1-r0",
-                 "pkg:npm/undici@8.11.2": "pkg:npm/undici@8.12.2"}
+                 "pkg:apk/alpine/brotli-libs@1.2.0-r1": "pkg:apk/alpine/brotli-libs@1.2.1-r0"}
 
 # Caddy
 PROTOCOLOS_CADDY = ["h1"]
@@ -686,6 +694,26 @@ def seccion_e():
         pasa(subcomponentes and all("@" in s for s in subcomponentes),
              f"e) VEX {cve}: atada a version exacta del componente {subcomponentes}")
 
+    # El VEX declara exactamente lo que esperan CVES_VEX y CVES_VEX_LOCK: una
+    # declaración olvidada al retirarla, o una nueva sin comprobar, se ve aquí
+    # y no a los 30 días. Control: la misma comparación con una declaración
+    # de más tiene que fallar (no es una comparación que siempre acierta).
+    # Una declaración por cada imagen y CVE: la misma CVE en dos imágenes
+    # (CVE-2026-111943 en caddy y mailpit) son dos declaraciones.
+    esperadas = collections.Counter([c for cves in CVES_VEX.values() for c in cves] + list(CVES_VEX_LOCK))
+
+    def declaradas_en(doc):
+        return collections.Counter(d["vulnerability"]["name"] for d in doc.get("statements", []))
+
+    con_una_de_mas = {**documento, "statements": [*documento.get("statements", []),
+                                                    {"vulnerability": {"name": "CVE-0000-0000"}}]}
+    control_lista = declaradas_en(con_una_de_mas) != esperadas
+    pasa(control_lista, "e) control: una declaracion de mas en el VEX se detecta")
+    declaradas = declaradas_en(documento)
+    negativo("e) VEX: una declaracion por cada imagen y CVE de CVES_VEX y CVES_VEX_LOCK, ni una mas ni una menos",
+             declaradas == esperadas, control_lista,
+             f"sobran {sorted((declaradas - esperadas).elements())}, faltan {sorted((esperadas - declaradas).elements())}")
+
     # Cada imagen con declaraciones: sin VEX (control: el VEX es lo que las
     # suprime) y con el VEX movido a la versión siguiente del componente
     # (control de atadura a la versión).
@@ -909,6 +937,9 @@ def adaptar(caddyfile=None):
             # alguno, no coincidiría.
             "file_server_total": json.dumps(configuracion).count('"handler": "file_server"'),
             "ech": "encrypted_client_hello" in json.dumps(configuracion["apps"].get("tls", {})),
+            # CVE-2026-116587: el servidor ACME de Caddy (el único sitio que
+            # parsea JWK de clientes) es este manejador.
+            "acme_server": '"handler": "acme_server"' in json.dumps(configuracion),
             "x509": condiciones_x509(configuracion)}
 
 
@@ -918,6 +949,7 @@ def seccion_f():
     control = adaptar(escribir(TEMPORAL / "caddy_adapt" / "Caddyfile", caddyfile_control([
         ("\tprotocols h1\n", "\tprotocols h1 h2\n"),
         ("\tskip_install_trust\n", "\tskip_install_trust\n\tech ech.canario.invalid\n"),
+        ("\trequest_header -Cookie\n", "\tacme_server\n\trequest_header -Cookie\n"),
         CONTROL_SIN_RANGE])))
     pasa(real["escucha"] == list(PUERTOS_CADDY), f"f) configuracion adaptada: servidores en {real['escucha']}")
     negativo(f"f) configuracion adaptada: todos los servidores con protocols {PROTOCOLOS_CADDY} (sin HTTP/2)",
@@ -930,10 +962,17 @@ def seccion_f():
              and len(real["file_server"]) == real["file_server_total"],
              False in control["file_server"], f"control: {control['file_server']}")
     negativo("f) configuracion adaptada: sin encrypted_client_hello (CVE-2026-97031)", not real["ech"], control["ech"])
+    # CVE-2026-116587: go-jose solo parsea JWK que llegan de fuera en el
+    # servidor ACME (acme_server, que monta los endpoints ACME de smallstep).
+    # El cliente ACME de Caddy (acmez) y el CA interno no la usan con datos
+    # ajenos, y con admin off nadie puede añadir el manejador en caliente.
+    # Control: el Caddyfile con acme_server en el sitio del 8443.
+    negativo("f) configuracion adaptada: sin el manejador acme_server (CVE-2026-116587)", not real["acme_server"],
+             control["acme_server"])
     # CVE-2026-111943: Caddy no verifica ningún certificado ajeno. Control: el
-    # Caddyfile con un cambio que rompe cada condición. Desde el 26 de octubre
-    # de 2026 es MEDIUM y ya no está en el VEX, pero sigue sin arreglo en las
-    # imágenes de Caddy y mailpit: esto es lo que demuestra que no se alcanza.
+    # Caddyfile con un cambio que rompe cada condición. Sigue sin arreglo en
+    # las imágenes de Caddy y mailpit: esto es lo que demuestra que no se
+    # alcanza y lo que sostiene su declaración en el VEX.
     control_x509 = adaptar(escribir(TEMPORAL / "caddy_x509" / "Caddyfile", caddyfile_control(CONTROL_X509)))
     for condicion, cumple in real["x509"].items():
         negativo(f"f) configuracion adaptada: {condicion} (CVE-2026-111943)", cumple,
@@ -1122,21 +1161,29 @@ def seccion_j():
         return {v["VulnerabilityID"] for _, v in hallazgos(informe)[0]
                 if v.get("Severity") in SEVERIDADES.split(",") and v.get("FixedVersion")}
 
-    _, sin_vex = lock_npm(real_dir)
-    control_vex_lock = CVES_VEX_LOCK <= graves_de(sin_vex)
-    pasa(control_vex_lock, f"j) control: sin VEX, Trivy reporta en el lock {sorted(CVES_VEX_LOCK)}")
-    _, movido = lock_npm(real_dir, vex=escribir_vex_movido())
-    negativo("j) VEX atado a la version en el lock: con otra version del paquete no suprime nada",
-             CVES_VEX_LOCK <= graves_de(movido), control_vex_lock,
-             f"siguen {sorted(graves_de(movido) & CVES_VEX_LOCK)}")
+    # Sin declaraciones para el lock no hay nada que controlar: con el
+    # conjunto vacío, "CVES_VEX_LOCK <= X" es cierto siempre y daría un PASA
+    # que no prueba nada. Se dice que no aplica; que el VEX no tenga ninguna
+    # declaración de más lo comprueba e).
+    if CVES_VEX_LOCK:
+        _, sin_vex = lock_npm(real_dir)
+        control_vex_lock = CVES_VEX_LOCK <= graves_de(sin_vex)
+        pasa(control_vex_lock, f"j) control: sin VEX, Trivy reporta en el lock {sorted(CVES_VEX_LOCK)}")
+        _, movido = lock_npm(real_dir, vex=escribir_vex_movido())
+        negativo("j) VEX atado a la version en el lock: con otra version del paquete no suprime nada",
+                 CVES_VEX_LOCK <= graves_de(movido), control_vex_lock,
+                 f"siguen {sorted(graves_de(movido) & CVES_VEX_LOCK)}")
+    else:
+        p("   j) VEX del lock: sin declaraciones, no aplica")
     r, informe = lock_npm(real_dir, vex=VEX)
     if informe is None:
         raise Parada(f"Trivy no produjo JSON para spa/package-lock.json: {r.err.strip()[-300:]}")
-    suprimidas = {m["Finding"]["VulnerabilityID"] for m in hallazgos(informe)[1]
-                  if m.get("Status") == "not_affected" and str(m.get("Source", "")).endswith(VEX.name)}
-    for cve in sorted(CVES_VEX_LOCK):
-        negativo(f"j) VEX {cve}: suprime el hallazgo en el lock (una declaracion sin efecto se revisa y se retira)",
-                 cve in suprimidas, control_vex_lock)
+    if CVES_VEX_LOCK:
+        suprimidas = {m["Finding"]["VulnerabilityID"] for m in hallazgos(informe)[1]
+                      if m.get("Status") == "not_affected" and str(m.get("Source", "")).endswith(VEX.name)}
+        for cve in sorted(CVES_VEX_LOCK):
+            negativo(f"j) VEX {cve}: suprime el hallazgo en el lock (una declaracion sin efecto se revisa y se retira)",
+                     cve in suprimidas, control_vex_lock)
     paquetes = sum(len(res.get("Packages") or []) for res in informe.get("Results") or [])
     objetivos = [res.get("Target") for res in informe.get("Results") or []]
     pasa(objetivos == ["package-lock.json"] and paquetes > 0, f"j) Trivy analiza el lock ({objetivos}, {paquetes} paquetes)")
