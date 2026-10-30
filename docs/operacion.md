@@ -12,7 +12,7 @@ Las órdenes se ejecutan en PowerShell desde la raíz del repositorio. Como la r
    python scripts\generar_secretos.py
    ```
 
-   Crea en `secrets/` solo los que faltan y nunca sobrescribe uno existente (si actualizas desde una versión anterior, vuelve a ejecutarlo: crea solo los que falten, como `clave_hmac_identidades.txt` y `clave_flujo_externo.txt`, las dos claves del login externo; sin ellas, `docker compose` no arranca): una clave maestra regenerada dejaría ilegibles los datos ya cifrados. No imprime ningún valor. `secrets/` está fuera de Git; haz copia de seguridad de la clave maestra por un canal seguro, porque sin ella los datos no se pueden descifrar. Guárdala **separada** de las copias de la base de datos: una copia de la base de datos junto con la clave maestra descifra todo lo que contenga, también lo ya suprimido o tachado (modelo de amenazas, 8).
+   Crea en `secrets/` solo los que faltan y nunca sobrescribe uno existente (si actualizas desde una versión anterior, vuelve a ejecutarlo: crea solo los que falten, como `clave_hmac_identidades.txt` y `clave_flujo_externo.txt`, las dos claves del login externo, o `smtp_usuario.txt` y `smtp_contrasena.txt`, la credencial del cartero con su marcador; sin ellas, `docker compose` no arranca): una clave maestra regenerada dejaría ilegibles los datos ya cifrados. No imprime ningún valor. `secrets/` está fuera de Git; haz copia de seguridad de la clave maestra por un canal seguro, porque sin ella los datos no se pueden descifrar. Guárdala **separada** de las copias de la base de datos: una copia de la base de datos junto con la clave maestra descifra todo lo que contenga, también lo ya suprimido o tachado (modelo de amenazas, 8).
 
 2. Arrancar:
 
@@ -58,7 +58,7 @@ Canario corre en el VPS con su propio compose, fuera de Dokploy. Dokploy solo po
 | `canario-personal.eduumr.dev` | la SPA del personal |
 | `canario-api.eduumr.dev` | la API |
 
-Lo que cambia respecto a local lo dicen tres ficheros: `compose.produccion.yaml` (los orígenes, el Caddyfile, sin puertos publicados y `edge` interna), `proxy/Caddyfile.produccion` (confía solo en Traefik) y `despliegue/traefik/canario.yml` (el enrutado de Traefik). `tests/security/verificar_despliegue.py` los prueba juntos con un Traefik de la misma versión que el de Dokploy (v3.6.25 en Dokploy v0.30.10).
+Lo que cambia respecto a local lo dicen tres ficheros: `compose.produccion.yaml` (los orígenes, el Caddyfile, sin puertos publicados, `edge` interna y el cartero entregando a Mailjet con el almacén de certificados de la imagen), `proxy/Caddyfile.produccion` (confía solo en Traefik) y `despliegue/traefik/canario.yml` (el enrutado de Traefik). `tests/security/verificar_despliegue.py` los prueba juntos con un Traefik de la misma versión que el de Dokploy (v3.6.25 en Dokploy v0.30.10).
 
 ### Primera vez
 
@@ -73,7 +73,7 @@ En el **PC** (PowerShell, desde la raíz del repositorio), con las baterías en 
    scp "$env:TEMP\canario-imagenes.tar" ovh:canario-imagenes.tar
    ```
 
-   La arquitectura tiene que ser la del VPS (`amd64`; en el VPS, `uname -m` da `x86_64`).
+   La arquitectura tiene que ser la del VPS (`amd64`; en el VPS, `uname -m` da `x86_64`). El cartero no lleva imagen propia: en producción usa `canario-api`, que es la misma con otro punto de entrada.
 
 En el **VPS** (`ssh ovh`, bash):
 
@@ -134,8 +134,33 @@ Cada cambio se prueba en el PC y se despliega igual: los pasos 1 y 2 (con `git p
 ### Lo que hay que vigilar
 
 - **Si Dokploy recrea su Traefik** (al actualizarlo o al cambiar sus ajustes), pierde la conexión a `edge`: los tres nombres dan 502 hasta repetir el `docker network connect` del paso 5. Le pasa lo mismo a Inmunia. Volver a conectarlo solo es pendiente del bloque B (modelo de amenazas, 6.20).
-- **El correo no sale del VPS.** Sin servidor SMTP de producción (`app/correo.py` habla con Mailpit, que no arranca sin el perfil `desarrollo`), los correos del registro y de los avisos no llegan: la API los da por enviados y deja el fallo en su log. Mientras tanto, las cuentas se crean por invitación desde **Cuentas** (el enlace se muestra una vez) o con `gestion alta-admin`.
+- **El correo sale solo con la credencial de Mailjet puesta.** Mientras `secrets/smtp_usuario.txt` tenga el marcador, el cartero lo dice al arrancar (`EVENTO correo_sin_credenciales`) y Mailjet rechaza cada correo (`EVENTO correo_fallido` en su log): el registro y los avisos no llegan. Se configura en [Correo en producción](#correo-en-producción-mailjet). Mientras tanto, las cuentas se crean por invitación desde **Cuentas** (el enlace se muestra una vez) o con `gestion alta-admin`.
+- **El log del cartero** (`docker compose ... logs cartero`) es donde se ve si el correo sale: `correo_aplazado` repetido es un proveedor que no responde, y `motivo=certificado` es que el certificado de quien contesta no vale, que es lo que se vería si alguien se hiciera pasar por Mailjet.
 - **El login con Google** sigue apagado mientras `secrets/google_client_id.txt` tenga el marcador. Para activarlo, el URI de redirección registrado en Google pasa a ser el de `canario-personal.eduumr.dev`.
+
+### Correo en producción (Mailjet)
+
+El cartero (`app/cartero.py`) entrega a Mailjet por TLS implícito en el 465 (`in-v3.mailjet.com`), con el certificado verificado, desde `no-responder@canario.eduumr.dev` y sin el seguimiento de enlaces de Mailjet: con él, Mailjet reescribiría cada enlace por uno suyo y el token de las invitaciones acabaría en sus registros (modelo de amenazas, 6.3). Se configura una vez:
+
+1. **La cuenta de Mailjet**, con segundo factor (una aplicación, no SMS). Quien entre en ella puede leer el historial de envíos y mandar correos con el nombre de Canario.
+2. **El dominio** `canario.eduumr.dev` como remitente en Mailjet. Mailjet da los registros DNS que tiene que haber: el de SPF y el de DKIM. Se añaden en Cloudflare **tal cual los da Mailjet** (TXT, en `canario.eduumr.dev` el de SPF y en el nombre que indique el de DKIM) y se espera a que Mailjet los dé por buenos. DKIM es el que importa para DMARC: firma con `d=canario.eduumr.dev`, que es el dominio del remitente.
+3. **El seguimiento, apagado también en la cuenta** (Account settings, tracking). El cartero ya manda `X-Mailjet-TrackClick: 0` y `X-Mailjet-TrackOpen: 0` en cada correo, y Mailjet documenta que mandan sobre la cuenta; apagarlo en la cuenta es la segunda capa.
+4. **La credencial, en el VPS** (bash, en `~/apps/canario`). Es la clave API y la clave secreta de Mailjet (su sección SMTP). `read -s` no la enseña ni la deja en el historial, y `printf '%s'` la escribe sin salto de línea, como exige el cartero:
+
+   ```bash
+   read -rs -p "Clave API de Mailjet: " u; printf '%s' "$u" > secrets/smtp_usuario.txt; echo
+   read -rs -p "Clave secreta de Mailjet: " c; printf '%s' "$c" > secrets/smtp_contrasena.txt; echo
+   unset u c
+   sudo docker compose -f docker-compose.yml -f compose.produccion.yaml up -d --wait cartero
+   ```
+
+   Hay que cambiar las dos: con una sola, el cartero no arranca (`ARRANQUE BLOQUEADO`). Con las dos, el log ya no dice `correo_sin_credenciales`.
+5. **Comprobar con un correo real**: pedir el registro con un email propio en `https://canario-personal.eduumr.dev/registro`. En el log del cartero, `EVENTO correo_entregado: tipo=verificacion`. En el correo recibido, "ver original" (Gmail: "Mostrar original"):
+   - `dkim=pass` con `header.d=canario.eduumr.dev` y `dmarc=pass`;
+   - el enlace es exactamente `https://canario-personal.eduumr.dev/registro/verificacion#...`, sin pasar por ningún dominio de Mailjet. Si el enlace está reescrito, **se para aquí**: el seguimiento no está apagado y los tokens llegarían a Mailjet.
+6. **DMARC** solo después de ver `dkim=pass` alineado en el paso anterior: un registro TXT en `_dmarc.canario.eduumr.dev` con `v=DMARC1; p=reject`. Desde ese momento, un correo que diga venir de `canario.eduumr.dev` sin la firma de DKIM se rechaza. El de `eduumr.dev` (`p=none`) no se toca: es de las demás aplicaciones, y el de un subdominio manda sobre él.
+
+El plan gratuito de Mailjet son 200 correos al día; el cartero reparte 150 para el registro y las invitaciones y 50 para los avisos de seguridad, y lo que pase de ahí lo descarta con su evento.
 
 ## Acceso con Google (opcional)
 
@@ -182,7 +207,7 @@ docker compose run --rm gestion suprimir-caducadas
 - **`suprimir-caducadas`** aplica la supresión legal y, en la misma ejecución, poda las solicitudes de registro cerradas o caducadas (más abajo).
 - **`reinvitar-admin`** es la recuperación de emergencia de un admin activado: revoca en el acto sus sesiones y dispositivos y emite una invitación nueva. Solo se ejecuta tras verificar la petición fuera de banda, con el contacto que consta en el contrato y nunca con el que da quien la pide (modelo de amenazas, 6.3).
 
-**El token de invitación es una credencial.** `alta-admin` y `reinvitar-admin` lo imprimen una sola vez, porque no hay correo. Caduca a las 72 horas y sirve una sola vez. Se entrega al titular por un canal seguro y distinto del de la petición, y no se pega en tickets, chats ni correos. Si el titular lo encuentra ya usado, alguien se le adelantó, y la auditoría de su empresa lo muestra.
+**El token de invitación es una credencial.** `alta-admin` y `reinvitar-admin` lo imprimen una sola vez: son la vía de emergencia y no dependen del correo. Caduca a las 72 horas y sirve una sola vez. Se entrega al titular por un canal seguro y distinto del de la petición, y no se pega en tickets, chats ni correos. Si el titular lo encuentra ya usado, alguien se le adelantó, y la auditoría de su empresa lo muestra.
 
 ### Códigos de salida
 

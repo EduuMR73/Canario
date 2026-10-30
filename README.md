@@ -33,22 +33,25 @@ El enunciado recomienda React o Vue. Se usa Angular porque trae de serie lo que 
 | Frontend | Angular 22.2.2, TypeScript 6.0.3 |
 | Proxy y TLS | Caddy 2.11.7, con su propia autoridad de certificación |
 | Criptografía | Argon2id (argon2-cffi), JWT (PyJWT), AES-GCM para el contenido de las denuncias (cryptography) |
-| Correo en desarrollo | Mailpit, en una red sin salida a internet |
+| Correo | Un servicio propio (el cartero) que entrega por TLS: a Mailjet en producción, a Mailpit en desarrollo |
 | Pruebas | Baterías propias en Python, unittest, Vitest, Playwright con Chromium, ruff, bandit, pip-audit, gitleaks y Trivy |
 | Despliegue | Docker Compose. Imágenes fijadas por versión y digest, contenedores de solo lectura, sin capacidades y sin root |
 
 ## Puesta en marcha
 
-**Requisitos:** Docker Desktop con `docker compose` (probado con Docker Compose v5.1.4 en Windows) y Python 3.12 (solo la biblioteca estándar). Para el manual de uso, además, una aplicación de autenticación en el móvil (Google Authenticator, Microsoft Authenticator o similar): el segundo factor es obligatorio. Las órdenes son de PowerShell, desde la raíz del repositorio.
+**Requisitos:** Docker Desktop con `docker compose` (probado con Docker Compose v5.1.4 en Windows) y Python 3.12 con el paquete `cryptography` (solo para crear el certificado del correo de desarrollo; el resto usa la biblioteca estándar). Para el manual de uso, además, una aplicación de autenticación en el móvil (Google Authenticator, Microsoft Authenticator o similar): el segundo factor es obligatorio. Las órdenes son de PowerShell, desde la raíz del repositorio.
 
 ```powershell
 # 1. Crear los secretos (solo los que faltan; no imprime ninguno)
 python scripts\generar_secretos.py
 
-# 2. Arrancar, con el correo de desarrollo (Mailpit)
+# 2. Crear la CA y el certificado del correo de desarrollo (una vez)
+python scripts\generar_tls_desarrollo.py
+
+# 3. Arrancar, con el correo de desarrollo (Mailpit)
 docker compose --profile desarrollo up -d --build --wait
 
-# 3. Parar sin perder los datos
+# 4. Parar sin perder los datos
 docker compose --profile desarrollo down
 ```
 
@@ -64,7 +67,7 @@ Antes de empezar:
 
 - **El aviso del navegador.** La primera vez que se abre la demo (y quizá de nuevo en otro puerto), el navegador muestra "La conexión no es privada" (`NET::ERR_CERT_AUTHORITY_INVALID`). Es lo esperado: el certificado lo firma la autoridad propia de Caddy, que el navegador no conoce. La conexión va cifrada igual. En Chrome se acepta con **Avanzado** y después **Acceder a localhost (sitio no seguro)**. No conviene instalar esa autoridad como raíz de confianza del sistema: podría firmar un certificado para cualquier dominio.
 - **Son dos sitios separados.** El denunciante usa el 8444 y el personal entra por `https://localhost:8445`, que lleva a `/entrar`. Ningún enlace del sitio del denunciante lleva al del personal (el canario de su barra vuelve a su propio inicio): es a propósito.
-- **Los correos no llegan a ningún buzón real.** En la demo se quedan en Mailpit y se leen con `python scripts\buzon.py`, que enseña cada enlace en su línea (la hora sale en UTC). La pantalla dirá "recibirá un correo": es lo que pasaría en producción.
+- **Los correos no llegan a ningún buzón real.** En la demo, el cartero los entrega a Mailpit y se leen con `python scripts\buzon.py`, que enseña cada enlace en su línea (la hora sale en UTC). La pantalla dirá "recibirá un correo": en producción llegaría de verdad, desde Mailjet ([operacion.md](docs/operacion.md#correo-en-producción-mailjet)).
 
 ### 1. Dar de alta una empresa
 
@@ -177,7 +180,7 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 - **Un admin malicioso** puede crear cuentas y dar de baja con su propio código: contra él solo hay detección (aviso por correo y auditoría).
 - **El TOTP no resiste el phishing con un proxy en medio**, porque el código no está atado al origen.
 - **El código de seguimiento no se puede recuperar.** Es el precio del anonimato.
-- **Los correos solo salen a Mailpit.** No hay salida SMTP de producción en esta entrega.
+- **El correo pasa por Mailjet.** Ve el contenido de cada correo, con los enlaces de un solo uso, aunque no los registre por su seguimiento, que está apagado. Si el cartero se para con correos en cola, se pierden con su evento: se recuperan reinvitando.
 - **La supresión legal no se ejecuta sola:** hay que programarla cada hora ([operacion.md](docs/operacion.md)).
 - **No se puede cambiar el nombre de una empresa.**
 - **Probado solo en Chromium.** Trusted Types y las pruebas del navegador no se ejecutan en Firefox ni Safari.
@@ -189,18 +192,17 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 2. **Regiones vivas** que existan antes que su texto, para los lectores de pantalla.
 3. **Pantalla de redacción** en la SPA.
 4. **Adjuntos** y **avisos al personal** de las denuncias nuevas.
-5. **Salida de correo de producción**, con SPF, DKIM y DMARC.
-6. **Autenticación resistente al phishing** (WebAuthn o passkeys).
-7. **Cuatro ojos** para declarar una denuncia no veraz y para tachar, que hoy hace un solo admin.
-8. **Cambiar el nombre de una empresa** desde `gestion`, con verificación fuera de banda.
-9. **Cifrado de extremo a extremo** y borrado criptográfico, una clave por denuncia.
+5. **Autenticación resistente al phishing** (WebAuthn o passkeys).
+6. **Cuatro ojos** para declarar una denuncia no veraz y para tachar, que hoy hace un solo admin.
+7. **Cambiar el nombre de una empresa** desde `gestion`, con verificación fuera de banda.
+8. **Cifrado de extremo a extremo** y borrado criptográfico, una clave por denuncia.
 
 ## Documentación
 
 | Documento | Contenido |
 |---|---|
-| [docs/api.md](docs/api.md) | Rutas de la API, sesión del navegador, páginas de la SPA y del denunciante, registro y correo de desarrollo |
-| [docs/operacion.md](docs/operacion.md) | Puesta en marcha completa, `gestion`, supresión legal programada, log y copias de seguridad |
+| [docs/api.md](docs/api.md) | Rutas de la API, sesión del navegador, páginas de la SPA y del denunciante, registro, correo y su log |
+| [docs/operacion.md](docs/operacion.md) | Puesta en marcha completa, producción en el VPS, correo con Mailjet, `gestion`, supresión legal programada, log y copias de seguridad |
 | [docs/pruebas.md](docs/pruebas.md) | Las doce baterías de seguridad, las pruebas unitarias y ruff, y cómo ejecutarlas |
 | [docs/threat-model.md](docs/threat-model.md) | Modelo de amenazas: decisiones de diseño, tabla de amenazas y límites |
 
@@ -208,10 +210,10 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 
 | Ruta | Contenido |
 |---|---|
-| `app/` | La API, las páginas del denunciante (`rutas_web.py` y `plantillas/`) y la herramienta `gestion.py` |
+| `app/` | La API, las páginas del denunciante (`rutas_web.py` y `plantillas/`), el broker del login externo (`broker.py`), el cartero del correo (`cartero.py`) y la herramienta `gestion.py` |
 | `db/` | Imagen de PostgreSQL y el esquema (`db/init/`) |
 | `proxy/` | Imagen y `Caddyfile` del proxy, el único punto de entrada |
 | `spa/` | La SPA del personal, que la imagen del proxy compila y sirve |
-| `scripts/` | `generar_secretos.py` y `buzon.py` (los correos de Mailpit) |
+| `scripts/` | `generar_secretos.py`, `generar_tls_desarrollo.py` (el TLS del correo de desarrollo) y `buzon.py` (los correos de Mailpit) |
 | `tests/` | Baterías de seguridad (`security/`) y pruebas unitarias (`unit/`) |
 | `docs/` | La documentación de la tabla anterior |

@@ -111,15 +111,22 @@ En la SPA, todo el personal (admin, instructor y auditor) ve en su inicio el enl
 
 El aspecto es el de la SPA (`proxy/estatico/canario.css`): la barra oscura con el canario, los mismos colores en los dos temas, los botones y el select de 38 px. Las variables se llaman igual que en `spa/src/styles.css` y valen lo mismo; si se cambia un color en la SPA, hay que cambiarlo aquí, y la batería de la SPA (k) falla si no. La fuente es la del sistema, no Geist: estas páginas no se guardan en caché, Tor Browser desactiva algunas fuentes y la CSP del sitio no cambia (modelo de amenazas, 6.11).
 
-### Registro del personal y correo de desarrollo
+### Registro del personal y correo
 
 Quien quiere una cuenta del personal la pide con su email; le llega un enlace para confirmarlo y, cuando un admin la aprueba con un rol, la invitación para activarla (modelo de amenazas, 6.3). Los enlaces apuntan a la SPA del personal, cuyo origen fija `CANARIO_ORIGEN_PERSONAL` en `docker-compose.yml` (obligatoria: sin ella la API no arranca). El token va en el fragmento (`#...`), así que la SPA lo lee y lo envía por `POST`.
 
-En desarrollo los correos van a Mailpit, que no los entrega a nadie. Está en su propio perfil, en una red interna sin salida a internet y sin puertos publicados:
+La API no envía correo ella misma: se lo pasa al **cartero** (`app/cartero.py`) por la red interna `correo`, y él lo compone, lo pone en su cola y lo entrega por TLS. Es el único servicio con la credencial SMTP y, con el broker, el único con salida a internet. En producción entrega a Mailjet ([operacion.md](operacion.md#correo-en-producción-mailjet)); en desarrollo, a Mailpit. Todos los correos salen con el remitente `Canario`, sin seguimiento de enlaces y con un pie que recuerda que Canario nunca pide la contraseña ni el código por correo.
+
+### Correo de desarrollo
+
+En desarrollo los correos van a Mailpit, que no los entrega a nadie. Está en su propio perfil, en una red interna sin salida a internet y sin puertos publicados. Habla TLS como el proveedor, con un certificado de una CA local que se crea una vez:
 
 ```powershell
+python scripts\generar_tls_desarrollo.py
 docker compose --profile desarrollo up -d --build --wait
 ```
+
+El script crea en `secrets/` la CA (`correo_ca.pem`), el certificado de Mailpit y su clave, y nunca sobrescribe. La clave de la CA no se guarda, y el cartero de desarrollo confía solo en esa CA: desde el PC no puede entregar a ningún servidor real. Caducan al año; para renovarlos, se borran los tres y se vuelve a ejecutar.
 
 Para leer el buzón, en PowerShell desde la raíz del repositorio:
 
@@ -144,13 +151,30 @@ Lo que el registro deja en el log de la API, siempre sin el email:
 ```
 EVENTO limite_destinatario: regla=<destinatario o destinatario_dia>
 EVENTO registro_fallido: error=<clase del error>
-EVENTO correo_fallido: tipo=<tipo de correo> error=<clase del error>
-EVENTO correo_descartado: tipo=<tipo de correo> motivo=envios_simultaneos
+EVENTO correo_fallido: tipo=<tipo de correo> error=<clase del error o estado_<código>>
+EVENTO correo_descartado: tipo=<tipo de correo> motivo=<envios_simultaneos, cupo_diario o cola_llena>
 ```
 
-`registro_fallido` significa que alguien recibió su 202 y no le llegará nada (por ejemplo, PostgreSQL no respondía); el mensaje del 202 le dice que lo vuelva a pedir. Hoy nadie revisa estas líneas: en producción, el log tiene que salir del anfitrión y alguien tiene que mirarlo (modelo de amenazas, 8).
+Y en el log del cartero, también sin el email, el asunto ni el enlace:
 
-Sin Mailpit, el registro responde igual y cada correo deja `EVENTO correo_fallido`, también los avisos de lecturas y de activación (`tipo=aviso_lecturas` y `tipo=aviso_activacion`). La salida SMTP de producción no es parte de esta entrega; su diseño está en el modelo de amenazas (8).
+```
+EVENTO correo_entregado: tipo=<tipo de correo>
+EVENTO correo_aplazado: tipo=<tipo de correo> motivo=<motivo> intento=<1 a 3>
+EVENTO correo_fallido: tipo=<tipo de correo> motivo=<motivo>
+EVENTO correo_descartado: tipo=<tipo de correo> motivo=<cupo_diario o cola_llena>
+EVENTO correo_perdido: pendientes=<número>
+EVENTO cartero_cliente_rechazado: ruta=<ruta>
+EVENTO correo_sin_credenciales: se entrega sin autenticarse
+```
+
+- `registro_fallido` significa que alguien recibió su 202 y no le llegará nada (por ejemplo, PostgreSQL no respondía); el mensaje del 202 le dice que lo vuelva a pedir.
+- `correo_aplazado` es un fallo temporal (red, plazo, un 4xx del servidor): el cartero lo reintenta a los 1, 5 y 15 minutos. Después, o con un fallo definitivo (un 5xx, la autenticación o un certificado que no vale, `motivo=certificado`), queda `correo_fallido`.
+- `correo_descartado` con `cupo_diario`: el día (UTC) ya se gastó su parte del tope del proveedor. El registro y las invitaciones tienen 150 al día y los avisos de seguridad 50 aparte, para que una avalancha de registros no los silencie.
+- `correo_perdido`: el cartero se paró con correos en cola. No se guardan en disco a propósito (llevan enlaces con tokens); se recuperan reinvitando desde **Cuentas** o volviendo a pedir el registro.
+
+Hoy nadie revisa estas líneas: en producción, el log tiene que salir del anfitrión y alguien tiene que mirarlo (modelo de amenazas, 8).
+
+Sin Mailpit, el registro responde igual: el cartero acepta cada correo y, al no poder entregarlo, deja `correo_aplazado` y después `correo_fallido`, también los avisos de lecturas, de activación y de vínculos. Sin el cartero, es la API la que deja `correo_fallido`.
 
 ### Origen del sitio del denunciante
 
