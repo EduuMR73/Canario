@@ -48,6 +48,9 @@ PATRON_CONFIGURACION = re.compile(rb"[\x21-\x7e]{1,255}")
 # sí: la comprobación de duplicados de abajo los rechazaría si fueran iguales.
 MARCADOR_GOOGLE_CLIENT_ID = "sin-configurar:client-id"
 MARCADOR_GOOGLE_CLIENT_SECRET = "sin-configurar:client-secret"
+# Los de la credencial SMTP del cartero (app/cartero.py), igual.
+MARCADOR_SMTP_USUARIO = "sin-configurar:usuario"
+MARCADOR_SMTP_CONTRASENA = "sin-configurar:contrasena"
 
 # Permisos del usuario "aplicacion" de Redis (la línea de la ACL sin el hash).
 # Es la única fuente de verdad: tanto el patrón de comprobación como el
@@ -83,6 +86,12 @@ SECRETOS = {
     # broker no arranca si solo uno de los dos está puesto.
     "google_client_id.txt": (lambda: MARCADOR_GOOGLE_CLIENT_ID, PATRON_CONFIGURACION),
     "google_client_secret.txt": (lambda: MARCADOR_GOOGLE_CLIENT_SECRET, PATRON_CONFIGURACION),
+    # Tampoco: con los dos marcadores el cartero entrega sin autenticarse (al
+    # Mailpit de desarrollo). En producción, quien opera pone la clave API y
+    # la clave secreta de Mailjet (docs/operacion.md); con una sola, el
+    # cartero no arranca.
+    "smtp_usuario.txt": (lambda: MARCADOR_SMTP_USUARIO, PATRON_CONFIGURACION),
+    "smtp_contrasena.txt": (lambda: MARCADOR_SMTP_CONTRASENA, PATRON_CONFIGURACION),
 }
 FICHERO_REDIS = "contrasena_redis.txt"
 FICHERO_ACL = "redis_acl.conf"

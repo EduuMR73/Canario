@@ -27,6 +27,8 @@ marcha):
 
     python tests/security/verificar_esqueleto.py
 
+Del cartero (app/cartero.py) solo inspecciona la configuración de Compose
+(redes, secretos, endurecimiento): no lo arranca.
 Usa un proyecto de Docker propio (canario_esqueleto) y levanta los servicios
 api y caddy (y postgres y redis, de los que depende la API para su arranque
 verificado).
@@ -83,6 +85,10 @@ IP_API = "10.88.0.4"  # IP fija de la API en app: la única en la que escucha uv
 SUBRED_CANJE = "10.88.2.0/28"
 RANGO_CANJE = "10.88.2.8/29"
 IP_API_CANJE = "10.88.2.4"  # IP fija de la API en canje, la única a la que atiende el broker
+SUBRED_CORREO = "10.88.4.0/28"
+RANGO_CORREO = "10.88.4.8/29"
+IP_API_CORREO = "10.88.4.4"  # IP fija de la API en correo, la única a la que atiende el cartero
+IP_CARTERO = "10.88.4.3"  # IP fija del cartero en correo, la única en la que escucha
 IP_FALSA = "6.6.6.6"  # valor falsificado de X-Forwarded-For
 # ENTRYPOINT de la imagen de la API, sin --host (uvicorn escucha entonces en
 # 127.0.0.1), y command del compose, que lo añade.
@@ -139,6 +145,18 @@ PUERTOS_CADDY = {"8443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}],
 REDES = {"api": {f"{PROYECTO}_app", f"{PROYECTO}_data", f"{PROYECTO}_cache", f"{PROYECTO}_correo",
                  f"{PROYECTO}_canje"},
          "caddy": {f"{PROYECTO}_app", f"{PROYECTO}_edge"}}
+# Cartero (app/cartero.py): misma imagen que la API con otro punto de entrada.
+# Se comprueba su configuración de Compose (no se arranca aquí: necesitaría los
+# secretos SMTP y la CA de desarrollo, y no lo usa nada de lo que prueba esta
+# batería). Literales, no derivados de docker-compose.yml.
+REDES_CARTERO = {"correo", "salida"}
+SECRETOS_CARTERO = ["smtp_contrasena", "smtp_usuario"]
+MEMORIA_CARTERO = 134217728  # 128m
+PIDS_CARTERO = 32
+ENTRYPOINT_CARTERO = ["uvicorn", "app.cartero:aplicacion", "--port", "8000", "--no-access-log", "--no-server-header"]
+COMANDO_CARTERO = ["--host", IP_CARTERO]
+HEALTHCHECK_CARTERO = ["CMD", "python", "-m", "app.comprobar_salud", IP_CARTERO]
+
 # Únicos montajes de la API: sus siete Docker secrets (contraseña de la base
 # de datos, clave maestra, clave del HMAC de los códigos, clave de firma de
 # los JWT, clave del HMAC de las identidades externas, clave de las cookies
@@ -549,17 +567,19 @@ def seccion_d():
     pasa(ip == IP_API, f"d) la API tiene la IP fija {IP_API} en app ({ip})")
     ip = inspeccionar(contenedor("api"))["NetworkSettings"]["Networks"][f"{PROYECTO}_canje"]["IPAddress"]
     pasa(ip == IP_API_CANJE, f"d) la API tiene la IP fija {IP_API_CANJE} en canje ({ip})")
+    # La .4 de correo es la única a la que atiende el cartero (CANARIO_IP_API).
+    ip = inspeccionar(contenedor("api"))["NetworkSettings"]["Networks"][f"{PROYECTO}_correo"]["IPAddress"]
+    pasa(ip == IP_API_CORREO, f"d) la API tiene la IP fija {IP_API_CORREO} en correo ({ip})")
     for red, subred, rango, interna in ((f"{PROYECTO}_app", SUBRED_APP, RANGO_APP, True),
                                         (f"{PROYECTO}_edge", SUBRED_EDGE, RANGO_EDGE, False),
-                                        (f"{PROYECTO}_canje", SUBRED_CANJE, RANGO_CANJE, True)):
+                                        (f"{PROYECTO}_canje", SUBRED_CANJE, RANGO_CANJE, True),
+                                        # correo: interna, la API no gana salida a internet por ella
+                                        # (la e) lo comprueba con una conexión real).
+                                        (f"{PROYECTO}_correo", SUBRED_CORREO, RANGO_CORREO, True)):
         i = inspeccionar(red)
         config = [(c["Subnet"], c.get("IPRange")) for c in i["IPAM"]["Config"]]
         pasa(config == [(subred, rango)], f"d) {red}: subred y rango automatico = {config}")
         pasa(i["Internal"] is interna, f"d) {red}: internal = {i['Internal']}")
-    # La red del correo, interna: la API no gana salida a internet por ella
-    # (la e) lo comprueba con una conexión real).
-    interna = inspeccionar(f"{PROYECTO}_correo")["Internal"]
-    pasa(interna is True, f"d) {PROYECTO}_correo: internal = {interna}")
 
 
 PRUEBA_SALIDA = ("import socket\n"
@@ -619,6 +639,73 @@ PRUEBA_ESCUCHA = ("import http.client, sys\n"
                   "except (OSError, http.client.HTTPException) as e:\n"
                   "    print('OTRO', type(e).__name__)\n")
 RESPUESTA_SALUD = 'RESPONDE 200 {"estado":"ok"}'
+
+
+def seccion_p():
+    p("=== p) cartero: aislamiento y endurecimiento (configuracion de Compose, no se arranca)")
+    r = dc("config", "--format", "json")
+    try:
+        servicios = json.loads(r.out)["services"]
+    except (ValueError, KeyError):
+        raise Parada(f"p) docker compose config no devuelve JSON: {r.err.strip()[-300:]}") from None
+    cartero, api, caddy = servicios.get("cartero"), servicios.get("api"), servicios.get("caddy")
+    if not (cartero and api and caddy):
+        raise Parada("p) docker compose config no trae los servicios cartero, api y caddy")
+
+    def redes(s):
+        return set(s.get("networks") or {})
+
+    def secretos(s):
+        return sorted(x["source"] if isinstance(x, dict) else x for x in s.get("secrets") or [])
+
+    # Redes: solo correo (con la API) y salida (con internet). Control de cada
+    # red ajena: otro servicio sí está en ella, así que la extracción las ve.
+    pasa(redes(cartero) == REDES_CARTERO, f"p) cartero: redes = {sorted(redes(cartero))}")
+    for red, vecino, nombre in (("data", api, "api"), ("cache", api, "api"), ("app", api, "api"),
+                                ("canje", api, "api"), ("edge", caddy, "caddy")):
+        negativo(f"p) cartero: no esta en la red {red}", red not in redes(cartero), red in redes(vecino),
+                 f"control: {nombre} deberia estar en {red}")
+    ip = ((cartero.get("networks") or {}).get("correo") or {}).get("ipv4_address")
+    pasa(ip == IP_CARTERO, f"p) cartero: IP fija {IP_CARTERO} en correo ({ip})")
+    ip = ((api.get("networks") or {}).get("correo") or {}).get("ipv4_address")
+    pasa(ip == IP_API_CORREO, f"p) api: IP fija {IP_API_CORREO} en correo ({ip})")
+    entorno = cartero.get("environment") or {}
+    pasa(entorno.get("CANARIO_IP_API") == IP_API_CORREO,
+         f"p) cartero: solo atiende a la IP de la API ({entorno.get('CANARIO_IP_API')!r})")
+
+    # Secretos: el cartero solo la credencial SMTP; la API ninguna de ellas.
+    pasa(secretos(cartero) == SECRETOS_CARTERO, f"p) cartero: secretos = {secretos(cartero)}")
+    negativo("p) api: sin secretos smtp_*", not any(s.startswith("smtp_") for s in secretos(api)),
+             "contrasena_aplicacion" in secretos(api) and all(s.startswith("smtp_") for s in secretos(cartero))
+             and bool(secretos(cartero)),
+             f"control: api {secretos(api)}, cartero {secretos(cartero)}")
+
+    # Endurecimiento, igual que el resto de servicios.
+    pasa(cartero.get("read_only") is True, f"p) cartero: read_only = {cartero.get('read_only')}")
+    pasa(cartero.get("cap_drop") == ["ALL"], f"p) cartero: cap_drop = {cartero.get('cap_drop')}")
+    pasa(not cartero.get("cap_add"), f"p) cartero: cap_add vacio ({cartero.get('cap_add')})")
+    pasa(cartero.get("security_opt") == ["no-new-privileges:true"],
+         f"p) cartero: security_opt = {cartero.get('security_opt')}")
+    pasa(str(cartero.get("mem_limit")) == str(MEMORIA_CARTERO), f"p) cartero: mem_limit = {cartero.get('mem_limit')}")
+    pasa(cartero.get("pids_limit") == PIDS_CARTERO, f"p) cartero: pids_limit = {cartero.get('pids_limit')}")
+    pasa(not cartero.get("privileged"), "p) cartero: no privilegiado")
+    # Sin user propio: usa el USER 10001 de la imagen (comprobado en b para la API).
+    pasa(not cartero.get("user"), f"p) cartero: sin user propio, usa el de la imagen ({cartero.get('user')!r})")
+    negativo("p) cartero: sin puertos publicados", not cartero.get("ports"), bool(caddy.get("ports")),
+             "control: caddy deberia publicar puertos")
+    pasa(cartero.get("build") == api.get("build"), "p) cartero: se construye exactamente como la API (misma imagen)")
+    pasa(cartero.get("entrypoint") == ENTRYPOINT_CARTERO, f"p) cartero: entrypoint = {cartero.get('entrypoint')}")
+    pasa(cartero.get("command") == COMANDO_CARTERO,
+         f"p) cartero: command = {cartero.get('command')} (solo en su IP de correo)")
+    pasa((cartero.get("healthcheck") or {}).get("test") == HEALTHCHECK_CARTERO,
+         f"p) cartero: healthcheck = {(cartero.get('healthcheck') or {}).get('test')}")
+    # Su único montaje: la CA de desarrollo en solo lectura (producción lo
+    # quita, verificar_despliegue.py). La API, ninguno de estos.
+    montajes = cartero.get("volumes") or []
+    ok_montaje = (len(montajes) == 1 and montajes[0].get("type") == "bind" and montajes[0].get("read_only") is True
+                  and montajes[0].get("target") == "/usr/lib/ssl/cert.pem"
+                  and str(montajes[0].get("source")).replace(chr(92), "/").endswith("/secrets/correo_ca.pem"))
+    pasa(ok_montaje, f"p) cartero: unico montaje la CA de desarrollo en solo lectura ({montajes})")
 
 
 def seccion_o():
@@ -1281,7 +1368,7 @@ def main():
     parada = None
     try:
         seccion_a()
-        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_o, seccion_f, seccion_n, seccion_g,
+        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_o, seccion_p, seccion_f, seccion_n, seccion_g,
                         seccion_h, seccion_i, seccion_j, seccion_k, seccion_l, seccion_m):
             seccion()
     except Parada as e:

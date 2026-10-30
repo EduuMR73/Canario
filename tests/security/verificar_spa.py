@@ -5,7 +5,8 @@ el 8445 (spa/, proxy/Dockerfile y proxy/Caddyfile, docs/threat-model.md, 6.11).
 La pila entera con la imagen real del proxy, que compila la SPA en su primera
 etapa. Prueba:
 
-* a) arranque de la pila (con Mailpit y el broker del login externo, con
+* a) arranque de la pila (con Mailpit, el cartero que le entrega el correo por
+  TLS y el broker del login externo, con
   Google sin configurar: los dos secretos de Google son los marcadores de
   scripts/generar_secretos.py, escritos en el directorio temporal en un compose
   adicional, sea cual sea el contenido de secrets/; si docker compose no los
@@ -15,7 +16,14 @@ etapa. Prueba:
   el log debe decirlo: i) y l) hacen más de 10 accesos (login, activación y
   contraseña) en 5 minutos desde el mismo cliente, y el límite de producción
   los cortaría según dónde caiga el cambio de ventana. Los límites de
-  producción los prueba verificar_denuncia.py, r);
+  producción los prueba verificar_denuncia.py, r). El correo pasa por el
+  cartero (app/cartero.py): la API se lo pasa por la red correo y él lo
+  entrega a Mailpit por TLS implícito. Una CA de la batería y el certificado
+  de Mailpit (nombre mailpit) se generan en el directorio temporal, la CA se
+  monta en el cartero como su único almacén de confianza y el certificado y
+  la clave en Mailpit, con la credencial SMTP falsa (los marcadores); nunca
+  los ficheros de secrets/. Los correos llevan el pie del cartero al final;
+  la batería los lee con la API HTTP de Mailpit;
 * b) las cabeceras exactas de la página, del script, de la hoja de estilos, de
   la fuente y de un error, con su tipo de contenido, y que la fuente que
   sirve Caddy es, byte a byte, la del release fijado (sha256);
@@ -77,7 +85,7 @@ etapa. Prueba:
   dispositivo; la solicitud de registro muestra el texto fijo de la SPA; ninguna
   violación de la CSP ni error de JavaScript (control: una conexión a otro
   origen sí deja su violación en la consola);
-* j) la verificación del registro desde el enlace del correo (Mailpit): el
+* j) la verificación del registro desde el enlace del correo (Mailpit, vía el cartero): el
   token sale de la URL, se envía al pulsar el botón y, después, el admin ve
   la solicitud por la API; el botón ocupa el ancho de la tarjeta aunque es
   type="button" (control: uno sin la clase, no) y la confirmación no es una
@@ -328,7 +336,7 @@ RAIZ = pathlib.Path.cwd()
 PROYECTO = "canario_spa"
 SALIDA = pathlib.Path(tempfile.gettempdir()) / "verificacion_spa.txt"
 # Con los perfiles gestion (alta de la empresa y del admin) y desarrollo
-# (Mailpit, para el correo de verificación del registro). down solo actúa
+# (Mailpit y, delante, el cartero: el correo de verificación del registro). down solo actúa
 # sobre los servicios de los perfiles activos: con los dos, no queda nada.
 BASE = ["docker", "compose", "-p", PROYECTO, "-f", "docker-compose.yml", "--profile", "gestion",
         "--profile", "desarrollo"]
@@ -362,6 +370,10 @@ SUBRED_CANJE = "10.88.2.0/28"
 MARCADOR_CLIENT_ID = "sin-configurar:client-id"
 MARCADOR_CLIENT_SECRET = "sin-configurar:client-secret"
 SECRETOS_GOOGLE = ("google_client_id", "google_client_secret")
+# Los marcadores de la credencial SMTP sin configurar (scripts/generar_secretos.py):
+# con ellos el cartero entrega sin AUTH, que es lo que admite Mailpit.
+MARCADOR_SMTP_USUARIO = "sin-configurar:usuario"
+MARCADOR_SMTP_CONTRASENA = "sin-configurar:contrasena"
 RAIZ_CA = "/data/caddy/pki/authorities/local/root.crt"
 INTERMEDIA_CA = "/data/caddy/pki/authorities/local/intermediate.crt"
 
@@ -636,8 +648,8 @@ NOMBRE_ROL_ADMIN = "Admin"
 ALERTA_LOGIN = "Empresa, email, contraseña o código incorrectos."
 # El texto fijo de la SPA tras solicitar el acceso (la API responde lo mismo
 # en todos los casos; su mensaje, en minúscula, ya no se enseña).
-TEXTO_REGISTRO = ("Si los datos son correctos, recibirá un correo en unos minutos. "
-                  "Si no le llega, vuelva a solicitarlo más tarde.")
+TEXTO_REGISTRO = ("Si los datos son correctos, recibirá un correo de Canario en unos minutos. "
+                  "Si no le llega, mire en la carpeta de spam y, si tampoco está, vuelva a solicitarlo más tarde.")
 # Pulido 2b. El error dentro de la tarjeta: [en la tarjeta, fondo, barra de
 # la izquierda, borde de arriba]. "Entrar" tras activar: [etiqueta, href,
 # fondo], con el amarillo del botón principal (#facc15). La salida de la
@@ -810,7 +822,8 @@ MENU_AUDITOR = ["Inicio", "Auditoría", "Mi cuenta"]
 H1_MI_CUENTA = "Mi cuenta"
 PATRON_ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
 TEXTO_SIN_ROL = f"Elija el rol de {EMAIL_REGISTRO} antes de aprobar."
-TEXTO_APROBADA = f"Aprobada: {EMAIL_REGISTRO} recibirá un correo para activar su cuenta como Auditor."
+TEXTO_APROBADA = (f"Aprobada: {EMAIL_REGISTRO} recibirá un correo para activar su cuenta como Auditor. "
+                  "Si no le llega, reinvite la cuenta desde Cuentas y entréguele el enlace en mano.")
 # La confirmación de la aprobación, con el rol que se eligió al abrirla.
 PREGUNTA_APROBAR = f"¿Aprobar a {EMAIL_REGISTRO} como Auditor? Recibirá un correo para activar su cuenta."
 # Un código de admin que no vale (spa/src/app/nucleo/codigo-admin.ts), y lo
@@ -3167,6 +3180,51 @@ def compilacion(contexto_spa, etiqueta):
         raise Parada(f"no se pudo construir la etapa de compilacion ({etiqueta}): {r.err.strip()[-500:]}")
 
 
+def certificados_correo(destino):
+    """Escribe en destino la CA de la batería (ca_correo.pem), el certificado de
+    Mailpit (nombre mailpit, firmado por esa CA) y su clave. Se generan aquí,
+    en el directorio temporal, y nunca se usan los ficheros de secrets/: el
+    cartero solo confía en esta CA, y la clave de la CA se descarta al firmar.
+    Lleva SKI y AKI porque el contexto por defecto de Python puede exigirlos."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    def nombre(texto):
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, texto)])
+
+    ahora = datetime.datetime.now(datetime.UTC)
+    desde, hasta = ahora - datetime.timedelta(minutes=5), ahora + datetime.timedelta(days=1)
+    clave_ca = ec.generate_private_key(ec.SECP256R1())
+    ca = (x509.CertificateBuilder().subject_name(nombre("Canario bateria CA del correo"))
+          .issuer_name(nombre("Canario bateria CA del correo"))
+          .public_key(clave_ca.public_key()).serial_number(x509.random_serial_number())
+          .not_valid_before(desde).not_valid_after(hasta)
+          .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+          .add_extension(x509.KeyUsage(digital_signature=False, content_commitment=False, key_encipherment=False,
+                                       data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                                       crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(clave_ca.public_key()), critical=False)
+          .sign(clave_ca, hashes.SHA256()))
+    clave = ec.generate_private_key(ec.SECP256R1())
+    certificado = (x509.CertificateBuilder().subject_name(nombre("mailpit")).issuer_name(ca.subject)
+                   .public_key(clave.public_key()).serial_number(x509.random_serial_number())
+                   .not_valid_before(desde).not_valid_after(hasta)
+                   .add_extension(x509.SubjectAlternativeName([x509.DNSName("mailpit")]), critical=False)
+                   .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                   .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+                   .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(clave_ca.public_key()),
+                                  critical=False)
+                   .sign(clave_ca, hashes.SHA256()))
+    (destino / "ca_correo.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    (destino / "mailpit_certificado.pem").write_bytes(certificado.public_bytes(serialization.Encoding.PEM))
+    (destino / "mailpit_clave.pem").write_bytes(clave.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+
+
 def copia_de_spa(nombre):
     """Copia de spa/ sin lo que genera un build o una instalación local."""
     copia = TEMPORAL / nombre
@@ -3229,7 +3287,9 @@ def senales_csp(mensajes):
 
 
 # Lector del buzón de Mailpit por su API HTTP, desde la red correo (la única
-# donde está), como en tests/security/verificar_registro.py.
+# donde está), como en tests/security/verificar_registro.py. Los correos
+# llegan por el cartero, con su pie al final del texto: las comprobaciones
+# buscan con regex el enlace y no comparan el texto entero.
 LECTOR_CORREO = r'''
 import json, urllib.request
 base = "http://mailpit:8025/api/v1"
@@ -3286,8 +3346,8 @@ def seccion_a():
     pasa(True, f"a) el broker monta los marcadores de Google del directorio temporal ({sorted(rutas)})")
     # El broker también: sin él, la API responde 503 a la lista de
     # proveedores, y la pila no sería la de producción (r).
-    r = dc("up", "-d", "--build", "--wait", "api", "caddy", "mailpit", "broker", timeout=1800)
-    p(f"up -d --build --wait api caddy mailpit broker -> codigo {r.rc}")
+    r = dc("up", "-d", "--build", "--wait", "api", "caddy", "mailpit", "cartero", "broker", timeout=1800)
+    p(f"up -d --build --wait api caddy mailpit cartero broker -> codigo {r.rc}")
     if r.rc != 0:
         p(r.todo.strip()[-1500:])
         raise Parada("no arranca la pila")
@@ -5116,6 +5176,41 @@ def main():
     marcadores = TEMPORAL / "secretos_google.yml"
     marcadores.write_text("\n".join(lineas) + "\n", encoding="utf-8", newline="\n")
     BASE.extend(["-f", str(marcadores)])
+    # El correo pasa por el cartero, que entrega a Mailpit por TLS implícito.
+    # Todo sale del directorio temporal, sea cual sea el contenido de secrets/:
+    # una CA y un certificado de Mailpit de la batería, y la credencial SMTP
+    # falsa con los marcadores de scripts/generar_secretos.py (con ellos el
+    # cartero entrega sin autenticarse). El override monta la CA en el cartero
+    # sobre su único almacén de confianza (/usr/lib/ssl/cert.pem); compose une
+    # los volúmenes por destino y el origen de este sustituye al de
+    # docker-compose.yml.
+    correo = TEMPORAL / "correo"
+    correo.mkdir()
+    try:
+        certificados_correo(correo)
+    except ImportError:
+        p("PARADA: falta cryptography en el Python que ejecuta la bateria (pip install -r requirements.txt)")
+        terminar_con_parada()
+    (correo / "smtp_usuario").write_bytes(MARCADOR_SMTP_USUARIO.encode("ascii"))
+    (correo / "smtp_contrasena").write_bytes(MARCADOR_SMTP_CONTRASENA.encode("ascii"))
+    lineas = ["secrets:"]
+    for nombre, fichero in (("smtp_usuario", "smtp_usuario"), ("smtp_contrasena", "smtp_contrasena"),
+                            ("mailpit_certificado", "mailpit_certificado.pem"),
+                            ("mailpit_clave", "mailpit_clave.pem")):
+        lineas += [f"  {nombre}:", f"    file: \"{(correo / fichero).as_posix()}\""]
+    secretos_correo = TEMPORAL / "secretos_correo.yml"
+    secretos_correo.write_text("\n".join(lineas) + "\n", encoding="utf-8", newline="\n")
+    ca_cartero = TEMPORAL / "ca_cartero.yml"
+    ca_cartero.write_text(
+        "services:\n"
+        "  cartero:\n"
+        "    volumes:\n"
+        "      - type: bind\n"
+        f"        source: \"{(correo / 'ca_correo.pem').as_posix()}\"\n"
+        "        target: /usr/lib/ssl/cert.pem\n"
+        "        read_only: true\n",
+        encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(secretos_correo), "-f", str(ca_cartero)])
     parada = None
     try:
         for seccion in (seccion_a, seccion_b, seccion_c_e, seccion_d, seccion_f, seccion_g, seccion_h, seccion_i,

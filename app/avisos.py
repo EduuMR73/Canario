@@ -36,8 +36,8 @@ Si no hay a quién avisar (una empresa con un solo admin y sin auditor, o la
 activación del primer admin), quien llama deja un EVENTO aviso_sin_destinatario:
 el aviso que no llega a nadie se ve, no se pierde en silencio. El envío lo
 hace app/correo.py después de responder, con sus límites y sus eventos de
-fallo. Límite conocido: la salida SMTP de producción no está decidida
-(app/correo.py), y hasta entonces estos correos solo llegan en desarrollo.
+fallo, a través del cartero (app/cartero.py), que les reserva una parte del
+cupo diario: una avalancha de registros no los silencia.
 """
 from app import correo
 

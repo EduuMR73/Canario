@@ -201,7 +201,11 @@ export class Solicitudes {
     }
     const { rol } = abierta;
     this.actuar(solicitud, this.api.aprobar(solicitud.solicitud_id, rol, this.confirmacion.getRawValue().codigo_totp),
-      `Aprobada: ${solicitud.email} recibirá un correo para activar su cuenta como ${nombreRol(rol)}.`, {
+      // La salida si el correo no llega: el admin no puede saber si se
+      // entregó, pero sí reinvitar desde Cuentas, que le enseña el enlace
+      // para dárselo en mano.
+      `Aprobada: ${solicitud.email} recibirá un correo para activar su cuenta como ${nombreRol(rol)}. ` +
+      'Si no le llega, reinvite la cuenta desde Cuentas y entréguele el enlace en mano.', {
         404: TEXTO_YA_CERRADA,
         409: 'Ya existe una cuenta con ese email. Se ha actualizado la lista.',
       }, true);

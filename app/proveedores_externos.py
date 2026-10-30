@@ -1,7 +1,7 @@
 """Proveedores de identidad externos del personal: el adaptador de Google.
 
-Lo usa el broker (app/broker.py), el único contenedor con salida a internet
-(docs/threat-model.md, 6.19). La API no habla con Google: le pasa al broker
+Lo usa el broker (app/broker.py), que con el cartero del correo es el único
+contenedor con salida a internet (docs/threat-model.md, 6.19). La API no habla con Google: le pasa al broker
 lo que necesita y recibe una identidad (proveedor, sub). Así ni el
 client_secret ni ningún token de Google llegan a la API ni al navegador
 (OWASP ASVS 5.0.0, 10.1.1). La API solo importa de aquí las constantes y

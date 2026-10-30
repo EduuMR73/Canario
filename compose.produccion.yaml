@@ -4,7 +4,8 @@
 #   docker compose -f docker-compose.yml -f compose.produccion.yaml up -d --wait
 #
 # Solo cambia lo que depende del entorno: los orígenes públicos, el Caddyfile,
-# la publicación de puertos y de dónde salen las imágenes. Todo lo demás
+# la publicación de puertos, adónde entrega el cartero y en qué certificados
+# confía, y de dónde salen las imágenes. Todo lo demás
 # (redes internas, read_only, cap_drop, usuarios, secretos, límites) es lo
 # mismo que prueban las baterías en local.
 
@@ -41,6 +42,24 @@ services:
     pull_policy: never
     environment:
       CANARIO_ORIGEN_PERSONAL: *origen_personal
+
+  cartero:
+    build: !reset null
+    # La imagen de la API: el cartero es la misma con otro punto de entrada, y
+    # así no hay una imagen más que copiar al VPS.
+    image: canario-api
+    pull_policy: never
+    environment:
+      # Mailjet (docs/operacion.md): TLS implícito en el 465
+      # (dev.mailjet.com/docs/smtp-relay/configuration).
+      CANARIO_SMTP_SERVIDOR: "in-v3.mailjet.com"
+      CANARIO_SMTP_PUERTO: "465"
+      # Un dominio con SPF, DKIM y DMARC propios (docs/operacion.md): sin
+      # ellos, los correos acaban en spam o cualquiera los puede suplantar.
+      CANARIO_CORREO_REMITENTE: "no-responder@canario.eduumr.dev"
+    # Sin la CA de desarrollo: confía en el almacén de certificados de la
+    # imagen, el que valida el certificado de Mailjet.
+    volumes: !reset []
 
   gestion:
     build: !reset null

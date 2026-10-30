@@ -148,8 +148,8 @@ MENSAJE_LECTURAS = (f"ha abierto hoy el máximo de {instruccion.LECTURAS_TOPE} d
 # Siempre el mismo, pase lo que pase con la solicitud (app/solicitudes.py).
 # Si la tarea de después de responder falla, el 202 ya ha salido: el mensaje
 # dice qué hacer si el correo no llega (app/solicitudes.py, cabecera).
-MENSAJE_REGISTRO = ("si los datos son correctos, recibirá un correo en unos minutos; "
-                    "si no le llega, vuelva a solicitarlo más tarde")
+MENSAJE_REGISTRO = ("si los datos son correctos, recibirá un correo de Canario en unos minutos; "
+                    "si no le llega, mire en la carpeta de spam y, si tampoco está, vuelva a solicitarlo más tarde")
 MENSAJE_SOLICITUD = "solicitud no válida"
 
 # Topes de forma de la petición, holgados respecto a lo válido: lo que pase

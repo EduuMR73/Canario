@@ -62,9 +62,10 @@ PRUEBAS_POR_FICHERO = {
     "test_avisos": 6,
     "test_bd": 9,
     "test_capas": 3,
+    "test_cartero": 18,
     "test_claves": 7,
     "test_cliente_broker": 12,
-    "test_correo": 8,
+    "test_correo": 7,
     "test_cripto": 42,
     "test_denuncias": 10,
     "test_errores": 11,
@@ -83,7 +84,7 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 17,
 }
-TOTAL_PRUEBAS = 336
+TOTAL_PRUEBAS = 353
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -172,7 +173,28 @@ MUTANTES = [
     ("correo.py", "    if not _semaforo.acquire(blocking=False):\n",
      "    if not _semaforo.acquire(blocking=False) and False:\n",
      "test_correo.Enviar.test_sin_hueco_se_descarta_sin_esperar",
-     "los envios simultaneos no tienen tope (un SMTP lento agota los hilos de la API)"),
+     "los envios simultaneos no tienen tope (un cartero colgado agota los hilos de la API)"),
+    # Cartero: el correo de produccion (app/cartero.py).
+    ("cartero.py", "    return ssl.create_default_context()\n", "    return ssl._create_stdlib_context()\n",
+     "test_cartero.Tls.test_verifica_certificado_y_nombre",
+     "el cartero no verifica el certificado del proveedor (cualquiera en medio lee los enlaces)"),
+    ("cartero.py", 'mensaje["X-Mailjet-TrackClick"] = "0"', 'mensaje["X-Mailjet-TrackClick"] = "1"',
+     "test_cartero.Componer.test_sin_seguimiento",
+     "el proveedor reescribe los enlaces y el token llega a sus registros"),
+    ("cartero.py", "if self._usados.get(categoria, 0) >= CUPO_DIARIO[categoria]:",
+     "if sum(self._usados.values()) >= sum(CUPO_DIARIO.values()):",
+     "test_cartero.ColaYCupo.test_cupo_por_categoria_y_por_dia",
+     "una avalancha de registros agota el cupo de los avisos de seguridad"),
+    ("cartero.py", '"certificado", definitiva=True', '"certificado", definitiva=False',
+     "test_cartero.Fallos.test_que_se_reintenta", "un certificado que no vale se reintenta como si fuera un corte de red"),
+    ("cartero.py", 'model_config = ConfigDict(extra="forbid", strict=True)\n    tipo: validacion.TextoLinea',
+     'model_config = ConfigDict(extra="ignore", strict=True)\n    tipo: validacion.TextoLinea',
+     "test_cartero.Componer.test_peticion_sin_controles", "la API puede mandar campos de mas (un remitente)"),
+    ("cartero.py", "    if sin_usuario != sin_contrasena:\n", "    if False:\n",
+     "test_cartero.Config.test_marcadores", "con las credenciales a medias el cartero arranca"),
+    ("cartero.py", "            if config.usuario is not None:\n", "            if False:\n",
+     "test_cartero.Tls.test_entrega_con_el_contexto_y_tls_implicito",
+     "con credenciales el cartero no se autentica (el proveedor rechaza todo)"),
     # Registro en segundo plano y las dos reglas del destinatario (bloque 5a-bis).
     ("limitador.py", 're.compile(r"([a-z]+(?:_[a-z]+)*)=', 're.compile(r"([a-z_]+)=',
      "test_limitador.CargarLimites.test_errores", "CANARIO_LIMITES admite guiones bajos sueltos en el nombre"),

@@ -15,7 +15,11 @@ import { enfocarEncabezado } from '../../nucleo/foco';
 // Sin entradilla: el correo de confirmación lo anuncia el aviso al enviar, y
 // la revisión del admin, la página de confirmación del email (acceso/
 // verificacion), cada cosa cuando pasa.
-const TEXTO_SOLICITADO = 'Si los datos son correctos, recibirá un correo en unos minutos. Si no le llega, vuelva a solicitarlo más tarde.';
+// El remitente se nombra por su nombre visible (Canario), que es el mismo en
+// todos los entornos; la dirección cambia entre desarrollo y producción. La
+// carpeta de spam, porque es donde suele estar un primer correo que no llega.
+const TEXTO_SOLICITADO = 'Si los datos son correctos, recibirá un correo de Canario en unos minutos. ' +
+  'Si no le llega, mire en la carpeta de spam y, si tampoco está, vuelva a solicitarlo más tarde.';
 
 @Component({
   selector: 'app-registro',

@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Batería de pruebas de seguridad del registro del personal, "primero el
 email" (app/solicitudes.py, app/correo.py y las rutas de app/rutas_personal.py),
-con la pila real: API, PostgreSQL, Redis y Mailpit (el SMTP de desarrollo).
+con la pila real: API, PostgreSQL, Redis, el cartero (app/cartero.py, que
+entrega el correo) y Mailpit (el SMTP de desarrollo, con TLS).
 
 Qué prueba:
 
 * a) el arranque: la API registra el origen de la SPA del personal; Mailpit
   corre sin root, de solo lectura, sin capacidades, con sus límites, solo en
   la red interna correo y sin puertos publicados, y desde esa red no se sale a
-  internet;
+  internet; el cartero corre de solo lectura, sin capacidades, en las redes
+  correo (con su IP fija) y salida, y con la CA de la batería como único
+  almacén de confianza;
 * c) el control positivo de extremo a extremo: solicitud, correo con el
   enlace (token en el fragmento), verificación, la solicitud aparece al admin,
   aprobación con un rol (sin token en la respuesta), correo de invitación,
@@ -42,9 +45,11 @@ Qué prueba:
   minutos): el cuarto es 429 con Retry-After y otro email sigue pasando; un
   solo evento con su regla, sin el email. Y el diario (configurado en 2): el
   tercero es 429 con el Retry-After hasta las 00:00 UTC, y su propio evento;
-* i) sin Mailpit, la respuesta no cambia y el fallo queda en el log sin el
-  email; ni emails, ni tokens, ni enlaces en los logs de la API, PostgreSQL y
-  Redis;
+* i) sin el cartero, la respuesta no cambia y el fallo queda en el log de la
+  API (EVENTO correo_fallido) sin el email; sin Mailpit, tampoco, y el fallo
+  queda en el log del cartero (EVENTO correo_aplazado, con reintento); ni
+  emails, ni tokens, ni enlaces en los logs de la API, el cartero, PostgreSQL
+  y Redis (el del cartero, con un control: sí registra las entregas);
 * j) sin CANARIO_ORIGEN_PERSONAL, o mal formado, la API no arranca;
 * k) con PostgreSQL parado, el registro responde el mismo 202 al momento (la
   base de datos va después de responder) y el fallo queda en el log, como
@@ -59,7 +64,22 @@ Qué prueba:
   con código 1 y un error, sin enlaces ni traza (control: con Mailpit sale
   con 0). Va después de las secciones que leen correos anteriores, porque
   parar Mailpit borra su buzón (tmpfs), y antes de k, que deja la API
-  reconectando con PostgreSQL.
+  reconectando con PostgreSQL;
+* n) lo que fija el cartero en todo correo que llega a Mailpit: el remitente
+  "Canario <no-responder@canario.invalid>", X-Mailjet-TrackClick: 0,
+  X-Mailjet-TrackOpen: 0, el Message-ID con el dominio del remitente y el pie
+  ("Canario nunca le pedirá por correo su contraseña ni su código de
+  verificación."). Se leen las cabeceras con la API de Mailpit
+  (/message/{ID}/headers) y el cuerpo del mensaje en crudo (/message/{ID}/raw);
+* o) el cartero solo atiende a la IP de la API: un POST /correos desde otro
+  contenedor de la red correo es un 403, deja EVENTO cartero_cliente_rechazado
+  (sin la IP ni el destinatario) y no sale correo; control: GET /salud desde
+  ese mismo contenedor da 200, así que la red llega y lo que rechaza es la IP;
+* q) TLS verificado: con el cartero confiando en una CA ajena (otro override
+  que cambia el montaje de /usr/lib/ssl/cert.pem), el correo no llega a
+  Mailpit, el log del cartero tiene EVENTO correo_fallido con
+  motivo=certificado y no hay reintento (es definitivo); control: con la CA
+  buena (antes y después, tras volver a crear el cartero) el correo sí llega.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
 resultado es SIN CONCLUSION, nunca PASA. Los oráculos son literales.
@@ -71,11 +91,18 @@ marcha y los secretos generados con scripts/generar_secretos.py):
 
 Usa un proyecto de Docker propio (canario_registro) con los perfiles
 desarrollo (Mailpit) y gestion. No levanta Caddy: habla con la API por la red
-app. Necesita que el proyecto canario y las demás baterías estén parados: la
-subred 10.88.0.0/28 es fija (si está en uso, PARADA). Al terminar lo borra
-todo (down -v y las imágenes construidas). No lee ningún secreto: la API y
-gestion los reciben de secrets/ como Docker secrets, y las APIs temporales de
-j) usan secretos falsos. Los ficheros auxiliares van a un directorio temporal
+app. Necesita que el proyecto canario y las demás baterías estén parados: las
+subredes 10.88.0.0/28 y 10.88.4.0/28 son fijas (si están en uso, PARADA). Al
+terminar lo borra todo (down -v y las imágenes construidas). No lee ningún
+secreto: la API y gestion los reciben de secrets/ como Docker secrets, las
+APIs temporales de j) usan secretos falsos, y el correo usa los suyos, FALSOS
+y generados en cada ejecución en el directorio temporal: las credenciales SMTP
+(los dos marcadores, con los que el cartero entrega sin autenticarse) y dos CA
+(la buena y una ajena) con el certificado de Mailpit (nombre mailpit) firmado
+por la buena, que salen de la función generar() de
+scripts/generar_tls_desarrollo.py ejecutada en la imagen de la API. Un override
+monta la CA buena en el cartero como su único almacén de confianza y el
+certificado y la clave en Mailpit. Los ficheros auxiliares van a un directorio temporal
 del sistema, nunca al repositorio. La salida completa se guarda en
 verificacion_registro.txt dentro del directorio temporal del sistema. El
 código de salida es 0 solo si el resultado global es OK.
@@ -96,6 +123,8 @@ import sys
 import tempfile
 import time
 import traceback
+from email import message_from_bytes
+from email import policy as politica_email
 
 RAIZ = pathlib.Path.cwd()
 PROYECTO = "canario_registro"
@@ -110,6 +139,13 @@ estado = {"falla": False, "sin_conclusion": False}
 # Oráculos literales
 # ---------------------------------------------------------------------------
 SUBRED_APP = "10.88.0.0/28"
+SUBRED_CORREO = "10.88.4.0/28"
+# docker-compose.yml: IP fija del cartero y de la API en la red correo.
+IP_CARTERO = "10.88.4.3"
+IP_API_CORREO = "10.88.4.4"
+MONTAJE_CA = "/usr/lib/ssl/cert.pem"
+MARCADOR_SMTP_USUARIO = "sin-configurar:usuario"
+MARCADOR_SMTP_CONTRASENA = "sin-configurar:contrasena"
 ORIGEN_PERSONAL = "https://localhost:8445"
 TEXTO_ORIGEN = "ORIGEN PERSONAL: https://localhost:8445"
 TEXTO_BLOQUEADO = "ARRANQUE BLOQUEADO: "
@@ -143,8 +179,9 @@ MEMORIA_MAILPIT = 134217728  # 128m
 PIDS = 64
 
 # Respuestas (app/rutas_personal.py y app/frontera_http.py)
-CUERPO_202 = ('{"mensaje":"si los datos son correctos, recibirá un correo en unos minutos; '
-              'si no le llega, vuelva a solicitarlo más tarde"}').encode()
+CUERPO_202 = ('{"mensaje":"si los datos son correctos, recibirá un correo de Canario en unos minutos; '
+              'si no le llega, mire en la carpeta de spam y, si tampoco está, vuelva a solicitarlo más tarde"}'
+              ).encode()
 CUERPO_401 = '{"detalle": "solicitud no válida"}'.encode()
 CUERPO_401_INVITACION = '{"detalle": "invitación no válida"}'.encode()
 CUERPO_401_CREDENCIALES = '{"detalle": "credenciales no válidas"}'.encode()
@@ -156,6 +193,17 @@ TIPO_JSON = "application/json"
 
 # Correos (app/solicitudes.py)
 REMITENTE = "no-responder@canario.invalid"
+# n) Lo que fija el cartero (app/cartero.py): el remitente completo y el pie.
+DE_CORREO = "Canario <no-responder@canario.invalid>"
+PIE_CORREO = "\n\n-- \nCanario nunca le pedirá por correo su contraseña ni su código de verificación.\n"
+FIN_MESSAGE_ID = "@canario.invalid>"
+# Eventos del log del cartero (app/cartero.py).
+TEXTO_CARTERO_ENTREGADO = "EVENTO correo_entregado: tipo=verificacion"
+TEXTO_CARTERO_APLAZADO = "EVENTO correo_aplazado: tipo=verificacion motivo="
+TEXTO_CARTERO_CERTIFICADO = "EVENTO correo_fallido: tipo=verificacion motivo=certificado"
+TEXTO_CARTERO_RECHAZADO = "EVENTO cartero_cliente_rechazado: ruta=/correos"
+CUERPO_CARTERO_PROHIBIDO = {"detalle": "prohibido"}
+CUERPO_CARTERO_SALUD = {"estado": "ok"}
 ASUNTO_VERIFICACION = "Confirme su email para registrarse en Canario"
 ASUNTO_AVISO_CUENTA = "Intento de registro con su email en Canario"
 ASUNTO_AVISO_PENDIENTE = "Su solicitud de registro en Canario sigue pendiente"
@@ -248,6 +296,58 @@ for m in lista.get("messages") or []:
     salida.append({"para": [a["Address"] for a in d.get("To") or []], "de": (d.get("From") or {}).get("Address"),
                    "asunto": d.get("Subject"), "texto": d.get("Text")})
 print(json.dumps(salida))
+'''
+
+# Cabeceras y cuerpo en crudo de cada correo del buzón, por la API de Mailpit:
+# GET /message/{ID}/headers (un objeto cabecera -> lista de valores; las
+# claves salen con la mayúscula canónica de net/mail, así que se comparan en
+# minúsculas) y GET /message/{ID}/raw (el mensaje tal cual lo recibió).
+LECTOR_CABECERAS = r'''
+import base64, json, urllib.request
+base = "http://mailpit:8025/api/v1"
+lista = json.load(urllib.request.urlopen(base + "/messages?limit=1000", timeout=10))
+salida = []
+for m in lista.get("messages") or []:
+    cabeceras = json.load(urllib.request.urlopen(base + "/message/" + m["ID"] + "/headers", timeout=10))
+    crudo = urllib.request.urlopen(base + "/message/" + m["ID"] + "/raw", timeout=10).read()
+    salida.append({"asunto": m.get("Subject"), "cabeceras": cabeceras,
+                   "crudo": base64.b64encode(crudo).decode("ascii")})
+print(json.dumps(salida))
+'''
+
+# o) Un cliente que no es la API, en la red correo: un POST /correos con un
+# correo bien formado (así lo que lo rechaza es la IP, no el formato) y un
+# GET /salud (el control: la red llega).
+CLIENTE_CARTERO = r'''
+import http.client, json, sys
+
+
+def peticion(metodo, ruta, cuerpo=None):
+    conexion = http.client.HTTPConnection("cartero", 8000, timeout=15)
+    try:
+        cabeceras = {"Content-Type": "application/json"} if cuerpo is not None else {}
+        conexion.request(metodo, ruta, body=cuerpo, headers=cabeceras)
+        respuesta = conexion.getresponse()
+        return {"estado": respuesta.status, "cuerpo": respuesta.read().decode("utf-8", "replace")}
+    except Exception as error:
+        return {"error": type(error).__name__}
+    finally:
+        conexion.close()
+
+
+correo = json.dumps({"tipo": "verificacion", "destinatario": sys.argv[1], "asunto": "prueba de la bateria",
+                     "cuerpo": "cuerpo de prueba"}).encode("ascii")
+print(json.dumps({"salud": peticion("GET", "/salud"), "correos": peticion("POST", "/correos", correo)}))
+'''
+
+# Las dos CA y el certificado de Mailpit, con la función generar() del propio
+# script de desarrollo (se monta en la imagen de la API, que trae cryptography).
+# Se generan dos juegos: el primero es el bueno, del segundo solo se usa su CA
+# (la ajena). Imprime PEM, nunca claves en el log: la salida la lee la batería.
+GENERADOR_TLS = r'''
+import json, runpy, sys
+generar = runpy.run_path(sys.argv[1])["generar"]
+print(json.dumps([[parte.decode("ascii") for parte in generar()] for _ in range(2)]))
 '''
 
 PRUEBA_SALIDA = ("import socket\n"
@@ -349,12 +449,23 @@ def log_de(servicio):
     return dc("logs", "--no-color", "--no-log-prefix", servicio).todo
 
 
+def log_cartero():
+    """El log del cartero entero, incluido el de los contenedores que q) ya
+    reemplazó."""
+    return "\n".join(LOGS_CARTERO_PREVIOS + [log_de("cartero")])
+
+
 def eventos_que_acaban(texto):
     """Líneas del log de la API que terminan exactamente en texto."""
     return [l for l in log_de("api").splitlines() if l.rstrip().endswith(texto)]
 
 
 TEMPORAL = None
+PRUEBA = None
+CA_AJENA_YML = None
+# Logs del cartero de contenedores que q) ya ha reemplazado: sin ellos, i) no
+# vería lo que se registró antes.
+LOGS_CARTERO_PREVIOS = []
 IMAGEN_API = ""
 ESTADO_GIT_ARRANQUE = None
 # Lo que no debe aparecer en ningún log: emails y tokens de la batería.
@@ -568,6 +679,97 @@ def con_limites(limites):
     return fichero
 
 
+def fichero_secreto(nombre, ruta):
+    return [f"  {nombre}:", f"    file: \"{ruta.as_posix()}\""]
+
+
+def escribir_auxiliares():
+    """Secretos falsos del correo (credenciales SMTP con los dos marcadores,
+    certificado y clave de Mailpit) y la CA de prueba en el cartero, en
+    ficheros de compose adicionales, como verificar_login_externo.py. Los PEM
+    se escriben vacíos y a) los rellena: compose necesita que existan antes
+    de cualquier config. Además, el override que cambia la CA por la ajena
+    (q)."""
+    global PRUEBA, CA_AJENA_YML
+    PRUEBA = TEMPORAL / "prueba"
+    secretos = TEMPORAL / "secretos_compose"
+    PRUEBA.mkdir()
+    secretos.mkdir()
+    for fichero in ("correo_ca.pem", "ca_ajena.pem", "mailpit_certificado.pem", "mailpit_clave.pem"):
+        (PRUEBA / fichero).write_bytes(b"")
+    (secretos / "smtp_usuario").write_bytes(MARCADOR_SMTP_USUARIO.encode("ascii"))
+    (secretos / "smtp_contrasena").write_bytes(MARCADOR_SMTP_CONTRASENA.encode("ascii"))
+    lineas = ["secrets:"]
+    for nombre in ("smtp_usuario", "smtp_contrasena"):
+        lineas += fichero_secreto(nombre, secretos / nombre)
+    for nombre in ("mailpit_certificado", "mailpit_clave"):
+        lineas += fichero_secreto(nombre, PRUEBA / f"{nombre}.pem")
+    adicional = TEMPORAL / "secretos_correo.yml"
+    adicional.write_text("\n".join(lineas) + "\n", encoding="utf-8", newline="\n")
+
+    def montaje(fichero):
+        # compose fusiona volumes por target y sustituye el montaje del repo
+        # (./secrets/correo_ca.pem): la CA de la batería es el único almacén de
+        # confianza del cartero.
+        return ("services:\n  cartero:\n    volumes:\n      - type: bind\n"
+                f"        source: \"{(PRUEBA / fichero).as_posix()}\"\n"
+                f"        target: {MONTAJE_CA}\n        read_only: true\n")
+    override = TEMPORAL / "ca_buena.yml"
+    override.write_text(montaje("correo_ca.pem"), encoding="utf-8", newline="\n")
+    CA_AJENA_YML = TEMPORAL / "ca_ajena.yml"
+    CA_AJENA_YML.write_text(montaje("ca_ajena.pem"), encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(adicional), "-f", str(override)])
+
+
+def generar_tls_prueba():
+    """Escribe en PRUEBA la CA buena, el certificado y la clave de Mailpit
+    (firmado por ella) y una CA ajena, generados con generar() de
+    scripts/generar_tls_desarrollo.py en la imagen de la API (sin red)."""
+    guion = RAIZ / "scripts" / "generar_tls_desarrollo.py"
+    r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                  "--security-opt", "no-new-privileges:true", "--mount",
+                  f"type=bind,src={guion},dst=/prueba/generar_tls_desarrollo.py,readonly",
+                  "--entrypoint", "python", IMAGEN_API, "-I", "-c", GENERADOR_TLS,
+                  "/prueba/generar_tls_desarrollo.py"])
+    try:
+        buena, ajena = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Parada(f"no se generan los certificados de prueba: {r.err.strip()[-400:]!r}") from None
+    ca, certificado, clave = buena
+    for nombre, contenido in (("correo_ca.pem", ca), ("mailpit_certificado.pem", certificado),
+                              ("mailpit_clave.pem", clave), ("ca_ajena.pem", ajena[0])):
+        (PRUEBA / nombre).write_bytes(contenido.encode("ascii"))
+    pasa(ca.startswith("-----BEGIN CERTIFICATE-----") and certificado.startswith("-----BEGIN CERTIFICATE-----")
+         and clave.startswith("-----BEGIN PRIVATE KEY-----") and ajena[0].startswith("-----BEGIN CERTIFICATE-----")
+         and ca != ajena[0], "a) control: se generan la CA buena, el certificado y la clave de Mailpit y una CA ajena distinta")
+
+
+def montaje_ca(servicio):
+    """[(origen, escritura)] de lo montado en /usr/lib/ssl/cert.pem del
+    contenedor del servicio, según docker inspect."""
+    montajes = inspeccionar(contenedor(servicio), "{{json .Mounts}}")
+    return [(m.get("Source", ""), m.get("RW")) for m in montajes if m.get("Destination") == MONTAJE_CA]
+
+
+def correos_completos():
+    """Cada correo del buzón con sus cabeceras (claves en minúsculas, valores
+    en lista) y el cuerpo de texto decodificado por la biblioteca estándar a
+    partir del mensaje en crudo, con LF."""
+    r = ejecutar(["docker", "run", "--rm", "--network", f"{PROYECTO}_correo", "--read-only", "--cap-drop", "ALL",
+                  "--security-opt", "no-new-privileges:true", "--entrypoint", "python", IMAGEN_API, "-c",
+                  LECTOR_CABECERAS])
+    try:
+        lista = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Parada(f"no se pudieron leer las cabeceras del buzon: {r.err.strip()[-400:]!r}") from None
+    for c in lista:
+        c["cabeceras"] = {k.lower(): v for k, v in c["cabeceras"].items()}
+        mensaje = message_from_bytes(base64.b64decode(c.pop("crudo")), policy=politica_email.default)
+        parte = mensaje.get_body(preferencelist=("plain",))
+        c["cuerpo"] = parte.get_content().replace("\r\n", "\n") if parte is not None else None
+    return lista
+
+
 # ---------------------------------------------------------------------------
 # Secciones
 # ---------------------------------------------------------------------------
@@ -583,11 +785,22 @@ def seccion_a():
     LIMITES_ACTUALES = TEMPORAL / "limites.yml"
     LIMITES_ACTUALES.write_text(f"services:\n  api:\n    environment:\n      CANARIO_LIMITES: \"{LIMITES_PRUEBA}\"\n",
                                 encoding="utf-8", newline="\n")
-    r = ejecutar(BASE + ["-f", str(LIMITES_ACTUALES), "up", "-d", "--build", "--wait", "api", "mailpit"])
-    p(f"up -d --build --wait api mailpit -> codigo {r.rc}")
+    # Primero la imagen: los certificados de prueba se generan con ella, y la
+    # pila los necesita ya escritos al arrancar.
+    r = dc("build", "api")
+    p(f"build api -> codigo {r.rc}")
     if r.rc != 0:
         p(r.todo.strip()[-1500:])
-        raise Parada("no arranca la pila con Mailpit")
+        raise Parada("no se construye la imagen de la API")
+    IMAGEN_API = f"{PROYECTO}-api"
+    if ejecutar(["docker", "image", "inspect", IMAGEN_API]).rc != 0:
+        raise Parada(f"no existe la imagen {IMAGEN_API} tras construirla")
+    generar_tls_prueba()
+    r = ejecutar(BASE + ["-f", str(LIMITES_ACTUALES), "up", "-d", "--build", "--wait", "api", "mailpit", "cartero"])
+    p(f"up -d --build --wait api mailpit cartero -> codigo {r.rc}")
+    if r.rc != 0:
+        p(r.todo.strip()[-1500:])
+        raise Parada("no arranca la pila con el cartero y Mailpit")
     IMAGEN_API = inspeccionar(contenedor("api"), "{{json .Config.Image}}")
     pasa(TEXTO_ORIGEN in log_de("api"), f"a) la API registra el origen de la SPA ({TEXTO_ORIGEN!r})")
     i = inspeccionar(contenedor("mailpit"))
@@ -604,6 +817,25 @@ def seccion_a():
     pasa(not publicados and not hc["PortBindings"], f"a) mailpit: sin puertos publicados ({publicados})")
     estado_salud = inspeccionar(contenedor("mailpit"), "{{json .State.Health.Status}}")
     pasa(estado_salud == "healthy", f"a) mailpit: healthy con su healthcheck ({estado_salud})")
+    # El cartero: endurecido como el resto, en correo (IP fija) y salida, con la
+    # CA de la batería como su único almacén de confianza.
+    i = inspeccionar(contenedor("cartero"))
+    hc = i["HostConfig"]
+    pasa(hc["ReadonlyRootfs"] is True and hc["CapDrop"] == ["ALL"] and not hc["CapAdd"]
+         and hc["SecurityOpt"] == ["no-new-privileges:true"],
+         f"a) cartero: de solo lectura, sin capacidades y sin ganar privilegios ({hc['ReadonlyRootfs']}, "
+         f"{hc['CapDrop']}, {hc['SecurityOpt']})")
+    redes = sorted(i["NetworkSettings"]["Networks"])
+    pasa(redes == [f"{PROYECTO}_correo", f"{PROYECTO}_salida"]
+         and i["NetworkSettings"]["Networks"][f"{PROYECTO}_correo"]["IPAddress"] == IP_CARTERO,
+         f"a) cartero: en las redes correo (con la IP {IP_CARTERO}) y salida ({redes})")
+    ip_api = inspeccionar(contenedor("api"), "{{json .NetworkSettings.Networks}}")[f"{PROYECTO}_correo"]["IPAddress"]
+    pasa(ip_api == IP_API_CORREO, f"a) la API tiene en la red correo la IP {IP_API_CORREO} que espera el cartero ({ip_api})")
+    montaje = montaje_ca("cartero")
+    pasa(len(montaje) == 1 and montaje[0][0].endswith("correo_ca.pem") and montaje[0][1] is False,
+         f"a) cartero: {MONTAJE_CA} es la CA de la bateria, de solo lectura ({montaje})")
+    estado_salud = inspeccionar(contenedor("cartero"), "{{json .State.Health.Status}}")
+    pasa(estado_salud == "healthy", f"a) cartero: healthy con su healthcheck ({estado_salud})")
     red = inspeccionar(f"{PROYECTO}_correo")
     pasa(red["Internal"] is True, f"a) la red correo es interna ({red['Internal']})")
     control = ejecutar(["docker", "run", "--rm", "--network", "bridge", "--entrypoint", "python", IMAGEN_API,
@@ -1074,25 +1306,52 @@ def seccion_h():
 
 
 def seccion_i():
-    p("=== i) sin Mailpit la respuesta no cambia y el fallo queda en el log, sin datos")
+    p("=== i) sin el cartero o sin Mailpit la respuesta no cambia y el fallo queda en el log, sin datos")
     ident = EMPRESAS["A"][1]
-    dc("stop", "mailpit")
+    # Sin el cartero: el fallo queda en el log de la API (no puede hablar con
+    # el cartero). El contenedor parado deja de resolverse por su nombre.
+    dc("stop", "cartero")
     try:
         antes = log_de("api").count(TEXTO_EVENTO_CORREO)
-        r = una(registro(ident, "i.sin.correo@registro.test"))
+        r = una(registro(ident, "i.sin.cartero@registro.test"))
         aparece = esperar(lambda: log_de("api").count(TEXTO_EVENTO_CORREO) > antes, 30)
     finally:
-        dc("start", "mailpit")
-    pasa(es(r, 202, CUERPO_202), f"i) con Mailpit parado, el registro responde el mismo 202 ({r.get('estado')})")
+        arranca = ejecutar(BASE + ["up", "-d", "--wait", "cartero"])
+    pasa(arranca.rc == 0, f"i) el cartero vuelve a arrancar (codigo {arranca.rc})")
+    pasa(es(r, 202, CUERPO_202), f"i) con el cartero parado, el registro responde el mismo 202 ({r.get('estado')})")
     eventos = [l for l in log_de("api").splitlines() if TEXTO_EVENTO_CORREO in l]
     pasa(aparece and not any("@" in l for l in eventos),
          f"i) el fallo deja EVENTO correo_fallido con el tipo y la clase del error, sin el email ({eventos[-1:]})")
+    # Sin Mailpit: la API entrega al cartero sin problema (202 del cartero); el
+    # fallo es del cartero, que aplaza el correo (temporal) y lo registra.
+    # Mailpit al volver recibe el reintento a los 60 s: no afecta a j ni k.
+    antes = log_cartero().count(TEXTO_CARTERO_APLAZADO)
+    dc("stop", "mailpit")
+    try:
+        r = una(registro(ident, "i.sin.correo@registro.test"))
+        aplazado = esperar(lambda: log_cartero().count(TEXTO_CARTERO_APLAZADO) > antes, 30)
+    finally:
+        dc("start", "mailpit")
+    pasa(es(r, 202, CUERPO_202), f"i) con Mailpit parado, el registro responde el mismo 202 ({r.get('estado')})")
+    eventos = [l for l in log_cartero().splitlines() if TEXTO_CARTERO_APLAZADO in l]
+    pasa(aplazado and not any("@" in l for l in eventos),
+         f"i) el cartero deja EVENTO correo_aplazado con el tipo y el motivo, sin el email ({eventos[-1:]})")
     textos = {s: log_de(s) for s in ("api", "postgres", "redis", "mailpit")}
-    fugas = sorted({f"{s}" for s, t in textos.items() for v in SENSIBLES if v and v in t and s != "mailpit"})
+    textos["cartero"] = log_cartero()
+    control = bool(SENSIBLES) and estado.get("c_ok", False)
+    fugas = sorted({f"{s}" for s, t in textos.items() for v in SENSIBLES if v and v in t
+                    and s not in ("mailpit", "cartero")})
     negativo(f"i) ningun email, token ni enlace de la bateria aparece en los logs de api, postgres y redis {fugas}",
-             not fugas, bool(SENSIBLES) and estado.get("c_ok", False))
+             not fugas, control)
     negativo("i) los logs de la API no llevan la ruta de la SPA con un token",
              "#" + ident not in textos["api"], estado.get("c_ok", False))
+    # El cartero. Control: su log SI registra las entregas (si no registrara
+    # nada, que no haya rastro no diría nada) y la batería tiene datos.
+    control_cartero = control and TEXTO_CARTERO_ENTREGADO in textos["cartero"]
+    fugas_cartero = sum(1 for v in SENSIBLES if v and v in textos["cartero"])
+    negativo(f"i) ningun email, token ni enlace de la bateria aparece en el log del cartero ({fugas_cartero} coincidencias)",
+             fugas_cartero == 0 and "https://" not in textos["cartero"], control_cartero,
+             "control: el log del cartero no tiene EVENTO correo_entregado")
 
 
 def seccion_j():
@@ -1167,6 +1426,124 @@ def seccion_k():
     negativo("k) el email no aparece en ninguna linea del log de la API",
              "k.sin.bd@registro.test" not in log_de("api"), control_ok)
     pasa(arranca.rc == 0, f"k) PostgreSQL vuelve a arrancar (codigo {arranca.rc})")
+
+
+def seccion_n():
+    p("=== n) el cartero fija el remitente, desactiva el seguimiento y pone el pie en todo correo")
+    ident = EMPRESAS["A"][1]
+    buzon("borrar")
+    # Dos tipos de correo distintos: verificacion y aviso_cuenta.
+    http([registro(ident, "n.nuevo@registro.test"), registro(ident, ADMINS["A"].email)])
+    esperar_correos("n.nuevo@registro.test", 1)
+    esperar_correos(ADMINS["A"].email, 1)
+    completos = correos_completos()
+    asuntos = {c["asunto"] for c in completos}
+    # Control: llegaron los dos y la API de cabeceras de Mailpit responde de
+    # verdad (cada mensaje trae su Subject). Sin esto, "todos cumplen" podría
+    # ser sobre una lista vacia o sobre cabeceras que no se leyeron.
+    control = {ASUNTO_VERIFICACION, ASUNTO_AVISO_CUENTA} <= asuntos and all(
+        c["cabeceras"].get("subject") for c in completos)
+    if not control:
+        sinc(f"n) no llegaron los dos correos o no se leen las cabeceras ({sorted(asuntos)})")
+        return
+    pasa(True, f"n) control: llegan los correos de verificacion y de aviso y sus cabeceras se leen ({len(completos)} correos)")
+
+    def todos(cabecera, esperado):
+        return all(c["cabeceras"].get(cabecera) == esperado for c in completos)
+    pasa(todos("from", [DE_CORREO]),
+         f"n) todos llevan From {DE_CORREO!r} ({[c['cabeceras'].get('from') for c in completos]})")
+    pasa(todos("x-mailjet-trackclick", ["0"]),
+         f"n) todos llevan X-Mailjet-TrackClick: 0 ({[c['cabeceras'].get('x-mailjet-trackclick') for c in completos]})")
+    pasa(todos("x-mailjet-trackopen", ["0"]),
+         f"n) todos llevan X-Mailjet-TrackOpen: 0 ({[c['cabeceras'].get('x-mailjet-trackopen') for c in completos]})")
+    ids = [c["cabeceras"].get("message-id") or [""] for c in completos]
+    pasa(all(len(i) == 1 and i[0].endswith(FIN_MESSAGE_ID) for i in ids),
+         f"n) todos llevan un Message-ID con el dominio del remitente ({ids})")
+    pasa(all((c["cuerpo"] or "").endswith(PIE_CORREO) for c in completos),
+         f"n) todos terminan con el pie de Canario ({[(c['cuerpo'] or '')[-60:] for c in completos]!a})")
+
+
+def seccion_o():
+    p("=== o) el cartero solo atiende a la IP de la API")
+    destinatario = "o.intruso@registro.test"
+    SENSIBLES.add(destinatario)
+    buzon("borrar")
+    antes = log_cartero().count(TEXTO_CARTERO_RECHAZADO)
+    r = ejecutar(["docker", "run", "--rm", "--network", f"{PROYECTO}_correo", "--read-only", "--cap-drop", "ALL",
+                  "--security-opt", "no-new-privileges:true", "--entrypoint", "python", IMAGEN_API, "-c",
+                  CLIENTE_CARTERO, destinatario])
+    try:
+        res = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Parada(f"el cliente del cartero no devolvio resultado: {r.err.strip()[-400:]!r}") from None
+    salud, correos_http = res["salud"], res["correos"]
+
+    def cuerpo_json(respuesta):
+        try:
+            return json.loads(respuesta.get("cuerpo", ""))
+        except ValueError:
+            return None
+    # Control: desde el mismo contenedor, /salud llega y da 200. Así la red
+    # funciona y el 403 de /correos es por la IP, no por no llegar.
+    control = salud.get("estado") == 200 and cuerpo_json(salud) == CUERPO_CARTERO_SALUD
+    pasa(control, f"o) control: GET /salud desde otro contenedor de la red correo da 200 ({salud})")
+    negativo(f"o) POST /correos desde otro contenedor de la red correo -> 403 ({correos_http.get('estado')})",
+             correos_http.get("estado") == 403 and cuerpo_json(correos_http) == CUERPO_CARTERO_PROHIBIDO, control,
+             f"respuesta: {correos_http}")
+    esperar(lambda: log_cartero().count(TEXTO_CARTERO_RECHAZADO) > antes, 15)
+    lineas = [l for l in log_cartero().splitlines() if TEXTO_CARTERO_RECHAZADO in l]
+    negativo(f"o) y deja EVENTO cartero_cliente_rechazado con la ruta, sin la IP ni el destinatario "
+             f"({len(lineas) - antes} nuevo)",
+             len(lineas) - antes == 1 and not any("@" in l or "10.88." in l for l in lineas), control)
+    # El rechazo es síncrono (middleware, antes de leer el cuerpo), pero la
+    # entrega, si se hubiera aceptado, tardaría unos instantes: se espera un
+    # poco antes de afirmar que no llegó.
+    time.sleep(5)
+    negativo("o) y no sale ningun correo", correos_para(destinatario) == [], control)
+
+
+def seccion_q():
+    p("=== q) TLS del cartero: con una CA ajena el correo no sale y el motivo es el certificado")
+    ident = EMPRESAS["A"][1]
+    buzon("borrar")
+    antes_ok, ajeno, despues_ok = "q.antes@registro.test", "q.ajena@registro.test", "q.despues@registro.test"
+    r = una(registro(ident, antes_ok))
+    llega_antes = es(r, 202, CUERPO_202) and len(esperar_correos(antes_ok, 1)) == 1
+    pasa(llega_antes, "q) control: con la CA buena, el correo llega a Mailpit (verificado por TLS)")
+    LOGS_CARTERO_PREVIOS.append(log_de("cartero"))
+    recreado = montado = aparece = False
+    log_ajena = ""
+    montaje = []
+    try:
+        arranque = ejecutar(BASE + ["-f", str(CA_AJENA_YML), "up", "-d", "--force-recreate", "--wait", "cartero"])
+        recreado = arranque.rc == 0
+        montaje = montaje_ca("cartero") if recreado else []
+        montado = len(montaje) == 1 and montaje[0][0].endswith("ca_ajena.pem")
+        if recreado and montado:
+            una(registro(ident, ajeno))
+            aparece = esperar(lambda: TEXTO_CARTERO_CERTIFICADO in log_de("cartero"), 60)
+            log_ajena = log_de("cartero")
+    finally:
+        # Siempre se vuelve a la CA buena, pase lo que pase en la prueba.
+        LOGS_CARTERO_PREVIOS.append(log_de("cartero"))
+        restaurado = ejecutar(BASE + ["up", "-d", "--force-recreate", "--wait", "cartero"])
+    montaje_buena = montaje_ca("cartero")
+    r = una(registro(ident, despues_ok))
+    llega_despues = es(r, 202, CUERPO_202) and len(esperar_correos(despues_ok, 1)) == 1
+    # El control de los tres negativos: el cartero confiaba de verdad en la CA
+    # ajena (montaje comprobado) y, con la buena, antes y despues, el correo
+    # llega.
+    control = (llega_antes and llega_despues and restaurado.rc == 0 and recreado and montado
+               and len(montaje_buena) == 1 and montaje_buena[0][0].endswith("correo_ca.pem"))
+    pasa(control, f"q) control: el cartero se vuelve a crear con la CA ajena ({montaje}) y despues con la buena; "
+                  f"con la buena llega el correo ({llega_antes}, {llega_despues}, {restaurado.rc})")
+    negativo("q) con una CA ajena, el correo no llega a Mailpit", aparece and correos_para(ajeno) == [], control,
+             f"evento certificado: {aparece}")
+    lineas = [l for l in log_ajena.splitlines() if TEXTO_CARTERO_CERTIFICADO in l]
+    negativo(f"q) el log del cartero tiene EVENTO correo_fallido con motivo=certificado, sin el email ({lineas[-1:]})",
+             len(lineas) == 1 and "@" not in lineas[0], control)
+    negativo("q) y es definitivo: ningun EVENTO correo_aplazado (no hay reintento)",
+             "EVENTO correo_aplazado" not in log_ajena, control and aparece)
 
 
 def buzon_herramienta(proyecto, *extra):
@@ -1295,7 +1672,7 @@ def subred_ocupada():
         r = ejecutar(["docker", "network", "inspect", "--format",
                       "{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}", red])
         partes = r.out.split()
-        if partes and SUBRED_APP in partes[1:]:
+        if partes and {SUBRED_APP, SUBRED_CORREO} & set(partes[1:]):
             return partes[0]
     return None
 
@@ -1313,21 +1690,27 @@ def main():
         terminar_con_parada()
     ocupada = subred_ocupada()
     if ocupada:
-        p(f"PARADA: la subred {SUBRED_APP} ya esta en uso por {ocupada} (pare el proyecto canario)")
+        p(f"PARADA: la subred {SUBRED_APP} o la {SUBRED_CORREO} ya esta en uso por {ocupada} "
+          f"(pare el proyecto canario)")
         terminar_con_parada()
+    TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_registro_"))
+    escribir_auxiliares()
     r = dc("config", "--quiet")
     if r.rc != 0:
         p(f"PARADA: docker compose config falla (genere los secretos con scripts/generar_secretos.py): "
           f"{r.err.strip()[:300]}")
+        shutil.rmtree(TEMPORAL, ignore_errors=True)
         terminar_con_parada()
-    TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_registro_"))
     parada = None
     try:
         # l va antes de i: necesita la API y PostgreSQL sanos (k, la última,
         # deja el pool reconectando) y para Mailpit, que borra su buzón; i
-        # también lo para y no depende de correos anteriores.
+        # también lo para (y el cartero) y no depende de correos anteriores.
+        # n, o y q (el correo del cartero) van tras h y antes de l: q vuelve a
+        # crear el cartero (se pierde su log, por eso LOGS_CARTERO_PREVIOS) y
+        # deja el cupo diario de correo en cero, y l borra el buzon.
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_m, seccion_g, seccion_h,
-                        seccion_l, seccion_i, seccion_j, seccion_k):
+                        seccion_n, seccion_o, seccion_q, seccion_l, seccion_i, seccion_j, seccion_k):
             seccion()
     except Parada as e:
         parada = str(e)

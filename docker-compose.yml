@@ -240,7 +240,7 @@ services:
     # --host: uvicorn escucha solo en la IP fija de la API en la red app, la
     # única por la que llega el proxy. En data, cache y correo la API es
     # cliente y no escucha: un vecino de esas redes que se viera comprometido
-    # (PostgreSQL, Redis, el SMTP) no puede hablarle saltándose el proxy y sus
+    # (PostgreSQL, Redis, el cartero) no puede hablarle saltándose el proxy y sus
     # cabeceras. uvicorn acepta una sola dirección (comprobado con su --help).
     # Solo se confía en las cabeceras de reenvío que vengan de la IP fija del
     # proxy en la red app; nunca "*". Sin esto, todos los clientes parecerían
@@ -267,7 +267,7 @@ services:
     # Sin puertos publicados: solo se llega a la API a través del proxy (red
     # app). En data habla con PostgreSQL; pg_hba.conf solo admite su subred
     # (samenet). En cache habla con Redis, el del limitador de peticiones. En
-    # correo, con el servidor SMTP de desarrollo (mailpit, app/correo.py).
+    # correo, con el cartero, que entrega los correos (app/correo.py).
     networks:
       app:
         # IP fija: es en la que escucha uvicorn (--host, arriba). Está en el
@@ -276,7 +276,10 @@ services:
         ipv4_address: 10.88.0.4
       data: {}
       cache: {}
-      correo: {}
+      # En correo la API es solo cliente del cartero y no escucha. IP fija
+      # porque el cartero solo atiende a la .4 (CANARIO_IP_API del cartero).
+      correo:
+        ipv4_address: 10.88.4.4
       # En canje la API es solo cliente del broker y no escucha (--host es la
       # IP de app): si el broker cae, no tiene a quién hablarle. IP fija porque
       # el broker solo atiende a la .4 (CANARIO_IP_API del broker).
@@ -300,7 +303,8 @@ services:
     # cifra las cookies del login externo y la contraseña del usuario
     # aplicacion de Redis (también se lee en cada conexión nueva). Sin
     # contrasena_plataforma: la API no puede dar de alta empresas. Sin los
-    # client_secret de los proveedores: solo los tiene el broker.
+    # client_secret de los proveedores: solo los tiene el broker. Sin la
+    # credencial SMTP: solo la tiene el cartero.
     # Sin variable CANARIO_LIMITES: la API usa los límites de producción de
     # app/limitador.py y los registra al arrancar.
     secrets:
@@ -371,6 +375,70 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  cartero:
+    # Entrega del correo (app/cartero.py): la API le pasa cada correo por la
+    # red interna correo y él lo entrega por TLS al proveedor. Tiene la
+    # credencial SMTP y salida a internet para que la API no tenga ninguna de
+    # las dos (docs/threat-model.md, 6.3). Misma imagen que la API con otro
+    # punto de entrada, como el broker y gestion.
+    build:
+      context: .
+    entrypoint: ["uvicorn", "app.cartero:aplicacion", "--port", "8000", "--no-access-log", "--no-server-header"]
+    # Solo en su IP de correo: en salida, la red con internet, no escucha.
+    command: ["--host", "10.88.4.3"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    pids_limit: 32
+    networks:
+      correo:
+        ipv4_address: 10.88.4.3
+      salida: {}
+    environment:
+      # La única IP a la que atiende (además de su propio healthcheck).
+      CANARIO_IP_API: "10.88.4.4"
+      # Adónde entrega. Aquí, el Mailpit de desarrollo (perfil desarrollo), con
+      # TLS implícito en su 1025. En producción, el proveedor
+      # (compose.produccion.yaml). Obligatorios: sin valor por defecto en el
+      # código.
+      CANARIO_SMTP_SERVIDOR: "mailpit"
+      CANARIO_SMTP_PUERTO: "1025"
+      # .invalid está reservado (RFC 2606 y RFC 6761): un correo de desarrollo
+      # no puede hacerse pasar por un dominio real.
+      CANARIO_CORREO_REMITENTE: "no-responder@canario.invalid"
+    # Solo la credencial SMTP. Ninguna clave de Canario ni acceso a la base de
+    # datos: si cae el cartero, eso no se pierde. Con los marcadores de
+    # scripts/generar_secretos.py entrega sin autenticarse (Mailpit no lo pide).
+    secrets:
+      - smtp_usuario
+      - smtp_contrasena
+    # El almacén de certificados en el que confía (ssl.create_default_context
+    # lee /usr/lib/ssl/cert.pem) es, aquí, SOLO la CA local de desarrollo
+    # (scripts/generar_tls_desarrollo.py): el cartero verifica el certificado
+    # de Mailpit igual que el del proveedor, y desde un PC de desarrollo no
+    # puede entregar a ningún servidor real, porque no confiaría en él.
+    # Producción quita este montaje y usa el almacén de la imagen.
+    volumes:
+      - type: bind
+        source: ./secrets/correo_ca.pem
+        target: /usr/lib/ssl/cert.pem
+        read_only: true
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.comprobar_salud", "10.88.4.3"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   gestion:
     # Operaciones de administración (alta de empresas y claves de cifrado,
     # app/gestion.py), fuera de la API pública. Misma imagen que la API con
@@ -411,11 +479,12 @@ services:
         max-file: "3"
 
   mailpit:
-    # Servidor SMTP de DESARROLLO: recibe los correos del registro del personal
-    # y no los entrega a nadie (app/correo.py). El perfil hace que
+    # Servidor SMTP de DESARROLLO: recibe los correos que le entrega el
+    # cartero (app/cartero.py) y no los entrega a nadie. El perfil hace que
     # "docker compose up" no lo arranque: se pide con --profile desarrollo.
-    # Sin él, cada correo deja EVENTO correo_fallido en el log de la API. La
-    # salida SMTP de producción no está decidida (docs/threat-model.md).
+    # Sin él, cada correo deja EVENTO correo_aplazado y después
+    # correo_fallido en el log del cartero. En producción el cartero entrega
+    # al proveedor (compose.produccion.yaml).
     # Imagen fijada por versión y por digest, como el resto.
     image: axllent/mailpit:v1.31.6@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
     profiles:
@@ -441,9 +510,24 @@ services:
     # nunca puede llegar a un buzón real) y sin puertos publicados (una red
     # interna no puede publicarlos). Los mensajes se leen con su API HTTP
     # (puerto 8025) desde un contenedor en la misma red: docs/api.md, sección
-    # Registro del personal y correo de desarrollo.
+    # Correo de desarrollo.
     networks:
       - correo
+    # TLS implícito en el 1025, como el 465 del proveedor: el cartero no tiene
+    # un modo sin TLS. El certificado lo firma la CA local de desarrollo
+    # (scripts/generar_tls_desarrollo.py), con el nombre mailpit. Es TLS de
+    # servidor: Mailpit no pide ni verifica certificados ajenos (comprobado en
+    # su código, internal/smtpd/smtpd.go de la 1.31.6: solo Certificates), así
+    # que no abre la puerta de CVE-2026-111943 (tests/security/canario.openvex.json).
+    # Solo estas tres variables: verificar_escaneos.py (f) las tiene en lista
+    # blanca y falla con cualquier otra (un reenvío, un webhook).
+    environment:
+      MP_SMTP_TLS_CERT: /run/secrets/mailpit_certificado
+      MP_SMTP_TLS_KEY: /run/secrets/mailpit_clave
+      MP_SMTP_REQUIRE_TLS: "true"
+    secrets:
+      - mailpit_certificado
+      - mailpit_clave
     # Sin healthcheck propio: la imagen trae el suyo (/mailpit readyz).
     logging:
       driver: json-file
@@ -509,9 +593,16 @@ networks:
     # accesibles desde fuera del host.
     internal: true
   correo:
-    # Red interna entre la API y el SMTP de desarrollo (mailpit): sin salida a
-    # internet ni acceso desde fuera del host.
+    # Red interna entre la API, el cartero y el SMTP de desarrollo (mailpit):
+    # sin salida a internet ni acceso desde fuera del host. Subred fija porque
+    # el cartero solo atiende a la IP fija de la API (.4); el cartero tiene la
+    # .3. De .2 a .7, IPs fijas, como en app. (10.88.3.0/28 es la red de los
+    # clientes de verificar_despliegue.py.)
     internal: true
+    ipam:
+      config:
+        - subnet: 10.88.4.0/28
+          ip_range: 10.88.4.8/29
   data:
     # Red interna de la base de datos: sin salida a internet ni acceso desde
     # fuera del host. Solo los servicios que la necesitan se conectan a ella.
@@ -551,7 +642,7 @@ networks:
           ip_range: 10.88.2.8/29
   salida:
     # La única red con salida a internet aparte de edge, y solo para el
-    # broker. No publica puertos.
+    # broker y el cartero, que no escuchan en ella. No publica puertos.
     {}
 
 secrets:
@@ -583,6 +674,18 @@ secrets:
     file: ./secrets/google_client_id.txt
   google_client_secret:
     file: ./secrets/google_client_secret.txt
+  # Credencial SMTP del cartero: scripts/generar_secretos.py la crea con un
+  # marcador y quien opera pone la del proveedor (docs/operacion.md).
+  smtp_usuario:
+    file: ./secrets/smtp_usuario.txt
+  smtp_contrasena:
+    file: ./secrets/smtp_contrasena.txt
+  # TLS del Mailpit de desarrollo (scripts/generar_tls_desarrollo.py). Solo los
+  # usa el perfil desarrollo: en producción no existen ni hacen falta.
+  mailpit_certificado:
+    file: ./secrets/mailpit_certificado.pem
+  mailpit_clave:
+    file: ./secrets/mailpit_clave.pem
 
 volumes:
   # Persiste entre reinicios, a diferencia de redis. Los scripts de

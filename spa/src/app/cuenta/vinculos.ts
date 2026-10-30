@@ -190,7 +190,9 @@ export class Vinculos {
   private desvincular(proveedor: Proveedor, codigo: string): void {
     const nombre = PROVEEDORES[proveedor].nombre;
     this.api.revocarVinculo(proveedor, codigo).subscribe({
-      next: () => void this.releerYTerminar('aviso', `Cuenta de ${nombre} desvinculada. Le hemos avisado por correo.`),
+      // "Le enviamos" y no "le hemos avisado": el correo sale después de
+      // responder y la SPA no sabe si se ha entregado.
+      next: () => void this.releerYTerminar('aviso', `Cuenta de ${nombre} desvinculada. Le enviamos un aviso por correo.`),
       error: (error: unknown) => {
         if (error instanceof HttpErrorResponse && error.status === 404) {
           // Ya no estaba vinculada (otra pestaña): /yo lo pondrá al día.
@@ -209,7 +211,7 @@ export class Vinculos {
     const nombre = PROVEEDORES[proveedor].nombre;
     this.empezar();
     this.api.completarVinculo(proveedor).subscribe({
-      next: () => void this.releerYTerminar('aviso', `Cuenta de ${nombre} vinculada. Le hemos avisado por correo.`),
+      next: () => void this.releerYTerminar('aviso', `Cuenta de ${nombre} vinculada. Le enviamos un aviso por correo.`),
       error: (error: unknown) => {
         if (error instanceof HttpErrorResponse && error.status === 401) {
           void this.comprobarTrasFallo(proveedor);

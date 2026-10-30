@@ -4,8 +4,8 @@ punta (app/rutas_externo.py, app/externo.py, el login externo y los vínculos
 de app/personal.py, app/cliente_broker.py y app/avisos.py;
 docs/threat-model.md, 6.19).
 
-La pila entera (PostgreSQL, Redis, API, Caddy, el broker y Mailpit) con un
-Google falso, y la batería haciendo de navegador por el 8445: guarda las
+La pila entera (PostgreSQL, Redis, API, Caddy, el broker, el cartero y
+Mailpit) con un Google falso, y la batería haciendo de navegador por el 8445: guarda las
 cookies como un navegador (una Set-Cookie con Max-Age=0 la borra; en una
 navegación desde otro sitio solo viajan las SameSite=Lax) y manda Fetch
 Metadata y Origin. También hace de servidor de autorización de Google: lee
@@ -87,13 +87,22 @@ marcha y los secretos generados con scripts/generar_secretos.py):
 
 Usa un proyecto de Docker propio (canario_loginext) con el perfil desarrollo
 (Mailpit). Necesita que el proyecto canario y las demás baterías estén
-parados: las subredes 10.88.0.0/28, 10.88.1.0/28 y 10.88.2.0/28 y los puertos
-127.0.0.1:8443, 8444 y 8445 son fijos (si están en uso, PARADA). Claves de
-cifrado, secretos de Redis y configuración de Google FALSOS, generados en
-cada ejecución, como en verificar_personal.py y verificar_externo.py; de
-secrets/ solo se usan las contraseñas de los roles de PostgreSQL, sin
-leerlas. En el override la red salida es interna: la batería no sale a
-internet. Tarda unos minutos: cada código TOTP vale una vez, y a veces hay
+parados: las subredes 10.88.0.0/28, 10.88.1.0/28, 10.88.2.0/28 y 10.88.4.0/28
+y los puertos 127.0.0.1:8443, 8444 y 8445 son fijos (si están en uso, PARADA).
+Claves de cifrado, secretos de Redis, configuración de Google y credenciales
+SMTP (los dos marcadores, con los que el cartero entrega sin autenticarse)
+FALSOS, generados en cada ejecución, como en verificar_personal.py y
+verificar_externo.py; de secrets/ solo se usan las contraseñas de los roles de
+PostgreSQL, sin leerlas. En el override la red salida es interna: la batería
+no sale a internet.
+
+Los avisos de vincular y revocar salen por el cartero (app/cartero.py), que
+los entrega por TLS a Mailpit con el certificado verificado. Para eso la
+batería genera, además de la CA del Google falso, otra CA y el certificado de
+Mailpit (nombre mailpit): el override monta esa CA en el cartero como su único
+almacén de confianza (/usr/lib/ssl/cert.pem) y el certificado y la clave en
+Mailpit como sus secretos mailpit_certificado y mailpit_clave. No hay prueba
+nueva del correo aquí: lo cubre verificar_registro.py. Tarda unos minutos: cada código TOTP vale una vez, y a veces hay
 que esperar al siguiente paso de 30 segundos.
 
 Los ficheros auxiliares van a un directorio temporal del sistema, nunca al
@@ -137,13 +146,17 @@ estado = {"falla": False, "sin_conclusion": False}
 PUERTO_API = 8443
 PUERTO_WEB = 8444
 PUERTO_SPA = 8445
-SUBREDES = ("10.88.0.0/28", "10.88.1.0/28", "10.88.2.0/28")
+SUBREDES = ("10.88.0.0/28", "10.88.1.0/28", "10.88.2.0/28", "10.88.4.0/28")
 RAIZ_CA = "/data/caddy/pki/authorities/local/root.crt"
 ORIGEN_SPA = "https://localhost:8445"
 ORIGEN_WEB = "https://localhost:8444"
-SERVICIOS = ["postgres", "redis", "api", "caddy", "broker", "mailpit"]
+SERVICIOS = ["postgres", "redis", "api", "caddy", "broker", "cartero", "mailpit"]
 LIMITES_PRUEBA = ("denuncia=1000/3600,seguimiento=1000/60,mensajes=1000/3600,acceso=1000/300,otras=1000/60,"
                   "cuenta=1000/60,registro=1000/3600,destinatario=1000/900,destinatario_dia=1000/86400")
+# Marcadores de las credenciales SMTP (scripts/generar_secretos.py): con los
+# dos, el cartero entrega sin autenticarse.
+MARCADOR_SMTP_USUARIO = "sin-configurar:usuario"
+MARCADOR_SMTP_CONTRASENA = "sin-configurar:contrasena"
 RED_SALIDA = f"{PROYECTO}_salida"
 RED_CORREO = f"{PROYECTO}_correo"
 IMAGEN_API = f"{PROYECTO}-api"
@@ -268,7 +281,8 @@ def permisos_sin(espacio):
 # Ficheros auxiliares (se escriben en el directorio temporal)
 # ---------------------------------------------------------------------------
 # CA de la batería y el certificado de oauth2.googleapis.com firmado por ella
-# (como verificar_externo.py). Corre en la imagen del broker, sin red.
+# (como verificar_externo.py), y otra CA con el certificado de Mailpit (nombre
+# mailpit) para el TLS del cartero. Corre en la imagen del broker, sin red.
 CERTIFICADOS = r'''
 import datetime, pathlib, sys
 from cryptography import x509
@@ -278,37 +292,47 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 destino = pathlib.Path(sys.argv[1])
 ahora = datetime.datetime.now(datetime.timezone.utc)
-NOMBRE = "oauth2.googleapis.com"
 
 
 def nombre(texto):
     return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, texto)])
 
 
-clave_ca = ec.generate_private_key(ec.SECP256R1())
-cert_ca = (x509.CertificateBuilder().subject_name(nombre("Canario bateria CA")).issuer_name(nombre("Canario bateria CA"))
-           .public_key(clave_ca.public_key()).serial_number(x509.random_serial_number())
-           .not_valid_before(ahora - datetime.timedelta(minutes=5)).not_valid_after(ahora + datetime.timedelta(days=1))
-           .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
-           .add_extension(x509.KeyUsage(digital_signature=False, content_commitment=False, key_encipherment=False,
-                                        data_encipherment=False, key_agreement=False, key_cert_sign=True,
-                                        crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
-           .add_extension(x509.SubjectKeyIdentifier.from_public_key(clave_ca.public_key()), critical=False)
-           .sign(clave_ca, hashes.SHA256()))
-clave = ec.generate_private_key(ec.SECP256R1())
-cert = (x509.CertificateBuilder().subject_name(nombre(NOMBRE)).issuer_name(cert_ca.subject)
-        .public_key(clave.public_key()).serial_number(x509.random_serial_number())
-        .not_valid_before(ahora - datetime.timedelta(minutes=5)).not_valid_after(ahora + datetime.timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName(NOMBRE)]), critical=False)
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
-        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(clave_ca.public_key()), critical=False)
-        .sign(clave_ca, hashes.SHA256()))
-pem_ca = cert_ca.public_bytes(serialization.Encoding.PEM)
+def emitir(nombre_ca, nombre_servidor):
+    # (CA, certificado del servidor, clave del servidor), en PEM.
+    clave_ca = ec.generate_private_key(ec.SECP256R1())
+    cert_ca = (x509.CertificateBuilder().subject_name(nombre(nombre_ca)).issuer_name(nombre(nombre_ca))
+               .public_key(clave_ca.public_key()).serial_number(x509.random_serial_number())
+               .not_valid_before(ahora - datetime.timedelta(minutes=5)).not_valid_after(ahora + datetime.timedelta(days=1))
+               .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+               .add_extension(x509.KeyUsage(digital_signature=False, content_commitment=False, key_encipherment=False,
+                                            data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                                            crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+               .add_extension(x509.SubjectKeyIdentifier.from_public_key(clave_ca.public_key()), critical=False)
+               .sign(clave_ca, hashes.SHA256()))
+    clave = ec.generate_private_key(ec.SECP256R1())
+    cert = (x509.CertificateBuilder().subject_name(nombre(nombre_servidor)).issuer_name(cert_ca.subject)
+            .public_key(clave.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(ahora - datetime.timedelta(minutes=5)).not_valid_after(ahora + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(nombre_servidor)]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(clave_ca.public_key()), critical=False)
+            .sign(clave_ca, hashes.SHA256()))
+    return (cert_ca.public_bytes(serialization.Encoding.PEM), cert.public_bytes(serialization.Encoding.PEM),
+            clave.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption()))
+
+
+pem_ca, pem_cert, pem_clave = emitir("Canario bateria CA", "oauth2.googleapis.com")
 (destino / "ca_bateria.pem").write_bytes(pem_ca)
-(destino / "google.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM) + pem_ca)
-(destino / "google.key").write_bytes(clave.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                                         serialization.NoEncryption()))
+(destino / "google.pem").write_bytes(pem_cert + pem_ca)
+(destino / "google.key").write_bytes(pem_clave)
+# El correo: otra CA, distinta de la de Google, en la que solo confía el cartero.
+pem_ca, pem_cert, pem_clave = emitir("Canario bateria CA del correo", "mailpit")
+(destino / "correo_ca.pem").write_bytes(pem_ca)
+(destino / "mailpit_certificado.pem").write_bytes(pem_cert)
+(destino / "mailpit_clave.pem").write_bytes(pem_clave)
 print("CERTIFICADOS")
 '''
 
@@ -1765,17 +1789,20 @@ def fichero_secreto(nombre, ruta):
 
 
 def escribir_auxiliares():
-    """Secretos falsos, configuración de Google falsa, la CA de prueba en el
-    broker, salida interna y los límites de prueba, en ficheros de compose
-    adicionales (como verificar_personal.py y verificar_externo.py)."""
+    """Secretos falsos (también las credenciales SMTP y el TLS de Mailpit),
+    configuración de Google falsa, la CA de prueba en el broker, la CA del
+    correo en el cartero, salida interna y los límites de prueba, en ficheros
+    de compose adicionales (como verificar_personal.py y verificar_externo.py)."""
     global PRUEBA, SECRETOS
     PRUEBA = TEMPORAL / "prueba"
     SECRETOS = TEMPORAL / "secretos_compose"
     PRUEBA.mkdir()
     SECRETOS.mkdir()
     (PRUEBA / "falso.py").write_text(FALSO, encoding="utf-8", newline="\n")
-    # El override necesita que exista antes de cualquier config; a) la escribe.
-    (PRUEBA / "ca_bateria.pem").write_bytes(b"")
+    # El override y los secretos necesitan que existan antes de cualquier
+    # config; a) los escribe de verdad.
+    for fichero in ("ca_bateria.pem", "correo_ca.pem", "mailpit_certificado.pem", "mailpit_clave.pem"):
+        (PRUEBA / fichero).write_bytes(b"")
     lineas = ["secrets:"]
     for nombre in ("clave_maestra", "clave_hmac_codigos", "clave_firma_tokens", "clave_hmac_identidades",
                    "clave_flujo_externo"):
@@ -1787,8 +1814,17 @@ def escribir_auxiliares():
     (SECRETOS / "redis_acl").write_text(texto_acl(PERMISOS_ACL_APLICACION), encoding="ascii", newline="\n")
     (SECRETOS / "google_client_id").write_bytes(CLIENT_ID.encode("ascii"))
     (SECRETOS / "google_client_secret").write_bytes(CLIENT_SECRET.encode("ascii"))
-    for nombre in ("contrasena_redis", "redis_acl", "google_client_id", "google_client_secret"):
+    # Credenciales SMTP del cartero: los dos marcadores de
+    # scripts/generar_secretos.py, con los que entrega sin autenticarse (Mailpit
+    # no lo pide).
+    (SECRETOS / "smtp_usuario").write_bytes(MARCADOR_SMTP_USUARIO.encode("ascii"))
+    (SECRETOS / "smtp_contrasena").write_bytes(MARCADOR_SMTP_CONTRASENA.encode("ascii"))
+    for nombre in ("contrasena_redis", "redis_acl", "google_client_id", "google_client_secret", "smtp_usuario",
+                   "smtp_contrasena"):
         lineas += fichero_secreto(nombre, SECRETOS / nombre)
+    # El certificado y la clave de Mailpit los genera a) en PRUEBA.
+    for nombre in ("mailpit_certificado", "mailpit_clave"):
+        lineas += fichero_secreto(nombre, PRUEBA / f"{nombre}.pem")
     adicional = TEMPORAL / "secretos_falsos.yml"
     adicional.write_text("\n".join(lineas) + "\n", encoding="utf-8", newline="\n")
     override = TEMPORAL / "override.yml"
@@ -1801,6 +1837,14 @@ def escribir_auxiliares():
         "    volumes:\n"
         "      - type: bind\n"
         f"        source: \"{(PRUEBA / 'ca_bateria.pem').as_posix()}\"\n"
+        "        target: /usr/lib/ssl/cert.pem\n"
+        "        read_only: true\n"
+        # La CA del correo es el único almacén de confianza del cartero (compose
+        # fusiona volumes por target y sustituye el montaje del repo).
+        "  cartero:\n"
+        "    volumes:\n"
+        "      - type: bind\n"
+        f"        source: \"{(PRUEBA / 'correo_ca.pem').as_posix()}\"\n"
         "        target: /usr/lib/ssl/cert.pem\n"
         "        read_only: true\n"
         "networks:\n"

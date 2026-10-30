@@ -26,7 +26,8 @@ Qué prueba:
      detrás de la quita de la cabecera Range, sin ECH, sin el servidor ACME
      (acme_server) y sin verificar nunca el certificado de otro (lista blanca
      sobre la configuración adaptada);
-     mailpit sin configuración y solo en su red interna; y en postgres, que
+     mailpit solo con la configuración de TLS de servidor (lista blanca) y solo
+     en su red interna; y en postgres, que
      libcurl solo la enlaza el módulo OAuth del lado cliente de libpq y que
      pg_hba.conf no tiene el método oauth;
   g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL);
@@ -589,6 +590,9 @@ def preparar_imagenes():
     # escaneo es el de la API.
     pasa(servicios["gestion"].get("build") == servicios["api"].get("build"),
          "e) gestion se construye exactamente como la API (mismo build): escanear api la cubre")
+    # Igual el cartero (app/cartero.py), que entrega el correo de producción.
+    pasa(servicios["cartero"].get("build") == servicios["api"].get("build"),
+         "e) el cartero se construye exactamente como la API (mismo build): escanear api la cubre")
     # Igual el broker de canje (app/broker.py): misma imagen, otro punto de entrada.
     pasa(servicios["broker"].get("build") == servicios["api"].get("build"),
          "e) el broker se construye exactamente como la API (mismo build): escanear api la cubre")
@@ -824,16 +828,30 @@ CONTROL_X509 = [
     ("\ttls internal\n", "\ttls internal {\n\t\tclient_auth {\n\t\t\tmode request\n\t\t}\n\t}\n"),
     ("\treverse_proxy api:8000 {", "\treverse_proxy https://api:8000 {"),
 ]
-# Mailpit con una variable de reenvío y en una red con salida: lo que haría
-# que abriese conexiones TLS hacia fuera.
+# Mailpit con una variable de reenvío, una orden y un punto de entrada propios
+# y en una red con salida: lo que haría que abriese conexiones TLS hacia fuera.
+# Cada línea rompe una condición de mailpit_sin_salida (el environment se
+# fusiona con el real, así que la lista blanca se ve con una clave de más).
 COMPOSE_CONTROL_MAILPIT = """services:
   mailpit:
     environment:
       MP_SMTP_RELAY_HOST: relay.canario.invalid
+    command: ["--smtp-relay-config", "/tmp/relay.yml"]
+    entrypoint: ["/mailpit"]
     networks:
       - correo
       - edge
 """
+# Lo único que mailpit puede llevar en environment: la configuración de TLS de
+# SERVIDOR (el cartero le entrega el correo por TLS). Literal, no derivado de
+# docker-compose.yml. En Mailpit 1.31.6, ConfigureTLS (internal/smtpd/smtpd.go)
+# solo fija Certificates en el tls.Config del servidor: no pide ni verifica
+# certificados de cliente, así que no verifica cadenas ajenas.
+ENTORNO_MAILPIT = {
+    "MP_SMTP_TLS_CERT": "/run/secrets/mailpit_certificado",
+    "MP_SMTP_TLS_KEY": "/run/secrets/mailpit_clave",
+    "MP_SMTP_REQUIRE_TLS": "true",
+}
 
 
 def quita_range(manejador):
@@ -901,8 +919,9 @@ def condiciones_x509(configuracion):
 
 
 def mailpit_sin_salida(extra=()):
-    """Mailpit sin ninguna configuración (ni variables, ni fichero de
-    entorno, ni orden propia) y solo en la red correo, que es interna."""
+    """Mailpit solo con la lista blanca de TLS de servidor (ENTORNO_MAILPIT:
+    ni una variable más, ni de reenvío SMTP ni de webhooks), sin fichero de
+    entorno ni orden propia, y solo en la red correo, que es interna."""
     r = ejecutar(BASE + list(extra) + ["--profile", "desarrollo", "config", "--format", "json"])
     configuracion = json_de_texto(r.out)
     if configuracion is None:
@@ -910,7 +929,8 @@ def mailpit_sin_salida(extra=()):
     mailpit = configuracion["services"]["mailpit"]
     redes = sorted(mailpit.get("networks") or {})
     return {
-        "sin configuracion": not any(mailpit.get(k) for k in ("environment", "env_file", "command", "entrypoint")),
+        "environment solo con la lista blanca de TLS de servidor": dict(mailpit.get("environment") or {}) == ENTORNO_MAILPIT,
+        "sin env_file, command ni entrypoint": not any(mailpit.get(k) for k in ("env_file", "command", "entrypoint")),
         "solo en la red interna correo": redes == ["correo"]
         and configuracion["networks"]["correo"].get("internal") is True,
     }
@@ -1030,9 +1050,11 @@ def seccion_f():
             continue
         negativo(f"f) produccion: {condicion} (CVE-2026-111943)", cumple,
                  control_x509["x509"][condicion] is False)
-    # CVE-2026-111943 en mailpit: sin configuración que le haga abrir TLS hacia
-    # fuera y sin salida. Control: un compose adicional con una variable de
-    # reenvío y la red edge.
+    # CVE-2026-111943 en mailpit: solo la configuración de TLS de servidor
+    # (lista blanca), que no verifica certificados ajenos, sin nada que le haga
+    # abrir TLS hacia fuera y sin salida. Control: un compose adicional con una
+    # variable de reenvío, command, entrypoint y la red edge: cada condición
+    # tiene que fallar.
     real_mailpit = mailpit_sin_salida()
     compose_control = escribir(TEMPORAL / "mailpit_control" / "compose.yml", COMPOSE_CONTROL_MAILPIT)
     control_mailpit = mailpit_sin_salida(["-f", str(compose_control)])
@@ -1397,7 +1419,8 @@ def main():
                     "contrasena_migrador.txt", "contrasena_aplicacion.txt", "contrasena_plataforma.txt",
                     "clave_maestra.txt", "clave_hmac_codigos.txt", "clave_firma_tokens.txt",
                     "clave_hmac_identidades.txt", "clave_flujo_externo.txt",
-                    "google_client_id.txt", "google_client_secret.txt"):
+                    "google_client_id.txt", "google_client_secret.txt",
+                    "smtp_usuario.txt", "smtp_contrasena.txt"):
         if not (RAIZ / "secrets" / fichero).is_file():
             p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
             terminar(parada=True)

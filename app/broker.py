@@ -1,4 +1,5 @@
-"""Broker de canje: el único contenedor de Canario con salida a internet.
+"""Broker de canje: con el cartero del correo (app/cartero.py), el único
+contenedor de Canario con salida a internet.
 
 La API guarda en memoria la clave maestra y la de firma de los JWT, y no
 tiene salida a internet: así, si la comprometen, no tiene por dónde sacarlas

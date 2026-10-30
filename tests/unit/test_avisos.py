@@ -1,14 +1,20 @@
 """Pruebas unitarias de los avisos de seguridad (app/avisos.py): a quién van
-y qué dicen. El envío real a Mailpit, con quién lo recibe y quién no, lo
-prueba tests/security/verificar_registro.py.
+y qué dicen. El envío real a Mailpit, a través del cartero, con quién lo
+recibe y quién no, lo prueba tests/security/verificar_registro.py.
 """
 import unittest
 import uuid
 from unittest import mock
 
-from app import avisos, correo, personal
+from app import avisos, cartero, personal
 
 EMAILS = ("auditora@empresa.es", "otro.admin@empresa.es")
+
+
+def componer(uno):
+    """Lo compone el cartero, como en producción: el tipo es uno de
+    correo.TIPOS y el asunto es de una línea."""
+    return cartero.componer("no-responder@canario.test", uno.tipo, uno.destinatario, uno.asunto, uno.cuerpo)
 
 
 class Destinatarios(unittest.TestCase):
@@ -33,8 +39,7 @@ class Correos(unittest.TestCase):
         for correos in (aviso, tope):
             self.assertEqual([c.destinatario for c in correos], list(EMAILS))
             self.assertTrue(all(c.tipo == "aviso_lecturas" and "lectora@empresa.es" in c.cuerpo for c in correos))
-            # Se puede componer: el tipo es uno de correo.TIPOS.
-            correo.componer(correos[0])
+            componer(correos[0])
         self.assertIn("ha abierto hoy 20 denuncias distintas", aviso[0].cuerpo)
         self.assertNotIn("Ha llegado al tope", aviso[0].cuerpo)
         self.assertIn("Ha llegado al tope de 50", tope[0].cuerpo)
@@ -45,7 +50,7 @@ class Correos(unittest.TestCase):
         self.assertTrue(all(c.tipo == "aviso_activacion" for c in correos))
         self.assertIn("La cuenta nueva@empresa.es de Empresa se ha activado en Canario con el rol instructor",
                       correos[0].cuerpo)
-        correo.componer(correos[0])
+        componer(correos[0])
 
     def test_vinculo_primero_al_titular(self):
         # NIST SP 800-63B-4, 4.1.2.1 y 4.5: el titular se entera de que se ha
@@ -60,7 +65,7 @@ class Correos(unittest.TestCase):
                 self.assertIn("Si no ha sido usted, alguien ha usado su sesión", correos[0].cuerpo)
                 self.assertIn("En la cuenta titular@empresa.es de Empresa en Canario", correos[1].cuerpo)
                 self.assertNotIn("Si no ha sido usted", correos[1].cuerpo)
-                correo.componer(correos[0])
+                componer(correos[0])
         # Sin nadie que vigile, el titular lo recibe igual.
         solo = avisos.correos_vinculo("Empresa", (), "titular@empresa.es", "google", True)
         self.assertEqual([c.destinatario for c in solo], ["titular@empresa.es"])

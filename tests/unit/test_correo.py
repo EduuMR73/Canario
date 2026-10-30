@@ -1,11 +1,12 @@
-"""Pruebas unitarias del correo saliente (app/correo.py): composición sin
-inyección de cabeceras, fallos que quedan en el log sin datos personales y
-tope de envíos simultáneos.
+"""Pruebas unitarias del correo saliente de la API (app/correo.py): lo que
+le pasa al cartero, fallos que quedan en el log sin datos personales y tope
+de envíos simultáneos.
 
-El servidor SMTP se sustituye por un doble (unittest.mock): aquí no hay red.
-El envío real a Mailpit lo prueba tests/security/verificar_registro.py.
+El cartero se sustituye por un doble (unittest.mock): aquí no hay red. La
+composición y la entrega las prueban tests/unit/test_cartero.py y, de
+extremo a extremo con Mailpit, tests/security/verificar_registro.py.
 """
-import smtplib
+import json
 import unittest
 from unittest import mock
 
@@ -19,65 +20,69 @@ def un_correo(destinatario=EMAIL, tipo="verificacion"):
                          cuerpo="Enlace: https://localhost:8445/registro/verificacion#secreto")
 
 
-class Componer(unittest.TestCase):
-    def test_valido(self):
-        mensaje = correo.componer(un_correo())
-        self.assertEqual(mensaje["To"], EMAIL)
-        self.assertEqual(mensaje["From"], "Canario <no-responder@canario.invalid>")
-        self.assertEqual(mensaje["Subject"], "Asunto")
-        self.assertIn("#secreto", mensaje.get_content())
-
-    def test_cabeceras_sin_cr_ni_lf(self):
-        # CWE-93: un salto de línea en el destinatario añadiría una cabecera
-        # (un Bcc). Control: el mismo email sin salto pasa (test_valido).
-        for malo in (EMAIL + "\r\nBcc: otro@x.es", EMAIL + "\nBcc: otro@x.es", EMAIL + "\rX: y"):
-            with self.subTest(malo=malo), self.assertRaises(ValueError):
-                correo.componer(un_correo(destinatario=malo))
-
-    def test_tipo_desconocido(self):
-        with self.assertRaises(ValueError):
-            correo.componer(un_correo(tipo="otro"))
-
-
 class Enviar(unittest.TestCase):
     def test_envio(self):
-        with mock.patch.object(smtplib, "SMTP") as smtp:
+        with mock.patch.object(correo, "_publicar", return_value=202) as publicar, \
+                self.assertNoLogs("canario.correo"):
             correo.enviar(un_correo())
-        smtp.assert_called_once_with("mailpit", 1025, timeout=5)
-        enviado = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
-        self.assertEqual(enviado["To"], EMAIL)
+        publicar.assert_called_once()
+        enviado = json.loads(publicar.call_args.args[0])
+        # Solo estos cuatro campos: el remitente y las cabeceras los pone el
+        # cartero, no la API.
+        self.assertEqual(enviado, {"tipo": "verificacion", "destinatario": EMAIL, "asunto": "Asunto",
+                                   "cuerpo": "Enlace: https://localhost:8445/registro/verificacion#secreto"})
+
+    def test_destino_fijo(self):
+        # El cartero en la red interna correo, nunca otro sitio.
+        self.assertEqual((correo.HOST, correo.PUERTO, correo.PLAZO), ("cartero", 8000, 5))
 
     def test_fallo_al_log_sin_datos(self):
-        error = smtplib.SMTPRecipientsRefused({EMAIL: (550, b"no")})
-        with mock.patch.object(smtplib, "SMTP", side_effect=error), \
+        error = OSError(f"conexion rechazada para {EMAIL}")
+        with mock.patch.object(correo, "_publicar", side_effect=error), \
                 self.assertLogs("canario.correo", "ERROR") as registro:
             correo.enviar(un_correo())
-        self.assertEqual(registro.output,
-                         ["ERROR:canario.correo:EVENTO correo_fallido: tipo=verificacion error=SMTPRecipientsRefused"])
+        self.assertEqual(registro.output, ["ERROR:canario.correo:EVENTO correo_fallido: tipo=verificacion error=OSError"])
         # El texto del error lleva el email (control): el log no.
         self.assertIn(EMAIL, str(error))
         self.assertNotIn(EMAIL, "\n".join(registro.output))
         self.assertNotIn("secreto", "\n".join(registro.output))
 
-    def test_cabecera_inyectada_acaba_en_el_log(self):
-        with mock.patch.object(smtplib, "SMTP") as smtp, self.assertLogs("canario.correo", "ERROR") as registro:
-            correo.enviar(un_correo(destinatario=EMAIL + "\r\nBcc: otro@x.es"))
-        smtp.assert_not_called()
-        self.assertEqual(registro.output,
-                         ["ERROR:canario.correo:EVENTO correo_fallido: tipo=verificacion error=ValueError"])
+    def test_respuestas_del_cartero(self):
+        # 429 y 503 son descartes del cartero; cualquier otro estado, un fallo.
+        casos = {
+            429: "ERROR:canario.correo:EVENTO correo_descartado: tipo=invitacion motivo=cupo_diario",
+            503: "ERROR:canario.correo:EVENTO correo_descartado: tipo=invitacion motivo=cola_llena",
+            422: "ERROR:canario.correo:EVENTO correo_fallido: tipo=invitacion error=estado_422",
+            403: "ERROR:canario.correo:EVENTO correo_fallido: tipo=invitacion error=estado_403",
+            200: "ERROR:canario.correo:EVENTO correo_fallido: tipo=invitacion error=estado_200",
+        }
+        for estado, esperado in casos.items():
+            with self.subTest(estado=estado), mock.patch.object(correo, "_publicar", return_value=estado), \
+                    self.assertLogs("canario.correo", "ERROR") as registro:
+                correo.enviar(un_correo(tipo="invitacion"))
+            self.assertEqual(registro.output, [esperado])
+
+    def test_tipo_desconocido_no_sale(self):
+        with mock.patch.object(correo, "_publicar") as publicar, \
+                self.assertLogs("canario.correo", "ERROR") as registro:
+            correo.enviar(un_correo(tipo="otro"))
+        publicar.assert_not_called()
+        self.assertEqual(registro.output, ["ERROR:canario.correo:EVENTO correo_fallido: tipo=desconocido error=ValueError"])
 
     def test_enviar_todos_sigue_tras_un_fallo(self):
         # Un aviso a varias personas: el fallo con una no deja sin aviso a las demás.
         enviados = []
 
-        def enviar(mensaje):
-            if mensaje["To"] == "falla@empresa.es":
+        def publicar(cuerpo):
+            destinatario = json.loads(cuerpo)["destinatario"]
+            if destinatario == "falla@empresa.es":
                 raise OSError
-            enviados.append(mensaje["To"])
+            enviados.append(destinatario)
+            return 202
 
         destinos = ("a@empresa.es", "falla@empresa.es", "b@empresa.es")
-        with mock.patch.object(smtplib, "SMTP") as smtp, self.assertLogs("canario.correo", "ERROR") as registro:
-            smtp.return_value.__enter__.return_value.send_message.side_effect = enviar
+        with mock.patch.object(correo, "_publicar", side_effect=publicar), \
+                self.assertLogs("canario.correo", "ERROR") as registro:
             correo.enviar_todos([un_correo(d, "aviso_lecturas") for d in destinos])
         self.assertEqual(enviados, ["a@empresa.es", "b@empresa.es"])
         self.assertEqual(registro.output, ["ERROR:canario.correo:EVENTO correo_fallido: tipo=aviso_lecturas error=OSError"])
@@ -88,10 +93,10 @@ class Enviar(unittest.TestCase):
             while correo._semaforo.acquire(blocking=False):
                 ocupados += 1
             self.assertEqual(ocupados, 4)
-            with mock.patch.object(smtplib, "SMTP") as smtp, \
+            with mock.patch.object(correo, "_publicar") as publicar, \
                     self.assertLogs("canario.correo", "ERROR") as registro:
                 correo.enviar(un_correo(tipo="invitacion"))
-            smtp.assert_not_called()
+            publicar.assert_not_called()
             self.assertEqual(registro.output, [
                 "ERROR:canario.correo:EVENTO correo_descartado: tipo=invitacion motivo=envios_simultaneos"])
         finally:
@@ -99,11 +104,11 @@ class Enviar(unittest.TestCase):
                 correo._semaforo.release()
         # Control: con huecos libres se envía, y los huecos quedan libres
         # también tras un fallo.
-        with mock.patch.object(smtplib, "SMTP", side_effect=OSError), self.assertLogs("canario.correo", "ERROR"):
+        with mock.patch.object(correo, "_publicar", side_effect=OSError), self.assertLogs("canario.correo", "ERROR"):
             correo.enviar(un_correo())
-        with mock.patch.object(smtplib, "SMTP") as smtp:
+        with mock.patch.object(correo, "_publicar", return_value=202) as publicar:
             correo.enviar(un_correo())
-        smtp.assert_called_once()
+        publicar.assert_called_once()
         libres = [correo._semaforo.acquire(blocking=False) for _ in range(4)]
         for _ in range(sum(libres)):
             correo._semaforo.release()

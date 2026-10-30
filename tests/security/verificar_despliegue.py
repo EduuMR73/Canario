@@ -25,7 +25,13 @@ frente al Traefik real. Prueba:
 * e) los orígenes de producción: la API del personal acepta el de
   canario-personal y rechaza el de localhost, el de otra aplicación del mismo
   dominio (same-site) y un Sec-Fetch-Site same-site; los formularios del
-  denunciante aceptan el de canario y rechazan el de localhost.
+  denunciante aceptan el de canario y rechazan el de localhost;
+* f) el cartero (app/cartero.py) en producción: usa la imagen de la API (no hay
+  imagen canario-cartero), sin la CA de desarrollo, entregando a
+  in-v3.mailjet.com:465 con el remitente de producción (configuración de
+  Compose con y sin el compose de producción, y el contenedor arrancado). Aquí
+  arranca con las credenciales de secrets/ y con la red salida interna, así
+  que no puede llegar a Mailjet ni a internet.
 
 Lo que no prueba: el Traefik real del VPS, Let's Encrypt (aquí el resolver no
 tiene salida y Traefik sirve su certificado por defecto) ni la persistencia de
@@ -42,8 +48,8 @@ marcha y los secretos generados con scripts/generar_secretos.py):
 
 Usa un proyecto de Docker propio (canario_despliegue). Necesita que el
 proyecto canario y las demás baterías estén parados: las subredes
-10.88.0.0/28, 10.88.1.0/28, 10.88.2.0/28 y la de los clientes, 10.88.3.0/28,
-son fijas (si están en uso, PARADA). Al terminar lo borra todo (down -v y las
+10.88.0.0/28, 10.88.1.0/28, 10.88.2.0/28, 10.88.4.0/28 (correo) y la de los
+clientes, 10.88.3.0/28, son fijas (si están en uso, PARADA). Al terminar lo borra todo (down -v y las
 imágenes construidas). No lee ningún secreto. Los ficheros auxiliares van a un
 directorio temporal del sistema, nunca al repositorio. La salida completa se
 guarda en verificacion_despliegue.txt dentro del directorio temporal del
@@ -76,7 +82,20 @@ estado = {"falla": False, "sin_conclusion": False}
 # Oráculos literales
 # ---------------------------------------------------------------------------
 SERVICIOS_CONSTRUIDOS = ("postgres", "api", "broker", "caddy")
-SUBREDES = ("10.88.0.0/28", "10.88.1.0/28", "10.88.2.0/28", "10.88.3.0/28")
+SUBREDES = ("10.88.0.0/28", "10.88.1.0/28", "10.88.2.0/28", "10.88.3.0/28", "10.88.4.0/28")
+# El cartero en producción (compose.produccion.yaml). Literales, no derivados de
+# los compose. No hay imagen canario-cartero: usa la de la API.
+IMAGEN_CARTERO_PRODUCCION = "canario-api"
+SMTP_PRODUCCION = {"CANARIO_SMTP_SERVIDOR": "in-v3.mailjet.com", "CANARIO_SMTP_PUERTO": "465",
+                   "CANARIO_CORREO_REMITENTE": "no-responder@canario.eduumr.dev"}
+SMTP_DESARROLLO = {"CANARIO_SMTP_SERVIDOR": "mailpit", "CANARIO_SMTP_PUERTO": "1025",
+                   "CANARIO_CORREO_REMITENTE": "no-responder@canario.invalid"}
+DESTINO_CA_DESARROLLO = "/usr/lib/ssl/cert.pem"
+SECRETOS_CARTERO = ("smtp_usuario.txt", "smtp_contrasena.txt")
+# Línea que el cartero registra al arrancar con su configuración (app/cartero.py,
+# ciclo_de_vida).
+LISTO_CARTERO = ("CARTERO LISTO: servidor=in-v3.mailjet.com puerto=465 "
+                 "remitente=no-responder@canario.eduumr.dev")
 # La misma versión que el Traefik de Dokploy v0.30.10 (TRAEFIK_VERSION en
 # packages/server/src/setup/traefik-setup.ts), fijada por digest (índice
 # multiarquitectura). Si el VPS lleva otra, se cambia aquí.
@@ -158,6 +177,9 @@ COMPOSE_PRUEBA = f"""services:
     image: {PROYECTO}-broker
   caddy:
     image: {PROYECTO}-caddy
+  cartero:
+    # Producción lo declara con la imagen canario-api; aquí, la de este proyecto.
+    image: {PROYECTO}-api
   traefik:
     image: {IMG_TRAEFIK}
     user: "65534:65534"
@@ -202,6 +224,10 @@ networks:
       config:
         - subnet: 10.88.3.0/28
           ip_range: 10.88.3.8/29
+  # Con internet en producción (la usa el cartero para llegar a Mailjet); aquí
+  # interna, para que la batería no pueda entregar nada ni salir a internet.
+  salida:
+    internal: true
 """
 
 # ---------------------------------------------------------------------------
@@ -305,8 +331,9 @@ def seccion_a():
     PRODUCCION.extend(["-f", str(prueba)])
     # Sin --build: el compose de producción anula build, así que si faltara
     # una imagen "up" fallaría en vez de construirla.
-    r = ejecutar(PRODUCCION + ["up", "-d", "--wait", "api", "caddy", "traefik"], timeout=600)
-    p(f"up -d --wait api caddy traefik (compose de produccion) -> codigo {r.rc}")
+    r = ejecutar(PRODUCCION + ["up", "-d", "--wait", "api", "caddy", "traefik", "cartero"],
+                 timeout=600)
+    p(f"up -d --wait api caddy traefik cartero (compose de produccion) -> codigo {r.rc}")
     if r.rc != 0:
         p(r.todo.strip()[-1500:])
         raise Parada("no arranca la pila de produccion")
@@ -438,6 +465,76 @@ def seccion_e():
              res["web_local"][0] == 403, control_web)
 
 
+# Conexión a 1.1.1.1:443: lo que no debe poder hacer el cartero aquí.
+PRUEBA_SALIDA = ("import socket\n"
+                 "try:\n"
+                 "    socket.create_connection(('1.1.1.1', 443), timeout=5).close(); print('CONECTA')\n"
+                 "except OSError as e:\n"
+                 "    print('SIN_SALIDA', type(e).__name__)\n")
+
+
+def config_json(*adicionales):
+    """docker compose config en JSON, con el compose de siempre y los
+    adicionales (el de producción, por ejemplo). Nunca el de la prueba."""
+    r = ejecutar(BASE + [x for a in adicionales for x in ("-f", a)] + ["config", "--format", "json"])
+    try:
+        return json.loads(r.out)
+    except ValueError:
+        raise Parada(f"docker compose config no devuelve JSON: {r.err.strip()[-300:]}") from None
+
+
+def seccion_f():
+    p("=== f) el cartero en produccion")
+    # Configuración de Compose. Control: sin el compose de producción, el mismo
+    # servicio lleva los valores de desarrollo, así que la lectura distingue.
+    desarrollo = config_json()["services"]["cartero"]
+    produccion = config_json("compose.produccion.yaml")["services"]["cartero"]
+    entorno_dev = {k: (desarrollo.get("environment") or {}).get(k) for k in SMTP_PRODUCCION}
+    entorno_pro = {k: (produccion.get("environment") or {}).get(k) for k in SMTP_PRODUCCION}
+    control_entorno = entorno_dev == SMTP_DESARROLLO
+    pasa(control_entorno, f"f) control: sin el compose de produccion el cartero entrega a Mailpit {entorno_dev}")
+    negativo(f"f) cartero: entrega a Mailjet por el 465 con el remitente de produccion {entorno_pro}",
+             entorno_pro == SMTP_PRODUCCION, control_entorno)
+    pasa(produccion.get("image") == IMAGEN_CARTERO_PRODUCCION and "build" not in produccion
+         and produccion.get("pull_policy") == "never",
+         f"f) cartero: imagen {produccion.get('image')} (la de la API), sin build y pull_policy never")
+    # La CA de desarrollo no entra en producción: el cartero confía en el
+    # almacén de la imagen, el que valida el certificado de Mailjet. Control: en
+    # desarrollo sí la monta.
+    destinos_dev = [v.get("target") for v in desarrollo.get("volumes") or []]
+    destinos_pro = [v.get("target") for v in produccion.get("volumes") or []]
+    negativo(f"f) cartero: sin la CA de desarrollo montada en {DESTINO_CA_DESARROLLO} ({destinos_pro})",
+             not destinos_pro, DESTINO_CA_DESARROLLO in destinos_dev, f"control, desarrollo: {destinos_dev}")
+
+    # El contenedor arrancado (up --wait ya exige que su healthcheck sea sano).
+    cartero = f"{PROYECTO}-cartero-1"
+    i = json.loads(ejecutar(["docker", "inspect", "--format", "{{json .}}", cartero]).out or "null")
+    if i is None:
+        raise Parada(f"no hay contenedor {cartero}")
+    pasa(i["State"]["Running"] is True and i["State"]["Health"]["Status"] == "healthy",
+         f"f) cartero: en marcha y sano ({i['State']['Status']}, {i['State']['Health']['Status']})")
+    api = json.loads(ejecutar(["docker", "inspect", "--format", "{{json .}}", f"{PROYECTO}-api-1"]).out or "null")
+    pasa(api is not None and i["Image"] == api["Image"],
+         "f) cartero: la misma imagen (mismo id) que la API, no hay imagen canario-cartero")
+    destinos = sorted(m["Destination"] for m in i["Mounts"])
+    destinos_api = sorted(m["Destination"] for m in (api or {}).get("Mounts", []))
+    negativo(f"f) cartero: solo monta sus dos secretos SMTP {destinos}",
+             destinos == ["/run/secrets/smtp_contrasena", "/run/secrets/smtp_usuario"],
+             "/run/secrets/contrasena_aplicacion" in destinos_api, f"control, montajes de la API: {destinos_api}")
+    registros = ejecutar(PRODUCCION + ["logs", "--no-color", "cartero"]).todo
+    negativo(f"f) cartero: arranca con la configuracion de produccion ({LISTO_CARTERO!r})",
+             LISTO_CARTERO in registros and "ARRANQUE BLOQUEADO" not in registros, bool(registros.strip()),
+             "control: el log del cartero esta vacio")
+    # Sin salida: la red salida es interna aquí (COMPOSE_PRUEBA), así que ni
+    # entrega a Mailjet ni llega a internet. Control: un contenedor de la
+    # misma imagen en la red bridge sí llega.
+    control = ejecutar(["docker", "run", "--rm", "--network", "bridge", "--entrypoint", "python",
+                        f"{PROYECTO}-api", "-c", PRUEBA_SALIDA], timeout=120)
+    r = ejecutar(["docker", "exec", cartero, "python", "-c", PRUEBA_SALIDA], timeout=120)
+    negativo(f"f) cartero: en la batería no llega a 1.1.1.1:443 ({r.out.strip()})", r.out.startswith("SIN_SALIDA"),
+             control.out.strip() == "CONECTA", f"control en la red bridge: {control.out.strip()!r}")
+
+
 def imagenes():
     return [f"{PROYECTO}-{s}" for s in SERVICIOS_CONSTRUIDOS]
 
@@ -539,6 +636,12 @@ def main():
     if ocupadas:
         p(f"PARADA: las subredes {SUBREDES} ya estan en uso por {ocupadas} (pare el proyecto canario)")
         terminar_con_parada()
+    # El cartero arranca aquí y docker compose exige que existan sus secretos
+    # (solo se comprueba con is_file, nunca se leen).
+    for fichero in SECRETOS_CARTERO:
+        if not (RAIZ / "secrets" / fichero).is_file():
+            p(f"PARADA: secrets/{fichero} no existe (scripts/generar_secretos.py)")
+            terminar_con_parada()
     r = ejecutar(PRODUCCION + ["config", "--quiet"])
     if r.rc != 0:
         p(f"PARADA: docker compose config falla (genere los secretos con scripts/generar_secretos.py): {r.err.strip()[:300]}")
@@ -546,7 +649,7 @@ def main():
     TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_despliegue_"))
     parada = None
     try:
-        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e):
+        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f):
             seccion()
     except Parada as e:
         parada = str(e)
