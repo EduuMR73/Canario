@@ -4,7 +4,7 @@ Las baterías de seguridad, las pruebas unitarias y el análisis estático. Las 
 
 ## Pruebas de seguridad
 
-Quince baterías, una por área (una de ellas, `verificar_google_real.py`, semimanual). Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
+Dieciséis baterías, una por área (una de ellas, `verificar_google_real.py`, semimanual). Cada prueba negativa lleva su control positivo: si el control falla, el resultado es `SIN CONCLUSION`, nunca `PASA`. Los resultados esperados están escritos como literales en la propia batería, no derivados del código que se prueba.
 
 | Batería | Qué prueba |
 |---|---|
@@ -21,13 +21,14 @@ Quince baterías, una por área (una de ellas, `verificar_google_real.py`, semim
 | `verificar_externo.py` | El broker de canje con un Google falso (el nombre real por alias de red y una CA de prueba): definición del compose, endurecimiento, solo escucha en canje y solo atiende a la IP de la API, la URL de autorización exacta, el canje bueno y cada id_token o respuesta que no vale (401 o 503 con su EVENTO), redirecciones que no se siguen, certificado de otra CA, plazo total, saturación, entradas mal formadas, log sin datos sensibles, y Google sin configurar o a medias |
 | `verificar_login_externo.py` | El login con Google y los vínculos de punta a punta, con la pila entera, un Google falso que solo canjea con el `verifier` del flujo y la batería haciendo de navegador: la URL exacta, las cookies del flujo y del ticket, la vuelta rechazada sin ningún canje, el dispositivo de confianza (el 409 igual exista o no la empresa), el ticket, los avisos en Mailpit, vinculaciones simultáneas, Redis y el broker caídos, entradas maliciosas y que ni los logs ni la base de datos guardan nada del proveedor |
 | `verificar_google_real.py` | Semimanual, contra el Google real: el `iss` de la vuelta y que Google rechaza un `verifier` incorrecto, con el correcto como control. Pide iniciar sesión dos veces en el navegador |
-| `verificar_escaneos.py` | Secretos en Git, dependencias de Python y de npm, análisis estático, imágenes y SBOM |
+| `verificar_despliegue.py` | El despliegue de producción detrás de un Traefik de la misma versión que el de Dokploy, con el mismo `despliegue/traefik/canario.yml`: el compose de producción sin construir nada, Caddy sin puertos publicados ni salida, el enrutado por nombre con una sola HSTS y la redirección a HTTPS, la IP del cliente a través de Traefik (los clientes se distinguen y `X-Forwarded-For` no se falsifica), Caddy solo atiende a Traefik en cada tipo de ruta, y los orígenes de producción |
+| `verificar_escaneos.py` | Secretos en Git, dependencias de Python y de npm, análisis estático, imágenes y SBOM (lo que sostiene el VEX de Caddy, también con el Caddyfile de producción) |
 | `verificar_unitarios.py` | Las pruebas unitarias (`tests/unit/`) en la imagen de la API, y mutantes que demuestran que fallan cuando deben |
 
 Para ejecutarlas:
 
 - Docker en marcha y los secretos generados.
-- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, sesión, SPA, inyección, registro, externo, login externo y Google real arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`. `verificar_externo.py` no sale a internet: en su copia, la red `salida` es interna.
+- **La pila de Canario parada** (`docker compose down`, nunca con `-v`): esqueleto, arranque, denuncia, web, personal, sesión, SPA, inyección, registro, externo, login externo, Google real y despliegue arrancan su propia copia con las mismas subredes fijas, y si están ocupadas se detienen con `PARADA`. `verificar_externo.py` no sale a internet: en su copia, la red `salida` es interna.
 - `verificar_escaneos.py` necesita internet: descarga las herramientas fijadas y la base de datos de vulnerabilidades, y lee del registro de npm la fecha de publicación de lo que cambia en `spa/package-lock.json`.
 - Todas las que construyen la imagen del proxy necesitan internet para compilar la SPA (`npm ci`). `verificar_spa.py` descarga además la imagen de Playwright (unos 2 GB la primera vez) y el paquete `playwright` con sus hashes.
 - `verificar_unitarios.py` no necesita los secretos ni la pila parada: solo construye la imagen de la API.

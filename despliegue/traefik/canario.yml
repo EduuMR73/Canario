@@ -1,0 +1,50 @@
+# Enrutado de Canario en el Traefik de Dokploy (docs/operacion.md). Se copia
+# tal cual a /etc/dokploy/traefik/dynamic/canario.yml en el VPS; Traefik vigila
+# ese directorio y lo carga sin reiniciar. tests/security/verificar_despliegue.py
+# prueba este mismo fichero con un Traefik de la misma versión.
+#
+# Traefik termina el TLS (Let's Encrypt, con el resolver "letsencrypt" que
+# configura Dokploy) y reenvía en HTTP a Caddy por la red edge de Canario, a la
+# que se conecta con la IP fija 10.88.1.2, la única en la que confía Caddy
+# (proxy/Caddyfile.produccion). Caddy decide todo lo demás: cabeceras de
+# seguridad, qué rutas se sirven y la IP del cliente.
+#
+# Aquí no se añaden cabeceras: HSTS y las demás las pone Caddy, y repetirlas
+# daría dos valores distintos de la misma cabecera.
+http:
+  routers:
+    # HTTP: solo redirige a HTTPS, sin llegar a Caddy.
+    canario-http:
+      entryPoints:
+        - web
+      rule: "Host(`canario.eduumr.dev`) || Host(`canario-personal.eduumr.dev`) || Host(`canario-api.eduumr.dev`)"
+      middlewares:
+        - canario-a-https
+      service: canario
+    canario:
+      entryPoints:
+        - websecure
+      rule: "Host(`canario.eduumr.dev`) || Host(`canario-personal.eduumr.dev`) || Host(`canario-api.eduumr.dev`)"
+      tls:
+        certResolver: letsencrypt
+      service: canario
+
+  middlewares:
+    # Permanente: Traefik responde 301 a un GET y 308 a cualquier otro método
+    # (pkg/middlewares/redirect/redirect.go de Traefik v3.6), así que un POST a
+    # http:// no se convierte en GET por el camino (RFC 9110, 15.4.9).
+    canario-a-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
+  services:
+    canario:
+      loadBalancer:
+        # Los tres sitios en el mismo puerto: Traefik conserva el Host
+        # (passHostHeader, por defecto) y Caddy elige el sitio por él.
+        # canario-caddy es el alias de Caddy en la red edge
+        # (compose.produccion.yaml).
+        passHostHeader: true
+        servers:
+          - url: "http://canario-caddy:8080"

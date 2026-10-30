@@ -1,0 +1,46 @@
+# Opciones globales comunes a proxy/Caddyfile (local) y proxy/Caddyfile.produccion.
+# Se importan dentro del bloque global de cada uno. Conservan la sangría del
+# bloque global: las baterías construyen sus controles buscando estas líneas
+# tal cual (tests/security/verificar_escaneos.py).
+	# Sin API de administración: nadie puede cambiar la configuración en caliente.
+	# Para cambiarla hay que reconstruir la imagen y reiniciar el contenedor.
+	admin off
+
+	# No guarda copia de la configuración (autosave.json) en /config. admin off no
+	# lo desactiva por sí solo (comprobado en el código de Caddy), y así /config
+	# queda de solo lectura.
+	persist_config off
+
+	# Sin servidor de redirección HTTP a HTTPS: no se escucha en el puerto 80 ni
+	# se publica HTTP.
+	auto_https disable_redirects
+
+	# El CA local no se intenta instalar en el almacén de confianza del sistema:
+	# el contenedor no es root y no tiene almacén que tocar.
+	skip_install_trust
+
+	# Logs de runtime (errores, avisos). Pueden llevar IPs de clientes.
+	log default {
+		# http.stdlib son mensajes del servidor HTTP de Go (por ejemplo errores de
+		# handshake TLS) con la IP dentro del texto. El campo msg no se puede
+		# filtrar, así que se excluye el logger entero.
+		exclude http.stdlib
+
+		# En el resto se BORRAN los campos con IP. No se usa hash (conserva 4 bytes
+		# de SHA-256, invertible por fuerza bruta sobre IPv4) ni ip_mask (deja
+		# parte de la dirección).
+		format filter {
+			wrap json
+			fields {
+				remote_ip delete
+				remote_port delete
+				client_ip delete
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>headers>X-Forwarded-For delete
+				request>headers>X-Real-Ip delete
+				request>headers>Forwarded delete
+			}
+		}
+	}

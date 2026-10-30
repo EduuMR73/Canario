@@ -65,8 +65,12 @@ RUN setcap -r /usr/bin/caddy \
  && chmod 0755 /config/caddy
 
 # La configuración va dentro de la imagen, de root y de solo lectura para Caddy:
-# no hay montaje que alguien pueda cambiar en caliente.
-COPY Caddyfile /etc/caddy/Caddyfile
+# no hay montaje que alguien pueda cambiar en caliente. Los dos Caddyfile (el
+# local, que es el que Caddy carga por defecto, y el de producción, que elige
+# compose.produccion.yaml) y lo que comparten, nombrados uno a uno: la misma
+# imagen sirve para los dos entornos, así que lo que se prueba en local es lo
+# que se despliega.
+COPY Caddyfile Caddyfile.produccion global.caddy servidor.caddy comun.caddy /etc/caddy/
 
 # Estáticos del sitio del denunciante, por el mismo motivo: dentro de la imagen,
 # de root (COPY sin --chown) y, con el sistema de ficheros raíz de solo lectura,
@@ -83,5 +87,6 @@ COPY --from=compilacion --chown=0:0 /spa/dist/canario-spa/browser/ /srv/spa/
 # Usuario sin privilegios con uid y gid fijos, distinto del de la API.
 USER 10002:10002
 
-# 8443: la API. 8444: el sitio del denunciante. 8445: la SPA del personal.
-EXPOSE 8443 8444 8445
+# En local, 8443: la API. 8444: el sitio del denunciante. 8445: la SPA del
+# personal. En producción, los tres sitios en el 8080, detrás de Traefik.
+EXPOSE 8443 8444 8445 8080

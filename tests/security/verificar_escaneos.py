@@ -800,6 +800,15 @@ for destino in sys.argv[1:]:
 # Puertos en los que escucha Caddy: la API, el sitio del denunciante y la SPA
 # del personal.
 PUERTOS_CADDY = ("8443", "8444", "8445")
+# El de producción: los tres sitios en un puerto, detrás de Traefik.
+PUERTOS_CADDY_PRODUCCION = ["8080"]
+# Lo que carga el Caddyfile local: él y los ficheros que importa
+# (proxy/Caddyfile). Los controles se construyen sobre una copia de todos.
+FICHEROS_CADDY = ("Caddyfile", "global.caddy", "servidor.caddy", "comun.caddy")
+# Condición de la lista blanca de CVE-2026-111943 que en producción no aplica:
+# allí Caddy no gestiona ningún certificado (sin app tls), lo que se comprueba
+# aparte y es más estricto que tener solo emisores internal.
+CONDICION_SOLO_INTERNAL = "solo emisores internal"
 # Cambio que convierte el Caddyfile real en el de control de la quita de Range:
 # el sitio del denunciante, el que tiene file_server, sin importar sin_range.
 CONTROL_SIN_RANGE = ("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n")
@@ -907,17 +916,29 @@ def mailpit_sin_salida(extra=()):
     }
 
 
-def caddyfile_control(cambios):
-    texto = (RAIZ / "proxy" / "Caddyfile").read_text(encoding="utf-8")
+def caddyfile_control(destino, cambios):
+    """Copia en destino la configuración local de Caddy (el Caddyfile y lo que
+    importa) con los cambios aplicados, y devuelve la ruta de su Caddyfile.
+    Cada texto debe estar en uno solo de esos ficheros, donde se cambia su
+    primera aparición: si no está en ninguno o está en varios, el control no
+    se puede construir y se ve."""
+    textos = {nombre: (RAIZ / "proxy" / nombre).read_text(encoding="utf-8") for nombre in FICHEROS_CADDY}
     for viejo, nuevo in cambios:
-        if viejo not in texto:
-            raise Parada(f"el Caddyfile no contiene {viejo.strip()!r}: el control no se puede construir")
-        texto = texto.replace(viejo, nuevo, 1)
-    return texto
+        donde = [nombre for nombre, texto in textos.items() if viejo in texto]
+        if len(donde) != 1:
+            raise Parada(f"{viejo.strip()!r} esta en {len(donde)} ficheros de proxy/ y se espera en 1: "
+                         "el control no se puede construir")
+        textos[donde[0]] = textos[donde[0]].replace(viejo, nuevo, 1)
+    for nombre, texto in textos.items():
+        escribir(pathlib.Path(destino) / nombre, texto)
+    return pathlib.Path(destino) / "Caddyfile"
 
 
-def adaptar(caddyfile=None):
-    montajes, ruta = [], "/etc/caddy/Caddyfile"
+def adaptar(caddyfile=None, ruta="/etc/caddy/Caddyfile"):
+    """Configuración que carga Caddy. Sin caddyfile, la de la imagen (ruta
+    elige cuál de sus dos Caddyfile); con él, la de ese directorio de
+    control, montado entero porque el Caddyfile importa sus vecinos."""
+    montajes = []
     if caddyfile is not None:
         montajes, ruta = [montaje(caddyfile.parent, "/c")], f"/c/{caddyfile.name}"
     r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
@@ -937,6 +958,9 @@ def adaptar(caddyfile=None):
             # alguno, no coincidiría.
             "file_server_total": json.dumps(configuracion).count('"handler": "file_server"'),
             "ech": "encrypted_client_hello" in json.dumps(configuracion["apps"].get("tls", {})),
+            # La app tls es la que gestiona certificados (emite, renueva y,
+            # con ACME, verifica los del servidor ACME).
+            "app_tls": "tls" in configuracion["apps"],
             # CVE-2026-116587: el servidor ACME de Caddy (el único sitio que
             # parsea JWK de clientes) es este manejador.
             "acme_server": '"handler": "acme_server"' in json.dumps(configuracion),
@@ -946,11 +970,11 @@ def adaptar(caddyfile=None):
 def seccion_f():
     p("=== f) alcanzabilidad en Caddy y en PostgreSQL (lo que sostiene el VEX)")
     real = adaptar()
-    control = adaptar(escribir(TEMPORAL / "caddy_adapt" / "Caddyfile", caddyfile_control([
+    control = adaptar(caddyfile_control(TEMPORAL / "caddy_adapt", [
         ("\tprotocols h1\n", "\tprotocols h1 h2\n"),
         ("\tskip_install_trust\n", "\tskip_install_trust\n\tech ech.canario.invalid\n"),
         ("\trequest_header -Cookie\n", "\tacme_server\n\trequest_header -Cookie\n"),
-        CONTROL_SIN_RANGE])))
+        CONTROL_SIN_RANGE]))
     pasa(real["escucha"] == list(PUERTOS_CADDY), f"f) configuracion adaptada: servidores en {real['escucha']}")
     negativo(f"f) configuracion adaptada: todos los servidores con protocols {PROTOCOLOS_CADDY} (sin HTTP/2)",
              real["protocolos"] and all(x == PROTOCOLOS_CADDY for x in real["protocolos"]),
@@ -973,9 +997,38 @@ def seccion_f():
     # Caddyfile con un cambio que rompe cada condición. Sigue sin arreglo en
     # las imágenes de Caddy y mailpit: esto es lo que demuestra que no se
     # alcanza y lo que sostiene su declaración en el VEX.
-    control_x509 = adaptar(escribir(TEMPORAL / "caddy_x509" / "Caddyfile", caddyfile_control(CONTROL_X509)))
+    control_x509 = adaptar(caddyfile_control(TEMPORAL / "caddy_x509", CONTROL_X509))
     for condicion, cumple in real["x509"].items():
         negativo(f"f) configuracion adaptada: {condicion} (CVE-2026-111943)", cumple,
+                 control_x509["x509"][condicion] is False)
+
+    # El Caddyfile de producción (proxy/Caddyfile.produccion), de la misma
+    # imagen: el VEX tiene que valer para lo que corre en producción, no solo
+    # en local. Comparte con el local todo lo que aquí se mira (global.caddy,
+    # servidor.caddy y comun.caddy), y los controles de arriba ya demostraron
+    # que cada comprobación distingue.
+    produccion = adaptar(ruta="/etc/caddy/Caddyfile.produccion")
+    pasa(produccion["escucha"] == PUERTOS_CADDY_PRODUCCION,
+         f"f) produccion: servidores en {produccion['escucha']}")
+    negativo(f"f) produccion: todos los servidores con protocols {PROTOCOLOS_CADDY} (sin HTTP/2)",
+             produccion["protocolos"] and all(x == PROTOCOLOS_CADDY for x in produccion["protocolos"]),
+             control["protocolos"] and all(x == ["h1", "h2"] for x in control["protocolos"]),
+             str(produccion["protocolos"]))
+    negativo(f"f) produccion: cada file_server detras de la quita de Range (CVE-2026-78667) {produccion['file_server']}",
+             bool(produccion["file_server"]) and all(produccion["file_server"])
+             and len(produccion["file_server"]) == produccion["file_server_total"],
+             False in control["file_server"], f"control: {control['file_server']}")
+    negativo("f) produccion: sin encrypted_client_hello (CVE-2026-97031)", not produccion["ech"], control["ech"])
+    negativo("f) produccion: sin el manejador acme_server (CVE-2026-116587)", not produccion["acme_server"],
+             control["acme_server"])
+    # Control: el local sí tiene app tls (tls internal), así que la
+    # comprobación encuentra lo que busca.
+    negativo("f) produccion: sin app tls, Caddy no gestiona ningun certificado (CVE-2026-111943)",
+             not produccion["app_tls"], real["app_tls"])
+    for condicion, cumple in produccion["x509"].items():
+        if condicion == CONDICION_SOLO_INTERNAL:
+            continue
+        negativo(f"f) produccion: {condicion} (CVE-2026-111943)", cumple,
                  control_x509["x509"][condicion] is False)
     # CVE-2026-111943 en mailpit: sin configuración que le haga abrir TLS hacia
     # fuera y sin salida. Control: un compose adicional con una variable de
@@ -1004,10 +1057,10 @@ def seccion_f():
     red = NOMBRES["red"]
     if ejecutar(["docker", "network", "create", "--internal", red]).rc != 0:
         raise Parada("no se pudo crear la red de la prueba ALPN")
-    control_h2 = escribir(TEMPORAL / "caddy_alpn" / "Caddyfile", caddyfile_control([("\tprotocols h1\n", "\tprotocols h1 h2\n")]))
+    control_h2 = caddyfile_control(TEMPORAL / "caddy_alpn", [("\tprotocols h1\n", "\tprotocols h1 h2\n")])
     comun = ["docker", "run", "-d", "--network", red, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
              "--tmpfs", "/data:uid=10002,gid=10002", "--tmpfs", "/config:uid=10002,gid=10002"]
-    for alias, extra in (("real", []), ("control", montaje(control_h2, "/etc/caddy/Caddyfile"))):
+    for alias, extra in (("real", []), ("control", montaje(control_h2.parent, "/etc/caddy"))):
         r = ejecutar(comun + ["--name", f"{PROYECTO}_caddy_{alias}", "--network-alias", alias, *extra, NOMBRES["caddy"]])
         if r.rc != 0:
             raise Parada(f"no arranca el Caddy {alias}: {r.err.strip()[-200:]}")

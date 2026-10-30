@@ -707,15 +707,22 @@ print(json.dumps(res, sort_keys=True))
 # construye desde el fichero real para que el control solo difiera en eso.
 CAMBIOS_CONTROL_RANGOS = [("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n"),
                           ("\t\theader -Accept-Ranges\n", "")]
+# Lo que carga el Caddyfile local: él y los ficheros que importa
+# (proxy/Caddyfile). El control se construye sobre una copia de todos.
+FICHEROS_CADDY = ("Caddyfile", "global.caddy", "servidor.caddy", "comun.caddy")
 
 
-def caddyfile_control_rangos():
-    texto = (RAIZ / "proxy" / "Caddyfile").read_text(encoding="utf-8")
+def caddyfile_control_rangos(destino):
+    """Copia en destino la configuración local de Caddy con los cambios del
+    control de n). Cada texto debe aparecer una sola vez en el conjunto de
+    ficheros: si no, el control no se puede construir y se ve."""
+    textos = {nombre: (RAIZ / "proxy" / nombre).read_text(encoding="utf-8") for nombre in FICHEROS_CADDY}
     for viejo, nuevo in CAMBIOS_CONTROL_RANGOS:
-        if texto.count(viejo) != 1:
-            raise Parada(f"el Caddyfile no contiene una sola vez {viejo.strip()!r}: el control de n) no se puede construir")
-        texto = texto.replace(viejo, nuevo)
-    return texto
+        if sum(texto.count(viejo) for texto in textos.values()) != 1:
+            raise Parada(f"proxy/ no contiene una sola vez {viejo.strip()!r}: el control de n) no se puede construir")
+        textos = {nombre: texto.replace(viejo, nuevo) for nombre, texto in textos.items()}
+    for nombre, texto in textos.items():
+        (destino / nombre).write_text(texto, encoding="utf-8", newline="\n")
 
 
 def cabeceras_exactas(etiqueta, cab, esperadas):
@@ -743,13 +750,14 @@ def seccion_n():
     # Accept-Ranges. El de control debe responder 206 y anunciar bytes; si no,
     # la comprobación no distinguiría nada.
     (TEMPORAL / "control_rangos").mkdir()
-    (TEMPORAL / "control_rangos" / "Caddyfile").write_text(caddyfile_control_rangos(), encoding="utf-8", newline="\n")
+    caddyfile_control_rangos(TEMPORAL / "control_rangos")
     (TEMPORAL / "rangos.py").write_text(CLIENTE_RANGOS, encoding="utf-8", newline="\n")
     nombre = f"{PROYECTO}_control_rangos"
     ejecutar(["docker", "run", "-d", "--name", nombre, "--network", f"{PROYECTO}_edge",
               "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
               "--mount", "type=volume,dst=/data",
-              "--mount", f"type=bind,src={TEMPORAL / 'control_rangos' / 'Caddyfile'},dst=/etc/caddy/Caddyfile,readonly",
+              # El directorio entero: el Caddyfile importa sus vecinos.
+              "--mount", f"type=bind,src={TEMPORAL / 'control_rangos'},dst=/etc/caddy,readonly",
               IMAGEN_PROXY])
     try:
         r = docker_run("--network", f"{PROYECTO}_edge",

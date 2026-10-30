@@ -1,0 +1,41 @@
+# Opciones de servidor comunes a proxy/Caddyfile (local) y
+# proxy/Caddyfile.produccion. Se importan dentro del bloque "servers" de cada
+# uno: Caddy no admite dos bloques "servers" para los mismos listeners
+# (comprobado con caddy adapt), así que lo propio de cada entorno (la confianza
+# en el proxy de delante) va en su fichero, junto al import. Conservan la
+# sangría del bloque: las baterías construyen sus controles buscando estas
+# líneas tal cual (tests/security/verificar_escaneos.py).
+
+		# Solo HTTP/1.1 sobre TCP. Sin HTTP/3 no hay listener UDP que no se publica
+		# ni se usa. Sin HTTP/2 mientras el binario de la imagen fijada lleve Go
+		# 1.26.8 y golang.org/x/net 0.59.0: CVE-2026-78669 (denegación de servicio
+		# con tramas SETTINGS de HTTP/2) tiene arreglo en Go 1.26.9 pero no hay
+		# imagen oficial de Caddy que lo traiga. Sin h2 el código vulnerable no es
+		# alcanzable. Con HTTP/1.1 no se pierde nada que importe: la API responde
+		# JSON y el sitio del denunciante, páginas pequeñas con una sola hoja de
+		# estilos, sin recursos que multiplexar; el reenvío a la API ya era
+		# HTTP/1.1. Se vuelve a "h1 h2" con la imagen que
+		# traiga el arreglo (tests/security/verificar_escaneos.py y
+		# tests/security/canario.openvex.json lo vigilan). En producción el
+		# navegador habla con Traefik, que negocia su propio protocolo: lo que
+		# llega aquí es solo el tramo de Traefik a Caddy.
+		protocols h1
+
+		# Sin strict_sni_host: su 421 lo genera el servidor antes de entrar en las
+		# rutas, y salía con "Server: Caddy" y sin cabeceras de seguridad
+		# (comprobado). Lo sustituye el sitio por defecto de cada Caddyfile, que
+		# responde 421 por las rutas a cualquier Host que no sea de un sitio, con
+		# las mismas cabeceras.
+
+		# Plazos explícitos. Por defecto Caddy no limita la lectura del cuerpo ni
+		# la escritura (documentación oficial: "Defaults to no timeout"): un
+		# cliente que envía un byte cada pocos segundos retendría la conexión
+		# para siempre (slowloris), y con request_buffers también su buffer.
+		# 30 s para el cuerpo dan margen a un denunciante por Tor, con poco
+		# ancho de banda, para subir el máximo de 128 KiB.
+		timeouts {
+			read_header 10s
+			read_body 30s
+			write 30s
+			idle 2m
+		}

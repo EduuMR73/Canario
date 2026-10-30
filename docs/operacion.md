@@ -36,7 +36,7 @@ Hay tres puertos publicados, todos solo en `127.0.0.1` y solo con el nombre `loc
 - `8443`: la API.
 - `8444`: el sitio del denunciante, en otro origen: `https://localhost:8444/` (las páginas, en [api.md](api.md)) y su hoja de estilos.
 - `8445`: la SPA del personal, en el suyo: `https://localhost:8445/`. Hoy tiene el acceso (entrar, también con Google si está configurado, activar una cuenta y solicitar el acceso, en [api.md](api.md)), el menú de cada rol, las pantallas del admin para las cuentas y las solicitudes, las de las denuncias para el admin y el instructor y la de la auditoría para el admin y el auditor, y reenvía la API del personal con la sesión en cookies.
- Para servir a internet hace falta un proxy o balanceador delante, que es decisión de cada despliegue (modelo de amenazas, 6.11 y 8).
+ Para servir a internet hace falta un proxy delante: el despliegue de producción, detrás del Traefik de Dokploy, está en [Producción en el VPS](#producción-en-el-vps-dokploy).
 
 Para parar sin perder datos:
 
@@ -47,6 +47,95 @@ docker compose down
 Nunca `docker compose down -v` en una instalación con datos: `-v` borra los volúmenes, es decir, la base de datos y la autoridad de certificación de Caddy.
 
 **Actualizar una instalación existente.** Canario no tiene migraciones: el esquema de `db/init/` solo se aplica con el volumen de la base de datos vacío. Si una versión nueva cambia el esquema (por ejemplo, la tabla `identidad_externa` del login externo), la API no arranca con la base de datos anterior y su log dice qué falta (`ARRANQUE BLOQUEADO: tablas: ...`, modelo de amenazas, 6.10): falla de forma visible, no a medias. Una instalación de prueba se pone al día recreando el volumen (`docker compose down -v` y arrancar), con lo que pierde sus datos. Para una con datos haría falta aplicar a mano la parte nueva del esquema como superusuario; ese procedimiento no está preparado (modelo de amenazas, 8).
+
+## Producción en el VPS (Dokploy)
+
+Canario corre en el VPS con su propio compose, fuera de Dokploy. Dokploy solo pone la entrada: su Traefik termina el TLS con Let's Encrypt y reenvía a Caddy por la red `edge` de Canario. Así los secretos nunca pasan por el panel (Dokploy guarda la configuración de cada servicio en su base de datos y escribe un `.env` en disco), y el compose que corre es el mismo que prueban las baterías. Los motivos y los riesgos, en el modelo de amenazas (6.20).
+
+| Nombre | Sitio |
+|---|---|
+| `canario.eduumr.dev` | el del denunciante |
+| `canario-personal.eduumr.dev` | la SPA del personal |
+| `canario-api.eduumr.dev` | la API |
+
+Lo que cambia respecto a local lo dicen tres ficheros: `compose.produccion.yaml` (los orígenes, el Caddyfile, sin puertos publicados y `edge` interna), `proxy/Caddyfile.produccion` (confía solo en Traefik) y `despliegue/traefik/canario.yml` (el enrutado de Traefik). `tests/security/verificar_despliegue.py` los prueba juntos con un Traefik de la misma versión que el de Dokploy (v3.6.25 en Dokploy v0.30.10).
+
+### Primera vez
+
+En el **PC** (PowerShell, desde la raíz del repositorio), con las baterías en verde, incluida `python tests\security\verificar_despliegue.py`:
+
+1. Construir las imágenes y guardarlas en un fichero. El VPS no construye nada: arranca exactamente lo que se probó.
+
+   ```powershell
+   docker compose build postgres api broker gestion caddy
+   docker image inspect canario-api --format "{{.Architecture}}"
+   docker save canario-postgres canario-api canario-broker canario-gestion canario-caddy -o "$env:TEMP\canario-imagenes.tar"
+   scp "$env:TEMP\canario-imagenes.tar" ovh:canario-imagenes.tar
+   ```
+
+   La arquitectura tiene que ser la del VPS (`amd64`; en el VPS, `uname -m` da `x86_64`).
+
+En el **VPS** (`ssh ovh`, bash):
+
+2. Cargar las imágenes y traer el código (el compose, los scripts y la configuración de Traefik):
+
+   ```bash
+   docker load -i ~/canario-imagenes.tar && rm ~/canario-imagenes.tar
+   git clone https://github.com/EduuMR73/Canario.git ~/apps/canario
+   cd ~/apps/canario
+   ```
+
+3. Generar los secretos **en el VPS**. No se copian del PC: cada instalación tiene los suyos. Después, copia de la clave maestra fuera del VPS, como en la puesta en marcha.
+
+   ```bash
+   python3 scripts/generar_secretos.py
+   ```
+
+4. Arrancar con el compose de producción encima del de siempre:
+
+   ```bash
+   docker compose -f docker-compose.yml -f compose.produccion.yaml up -d --wait
+   ```
+
+   Si falta alguna imagen, falla y lo dice: no la construye ni la descarga (`pull_policy: never`).
+
+5. Conectar Traefik a la red `edge` con la IP fija en la que confía Caddy, y darle el enrutado:
+
+   ```bash
+   docker network connect --ip 10.88.1.2 canario_edge dokploy-traefik
+   sudo cp despliegue/traefik/canario.yml /etc/dokploy/traefik/dynamic/canario.yml
+   ```
+
+   Traefik vigila ese directorio y carga el fichero sin reiniciar. **Sin la IP fija**, Caddy no confía en Traefik y responde 403 a todo: el fallo se ve, en vez de meter a todos los clientes en el mismo contador del limitador.
+
+6. En Cloudflare, tres registros A a la IP del VPS, **solo DNS** (nube gris), como el resto de `eduumr.dev`: `canario`, `canario-personal` y `canario-api`. Con el proxy de Cloudflare habría un tercer salto delante de Traefik y la IP del cliente sería la de Cloudflare.
+
+7. Comprobar desde el **PC** (PowerShell; `curl.exe`, no el alias `curl` de PowerShell 5):
+
+   ```powershell
+   curl.exe -sI https://canario-api.eduumr.dev/salud
+   curl.exe -sI http://canario.eduumr.dev/
+   ```
+
+   La primera, `200` con una sola `strict-transport-security: max-age=63072000` y el certificado de Let's Encrypt; la segunda, `301` a `https://canario.eduumr.dev/` (a un GET; a un POST Traefik responde `308`, que conserva el método).
+
+8. Dar de alta la empresa y el primer admin como en el README, con los dos ficheros de compose:
+
+   ```bash
+   docker compose -f docker-compose.yml -f compose.produccion.yaml run --rm gestion alta-empresa --nombre "Demo S.L." --zona Europe/Madrid
+   ```
+
+   El enlace de activación se abre en `https://canario-personal.eduumr.dev/activacion#<token>`.
+
+### Actualizar
+
+Cada cambio se prueba en el PC y se despliega igual: los pasos 1 y 2 (con `git pull --ff-only` en vez de `git clone`) y el 4. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 5. Los secretos y la conexión de Traefik se quedan como están. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
+
+### Lo que hay que vigilar
+
+- **Si Dokploy recrea su Traefik** (al actualizarlo o al cambiar sus ajustes), pierde la conexión a `edge`: los tres nombres dan 502 hasta repetir el `docker network connect` del paso 5. Le pasa lo mismo a Inmunia. Volver a conectarlo solo es pendiente del bloque B (modelo de amenazas, 6.20).
+- **El correo no sale del VPS.** Sin servidor SMTP de producción (`app/correo.py` habla con Mailpit, que no arranca sin el perfil `desarrollo`), los correos del registro y de los avisos no llegan: la API los da por enviados y deja el fallo en su log. Mientras tanto, las cuentas se crean por invitación desde **Cuentas** (el enlace se muestra una vez) o con `gestion alta-admin`.
+- **El login con Google** sigue apagado mientras `secrets/google_client_id.txt` tenga el marcador. Para activarlo, el URI de redirección registrado en Google pasa a ser el de `canario-personal.eduumr.dev`.
 
 ## Acceso con Google (opcional)
 

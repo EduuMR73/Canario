@@ -1,0 +1,72 @@
+# Proxy inverso de Canario en producción, detrás del Traefik de Dokploy
+# (docs/operacion.md). Traefik termina el TLS con Let's Encrypt y reenvía en
+# HTTP por la red edge, en la que solo están él y Caddy. Lo común con el local
+# está en global.caddy, servidor.caddy y comun.caddy.
+#
+# Por qué HTTP entre Traefik y Caddy: volver a cifrar ese tramo no protege de
+# nada que importe. Traefik descifra el TLS del navegador igualmente, y para
+# leer el tramo interno hay que ser root en el anfitrión, que ya tiene todos
+# los secretos (docs/threat-model.md).
+#
+# Lo selecciona compose.produccion.yaml. Si producción arrancase por error con
+# el Caddyfile local, Caddy no escucharía en el 8080 y Traefik daría 502: el
+# fallo se ve, no queda a medias.
+{
+	import global.caddy
+
+	servers {
+		import servidor.caddy
+
+		# Solo se confía en Traefik, con la IP fija que se le da en la red edge
+		# (docker network connect --ip, docs/operacion.md). /32: ni el resto de
+		# la subred ni ningún otro contenedor del anfitrión.
+		trusted_proxies static 10.88.1.2/32
+		# X-Forwarded-For se lee de derecha a izquierda: la IP del cliente es la
+		# última que añadió Traefik. Por defecto Caddy lee de izquierda a derecha
+		# y se quedaría con la primera, que la escribe el propio cliente
+		# (documentación de Caddy, trusted_proxies_strict).
+		trusted_proxies_strict
+	}
+}
+
+import comun.caddy
+
+# Solo atiende a Traefik. Si Traefik llegase con otra IP (por ejemplo, porque
+# Dokploy lo recreó y se conectó a edge sin --ip), Caddy no confiaría en él y
+# todos los clientes compartirían el contador del limitador sin que nada lo
+# avisara. Con esto, cualquier conexión que no venga de esa IP recibe 403 y el
+# fallo se ve. Es un handle y no un error suelto: Caddy ordena error después de
+# los handle de cada sitio, que lo saltarían; los handle son excluyentes y este
+# va el primero (comprobado con caddy adapt). El 403 lo pinta el handle_errors
+# de cada sitio, con sus cabeceras.
+(solo_traefik) {
+	@no_traefik not remote_ip 10.88.1.2
+	handle @no_traefik {
+		error 403
+	}
+}
+
+# Un solo puerto para los tres sitios: Traefik conserva el Host y Caddy elige
+# el sitio por él. 8080 y no 80: Caddy no es root ni tiene NET_BIND_SERVICE.
+# http:// explícito: Caddy no gestiona certificados aquí (automatic_https
+# omite estos nombres).
+http://canario-api.eduumr.dev:8080 {
+	import solo_traefik
+	import sitio_api
+}
+
+http://canario.eduumr.dev:8080 {
+	import solo_traefik
+	import sitio_denunciante
+}
+
+http://canario-personal.eduumr.dev:8080 {
+	import solo_traefik
+	import sitio_spa
+}
+
+# Sin solo_traefik: este sitio no reenvía nada a la API (solo responde 421), y
+# no tiene handle_errors que pintara el 403 con las cabeceras.
+http://:8080 {
+	import sitio_por_defecto
+}

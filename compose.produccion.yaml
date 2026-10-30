@@ -1,0 +1,77 @@
+# Producción en el VPS, detrás del Traefik de Dokploy (docs/operacion.md). Se
+# suma a docker-compose.yml, que no cambia:
+#
+#   docker compose -f docker-compose.yml -f compose.produccion.yaml up -d --wait
+#
+# Solo cambia lo que depende del entorno: los orígenes públicos, el Caddyfile,
+# la publicación de puertos y de dónde salen las imágenes. Todo lo demás
+# (redes internas, read_only, cap_drop, usuarios, secretos, límites) es lo
+# mismo que prueban las baterías en local.
+
+services:
+  # El VPS nunca construye: arranca las imágenes que se construyeron y probaron
+  # en el PC y se copiaron con docker save y docker load (docs/operacion.md).
+  # Así lo desplegado es exactamente lo probado, y el VPS, con poca memoria, no
+  # compila la SPA ni descarga paquetes de npm o PyPI. build se anula con
+  # !reset, image es el nombre que docker compose da a lo que construye con
+  # el proyecto canario (name: canario, docker-compose.yml) y pull_policy
+  # never impide que lo busque en un registro: si falta una imagen, "up" falla
+  # y se ve, en vez de construirla o de bajar otra.
+  postgres:
+    build: !reset null
+    image: canario-postgres
+    pull_policy: never
+
+  api:
+    build: !reset null
+    image: canario-api
+    pull_policy: never
+    environment:
+      # Los orígenes públicos (docs/operacion.md). El de la SPA lo comparte con
+      # el broker, como en docker-compose.yml.
+      CANARIO_ORIGEN_PERSONAL: &origen_personal "https://canario-personal.eduumr.dev"
+      # En local no se define y la API usa https://localhost:8444
+      # (app/rutas_web.py). Aquí es obligatorio: sin él, los formularios del
+      # denunciante exigirían el origen de localhost y se rechazarían todos.
+      CANARIO_ORIGEN_WEB: "https://canario.eduumr.dev"
+
+  broker:
+    build: !reset null
+    image: canario-broker
+    pull_policy: never
+    environment:
+      CANARIO_ORIGEN_PERSONAL: *origen_personal
+
+  gestion:
+    build: !reset null
+    image: canario-gestion
+    pull_policy: never
+
+  caddy:
+    build: !reset null
+    image: canario-caddy
+    pull_policy: never
+    # El Caddyfile de producción, dentro de la misma imagen (proxy/Dockerfile).
+    # Es la orden de la imagen oficial de Caddy con otra configuración.
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.produccion", "--adapter", "caddyfile"]
+    # Sin puertos publicados en el anfitrión: Traefik llega a Caddy por la red
+    # edge. Ni siquiera en 127.0.0.1: nada del anfitrión necesita hablarle.
+    ports: !reset []
+    networks:
+      edge:
+        # El nombre con el que lo busca Traefik (despliegue/traefik/canario.yml).
+        # Propio y no "caddy": Traefik está también en la red de Dokploy, donde
+        # otra aplicación podría tener un servicio que se llame igual.
+        aliases:
+          - canario-caddy
+
+networks:
+  edge:
+    # Interna en producción. En local tiene que publicar puertos, y una red
+    # interna no puede; aquí no publica nada, así que Caddy se queda sin salida
+    # a internet (cierra lo que docs/threat-model.md dejaba como residual: el
+    # proxy, que ve el texto en claro, podía abrir conexiones hacia fuera).
+    # Traefik se conecta a ella con la IP fija en la que confía Caddy
+    # (10.88.1.2, proxy/Caddyfile.produccion); su salida a internet es la de
+    # sus propias redes.
+    internal: true
