@@ -75,12 +75,19 @@ En el **PC** (PowerShell, desde la raíz del repositorio), con las baterías en 
 
    La arquitectura tiene que ser la del VPS (`amd64`; en el VPS, `uname -m` da `x86_64`). El cartero no lleva imagen propia: en producción usa `canario-api`, que es la misma con otro punto de entrada.
 
-En el **VPS** (`ssh ovh`, bash):
+En el **VPS** (`ssh ovh`, bash). Todo lo de Docker va con `sudo`: el usuario del VPS no está en el grupo `docker`, a propósito. Estar en ese grupo equivale a ser root sin contraseña (cualquiera de sus procesos puede arrancar un contenedor que monte `/`), y así cada orden con privilegios la pide y queda en el registro de `sudo`.
 
-2. Cargar las imágenes y traer el código (el compose, los scripts y la configuración de Traefik):
+2. Cargar las imágenes, comprobar que están y traer el código (el compose, los scripts y la configuración de Traefik):
 
    ```bash
-   docker load -i ~/canario-imagenes.tar && rm ~/canario-imagenes.tar
+   sudo docker load -i ~/canario-imagenes.tar
+   sudo docker image ls --format '{{.Repository}} {{.CreatedSince}}' | grep '^canario-'
+   ```
+
+   Tienen que salir las cinco (`canario-postgres`, `canario-api`, `canario-broker`, `canario-gestion` y `canario-caddy`) con la fecha de la construcción del paso 1. Solo entonces se borra el fichero: si la carga falló a medias, sin él habría que repetir la copia desde el PC.
+
+   ```bash
+   rm ~/canario-imagenes.tar
    git clone https://github.com/EduuMR73/Canario.git ~/apps/canario
    cd ~/apps/canario
    ```
@@ -94,58 +101,79 @@ En el **VPS** (`ssh ovh`, bash):
 4. Arrancar con el compose de producción encima del de siempre:
 
    ```bash
-   docker compose -f docker-compose.yml -f compose.produccion.yaml up -d --wait
+   sudo docker compose -f docker-compose.yml -f compose.produccion.yaml up -d --wait
    ```
 
    Si falta alguna imagen, falla y lo dice: no la construye ni la descarga (`pull_policy: never`).
 
-5. Conectar Traefik a la red `edge` con la IP fija en la que confía Caddy, y darle el enrutado:
+5. En Cloudflare, tres registros A a la IP del VPS, **solo DNS** (nube gris), como el resto de `eduumr.dev`: `canario`, `canario-personal` y `canario-api`. Con el proxy de Cloudflare habría un tercer salto delante de Traefik y la IP del cliente sería la de Cloudflare.
+
+   Comprobar desde el **PC** (PowerShell) que ya resuelven, por DNS sobre HTTPS y no con `nslookup`: en algunas redes el puerto 53 está interceptado y una caché devuelve "no existe" durante minutos aunque el registro ya esté en Cloudflare. Por lo mismo, no se consulta un nombre **antes** de crearlo: la respuesta negativa también se queda en caché.
+
+   ```powershell
+   curl.exe -sS -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=canario.eduumr.dev&type=A"
+   curl.exe -sS -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=canario-personal.eduumr.dev&type=A"
+   curl.exe -sS -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=canario-api.eduumr.dev&type=A"
+   ```
+
+   Cada una tiene que traer `"Status":0` y un `Answer` con la IP del VPS.
+
+6. Solo con los tres nombres resolviendo, conectar Traefik a la red `edge` con la IP fija en la que confía Caddy, y darle el enrutado (en el VPS):
 
    ```bash
-   docker network connect --ip 10.88.1.2 canario_edge dokploy-traefik
+   sudo docker network connect --ip 10.88.1.2 canario_edge dokploy-traefik
    sudo cp despliegue/traefik/canario.yml /etc/dokploy/traefik/dynamic/canario.yml
    ```
 
    Traefik vigila ese directorio y carga el fichero sin reiniciar. **Sin la IP fija**, Caddy no confía en Traefik y responde 403 a todo: el fallo se ve, en vez de meter a todos los clientes en el mismo contador del limitador.
 
-6. En Cloudflare, tres registros A a la IP del VPS, **solo DNS** (nube gris), como el resto de `eduumr.dev`: `canario`, `canario-personal` y `canario-api`. Con el proxy de Cloudflare habría un tercer salto delante de Traefik y la IP del cliente sería la de Cloudflare.
+   **El orden importa.** Al cargar el fichero, Traefik pide los certificados a Let's Encrypt; si los nombres aún no existen, Let's Encrypt responde NXDOMAIN y Traefik no lo vuelve a intentar por su cuenta. Si ya pasó, se retira el fichero, se espera a que Traefik lo descargue y se vuelve a poner:
 
-7. Comprobar desde el **PC** (PowerShell; `curl.exe`, no el alias `curl` de PowerShell 5):
-
-   ```powershell
-   curl.exe -sI https://canario-api.eduumr.dev/salud
-   curl.exe -sI http://canario.eduumr.dev/
+   ```bash
+   sudo rm /etc/dokploy/traefik/dynamic/canario.yml
+   sleep 10
+   sudo cp despliegue/traefik/canario.yml /etc/dokploy/traefik/dynamic/canario.yml
    ```
 
-   La primera, `200` con una sola `strict-transport-security: max-age=63072000` y el certificado de Let's Encrypt; la segunda, `301` a `https://canario.eduumr.dev/` (a un GET; a un POST Traefik responde `308`, que conserva el método).
+7. Comprobar desde el **PC** (PowerShell; `curl.exe`, no el alias `curl` de PowerShell 5). Con `-D - -o NUL` hace un GET y enseña solo las cabeceras. `-I` no sirve aquí: manda HEAD, y `/salud` solo admite GET (responde `405`) y Traefik redirige un HEAD con `308`, así que la comprobación fallaría sin que nada estuviera mal.
+
+   ```powershell
+   curl.exe -sS -D - -o NUL https://canario-api.eduumr.dev/salud
+   curl.exe -sS -D - -o NUL http://canario.eduumr.dev/
+   ```
+
+   La primera, `200` con una sola `strict-transport-security: max-age=63072000` y el certificado de Let's Encrypt; la segunda, `301` a `https://canario.eduumr.dev/` (a un GET; a cualquier otro método Traefik responde `308`, que lo conserva).
 
 8. Dar de alta la empresa y el primer admin como en el README, con los dos ficheros de compose:
 
    ```bash
-   docker compose -f docker-compose.yml -f compose.produccion.yaml run --rm gestion alta-empresa --nombre "Demo S.L." --zona Europe/Madrid
+   sudo docker compose -f docker-compose.yml -f compose.produccion.yaml run --rm gestion alta-empresa --nombre "Demo S.L." --zona Europe/Madrid
    ```
 
    El enlace de activación se abre en `https://canario-personal.eduumr.dev/activacion#<token>`.
 
 ### Actualizar
 
-Cada cambio se prueba en el PC y se despliega igual: los pasos 1 y 2 (con `git pull --ff-only` en vez de `git clone`) y el 4. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 5. Los secretos y la conexión de Traefik se quedan como están. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
+Cada cambio se prueba en el PC y se despliega igual: el paso 1, el 2 (en vez de `git clone`, `cd ~/apps/canario` y `git pull --ff-only`), el 3 y el 4, todos desde `~/apps/canario`. El paso 3 se repite siempre: `generar_secretos.py` nunca sobrescribe un fichero existente, solo crea los que una versión nueva necesita y aún no están (como `smtp_usuario.txt` y `smtp_contrasena.txt`), y sin ellos el paso 4 no arranca. Los que ya existen, incluida la clave maestra, se quedan como están. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 6; la conexión de Traefik se queda como está. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
 
 ### Lo que hay que vigilar
 
-- **Si Dokploy recrea su Traefik** (al actualizarlo o al cambiar sus ajustes), pierde la conexión a `edge`: los tres nombres dan 502 hasta repetir el `docker network connect` del paso 5. Le pasa lo mismo a Inmunia. Volver a conectarlo solo es pendiente del bloque B (modelo de amenazas, 6.20).
+- **Si Dokploy recrea su Traefik** (al actualizarlo o al cambiar sus ajustes), pierde la conexión a `edge`: los tres nombres dan 502 hasta repetir el `sudo docker network connect` del paso 6. Le pasa lo mismo a Inmunia. Volver a conectarlo solo es pendiente del bloque B (modelo de amenazas, 6.20).
 - **El correo sale solo con la credencial de Mailjet puesta.** Mientras `secrets/smtp_usuario.txt` tenga el marcador, el cartero lo dice al arrancar (`EVENTO correo_sin_credenciales`) y Mailjet rechaza cada correo (`EVENTO correo_fallido` en su log): el registro y los avisos no llegan. Se configura en [Correo en producción](#correo-en-producción-mailjet). Mientras tanto, las cuentas se crean por invitación desde **Cuentas** (el enlace se muestra una vez) o con `gestion alta-admin`.
-- **El log del cartero** (`docker compose ... logs cartero`) es donde se ve si el correo sale: `correo_aplazado` repetido es un proveedor que no responde, y `motivo=certificado` es que el certificado de quien contesta no vale, que es lo que se vería si alguien se hiciera pasar por Mailjet.
+- **El log del cartero** (`sudo docker compose -f docker-compose.yml -f compose.produccion.yaml logs cartero`) es donde se ve si el correo sale: `correo_aplazado` repetido es un proveedor que no responde, y `motivo=certificado` es que el certificado de quien contesta no vale, que es lo que se vería si alguien se hiciera pasar por Mailjet.
 - **El login con Google** sigue apagado mientras `secrets/google_client_id.txt` tenga el marcador. Para activarlo, el URI de redirección registrado en Google pasa a ser el de `canario-personal.eduumr.dev`.
 
 ### Correo en producción (Mailjet)
 
-El cartero (`app/cartero.py`) entrega a Mailjet por TLS implícito en el 465 (`in-v3.mailjet.com`), con el certificado verificado, desde `no-responder@canario.eduumr.dev` y sin el seguimiento de enlaces de Mailjet: con él, Mailjet reescribiría cada enlace por uno suyo y el token de las invitaciones acabaría en sus registros (modelo de amenazas, 6.3). Se configura una vez:
+El cartero (`app/cartero.py`) entrega a Mailjet por TLS implícito en el 465 (`in-v3.mailjet.com`), con el certificado verificado, desde `no-responder@canario.eduumr.dev` y sin el seguimiento de enlaces de Mailjet: con él, Mailjet reescribiría cada enlace por uno suyo y el token de las invitaciones acabaría en sus registros (modelo de amenazas, 6.3). Se configura una vez, en este orden: los pasos 1 a 3 en Mailjet y en Cloudflare; después, desplegar en el VPS una versión que ya tenga el cartero (como en [Actualizar](#actualizar)); y solo entonces los pasos 4 a 6, que lo necesitan en marcha.
 
 1. **La cuenta de Mailjet**, con segundo factor (una aplicación, no SMS). Quien entre en ella puede leer el historial de envíos y mandar correos con el nombre de Canario.
 2. **El dominio** `canario.eduumr.dev` como remitente en Mailjet. Mailjet da los registros DNS que tiene que haber: el de SPF y el de DKIM. Se añaden en Cloudflare **tal cual los da Mailjet** (TXT, en `canario.eduumr.dev` el de SPF y en el nombre que indique el de DKIM) y se espera a que Mailjet los dé por buenos. DKIM es el que importa para DMARC: firma con `d=canario.eduumr.dev`, que es el dominio del remitente.
+
+   Dos trampas de la pantalla de Mailjet. Enseña el SPF con Hostname `@`, que para Mailjet es el propio `canario.eduumr.dev`; en Cloudflare la zona es `eduumr.dev`, así que el nombre que se escribe es `canario` (con `@` el registro acabaría en `eduumr.dev`, el dominio de las demás aplicaciones). Y no se usan "Continue with Cloudflare" ni "Configure automatically": delegan en Mailjet la escritura en los DNS de `eduumr.dev`, que también son los de las demás aplicaciones, cuando basta con copiar dos registros a mano y revisarlos. Para comprobarlos, DNS sobre HTTPS como en el paso 5 de la primera vez, con `type=TXT`.
+
 3. **El seguimiento, apagado también en la cuenta** (Account settings, tracking). El cartero ya manda `X-Mailjet-TrackClick: 0` y `X-Mailjet-TrackOpen: 0` en cada correo, y Mailjet documenta que mandan sobre la cuenta; apagarlo en la cuenta es la segunda capa.
-4. **La credencial, en el VPS** (bash, en `~/apps/canario`). Es la clave API y la clave secreta de Mailjet (su sección SMTP). `read -s` no la enseña ni la deja en el historial, y `printf '%s'` la escribe sin salto de línea, como exige el cartero:
+4. **La credencial, en el VPS** (bash, en `~/apps/canario`), con el cartero ya desplegado. Es la clave API y la clave secreta de Mailjet (su sección SMTP). `read -s` no la enseña ni la deja en el historial, y `printf '%s'` la escribe sin salto de línea, como exige el cartero:
 
    ```bash
    read -rs -p "Clave API de Mailjet: " u; printf '%s' "$u" > secrets/smtp_usuario.txt; echo
