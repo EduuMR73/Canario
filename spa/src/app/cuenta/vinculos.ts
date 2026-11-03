@@ -8,7 +8,9 @@ import { TEXTO_INESPERADO, TEXTO_NO_DISPONIBLE, detalleDe, textoDeError } from '
 import { enfocarEncabezado } from '../nucleo/foco';
 import { Sesion } from '../nucleo/sesion';
 
-// Mi cuenta: las cuentas externas vinculadas (docs/threat-model.md, 6.19).
+// Mi cuenta, sección de las cuentas externas vinculadas (/cuenta/externas,
+// dentro de cuenta.ts; docs/threat-model.md, 6.19). Su título es el h1 de la
+// página, como en la de la contraseña.
 // Vincular y desvincular piden un código TOTP recién escrito: la sesión sola
 // (un token robado) no basta. La API avisa por correo al titular y a quienes
 // vigilan la cuenta (app/rutas_externo.py).
@@ -16,7 +18,8 @@ import { Sesion } from '../nucleo/sesion';
 // /yo es la única fuente de lo que está vinculado (nucleo/sesion.ts): tras
 // cada cambio se vuelve a pedir, y la página no lleva su propia copia.
 //
-// Vincular sale a Google y vuelve a /cuenta?vinculo=<resultado>. Con
+// Vincular sale a Google y vuelve a /cuenta/externas?vinculo=<resultado>
+// (app/rutas_externo.py, DESTINOS). Con
 // "pendiente", el ticket de la vuelta está en su cookie y esta página lo
 // completa una sola vez. La URL se limpia con replaceState antes de nada: al
 // recargar no se repite. Si aun así llega un 401 (otra pestaña, o el ticket
@@ -53,8 +56,8 @@ export function diaDe(iso: string): string {
   imports: [ReactiveFormsModule],
   host: { '(window:pageshow)': 'alMostrar($event)' },
   template: `
-    <section class="tarjeta seccion-cuenta" aria-labelledby="vinculos-titulo">
-      <h2 id="vinculos-titulo">Entrar con una cuenta externa</h2>
+    <h1 tabindex="-1">Entrar con una cuenta externa</h1>
+    <div class="tarjeta seccion-cuenta">
       @if (resultado(); as r) {
         <p id="vinculos-resultado" tabindex="-1" [class]="r.tipo" [attr.role]="r.tipo === 'aviso' ? 'status' : 'alert'">{{ r.texto }}</p>
       }
@@ -65,7 +68,7 @@ export function diaDe(iso: string): string {
           <p class="aviso">El acceso con cuentas externas no está configurado en este servidor: se entra con la contraseña y el código.</p>
         }
         @for (proveedor of lista; track proveedor) {
-          <h3>{{ registro[proveedor].nombre }}</h3>
+          <h2>{{ registro[proveedor].nombre }}</h2>
           @if (vinculoDe(proveedor); as vinculo) {
             <p>Vinculada el {{ dia(vinculo.creada) }}. Puede entrar con {{ registro[proveedor].nombre }} y su código desde un navegador de confianza.</p>
           } @else {
@@ -91,8 +94,10 @@ export function diaDe(iso: string): string {
             }
           </form>
         }
+      } @else {
+        <p role="status">Cargando las cuentas externas...</p>
       }
-    </section>
+    </div>
   `,
 })
 export class Vinculos {
@@ -119,7 +124,7 @@ export class Vinculos {
     const consulta = inject(ActivatedRoute).snapshot.queryParamMap;
     if (consulta.has('vinculo')) {
       const valor = consulta.get('vinculo');
-      inject(Location).replaceState('/cuenta');
+      inject(Location).replaceState('/cuenta/externas');
       if (valor === 'pendiente') {
         this.completar(PROVEEDOR_VUELTA);
       } else {
@@ -131,8 +136,7 @@ export class Vinculos {
     }
     // Aquí la lista sí se dice si falla: es la sección que la usa. Visible,
     // pero sin role="alert": no responde a nada que haya hecho la persona, y
-    // anunciarlo al abrir la página interrumpiría el formulario de la
-    // contraseña, que va antes.
+    // el foco ya lleva al h1, que se lee antes.
     this.api.proveedores().subscribe({
       next: (lista) => this.proveedores.set(lista),
       error: (error: unknown) => this.errorLista.set(textoDeError(error)),

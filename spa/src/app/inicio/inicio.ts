@@ -45,7 +45,7 @@ const DESCRIPCIONES: Record<Exclude<Ruta, '/inicio'>, string> = {
   '/cuentas': 'Invitar, repetir una invitación o dar de baja.',
   '/solicitudes': 'Aprobar o rechazar las peticiones de acceso.',
   '/auditoria': 'Quién hizo qué y si el registro está intacto.',
-  '/cuenta': 'Cambiar su contraseña.',
+  '/cuenta': 'Su contraseña y las cuentas externas con las que entra.',
 };
 
 @Component({

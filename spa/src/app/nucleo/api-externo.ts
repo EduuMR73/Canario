@@ -52,7 +52,7 @@ export const NAVEGAR = new InjectionToken<(url: string) => void>('navegar', {
 });
 
 // Lo que dice la vuelta del proveedor (app/rutas_externo.py, RESULTADOS):
-// /entrar?externo=<resultado> y /cuenta?vinculo=<resultado>. Lista cerrada:
+// /entrar?externo=<resultado> y /cuenta/externas?vinculo=<resultado>. Lista cerrada:
 // un valor que no esté aquí no pinta nada, y ningún texto de la URL llega a
 // la página.
 export type Resultado = 'cancelado' | 'no_disponible' | 'fallido';

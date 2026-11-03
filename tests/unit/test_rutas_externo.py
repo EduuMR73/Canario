@@ -252,7 +252,7 @@ class Vuelta(unittest.TestCase):
 
     def test_valida_deja_el_ticket_y_borra_el_flujo(self):
         for proposito, destino in ((externo.PROPOSITO_ACCESO, "/entrar/codigo"),
-                                   (externo.PROPOSITO_VINCULO, "/cuenta?vinculo=pendiente")):
+                                   (externo.PROPOSITO_VINCULO, "/cuenta/externas?vinculo=pendiente")):
             with self.subTest(proposito=proposito):
                 valor, sellado = flujo(proposito)
                 respuesta, canjear, falso = self.volver(con_cookies(NAVEGACION, flujo=sellado), consulta_de(valor))
@@ -316,7 +316,7 @@ class Vuelta(unittest.TestCase):
 
     def test_cancelar_y_otros_errores_del_proveedor(self):
         for proposito, prefijo in ((externo.PROPOSITO_ACCESO, "/entrar?externo="),
-                                   (externo.PROPOSITO_VINCULO, "/cuenta?vinculo=")):
+                                   (externo.PROPOSITO_VINCULO, "/cuenta/externas?vinculo=")):
             valor, sellado = flujo(proposito)
             cabeceras = con_cookies(NAVEGACION, flujo=sellado)
             with self.subTest(proposito=proposito, error="access_denied"):

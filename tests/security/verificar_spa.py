@@ -128,10 +128,13 @@ etapa. Prueba:
   enlaces se activan una instructora y un auditor; reinvitar avisa al titular
   en /inicio, anular quita el aviso, la baja pide confirmación (con el foco
   en el campo del código) y cierra la sesión del auditor (control: antes de
-  la baja entraba) y la propia cuenta no tiene botón de baja; los tres campos de contraseña de /cuenta tienen
-  su botón "Mostrar" (pulido 2c; control: la instructora abre /cuenta);
-  /cuenta va en dos tarjetas, la contraseña y la cuenta externa, cada una
-  con un solo campo de código (el mismo control);
+  la baja entraba) y la propia cuenta no tiene botón de baja; los tres campos de contraseña de Mi cuenta tienen
+  su botón "Mostrar" (pulido 2c; control: la instructora abre /cuenta y
+  llega a /cuenta/contrasena); cada sección de Mi cuenta (la contraseña y
+  las cuentas externas) es una página con su h1, su título, su enlace del
+  menú lateral con aria-current y un solo campo de código, y la instructora y
+  el auditor abren /cuenta/externas por su URL sin que el guard los mande a
+  /inicio (el mismo control);
   los tres roles ven en /inicio la tarjeta del canal con el enlace de su
   empresa en el 8444 y "Abrir el formulario" con pestaña nueva y rel
   noopener noreferrer, y el clic abre ese formulario con un 200;
@@ -537,6 +540,7 @@ PRUEBAS_UNITARIAS = (
     "al recargar ?vinculo=pendiente con el ticket gastado, relee /yo antes de dar el error",
     "vincular no lleva a una URL que no sea de Google",
     "sin proveedores avisa; vinculada enseña solo el proveedor y la fecha",
+    "mientras llega la lista de proveedores dice que está cargando, y después ya no",
     # El aviso de inactividad (nucleo/caducidad.ts y renovacion.ts).
     "la renovación pone en marcha de nuevo la cuenta atrás y se la cuenta a las demás pestañas",
     "una renovación sin los segundos falla de forma visible",
@@ -664,9 +668,14 @@ MOSTRAR_ENTRAR_PULSADO = [["entrar-contrasena", "text", ["button", "true", "Most
 MOSTRAR_CUENTA = [["cuenta-actual", "password", ["button", "false", "Mostrar la contraseña actual"]],
                   ["cuenta-nueva", "password", ["button", "false", "Mostrar la contraseña nueva"]],
                   ["cuenta-repetir", "password", ["button", "false", "Mostrar la contraseña nueva repetida"]]]
-# /cuenta: [h2, campos "Código de autenticación"] de cada tarjeta, en orden, y
-# los de toda la página. Los dos códigos, cada uno en la suya.
-TARJETAS_CUENTA = {"tarjetas": [["Cambiar la contraseña", 1], ["Entrar con una cuenta externa", 1]], "codigos": 2}
+# Mi cuenta: cada sección es una página (spa/src/app/cuenta/cuenta.ts). De
+# cada una: [h1, campos "Código de autenticación" de main, enlace del menú
+# lateral con aria-current, título]. Un solo código por pantalla.
+SECCIONES_CUENTA = {
+    "/cuenta/contrasena": ["Cambiar la contraseña", 1, "Contraseña", "Contraseña - Mi cuenta - Canario"],
+    "/cuenta/externas": ["Entrar con una cuenta externa", 1, "Cuentas externas",
+                         "Cuentas externas - Mi cuenta - Canario"],
+}
 SALIDA_ACTIVADA = ["A", "/entrar", "rgb(250, 204, 21)"]
 SALIDA_VERIFICADA = "/entrar"
 TEXTO_VERIFICADO = ("Email confirmado. Un admin de su empresa revisará la solicitud; si la aprueba, recibirá "
@@ -782,7 +791,7 @@ BOTONES_OCUPADOS = {
     # "Cerrar la sesión" y "Seguir conectado" del aviso de inactividad.
     "armazon/armazon.ts": 2,
     "auditoria/auditoria.ts": 3,
-    "cuenta/cuenta.ts": 1,
+    "cuenta/contrasena.ts": 1,
     # Vincular y desvincular, uno u otro según el estado.
     "cuenta/vinculos.ts": 2,
     "cuentas/cuentas.ts": 5,
@@ -819,7 +828,9 @@ CONTRASENA_NUEVAS = secrets.token_urlsafe(18)
 MENU_ADMIN = ["Inicio", "Denuncias", "Cuentas", "Solicitudes", "Auditoría", "Mi cuenta"]
 MENU_INSTRUCTOR = ["Inicio", "Denuncias", "Mi cuenta"]
 MENU_AUDITOR = ["Inicio", "Auditoría", "Mi cuenta"]
-H1_MI_CUENTA = "Mi cuenta"
+# /cuenta lleva a la primera sección, la de la contraseña.
+RUTA_MI_CUENTA = "/cuenta/contrasena"
+H1_MI_CUENTA = "Cambiar la contraseña"
 PATRON_ENLACE = re.compile(r"https://localhost:8445/activacion#[0-9a-f]{32}\.[A-Za-z0-9_-]{43}")
 TEXTO_SIN_ROL = f"Elija el rol de {EMAIL_REGISTRO} antes de aprobar."
 TEXTO_APROBADA = (f"Aprobada: {EMAIL_REGISTRO} recibirá un correo para activar su cuenta como Auditor. "
@@ -927,7 +938,8 @@ FONDO_CLARO = "rgb(255, 255, 255)"
 FONDO_OSCURO = "rgb(11, 13, 16)"
 FUENTES_ESPERADAS = [["Geist", "loaded"]]
 # Las páginas del admin que se miran a 320 px, además de /entrar.
-RUTAS_ANCHO = ["/inicio", "/denuncias", "/cuentas", "/solicitudes", "/auditoria", "/cuenta"]
+RUTAS_ANCHO = ["/inicio", "/denuncias", "/cuentas", "/solicitudes", "/auditoria", "/cuenta/contrasena",
+               "/cuenta/externas"]
 # p) Pulido 1. A 1280 px, lo que queda entre el botón de cerrar la sesión y el
 # borde derecho: el relleno de la barra (--espacio-6, 1.5rem). Los títulos de
 # /cuentas (h1 y h2) y un h3, con su tamaño y su peso. Y el contraste mínimo de
@@ -1085,13 +1097,14 @@ MOSTRAR = ("() => [...document.querySelectorAll('main input')].map((c) => "
            "[c, document.querySelector('main button[aria-controls=\"' + c.id + '\"]')])"
            ".filter(([c, b]) => c.type === 'password' || b !== null).map(([c, b]) => "
            "[c.id, c.type, b === null ? null : [b.type, b.getAttribute('aria-pressed'), b.textContent.trim()]])")
-# Las tarjetas de main: [texto del h2, cuántos campos de código tiene], y los
-# campos de código de toda la página.
-TARJETAS = ("() => { const codigos = (r) => [...r.querySelectorAll('label')]"
-            ".filter((e) => e.textContent.trim() === 'Código de autenticación').length; "
-            "return {tarjetas: [...document.querySelectorAll('main .tarjeta')]"
-            ".map((t) => [t.querySelector('h2')?.textContent.trim() ?? null, codigos(t)]), "
-            "codigos: codigos(document.querySelector('main'))}; }")
+# Una sección de Mi cuenta: [h1 de main, campos "Código de autenticación" de
+# main, textos de los enlaces de main con aria-current="page" (el menú lateral;
+# el de la barra está en header) unidos con "|", título del documento].
+SECCION = ("() => [document.querySelector('main h1')?.textContent.trim() ?? null, "
+           "[...document.querySelectorAll('main label')]"
+           ".filter((e) => e.textContent.trim() === 'Código de autenticación').length, "
+           "[...document.querySelectorAll('main nav a[aria-current=\"page\"]')]"
+           ".map((a) => a.textContent.trim()).join('|') || null, document.title]")
 res = {}
 eventos, consola, errores = [], [], []
 ultimo = {"paso": -1}
@@ -1686,20 +1699,24 @@ async def pasos_roles(navegador):
     res["menu_instructora"] = await menu(instructora)
     res["instructora_cuentas"] = await abrir(instructora, "/cuentas")
     res["instructora_solicitudes"] = await abrir(instructora, "/solicitudes")
-    # La pila de la batería no anuncia Google (r): sin él, la tarjeta de la
-    # cuenta externa no tiene formulario y no habría segundo código que medir.
-    # Se simula solo mientras se mide: más abajo, el cambio de contraseña busca
-    # el único campo de código de la página.
+    # La pila de la batería no anuncia Google (r): sin él, la sección de las
+    # cuentas externas no tiene formulario y no habría campo de código que
+    # medir. Se simula solo mientras se mide.
     await simular(instructora, PROVEEDORES, 200, {"proveedores": ["google"]})
+    # /cuenta sola: el guard la deja pasar y lleva a la primera sección.
     res["instructora_cuenta"] = await abrir(instructora, "/cuenta")
     res["mostrar_cuenta"] = await instructora.evaluate(MOSTRAR)
-    # La tarjeta de la cuenta externa se rellena al llegar la lista de
-    # proveedores. Si no llega, se mide igual y la prueba lo dirá.
+    secciones = {"/cuenta/contrasena": await instructora.evaluate(SECCION)}
+    # Por su URL: una sección hija sin roles propios iría a /inicio.
+    res["instructora_externas"] = await abrir(instructora, "/cuenta/externas")
+    # La sección se rellena al llegar la lista de proveedores. Si no llega,
+    # se mide igual y la prueba lo dirá.
     try:
         await instructora.wait_for_selector("#vinculos-codigo-google", timeout=10000)
     except Exception:
         pass
-    res["tarjetas_cuenta"] = await instructora.evaluate(TARJETAS)
+    secciones["/cuenta/externas"] = await instructora.evaluate(SECCION)
+    res["secciones_cuenta"] = secciones
     await instructora.context.unroute(ORIGEN + PROVEEDORES)
     res["usuarios_instructora"] = await estado_api(instructora, USUARIOS)
 
@@ -1709,6 +1726,7 @@ async def pasos_roles(navegador):
     await entrar(auditor, email_auditor, contrasena, secreto_auditor)
     res["menu_auditor"] = await menu(auditor)
     res["auditor_cuentas"] = await abrir(auditor, "/cuentas")
+    res["auditor_externas"] = await abrir(auditor, "/cuenta/externas")
     res["auditor_inicio_antes"] = await abrir(auditor, "/inicio")
 
     # El canal de la empresa en el inicio de los tres roles.
@@ -2887,11 +2905,11 @@ async def pasos_externo(navegador):
     # Mi cuenta sin proveedores, y la vuelta de un vínculo sin ticket.
     admin = await pagina_nueva(navegador, "admin")
     await entrar(admin, email_admin, contrasena_admin, secreto_admin)
-    await abrir(admin, "/cuenta")
+    await abrir(admin, "/cuenta/externas")
     res["cuenta_avisos_real"] = await admin.locator("app-vinculos .aviso").all_inner_texts()
     res["cuenta_formularios_real"] = await admin.locator("app-vinculos form").count()
     marca = len(eventos)
-    await admin.goto(ORIGEN + "/cuenta?vinculo=pendiente")
+    await admin.goto(ORIGEN + "/cuenta/externas?vinculo=pendiente")
     await h1(admin)
     res["pendiente_real"] = await resultado_vinculo(admin)
     res["pendiente_url"] = await admin.evaluate(URL)
@@ -2908,7 +2926,7 @@ async def pasos_externo(navegador):
     # (el cuerpo es el que da con el broker parado). /entrar no pinta botón
     # ni error; Mi cuenta enseña el error sin role=alert.
     await simular(admin, PROVEEDORES, 503, {"detalle": NO_DISPONIBLE})
-    await abrir(admin, "/cuenta")
+    await abrir(admin, "/cuenta/externas")
     lista = admin.locator("#vinculos-lista")
     await lista.wait_for()
     res["caida_cuenta"] = [(await lista.inner_text()).strip(), await lista.get_attribute("role"),
@@ -2926,7 +2944,7 @@ async def pasos_externo(navegador):
     # Mi cuenta con Google anunciado y un 409 al completar el vínculo.
     await simular(admin, PROVEEDORES, 200, {"proveedores": ["google"]})
     await simular(admin, VINCULO, 409, {"detalle": DUPLICADO})
-    await admin.goto(ORIGEN + "/cuenta?vinculo=pendiente")
+    await admin.goto(ORIGEN + "/cuenta/externas?vinculo=pendiente")
     await h1(admin)
     res["vinculo_409"] = await resultado_vinculo(admin)
     await admin.locator("app-vinculos form").first.wait_for()
@@ -4001,12 +4019,19 @@ def seccion_l():
     pasa(res.get("menu_instructora") == MENU_INSTRUCTOR and res.get("menu_auditor") == MENU_AUDITOR,
          f"l) el menu de la instructora y del auditor ({res.get('menu_instructora')}, {res.get('menu_auditor')})")
     propia = res.get("instructora_cuenta") or {}
-    control_guard = propia == {"ruta": "/cuenta", "h1": H1_MI_CUENTA}
-    pasa(control_guard, f"l) control: la instructora abre /cuenta por su URL ({propia})")
-    negativo(f"l) en /cuenta, cada campo de contrasena tiene su boton Mostrar, sin pulsar ({res.get('mostrar_cuenta')})",
-             res.get("mostrar_cuenta") == MOSTRAR_CUENTA, control_guard)
-    negativo(f"l) /cuenta va en dos tarjetas, cada una con un solo campo de codigo ({res.get('tarjetas_cuenta')})",
-             res.get("tarjetas_cuenta") == TARJETAS_CUENTA, control_guard)
+    control_guard = propia == {"ruta": RUTA_MI_CUENTA, "h1": H1_MI_CUENTA}
+    pasa(control_guard, f"l) control: la instructora abre /cuenta por su URL y llega a {RUTA_MI_CUENTA} ({propia})")
+    negativo(f"l) en Mi cuenta, cada campo de contrasena tiene su boton Mostrar, sin pulsar "
+             f"({res.get('mostrar_cuenta')})", res.get("mostrar_cuenta") == MOSTRAR_CUENTA, control_guard)
+    # Las secciones hijas declaran sus roles (app.routes.ts): sin ellos, el
+    # guard las mandaría a /inicio.
+    for clave in ("instructora_externas", "auditor_externas"):
+        negativo(f"l) {clave.split('_')[0]} abre /cuenta/externas por su URL sin volver a /inicio ({res.get(clave)})",
+                 res.get(clave) == {"ruta": "/cuenta/externas", "h1": SECCIONES_CUENTA["/cuenta/externas"][0]},
+                 control_guard)
+    negativo(f"l) cada seccion de Mi cuenta tiene su h1, un solo campo de codigo, su enlace del menu lateral con "
+             f"aria-current y su titulo ({res.get('secciones_cuenta')})",
+             res.get("secciones_cuenta") == SECCIONES_CUENTA, control_guard)
     for clave, ruta_pedida in (("instructora_cuentas", "/cuentas"), ("instructora_solicitudes", "/solicitudes"),
                                ("auditor_cuentas", "/cuentas")):
         negativo(f"l) {clave.split('_')[0]} pide {ruta_pedida} por su URL y vuelve a /inicio ({res.get(clave)})",
@@ -4936,7 +4961,7 @@ def seccion_r():
     releido = control_pendiente and ["GET", RUTA_YO, 200] in pendiente[posts[0] + 1:]
     pasa(releido and not any(r[1] == RUTA_RENOVACION for r in pendiente),
          "r) tras ese 401 relee /yo, sin renovar la sesion")
-    pasa(res.get("pendiente_real") == ["alert", TEXTO_VINCULO_CADUCADO] and res.get("pendiente_url") == "/cuenta",
+    pasa(res.get("pendiente_real") == ["alert", TEXTO_VINCULO_CADUCADO] and res.get("pendiente_url") == "/cuenta/externas",
          f"r) y da el error con la URL limpia ({res.get('pendiente_real')}, {res.get('pendiente_url')!r})")
     negativo(f"r) recargar /cuenta no repite el POST del vinculo ({res.get('recarga_api')})",
              ["POST", RUTA_VINCULO] not in (res.get("recarga_api") or []), control_pendiente)

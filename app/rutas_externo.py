@@ -94,10 +94,14 @@ RESULTADOS = (CANCELADO, NO_DISPONIBLE, FALLIDO)
 # Destino de cada propósito si todo va bien y prefijo del destino si falla.
 # Mientras no se ha abierto el flujo no se sabe el propósito: se toma el
 # acceso. Rutas de la SPA sin punto (proxy/Caddyfile trata las rutas con
-# extensión como ficheros).
+# extensión como ficheros). El vínculo vuelve a la página donde vive
+# (spa/src/app/cuenta/vinculos.ts, /cuenta/externas): si esa página se muda,
+# se cambia aquí, en la SPA (app.routes.ts) y en sus pruebas a la vez. La API
+# y la SPA se despliegan juntas (docs/operacion.md): con versiones distintas,
+# la vuelta caería en una página que no completa el vínculo.
 DESTINOS = {
     externo.PROPOSITO_ACCESO: ("/entrar/codigo", "/entrar?externo="),
-    externo.PROPOSITO_VINCULO: ("/cuenta?vinculo=pendiente", "/cuenta?vinculo="),
+    externo.PROPOSITO_VINCULO: ("/cuenta/externas?vinculo=pendiente", "/cuenta/externas?vinculo="),
 }
 # Error de la vuelta (RFC 6749, 4.1.2.1) cuando la persona cancela en el
 # proveedor: tiene su propio mensaje en la SPA. Cualquier otro es un fallo.

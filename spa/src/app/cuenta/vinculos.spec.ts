@@ -56,7 +56,7 @@ function crear(consulta: Record<string, string> = {}): Pagina {
   return { pagina, raiz: pagina.nativeElement as HTMLElement, http, replaceState, navegar };
 }
 
-// La cuenta que el armazón ya ha cargado antes de abrir /cuenta.
+// La cuenta que el armazón ya ha cargado antes de abrir /cuenta/externas.
 async function conCuenta(p: Pagina, cuenta: object): Promise<void> {
   const carga = TestBed.inject(Sesion).cargar();
   p.http.expectOne(YO).flush(cuenta);
@@ -74,7 +74,7 @@ describe('cuentas externas vinculadas', () => {
 
   it('al recargar ?vinculo=pendiente con el ticket gastado, relee /yo antes de dar el error', async () => {
     const p = crear({ vinculo: 'pendiente' });
-    expect(p.replaceState).toHaveBeenCalledWith('/cuenta');
+    expect(p.replaceState).toHaveBeenCalledWith('/cuenta/externas');
     const completar = p.http.expectOne(VINCULO);
     expect(completar.request.method).toBe('POST');
     completar.flush({ detalle: 'credenciales no válidas' }, NO_VALIDO);
@@ -143,12 +143,23 @@ describe('cuentas externas vinculadas', () => {
     await conCuenta(con, VINCULADA);
     // Control del aviso: con Google configurado no sale.
     expect(con.raiz.querySelector('.aviso')).toBeNull();
-    expect(con.raiz.querySelector('h3')?.textContent?.trim()).toBe('Google');
-    expect(con.raiz.querySelector('h3 + p')?.textContent?.trim()).toBe(
+    expect(con.raiz.querySelector('h2')?.textContent?.trim()).toBe('Google');
+    expect(con.raiz.querySelector('h2 + p')?.textContent?.trim()).toBe(
       'Vinculada el 25/10/2026. Puede entrar con Google y su código desde un navegador de confianza.');
     expect(con.raiz.querySelector('button[type="submit"]')?.textContent?.trim()).toBe('Desvincular Google');
     expect(con.raiz.textContent).not.toContain('persona@canario.test');
     // Una fecha que no se puede leer se enseña tal cual.
     expect(diaDe('no-es-una-fecha')).toBe('no-es-una-fecha');
+  });
+
+  it('mientras llega la lista de proveedores dice que está cargando, y después ya no', async () => {
+    const p = crear();
+    expect(p.raiz.querySelector('[role="status"]')?.textContent?.trim()).toBe('Cargando las cuentas externas...');
+    expect(p.raiz.querySelector('form')).toBeNull();
+    p.http.expectOne(PROVEEDORES).flush({ proveedores: ['google'] });
+    await conCuenta(p, CUENTA);
+    // Control: con la lista, el aviso de carga se va y sale el formulario.
+    expect(p.raiz.querySelector('[role="status"]')).toBeNull();
+    expect(p.raiz.querySelector('form')).not.toBeNull();
   });
 });

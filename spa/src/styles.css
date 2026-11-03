@@ -776,12 +776,67 @@ main.acceso {
   text-align: center;
 }
 
-/* Mi cuenta: una tarjeta por tarea, del ancho de los formularios del
-   armazón (la de /entrar es más estrecha). Va después de .tarjeta para
-   ganarle el max-width con la misma especificidad. */
+/* Mi cuenta (cuenta/cuenta.ts): el menú lateral y la sección abierta, en
+   los 64rem del armazón como el resto de las páginas. Antes era una
+   columna de 34rem pegada a la izquierda, con medio main vacío al lado. La
+   tarjeta de la sección (.seccion-cuenta) ocupa su columna: va después de
+   .tarjeta y le gana el max-width con la misma especificidad, sin subirla.
+   El formulario de dentro sigue
+   con su medida (.formulario). Por debajo de 48rem el menú pasa encima y
+   nada desborda a 320 px (WCAG 2.2, 1.4.10). Colores: solo parejas que ya
+   comprueba tests/security/verificar_spa.py. */
+.cuenta {
+  display: grid;
+  grid-template-columns: 14rem minmax(0, 1fr);
+  gap: var(--espacio-6) 2rem;
+  align-items: start;
+}
+
+@media (max-width: 48rem) {
+  .cuenta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.cuenta-menu-titulo {
+  margin: 0 0 var(--espacio-2);
+  color: var(--color-texto-suave);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.cuenta-menu ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cuenta-menu a {
+  display: block;
+  padding: var(--espacio-2) var(--espacio-3);
+  border-left: 3px solid transparent;
+  border-radius: var(--radio);
+  color: var(--color-texto);
+  text-decoration: none;
+}
+
+/* La sección actual no se distingue solo por el color: va en negrita, con
+   una raya a la izquierda y aria-current="page". Raya con border y no con
+   box-shadow, como en la barra: los colores forzados quitan las sombras. */
+.cuenta-menu a[aria-current="page"] {
+  font-weight: 600;
+  background: var(--color-superficie);
+  border-left-color: var(--color-acento);
+}
+
+@media (hover: hover) {
+  .cuenta-menu a:hover {
+    background: var(--color-secundario-encima);
+  }
+}
+
 .seccion-cuenta {
-  max-width: var(--ancho-formulario);
-  margin-bottom: var(--espacio-6);
+  max-width: none;
 }
 
 /* Armazón: la barra con la marca, el menú del rol, la cuenta y el cierre.

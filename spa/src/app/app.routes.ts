@@ -6,7 +6,9 @@ import { Registro } from './acceso/registro/registro';
 import { Verificacion } from './acceso/verificacion/verificacion';
 import { Armazon } from './armazon/armazon';
 import { Auditoria } from './auditoria/auditoria';
+import { Contrasena } from './cuenta/contrasena';
 import { Cuenta } from './cuenta/cuenta';
+import { Vinculos } from './cuenta/vinculos';
 import { Cuentas } from './cuentas/cuentas';
 import { Denuncias } from './denuncias/denuncias';
 import { Expediente } from './denuncias/expediente';
@@ -26,7 +28,7 @@ import { Solicitudes } from './solicitudes/solicitudes';
 //
 // /activacion y /registro/verificacion son las rutas de los enlaces de los
 // correos (app/solicitudes.py): si cambian aquí, cambian allí. Lo mismo
-// /entrar/codigo, /entrar y /cuenta, los destinos de la vuelta de Google
+// /entrar/codigo, /entrar y /cuenta/externas, los destinos de la vuelta de Google
 // (app/rutas_externo.py, DESTINOS).
 //
 // Las páginas con sesión van dentro del armazón, y permitirPorRol comprueba
@@ -66,7 +68,27 @@ export const routes: Routes = [
         path: 'auditoria', component: Auditoria, title: 'Auditoría - Canario',
         data: { roles: MENU.auditoria.roles },
       },
-      { path: 'cuenta', component: Cuenta, title: 'Mi cuenta - Canario', data: { roles: MENU.cuenta.roles } },
+      // Mi cuenta (cuenta/cuenta.ts): el menú lateral y una sección hija por
+      // tarea. Las hijas declaran sus roles: permitirPorRol corre también
+      // para ellas, y Angular no les pasa la data de un padre con componente
+      // (paramsInheritanceStrategy 'emptyOnly'); sin roles, no se abrirían
+      // para nadie. /cuenta sola lleva a la primera sección.
+      {
+        path: 'cuenta', component: Cuenta, data: { roles: MENU.cuenta.roles },
+        children: [
+          { path: '', pathMatch: 'full', redirectTo: 'contrasena' },
+          {
+            path: 'contrasena', component: Contrasena, title: 'Contraseña - Mi cuenta - Canario',
+            data: { roles: MENU.cuenta.roles },
+          },
+          // La vuelta de Google al vincular llega aquí (app/rutas_externo.py,
+          // DESTINOS): si esta ruta cambia, cambia allí.
+          {
+            path: 'externas', component: Vinculos, title: 'Cuentas externas - Mi cuenta - Canario',
+            data: { roles: MENU.cuenta.roles },
+          },
+        ],
+      },
     ],
   },
   { path: '**', component: NoEncontrada, title: 'Página no encontrada - Canario' },

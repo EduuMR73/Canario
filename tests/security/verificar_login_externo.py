@@ -194,12 +194,12 @@ RUTA_SESION_EXTERNA = "/v1/personal/sesiones/externa"
 RUTA_VINCULO_INICIO = "/v1/personal/externo/google/vinculo/inicio"
 RUTA_VINCULO = "/v1/personal/externo/google/vinculo"
 DESTINO_ACCESO = "/entrar/codigo"
-DESTINO_VINCULO = "/cuenta?vinculo=pendiente"
+DESTINO_VINCULO = "/cuenta/externas?vinculo=pendiente"
 FALLIDO_ACCESO = "/entrar?externo=fallido"
 CANCELADO_ACCESO = "/entrar?externo=cancelado"
 NO_DISPONIBLE_ACCESO = "/entrar?externo=no_disponible"
-FALLIDO_VINCULO = "/cuenta?vinculo=fallido"
-CANCELADO_VINCULO = "/cuenta?vinculo=cancelado"
+FALLIDO_VINCULO = "/cuenta/externas?vinculo=fallido"
+CANCELADO_VINCULO = "/cuenta/externas?vinculo=cancelado"
 
 CUERPO_401 = '{"detalle": "credenciales no válidas"}'.encode()
 CUERPO_403 = b'{"detalle": "permiso denegado"}'
