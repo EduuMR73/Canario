@@ -192,22 +192,28 @@ En el VPS (bash, en `~/apps/canario`):
 
    `verify` no tiene que decir nada. `security` da una nota de exposición; si una directiva de endurecimiento rompe la unidad en el paso 3, se quita esa sola y se anota el motivo en el comentario de la unidad.
 
-3. Una ejecución con todo bien, antes de activar el timer. Tiene que acabar en `status=0/SUCCESS` y sin ninguna línea `RECONECTADO`:
+3. Una ejecución con todo bien, antes de activar el timer. `systemctl start` espera a que termine; tiene que dar `rc=0`:
 
    ```bash
-   sudo systemctl start canario-reconectar-traefik.service
-   systemctl status canario-reconectar-traefik.service --no-pager
-   sudo journalctl -u canario-reconectar-traefik.service --no-pager -n 20
+   sudo systemctl start canario-reconectar-traefik.service; echo "rc=$?"
    ```
 
-4. Activar el timer:
+   Aquí `systemctl status` no sirve: una unidad inactiva que nada referencia se descarga de memoria (`CollectMode=` en `systemd.unit`) y `status` la enseña sin historia, como si nunca hubiera corrido. El journal también queda vacío: con todo bien el script no escribe nada y `LogLevelMax=notice` calla el inicio y el fin.
+
+4. Activar el timer y, pasado un minuto y medio, ver su última ejecución. Con el timer, la unidad queda referenciada y `status` ya la enseña: tiene que decir `status=0/SUCCESS` con la hora de hace un momento. Si dice `failed`, el endurecimiento de la unidad rompe algo: se para aquí y se mira el journal.
 
    ```bash
    sudo systemctl enable --now canario-reconectar-traefik.timer
-   systemctl list-timers canario-reconectar-traefik.timer
+   systemctl list-timers canario-reconectar-traefik.timer --no-pager
+   systemctl status canario-reconectar-traefik.service --no-pager
    ```
 
-5. El vigía avisa por Telegram de los tres ficheros nuevos. Se mira que el aviso diga **exactamente** esos tres (`/usr/local/sbin/canario-reconectar-traefik.py` y las dos unidades) y, solo entonces, se rehace su foto para que no los vuelva a contar como cambio:
+5. El vigía avisa por Telegram de los ficheros nuevos, en uno o dos avisos. Se mira que digan **exactamente** estos cuatro y, solo entonces, se rehace su foto para que no los vuelva a contar como cambio:
+
+   - `/usr/local/sbin/canario-reconectar-traefik.py`
+   - `/etc/systemd/system/canario-reconectar-traefik.service`
+   - `/etc/systemd/system/canario-reconectar-traefik.timer`
+   - `/etc/systemd/system/timers.target.wants/canario-reconectar-traefik.timer` (el enlace que crea `enable`)
 
    ```bash
    sudo /usr/local/sbin/vigia.sh base
@@ -225,7 +231,7 @@ En el VPS (bash, en `~/apps/canario`):
    sudo docker network disconnect canario_edge dokploy-traefik
    ```
 
-   El bucle tiene que dejar de dar `200` justo después (un plazo agotado, que `curl.exe` enseña como `000`, o un `502`) y volver a `200` en 70 s como mucho. No se espera un estado concreto: con el Traefik de la batería, la primera petición tras el corte no recibe respuesta en 15 s, aunque se suponía un `502` (`verificar_despliegue.py`, g). Si a los 70 s no ha vuelto el `200`, **se para aquí** y se mira el journal. En el journal queda la reconexión:
+   El bucle tiene que dejar de dar `200` justo después (un plazo agotado, que `curl.exe` enseña como `000`, o un `502`) y volver a `200` en 70 s como mucho. No se espera un estado concreto: con el Traefik de la batería, la primera petición tras el corte no recibe respuesta en 15 s, aunque se suponía un `502` (`verificar_despliegue.py`, g). En el VPS, el 3 de noviembre de 2026: un `000`, cuatro `502` y `200` a los 40 s, más o menos. Si a los 70 s no ha vuelto el `200`, **se para aquí** y se mira el journal. En el journal queda la reconexión:
 
    ```bash
    sudo journalctl -u canario-reconectar-traefik.service --no-pager -p warning -n 5
