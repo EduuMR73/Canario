@@ -156,6 +156,8 @@ En el **VPS** (`ssh ovh`, bash). Todo lo de Docker va con `sudo`: el usuario del
 
 Cada cambio se prueba en el PC y se despliega igual: el paso 1, el 2 (en vez de `git clone`, `cd ~/apps/canario` y `git pull --ff-only`), el 3 y el 4, todos desde `~/apps/canario`. El paso 3 se repite siempre: `generar_secretos.py` nunca sobrescribe un fichero existente, solo crea los que una versión nueva necesita y aún no están (como `smtp_usuario.txt` y `smtp_contrasena.txt`), y sin ellos el paso 4 no arranca. Los que ya existen, incluida la clave maestra, se quedan como están. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 6; la conexión de Traefik se queda como está. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
 
+La API (imagen `canario-api`) y la SPA (va dentro de `canario-caddy`) se despliegan y se revierten juntas, siempre de la misma versión del repositorio: el paso 1 construye las dos y el 4 las arranca a la vez. Nunca se cambia una sola de esas imágenes. Hay contratos entre las dos que no se comprueban en marcha. Por ejemplo, la vuelta de Google al vincular una cuenta va a `/cuenta/externas` (`app/rutas_externo.py`, `DESTINOS`); con una API nueva y una SPA vieja, o al revés, esa vuelta cae en una página que no completa el vínculo, y la persona no ve ningún error.
+
 Después de cada `git pull`, la copia instalada del reconciliador tiene que ser igual a la del repositorio (más abajo). `cmp` no dice nada si son iguales:
 
 ```bash
@@ -310,7 +312,7 @@ Para activarlo:
 
 3. Arrancar como siempre (`docker compose up -d --build --wait`). El log del broker dice `PROVEEDOR ACTIVADO` con la URI de redirección que usa.
 
-4. Usarlo: la primera vez se entra con contraseña y código, que deja el dispositivo de confianza en ese navegador. En **Mi cuenta**, "Vincular Google" pide un código y lleva a Google. Desde entonces, en ese navegador, "Iniciar sesión con Google" y el código. Google nunca sustituye al código ni crea la confianza.
+4. Usarlo: la primera vez se entra con contraseña y código, que deja el dispositivo de confianza en ese navegador. En **Mi cuenta**, sección **Cuentas externas**, "Vincular Google" pide un código y lleva a Google. Desde entonces, en ese navegador, "Iniciar sesión con Google" y el código. Google nunca sustituye al código ni crea la confianza.
 
 La cuenta de Google Cloud que administra el cliente necesita un segundo factor resistente (passkey o una aplicación, no SMS): quien la controle puede cambiar la URI de redirección y llevarse los códigos. Para comprobar el canje contra el Google real, `verificar_google_real.py` ([pruebas.md](pruebas.md)).
 

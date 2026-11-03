@@ -148,7 +148,7 @@ Invitar, reinvitar, dar de baja y aprobar una solicitud piden además un código
 
 ### 8. Entrar con Google (opcional)
 
-Solo si se ha configurado ([operacion.md](docs/operacion.md)); si no, el botón no aparece. En **Mi cuenta**, "Vincular Google" con un código. Después, en el mismo navegador, "Iniciar sesión con Google" en `/entrar` y el código: Google sustituye a la contraseña, no al código.
+Solo si se ha configurado ([operacion.md](docs/operacion.md)); si no, el botón no aparece. En **Mi cuenta**, sección **Cuentas externas**, "Vincular Google" con un código. Después, en el mismo navegador, "Iniciar sesión con Google" en `/entrar` y el código: Google sustituye a la contraseña, no al código.
 
 ### Qué más se puede comprobar
 

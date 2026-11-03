@@ -76,7 +76,9 @@ La imagen del proxy compila la SPA en una primera etapa con Node y copia solo el
 | `/denuncias` | Admin e instructor: el listado con filtro por estado. El admin ve todas y las asigna; el instructor, las suyas |
 | `/denuncias/<id>` | Admin e instructor, con la denuncia asignada: abrir el expediente con un botón (cada lectura queda en la auditoría y cuenta para el tope diario), escribir al denunciante, cambiar el estado y, solo el admin, declararla no veraz |
 | `/auditoria` | Admin y auditor: quién hizo qué, lo más reciente primero, con emails; cargar las anteriores, actualizar y verificar la cadena |
-| `/cuenta` | Con sesión, para todos los roles: cambiar la contraseña, que cierra las demás sesiones |
+| `/cuenta` | Con sesión, para todos los roles: Mi cuenta, con un menú lateral y una página por sección. `/cuenta` sola lleva a la primera |
+| `/cuenta/contrasena` | Cambiar la contraseña, con la actual y un código TOTP; cierra las demás sesiones |
+| `/cuenta/externas` | Vincular o desvincular una cuenta externa (Google), con un código TOTP. La vuelta de Google al vincular llega aquí, con `?vinculo=<resultado>` |
 
 Invitar, reinvitar, dar de baja y aprobar una solicitud piden en el cuerpo un código TOTP recién escrito (`codigo_totp`): con la sesión del admin sola ya no se crea un admin propio ni se da de baja al legítimo (modelo de amenazas, 6.3). Cada código vale una sola vez, así que dos operaciones seguidas esperan al código siguiente. Un código malo o repetido da 401 sin `WWW-Authenticate` (no falla la sesión, sino el código) y cuenta para el bloqueo del dispositivo.
 
