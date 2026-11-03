@@ -31,11 +31,18 @@ frente al Traefik real. Prueba:
   in-v3.mailjet.com:465 con el remitente de producción (configuración de
   Compose con y sin el compose de producción, y el contenedor arrancado). Aquí
   arranca con las credenciales de secrets/ y con la red salida interna, así
-  que no puede llegar a Mailjet ni a internet.
+  que no puede llegar a Mailjet ni a internet;
+* g) el reconciliador (despliegue/reconectar_traefik.py) contra el Traefik de
+  la prueba: con todo bien no toca nada (el mismo EndpointID); desconectado, o
+  conectado con otra IP, lo vuelve a conectar con la suya, lo dice con una
+  línea RECONECTADO y el sitio vuelve a responder; si otro contenedor tiene la
+  IP de Traefik, falla sin tocar a ninguno de los dos; un contenedor que no
+  existe, una IP fuera de la red y una IP mal escrita fallan con su código.
+  Termina con Traefik en su IP y el sitio en 200.
 
 Lo que no prueba: el Traefik real del VPS, Let's Encrypt (aquí el resolver no
-tiene salida y Traefik sirve su certificado por defecto) ni la persistencia de
-la conexión de Traefik a la red edge cuando Dokploy lo recrea. Eso se
+tiene salida y Traefik sirve su certificado por defecto) ni las unidades de
+systemd que lanzan el reconciliador cada minuto (esto es Windows). Eso se
 comprueba en el VPS con las órdenes de docs/operacion.md.
 
 Cada prueba negativa lleva su control positivo: si el control falla, el
@@ -59,6 +66,7 @@ Solo usa la biblioteca estándar.
 """
 import base64
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -253,9 +261,9 @@ def p(texto=""):
     lineas_salida.append(texto)
 
 
-def ejecutar(args, timeout=900, entrada=None):
+def ejecutar(args, timeout=900, entrada=None, entorno=None):
     # check=False explícito: el código de salida se comprueba en cada llamada.
-    r = subprocess.run(args, capture_output=True, timeout=timeout, check=False, input=entrada)
+    r = subprocess.run(args, capture_output=True, timeout=timeout, check=False, input=entrada, env=entorno)
     return R(r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
 
 
@@ -535,11 +543,163 @@ def seccion_f():
              control.out.strip() == "CONECTA", f"control en la red bridge: {control.out.strip()!r}")
 
 
+# El reconciliador que se instala en el VPS (docs/operacion.md), ejecutado
+# aquí contra el Traefik de la prueba.
+SCRIPT_RECONECTAR = RAIZ / "despliegue" / "reconectar_traefik.py"
+TRAEFIK = f"{PROYECTO}-traefik-1"
+RED_EDGE = f"{PROYECTO}_edge"
+# Fuera del rango automático de edge (10.88.1.8/29), así que nadie más la tiene.
+IP_TRAEFIK_OTRA = "10.88.1.4"
+IP_FUERA_DE_EDGE = "10.88.9.2"
+# Contenedor que ocupa la IP de Traefik en g. Con el prefijo del proyecto, para
+# que la limpieza y la comprobación de restos lo vean.
+OCUPA = f"{PROYECTO}-ocupa"
+# Lo que responde Traefik justo después de un corte no se fija como oráculo:
+# se suponía 502 y la primera ejecución (3 nov 2026) dio un plazo agotado a los
+# 15 s, también con edge ya conectada con otra IP. La hipótesis, sin
+# demostrar, es que reutiliza una conexión con Caddy que quedó muerta. Lo que
+# importa aquí es que sin edge no hay 200 y que el reconciliador lo devuelve.
+
+
+def reconectar(contenedor=None, red=RED_EDGE, ip=IP_TRAEFIK_EDGE):
+    # -X utf8: los mensajes llevan tildes y en Windows la salida a una tubería
+    # no es UTF-8 (-I ignora PYTHONUTF8). Sin JOURNAL_STREAM, como a mano.
+    entorno = {k: v for k, v in os.environ.items() if k != "JOURNAL_STREAM"}
+    return ejecutar([sys.executable, "-I", "-X", "utf8", str(SCRIPT_RECONECTAR), "--contenedor",
+                     contenedor or TRAEFIK, "--red", red, "--ip", ip], timeout=180, entorno=entorno)
+
+
+def conexion_edge(contenedor=TRAEFIK):
+    """(IP, EndpointID) del contenedor en edge, o (None, None) si no está."""
+    r = ejecutar(["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", contenedor])
+    redes = json.loads(r.out or "null") or {}
+    red = redes.get(RED_EDGE)
+    return (red.get("IPAddress") or None, red.get("EndpointID")) if red else (None, None)
+
+
+def salud():
+    """Estado de /salud a través del Traefik de la prueba."""
+    return cliente([pet("s", HOST_API, "/salud")], "publica", IP_CLIENTE)["s"][0]
+
+
+def salud_detallada():
+    """Estado de /salud y un detalle para el informe: el cuerpo (con estado 0,
+    la excepción del cliente, que no llegó a tener respuesta) y lo que tardó."""
+    inicio = time.monotonic()
+    r = cliente([pet("s", HOST_API, "/salud")], "publica", IP_CLIENTE)["s"]
+    return r[0], f"{time.monotonic() - inicio:.1f} s, {r[2][:200]!r}"
+
+
+def esperar_salud(segundos=30):
+    for _ in range(segundos):
+        if salud() == 200:
+            return True
+        time.sleep(1)
+    return False
+
+
+def esperar_403_caddy(segundos=30):
+    """True si, en ese plazo, /salud a través de Traefik recibe el 403 de Caddy
+    con su cuerpo literal. Se pregunta varias veces porque la primera petición
+    tras un corte puede agotar su plazo (arriba). Devuelve también lo visto."""
+    limite = time.monotonic() + segundos
+    vistos = []
+    while time.monotonic() < limite:
+        r = cliente([pet("s", HOST_API, "/salud")], "publica", IP_CLIENTE)["s"]
+        if r[0] == 403 and r[2] == CUERPO_403_CADDY:
+            return True, vistos + [403]
+        vistos.append(r[0])
+        time.sleep(1)
+    return False, vistos
+
+
+def linea_reconectado(antes):
+    return f"RECONECTADO: contenedor={TRAEFIK} red={RED_EDGE} ip={IP_TRAEFIK_EDGE} antes={antes}"
+
+
+def seccion_g():
+    p("=== g) el reconciliador de la conexion de Traefik a edge")
+    ip, endpoint = conexion_edge()
+    if ip != IP_TRAEFIK_EDGE:
+        raise Parada(f"Traefik no empieza en {IP_TRAEFIK_EDGE} de edge ({ip})")
+
+    # g1. Todo bien: no toca nada ni escribe nada (corre cada minuto).
+    r = reconectar()
+    control_bien = r.rc == 0
+    pasa(control_bien and r.out == "" and r.err == "",
+         f"g1) con todo bien sale con 0 y sin escribir nada (codigo {r.rc}, {r.todo.strip()[:120]!r})")
+    pasa(conexion_edge() == (ip, endpoint), "g1) no reconecta: el mismo EndpointID")
+
+    # g2. Desconectado, como lo deja Dokploy al recrearlo.
+    ejecutar(["docker", "network", "disconnect", RED_EDGE, TRAEFIK])
+    control = conexion_edge()[0] is None
+    estado_sin, detalle_sin = salud_detallada()
+    negativo(f"g2) control: sin edge el sitio no responde 200 ({estado_sin})", estado_sin != 200, control,
+             "Traefik sigue en edge tras el disconnect")
+    p(f"   g2) dato, sin oraculo: Traefik sin edge -> {estado_sin} ({detalle_sin})")
+    r = reconectar()
+    pasa(r.rc == 0 and r.out.strip() == linea_reconectado("desconectado"),
+         f"g2) desconectado: lo reconecta y lo dice (codigo {r.rc}, {r.todo.strip()[:160]!r})")
+    pasa(conexion_edge()[0] == IP_TRAEFIK_EDGE, f"g2) Traefik vuelve a {IP_TRAEFIK_EDGE}: {conexion_edge()[0]}")
+    pasa(esperar_salud(), "g2) el sitio vuelve a responder 200 en 30 s")
+
+    # g3. Conectado con otra IP: Caddy no confía en ella y responde 403.
+    ejecutar(["docker", "network", "disconnect", RED_EDGE, TRAEFIK])
+    ejecutar(["docker", "network", "connect", "--ip", IP_TRAEFIK_OTRA, RED_EDGE, TRAEFIK])
+    caddy_rechaza, vistos = esperar_403_caddy()
+    control = conexion_edge()[0] == IP_TRAEFIK_OTRA and caddy_rechaza
+    pasa(control, f"g3) control: con {IP_TRAEFIK_OTRA}, Caddy responde su 403 en 30 s "
+                  f"({conexion_edge()[0]}, estados vistos {vistos})")
+    r = reconectar()
+    negativo(f"g3) con otra IP: la cambia por la suya y lo dice (codigo {r.rc}, {r.todo.strip()[:160]!r})",
+             r.rc == 0 and r.out.strip() == linea_reconectado(f"otra_ip={IP_TRAEFIK_OTRA}"), control)
+    pasa(conexion_edge()[0] == IP_TRAEFIK_EDGE, f"g3) Traefik vuelve a {IP_TRAEFIK_EDGE}: {conexion_edge()[0]}")
+    pasa(esperar_salud(), "g3) el sitio vuelve a responder 200 en 30 s")
+
+    # g4. Otro contenedor con la IP de Traefik: no se toca a ninguno.
+    ejecutar(["docker", "network", "disconnect", RED_EDGE, TRAEFIK])
+    ocupa = ejecutar(["docker", "run", "-d", "--name", OCUPA, "--network", RED_EDGE, "--ip", IP_TRAEFIK_EDGE,
+                      "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                      "--user", "65534:65534", "--entrypoint", "python", f"{PROYECTO}-api",
+                      "-c", "import time; time.sleep(600)"], timeout=120)
+    control = ocupa.rc == 0 and conexion_edge(OCUPA)[0] == IP_TRAEFIK_EDGE and conexion_edge()[0] is None
+    pasa(control, f"g4) control: {OCUPA} tiene {IP_TRAEFIK_EDGE} y Traefik esta fuera de edge ({ocupa.todo.strip()[:120]!r})")
+    r = reconectar()
+    esperado = f"la IP {IP_TRAEFIK_EDGE} de {RED_EDGE} la tiene el contenedor {OCUPA}"
+    negativo(f"g4) IP ocupada: falla con 1 y dice quien la tiene (codigo {r.rc}, {r.err.strip()[:160]!r})",
+             r.rc == 1 and esperado in r.err and r.out == "", control)
+    negativo("g4) no toca a ninguno: el otro conserva la IP y Traefik sigue fuera",
+             conexion_edge(OCUPA)[0] == IP_TRAEFIK_EDGE and conexion_edge()[0] is None, control)
+    ejecutar(["docker", "rm", "-f", OCUPA])
+    r = reconectar()
+    pasa(r.rc == 0 and r.out.strip() == linea_reconectado("desconectado"),
+         f"g4) libre la IP, lo reconecta (codigo {r.rc}, {r.todo.strip()[:160]!r})")
+
+    # g5 y g6. Errores de quien opera: fallan con su código sin tocar nada.
+    ip, endpoint = conexion_edge()
+    r = reconectar(contenedor=f"{PROYECTO}-no-existe")
+    negativo(f"g5) contenedor que no existe: codigo 3 ({r.rc}, {r.err.strip()[:120]!r})",
+             r.rc == 3 and "no existe el contenedor" in r.err, control_bien)
+    r = reconectar(ip=IP_FUERA_DE_EDGE)
+    negativo(f"g6) IP fuera de edge: codigo 1 ({r.rc}, {r.err.strip()[:120]!r})",
+             r.rc == 1 and "no está en la red" in r.err, control_bien)
+    r = reconectar(ip="10.88.1.x")
+    negativo(f"g6) IP mal escrita: codigo 2 de argparse ({r.rc})", r.rc == 2, control_bien)
+    pasa(conexion_edge() == (ip, endpoint), "g5, g6) Traefik sin tocar: el mismo EndpointID")
+
+    # Al terminar, como se encontró: Traefik en su IP y el sitio en 200.
+    pasa(conexion_edge()[0] == IP_TRAEFIK_EDGE and salud() == 200,
+         f"g) final: Traefik en {IP_TRAEFIK_EDGE} de edge y /salud en 200")
+
+
 def imagenes():
     return [f"{PROYECTO}-{s}" for s in SERVICIOS_CONSTRUIDOS]
 
 
 def limpiar():
+    # El contenedor de g4 no es del compose: down no lo borra y, conectado a
+    # edge, impediría borrar la red.
+    ejecutar(["docker", "rm", "-f", OCUPA])
     r = ejecutar(PRODUCCION + ["down", "-v"], timeout=600)
     ejecutar(["docker", "image", "rm", *imagenes()])
     return r
@@ -649,7 +809,7 @@ def main():
     TEMPORAL = pathlib.Path(tempfile.mkdtemp(prefix="canario_despliegue_"))
     parada = None
     try:
-        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f):
+        for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g):
             seccion()
     except Parada as e:
         parada = str(e)

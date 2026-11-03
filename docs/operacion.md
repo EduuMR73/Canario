@@ -156,9 +156,101 @@ En el **VPS** (`ssh ovh`, bash). Todo lo de Docker va con `sudo`: el usuario del
 
 Cada cambio se prueba en el PC y se despliega igual: el paso 1, el 2 (en vez de `git clone`, `cd ~/apps/canario` y `git pull --ff-only`), el 3 y el 4, todos desde `~/apps/canario`. El paso 3 se repite siempre: `generar_secretos.py` nunca sobrescribe un fichero existente, solo crea los que una versión nueva necesita y aún no están (como `smtp_usuario.txt` y `smtp_contrasena.txt`), y sin ellos el paso 4 no arranca. Los que ya existen, incluida la clave maestra, se quedan como están. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 6; la conexión de Traefik se queda como está. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
 
+Después de cada `git pull`, la copia instalada del reconciliador tiene que ser igual a la del repositorio (más abajo). `cmp` no dice nada si son iguales:
+
+```bash
+sudo cmp despliegue/reconectar_traefik.py /usr/local/sbin/canario-reconectar-traefik.py
+sudo cmp despliegue/systemd/canario-reconectar-traefik.service /etc/systemd/system/canario-reconectar-traefik.service
+sudo cmp despliegue/systemd/canario-reconectar-traefik.timer /etc/systemd/system/canario-reconectar-traefik.timer
+```
+
+Si alguno difiere, o el cambio es del repositorio y se reinstala como en la primera vez, o alguien tocó la copia instalada, y eso se investiga antes de nada.
+
+### Reconexión automática de Traefik
+
+Dokploy, cada vez que recrea su Traefik (al actualizarse o al cambiar sus ajustes), lo crea solo en su red, sin `canario_edge`, y no tiene ninguna opción para añadir redes (`traefik-setup.ts` de Dokploy v0.30.10). Sin esa conexión, los tres nombres dejan de responder. `despliegue/reconectar_traefik.py` compara cada minuto el estado real con el deseado y, si hace falta, vuelve a conectar Traefik con `10.88.1.2`. Si otro contenedor tiene esa IP, no toca nada y falla: podría ser alguien haciéndose pasar por Traefik ante Caddy. Los motivos, en el modelo de amenazas (6.20); las pruebas, en `verificar_despliegue.py`, g.
+
+Se instala **una copia** con dueño root. Nunca se ejecuta desde `~/apps/canario`: esa carpeta la puede cambiar el usuario del VPS, y un fichero que un usuario edita y root ejecuta es una vía de escalada.
+
+En el VPS (bash, en `~/apps/canario`):
+
+1. Comprobar antes que el vigía (la vigilancia del VPS, que avisa por Telegram y no está en este repositorio) está vivo: es lo que avisará de que se tocan `/usr/local/sbin` y `/etc/systemd/system`.
+
+   ```bash
+   systemctl list-timers 'vigia*'
+   ```
+
+2. Instalar y comprobar las unidades:
+
+   ```bash
+   sudo install -o root -g root -m 0755 despliegue/reconectar_traefik.py /usr/local/sbin/canario-reconectar-traefik.py
+   sudo install -o root -g root -m 0644 despliegue/systemd/canario-reconectar-traefik.service despliegue/systemd/canario-reconectar-traefik.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemd-analyze verify /etc/systemd/system/canario-reconectar-traefik.service /etc/systemd/system/canario-reconectar-traefik.timer
+   sudo systemd-analyze security canario-reconectar-traefik.service
+   ```
+
+   `verify` no tiene que decir nada. `security` da una nota de exposición; si una directiva de endurecimiento rompe la unidad en el paso 3, se quita esa sola y se anota el motivo en el comentario de la unidad.
+
+3. Una ejecución con todo bien, antes de activar el timer. Tiene que acabar en `status=0/SUCCESS` y sin ninguna línea `RECONECTADO`:
+
+   ```bash
+   sudo systemctl start canario-reconectar-traefik.service
+   systemctl status canario-reconectar-traefik.service --no-pager
+   sudo journalctl -u canario-reconectar-traefik.service --no-pager -n 20
+   ```
+
+4. Activar el timer:
+
+   ```bash
+   sudo systemctl enable --now canario-reconectar-traefik.timer
+   systemctl list-timers canario-reconectar-traefik.timer
+   ```
+
+5. El vigía avisa por Telegram de los tres ficheros nuevos. Se mira que el aviso diga **exactamente** esos tres (`/usr/local/sbin/canario-reconectar-traefik.py` y las dos unidades) y, solo entonces, se rehace su foto para que no los vuelva a contar como cambio:
+
+   ```bash
+   sudo /usr/local/sbin/vigia.sh base
+   ```
+
+6. Probarlo de verdad, con un corte controlado que solo afecta a Canario. En el **PC** (PowerShell), un bucle que pregunta cada 5 s:
+
+   ```powershell
+   while ($true) { (Get-Date -Format HH:mm:ss) + " " + (curl.exe -s -o NUL -w "%{http_code}" https://canario-api.eduumr.dev/salud); Start-Sleep 5 }
+   ```
+
+   En el **VPS**:
+
+   ```bash
+   sudo docker network disconnect canario_edge dokploy-traefik
+   ```
+
+   El bucle tiene que dejar de dar `200` justo después (un plazo agotado, que `curl.exe` enseña como `000`, o un `502`) y volver a `200` en 70 s como mucho. No se espera un estado concreto: con el Traefik de la batería, la primera petición tras el corte no recibe respuesta en 15 s, aunque se suponía un `502` (`verificar_despliegue.py`, g). Si a los 70 s no ha vuelto el `200`, **se para aquí** y se mira el journal. En el journal queda la reconexión:
+
+   ```bash
+   sudo journalctl -u canario-reconectar-traefik.service --no-pager -p warning -n 5
+   ```
+
+   Tiene que salir `RECONECTADO: contenedor=dokploy-traefik red=canario_edge ip=10.88.1.2 antes=desconectado`.
+
+**Lo que esto no cubre.** Que Traefik se recree es una señal y, de momento, solo queda en el journal: nadie avisa al momento. Lo verá el vigía cuando lea esa línea (pendiente con fecha, modelo de amenazas, 6.20). Un fallo del reconciliador sí se ve: deja la unidad fallida, el vigía avisa de las unidades fallidas y los monitores externos (abajo) ven el sitio caído.
+
+### Monitores externos
+
+El vigía vive dentro del VPS: si se cae el VPS entero, o Traefik, el vigía no puede avisar. Por eso hay dos monitores de tipo **Keyword** en UptimeRobot (plan gratuito, cada 5 minutos, aviso por correo y por notificación del móvil), que sondean desde fuera:
+
+| Monitor | URL | Palabra que tiene que estar |
+|---|---|---|
+| API Canario | `https://canario-api.eduumr.dev/salud` | `"estado":"ok"` |
+| Web Canario | `https://canario.eduumr.dev` | `Canal de denuncias anónimo` |
+
+Keyword y no HTTP: el monitor HTTP de UptimeRobot pregunta con `HEAD`, Canario responde `405` a `HEAD` y el monitor lo daría por caído; elegir el método es de los planes de pago. El Keyword pregunta con `GET` y además comprueba que la respuesta es la de Canario. Si cambia el título de la página del denunciante, hay que cambiar su palabra.
+
+Sondean desde fuera en vez de esperar un ping que salga del VPS, así que no añaden ninguna salida desde el VPS.
+
 ### Lo que hay que vigilar
 
-- **Si Dokploy recrea su Traefik** (al actualizarlo o al cambiar sus ajustes), pierde la conexión a `edge`: los tres nombres dan 502 hasta repetir el `sudo docker network connect` del paso 6. Le pasa lo mismo a Inmunia. Volver a conectarlo solo es pendiente del bloque B (modelo de amenazas, 6.20).
+- **Si Dokploy recrea su Traefik** (al actualizarlo o al cambiar sus ajustes), pierde la conexión a `edge` y el reconciliador la repone en un minuto como mucho (arriba). A Inmunia le pasa lo mismo y este reconciliador no la cubre.
 - **El correo sale solo con la credencial de Mailjet puesta.** Mientras `secrets/smtp_usuario.txt` tenga el marcador, el cartero lo dice al arrancar (`EVENTO correo_sin_credenciales`) y Mailjet rechaza cada correo (`EVENTO correo_fallido` en su log): el registro y los avisos no llegan. Se configura en [Correo en producción](#correo-en-producción-mailjet). Mientras tanto, las cuentas se crean por invitación desde **Cuentas** (el enlace se muestra una vez) o con `gestion alta-admin`.
 - **El log del cartero** (`sudo docker compose -f docker-compose.yml -f compose.produccion.yaml logs cartero`) es donde se ve si el correo sale: `correo_aplazado` repetido es un proveedor que no responde, y `motivo=certificado` es que el certificado de quien contesta no vale, que es lo que se vería si alguien se hiciera pasar por Mailjet.
 - **El login con Google** sigue apagado mientras `secrets/google_client_id.txt` tenga el marcador. Para activarlo, el URI de redirección registrado en Google pasa a ser el de `canario-personal.eduumr.dev`.

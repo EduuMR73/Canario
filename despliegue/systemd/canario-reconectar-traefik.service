@@ -1,0 +1,58 @@
+# Reconecta el Traefik de Dokploy a canario_edge con 10.88.1.2 si Dokploy lo
+# ha recreado (despliegue/reconectar_traefik.py; docs/operacion.md). Lo lanza
+# canario-reconectar-traefik.timer cada minuto.
+#
+# Se instala en /etc/systemd/system, como el script en /usr/local/sbin, con
+# dueño root y sin escritura para nadie más: si otro usuario pudiera cambiar
+# ExecStart o el script, tendría root (ATT&CK T1543.002, mitigación M1022).
+[Unit]
+Description=Canario: reconecta el Traefik de Dokploy a canario_edge
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/canario-reconectar-traefik.py --contenedor dokploy-traefik --red canario_edge --ip 10.88.1.2
+# Cada orden de docker tiene su plazo de 30 s en el script; esto es el tope de
+# la ejecución entera, para que una unidad colgada falle y se vea.
+TimeoutStartSec=120
+
+# Endurecimiento. Ojo: no contiene a un atacante. El script habla con el
+# socket de Docker, y quien habla con él equivale a root (puede arrancar un
+# contenedor que monte /). Estas directivas solo limitan lo que haría un fallo
+# del propio script; el control real es que solo root pueda cambiar el script
+# y la unidad. Cada una se comprueba en el VPS con systemd-analyze; si una
+# rompe la unidad, se quita esa sola y se anota el motivo.
+NoNewPrivileges=yes
+ProtectSystem=strict
+# El socket de Docker, explícito, aunque ProtectSystem=strict deje /run solo
+# de lectura.
+ReadWritePaths=/run/docker.sock
+ProtectHome=yes
+# Con ProtectHome, el cliente de docker no llega a /root/.docker: su
+# configuración va a un directorio propio y vacío que systemd crea y borra.
+RuntimeDirectory=canario-reconectar-traefik
+Environment=DOCKER_CONFIG=%t/canario-reconectar-traefik
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# Solo sockets de Unix: el script no necesita red, solo el socket de Docker.
+RestrictAddressFamilies=AF_UNIX
+# Sin capacidades: el socket es de root y el proceso es root, así que le basta
+# con los permisos de dueño.
+CapabilityBoundingSet=
+UMask=0077
+# Corre cada minuto. Sin esto, cada ejecución deja dos líneas en el journal
+# (inicio y fin). RECONECTADO va con prioridad warning y los errores con err,
+# así que siguen pasando. Hay que comprobar en el VPS que esto calla esas dos
+# líneas.
+LogLevelMax=notice

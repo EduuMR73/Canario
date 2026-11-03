@@ -1,0 +1,13 @@
+# Lanza canario-reconectar-traefik.service cada minuto (docs/operacion.md).
+[Unit]
+Description=Canario: comprueba cada minuto la conexion de Traefik a canario_edge
+
+[Timer]
+OnCalendar=minutely
+# Por defecto systemd agrupa los disparos con un margen de hasta un minuto,
+# que doblaría el tiempo de caída. Con 5 s, Canario vuelve en poco más de un
+# minuto como mucho.
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
