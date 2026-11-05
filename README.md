@@ -12,6 +12,15 @@ Quien denuncia no se registra ni da su nombre: escribe la denuncia y recibe un c
 
 Todo corre en Docker Compose detrás de un proxy Caddy, solo en `127.0.0.1`.
 
+## Producción
+
+Canario está desplegado en un VPS de OVHcloud (Estrasburgo, UE):
+
+- Denunciante (páginas sin JavaScript): https://canario.eduumr.dev
+- Personal (SPA): https://canario-personal.eduumr.dev
+
+Cómo se despliega y se opera: [docs/operacion.md](docs/operacion.md). Por qué este proveedor y no Render, AWS, Azure o Google Cloud: [estudio de costes](docs/estudio-costes.md) ([PDF](docs/estudio-costes.pdf)).
+
 ## Cómo cumple el enunciado
 
 | Requisito | Cómo se cumple | Más detalle |
@@ -203,6 +212,7 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 |---|---|
 | [docs/api.md](docs/api.md) | Rutas de la API, sesión del navegador, páginas de la SPA y del denunciante, registro, correo y su log |
 | [docs/operacion.md](docs/operacion.md) | Puesta en marcha completa, producción en el VPS, correo con Mailjet, `gestion`, supresión legal programada, log y copias de seguridad |
+| [docs/estudio-costes.md](docs/estudio-costes.md) | Coste de explotar Canario en OVHcloud, Render, AWS, Azure y Google Cloud, con su versión en [PDF](docs/estudio-costes.pdf) |
 | [docs/pruebas.md](docs/pruebas.md) | Las doce baterías de seguridad, las pruebas unitarias y ruff, y cómo ejecutarlas |
 | [docs/threat-model.md](docs/threat-model.md) | Modelo de amenazas: decisiones de diseño, tabla de amenazas y límites |
 
