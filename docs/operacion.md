@@ -296,7 +296,7 @@ Sin configurar nada, Google está desactivado: `generar_secretos.py` deja un mar
 
 Para activarlo:
 
-1. En Google Cloud Console, la pantalla de consentimiento (Google Auth Platform) de tipo Externo. Mientras esté en modo de pruebas, solo entran las cuentas añadidas como usuarios de prueba. Sin permisos extra: Canario solo pide `openid`, ni el email. Después, un cliente OAuth de tipo "Aplicación web" con la URI de redirección exacta `https://localhost:8445/v1/personal/externo/google/vuelta` (en otro despliegue, el origen de `CANARIO_ORIGEN_PERSONAL`) y sin orígenes de JavaScript.
+1. En Google Cloud Console, la pantalla de consentimiento (Google Auth Platform) de tipo Externo. Sin permisos extra: Canario solo pide `openid`, ni el email. Por eso no hace falta añadir usuarios de prueba, aunque la aplicación siga en modo de pruebas: Google exime de esa lista, del aviso de aplicación no verificada y de la caducidad a los 7 días a las aplicaciones que solo piden `openid`, `email` o `profile` ([Manage App Audience](https://support.google.com/cloud/answer/15549945)); que Canario pide solo `openid` lo comprueba `verificar_externo.py` (d). La barrera no es esa lista: en Canario solo entra con Google quien fue invitado, tiene el segundo factor y vinculó su cuenta (paso 4). Después, un cliente OAuth de tipo "Aplicación web" con la URI de redirección exacta `https://localhost:8445/v1/personal/externo/google/vuelta` (en otro despliegue, el origen de `CANARIO_ORIGEN_PERSONAL`) y sin orígenes de JavaScript.
 
 2. Escribir los dos valores en `secrets/`, sin que queden en el historial de PowerShell:
 
