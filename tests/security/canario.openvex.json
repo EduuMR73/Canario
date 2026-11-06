@@ -4,12 +4,12 @@
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "last_updated": "2026-11-06T12:00:00Z",
-  "version": 8,
+  "last_updated": "2026-11-06T15:30:00Z",
+  "version": 9,
   "statements": [
     {
       "vulnerability": {"name": "CVE-2026-78669"},
-      "timestamp": "2026-10-15T06:20:00Z",
+      "timestamp": "2026-11-06T15:30:00Z",
       "products": [
         {
           "@id": "pkg:golang/caddy",
@@ -21,11 +21,11 @@
       ],
       "status": "not_affected",
       "justification": "inline_mitigations_already_exist",
-      "impact_statement": "Denegación de servicio con tramas SETTINGS de HTTP/2. El Caddyfile fija 'protocols h1' (la configuración adaptada solo lleva h1) y el servidor elige http/1.1 aunque el cliente ofrezca h2 por ALPN, en los dos puertos (8443 y 8444) (comprobado en verificar_escaneos.py, con un Caddy 'h1 h2' que elige h2 como control). Los dos puertos solo aceptan TLS, así que tampoco hay h2c: el código de HTTP/2 no es alcanzable. El reenvío a la API es HTTP/1.1. Se revisa al publicarse una imagen de Caddy con Go 1.26.9 o posterior."
+      "impact_statement": "Denegación de servicio con tramas SETTINGS de HTTP/2. El Caddyfile fija 'protocols h1' (la configuración adaptada solo lleva h1) y el servidor elige http/1.1 aunque el cliente ofrezca h2 por ALPN, en los dos puertos (8443 y 8444) (comprobado en verificar_escaneos.py, con un Caddy 'h1 h2' que elige h2 como control). Los dos puertos solo aceptan TLS, así que tampoco hay h2c: el código de HTTP/2 no es alcanzable. El reenvío a la API es HTTP/1.1. Revisada el 6 de noviembre de 2026: la imagen fijada es la misma, el aviso (GO-2026-6611, modificado por última vez el 16 de octubre de 2026) sigue señalando el procesado de SETTINGS de HTTP/2 y la mitigación se comprueba en cada ejecución. Caddy 2.11.9 (5 de noviembre de 2026) trae Go 1.27.3, que la arregla: se retira al adoptar su imagen, cumplidos los 14 días (docs/threat-model.md, 6.17)."
     },
     {
       "vulnerability": {"name": "CVE-2026-78667"},
-      "timestamp": "2026-10-15T06:20:00Z",
+      "timestamp": "2026-11-06T15:30:00Z",
       "products": [
         {
           "@id": "pkg:golang/caddy",
@@ -36,11 +36,11 @@
       ],
       "status": "not_affected",
       "justification": "inline_mitigations_already_exist",
-      "impact_statement": "Denegación de servicio con cabeceras Range en FileServer, ServeContent y ServeFile de net/http. El sitio del denunciante (8444) usa file_server, que llama a ServeContent, pero el Caddyfile quita la cabecera Range de la petición (request_header -Range) antes de llegar a él, y sin Range ServeContent no la analiza y responde el fichero entero. Comprobado en verificar_escaneos.py (en la configuración adaptada, cada file_server va detrás de la quita; control: sin ella, falla) y en verificar_esqueleto.py (dos rangos dan 200; control: el mismo Caddy sin la quita da 206). Se revisa al publicarse una imagen de Caddy con Go 1.26.9 o posterior."
+      "impact_statement": "Denegación de servicio con cabeceras Range en FileServer, ServeContent y ServeFile de net/http. El sitio del denunciante (8444) usa file_server, que llama a ServeContent, pero el Caddyfile quita la cabecera Range de la petición (request_header -Range) antes de llegar a él, y sin Range ServeContent no la analiza y responde el fichero entero. Comprobado en verificar_escaneos.py (en la configuración adaptada, cada file_server va detrás de la quita; control: sin ella, falla) y en verificar_esqueleto.py (dos rangos dan 200; control: el mismo Caddy sin la quita da 206). Revisada el 6 de noviembre de 2026: la imagen fijada es la misma, el aviso (GO-2026-6609, modificado por última vez el 16 de octubre de 2026) sigue señalando parseRange y ServeContent, y las dos comprobaciones se ejecutan en cada pasada de sus baterías. Caddy 2.11.9 (5 de noviembre de 2026) trae Go 1.27.3, que la arregla: se retira al adoptar su imagen, cumplidos los 14 días (docs/threat-model.md, 6.17)."
     },
     {
       "vulnerability": {"name": "CVE-2026-97031"},
-      "timestamp": "2026-10-12T22:00:00Z",
+      "timestamp": "2026-11-06T15:30:00Z",
       "products": [
         {
           "@id": "pkg:golang/caddy",
@@ -51,7 +51,7 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Agotamiento de memoria con referencias repetidas a extensiones exteriores de ECH en crypto/tls. En Go 1.26.8, processECHClientHello devuelve el ClientHello exterior sin descifrarlo si no hay claves ECH, y las referencias exteriores solo se procesan en decodeInnerClientHello, después de descifrar. Caddy 2.11.7 solo instala GetEncryptedClientHelloKeys con la opción global 'ech' (modules/caddytls/connpolicy.go), que el Caddyfile no usa (la configuración adaptada no contiene encrypted_client_hello, comprobado en verificar_escaneos.py)."
+      "impact_statement": "Agotamiento de memoria con referencias repetidas a extensiones exteriores de ECH en crypto/tls. En Go 1.26.8, processECHClientHello devuelve el ClientHello exterior sin descifrarlo si no hay claves ECH, y las referencias exteriores solo se procesan en decodeInnerClientHello, después de descifrar. Caddy 2.11.7 solo instala GetEncryptedClientHelloKeys con la opción global 'ech' (modules/caddytls/connpolicy.go), que el Caddyfile no usa (la configuración adaptada no contiene encrypted_client_hello, comprobado en verificar_escaneos.py). Revisada el 6 de noviembre de 2026: la imagen fijada es la misma, el aviso (GO-2026-6607, modificado por última vez el 16 de octubre de 2026) sigue señalando decodeInnerClientHello y la comprobación se ejecuta en cada pasada. Caddy 2.11.9 (5 de noviembre de 2026) trae Go 1.27.3, que la arregla: se retira al adoptar su imagen, cumplidos los 14 días (docs/threat-model.md, 6.17)."
     },
     {
       "vulnerability": {"name": "CVE-2026-92392"},
@@ -75,7 +75,7 @@
     },
     {
       "vulnerability": {"name": "CVE-2026-111943"},
-      "timestamp": "2026-10-29T12:45:00Z",
+      "timestamp": "2026-11-06T15:30:00Z",
       "products": [
         {
           "@id": "pkg:golang/caddy",
@@ -86,11 +86,11 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. En Caddy 2.11.7 eso pasa en la autenticación de clientes (modules/caddytls/connpolicy.go), en el admin remoto (admin.go), en todo cliente TLS (ACME, reverse_proxy a https://) y en la instalación de la raíz local en el almacén del sistema (modules/caddypki/crypto.go, trusted). La configuración adaptada no tiene ninguno: admin desactivado, install_trust en false, solo emisores internal, sin client_authentication y sin tls en ningún transporte (comprobado en verificar_escaneos.py, f, en lista blanca, con un Caddyfile de control que rompe cada condición). Se revisa al publicarse una imagen de Caddy con Go 1.26.10 o posterior. (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
+      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. En Caddy 2.11.7 eso pasa en la autenticación de clientes (modules/caddytls/connpolicy.go), en el admin remoto (admin.go), en todo cliente TLS (ACME, reverse_proxy a https://) y en la instalación de la raíz local en el almacén del sistema (modules/caddypki/crypto.go, trusted). La configuración adaptada no tiene ninguno: admin desactivado, install_trust en false, solo emisores internal, sin client_authentication y sin tls en ningún transporte (comprobado en verificar_escaneos.py, f, en lista blanca, con un Caddyfile de control que rompe cada condición). Revisada el 6 de noviembre de 2026: la imagen fijada es la misma, el aviso (GO-2026-6809, modificado por última vez el 29 de octubre de 2026) sigue señalando Certificate.Verify y la lista blanca se comprueba en cada pasada. Caddy 2.11.9 (5 de noviembre de 2026) trae Go 1.27.3, que la arregla: se retira al adoptar su imagen, cumplidos los 14 días (docs/threat-model.md, 6.17). (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
     },
     {
       "vulnerability": {"name": "CVE-2026-116587"},
-      "timestamp": "2026-10-29T12:45:00Z",
+      "timestamp": "2026-11-06T15:30:00Z",
       "products": [
         {
           "@id": "pkg:golang/caddy",
@@ -101,7 +101,7 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Consumo de CPU sin límite al validar la clave RSA de una JWK manipulada (GHSA-mgcc-cww5-fp2q): solo afecta a quien parsea JWK que llegan de fuera. En Caddy 2.11.7, go-jose es una dependencia indirecta (go.mod); el cliente ACME (acmez 3.1.7) solo la trae para sus pruebas y certmagic 0.25.6 no la trae; el CA interno (modules/caddypki/ca.go) no la importa y carga sus claves en PEM. El único que procesa JWS y JWK de clientes es el manejador http.handlers.acme_server (modules/caddypki/acmeserver), que monta los endpoints ACME de smallstep. La configuración adaptada no lo tiene y el admin está desactivado, así que nadie puede añadirlo en caliente (comprobado en verificar_escaneos.py, f, con un Caddyfile de control que lo añade). Se revisa al publicarse una imagen de Caddy con go-jose 4.1.6 o posterior. (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
+      "impact_statement": "Consumo de CPU sin límite al validar la clave RSA de una JWK manipulada (GHSA-mgcc-cww5-fp2q): solo afecta a quien parsea JWK que llegan de fuera. En Caddy 2.11.7, go-jose es una dependencia indirecta (go.mod); el cliente ACME (acmez 3.1.7) solo la trae para sus pruebas y certmagic 0.25.6 no la trae; el CA interno (modules/caddypki/ca.go) no la importa y carga sus claves en PEM. El único que procesa JWS y JWK de clientes es el manejador http.handlers.acme_server (modules/caddypki/acmeserver), que monta los endpoints ACME de smallstep. La configuración adaptada no lo tiene y el admin está desactivado, así que nadie puede añadirlo en caliente (comprobado en verificar_escaneos.py, f, con un Caddyfile de control que lo añade). Revisada el 6 de noviembre de 2026: la imagen fijada es la misma, el aviso (GHSA-mgcc-cww5-fp2q, modificado por última vez el 27 de octubre de 2026) no ha cambiado y la comprobación se ejecuta en cada pasada. Caddy 2.11.9 (5 de noviembre de 2026) trae go-jose 4.1.6, que lo arregla en v4: esta declaración se retira al adoptar su imagen, cumplidos los 14 días. Pero el binario de Caddy (el de 2.11.7 y el de 2.11.9) lleva también go-jose/v3 v3.0.5, que el aviso da por afectada sin versión arreglada: hoy Trivy no la reporta, y si al adoptar 2.11.9 la reporta, se declara con este mismo análisis. La comprobación de acme_server se queda como invariante. (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
     },
     {
       "vulnerability": {"name": "CVE-2026-85091"},

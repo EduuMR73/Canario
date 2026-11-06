@@ -9,8 +9,9 @@
 		# Solo HTTP/1.1 sobre TCP. Sin HTTP/3 no hay listener UDP que no se publica
 		# ni se usa. Sin HTTP/2 mientras el binario de la imagen fijada lleve Go
 		# 1.26.8 y golang.org/x/net 0.59.0: CVE-2026-78669 (denegación de servicio
-		# con tramas SETTINGS de HTTP/2) tiene arreglo en Go 1.26.9 pero no hay
-		# imagen oficial de Caddy que lo traiga. Sin h2 el código vulnerable no es
+		# con tramas SETTINGS de HTTP/2) tiene arreglo en Go 1.26.9, y la imagen
+		# oficial que lo trae (Caddy 2.11.9, del 5 de noviembre de 2026) aún no
+		# cumple la espera de 14 días. Sin h2 el código vulnerable no es
 		# alcanzable. Con HTTP/1.1 no se pierde nada que importe: la API responde
 		# JSON y el sitio del denunciante, páginas pequeñas con una sola hoja de
 		# estilos, sin recursos que multiplexar; el reenvío a la API ya era
