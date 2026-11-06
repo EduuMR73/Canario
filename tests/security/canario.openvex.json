@@ -4,8 +4,8 @@
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "last_updated": "2026-10-29T12:45:00Z",
-  "version": 6,
+  "last_updated": "2026-11-06T12:00:00Z",
+  "version": 8,
   "statements": [
     {
       "vulnerability": {"name": "CVE-2026-78669"},
@@ -89,21 +89,6 @@
       "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. En Caddy 2.11.7 eso pasa en la autenticación de clientes (modules/caddytls/connpolicy.go), en el admin remoto (admin.go), en todo cliente TLS (ACME, reverse_proxy a https://) y en la instalación de la raíz local en el almacén del sistema (modules/caddypki/crypto.go, trusted). La configuración adaptada no tiene ninguno: admin desactivado, install_trust en false, solo emisores internal, sin client_authentication y sin tls en ningún transporte (comprobado en verificar_escaneos.py, f, en lista blanca, con un Caddyfile de control que rompe cada condición). Se revisa al publicarse una imagen de Caddy con Go 1.26.10 o posterior. (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
     },
     {
-      "vulnerability": {"name": "CVE-2026-111943"},
-      "timestamp": "2026-10-29T12:45:00Z",
-      "products": [
-        {
-          "@id": "pkg:golang/github.com/axllent/mailpit",
-          "subcomponents": [
-            {"@id": "pkg:golang/stdlib@v1.27.2"}
-          ]
-        }
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "crypto/x509 sin la desconfianza en las ocho intermediarias comprometidas de eMudhra: solo importa a quien verifica la cadena de un certificado ajeno. Mailpit solo abriría una conexión TLS hacia fuera con el reenvío SMTP o los webhooks, y no tiene ninguno configurado: lo único que lleva en environment es la configuración de TLS de SERVIDOR (MP_SMTP_TLS_CERT, MP_SMTP_TLS_KEY y MP_SMTP_REQUIRE_TLS, lista blanca comprobada en verificar_escaneos.py, f), sin env_file, command ni entrypoint. Esa configuración no verifica certificados ajenos: en Mailpit 1.31.6, ConfigureTLS (internal/smtpd/smtpd.go) solo asigna Certificates al tls.Config del servidor, sin pedir ni verificar certificados de cliente. Está solo en la red interna correo, sin salida (mismo control f, con un compose que añade una variable de reenvío, command, entrypoint y otra red). Es solo de desarrollo (perfil desarrollo). Se retira al subir a mailpit 1.32.0 o posterior, que se adopta desde el 5 de noviembre de 2026 (regla de los 14 días, docs/threat-model.md, 6.17). (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
-    },
-    {
       "vulnerability": {"name": "CVE-2026-116587"},
       "timestamp": "2026-10-29T12:45:00Z",
       "products": [
@@ -117,6 +102,27 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "Consumo de CPU sin límite al validar la clave RSA de una JWK manipulada (GHSA-mgcc-cww5-fp2q): solo afecta a quien parsea JWK que llegan de fuera. En Caddy 2.11.7, go-jose es una dependencia indirecta (go.mod); el cliente ACME (acmez 3.1.7) solo la trae para sus pruebas y certmagic 0.25.6 no la trae; el CA interno (modules/caddypki/ca.go) no la importa y carga sus claves en PEM. El único que procesa JWS y JWK de clientes es el manejador http.handlers.acme_server (modules/caddypki/acmeserver), que monta los endpoints ACME de smallstep. La configuración adaptada no lo tiene y el admin está desactivado, así que nadie puede añadirlo en caliente (comprobado en verificar_escaneos.py, f, con un Caddyfile de control que lo añade). Se revisa al publicarse una imagen de Caddy con go-jose 4.1.6 o posterior. (La base de datos de Trivy la bajó a MEDIUM el 26 de octubre de 2026 y la subió otra vez a HIGH el 29: se vuelve a declarar con la misma evidencia.)"
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-85091"},
+      "timestamp": "2026-11-06T12:00:00Z",
+      "products": [
+        {"@id": "pkg:apk/alpine/zlib@1.3.2-r0"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Desbordamiento de memoria en gz_vacate de zlib 1.3.1.2 a 1.3.2, que solo se alcanza llamando a gzprintf o gzvprintf después de que un gzwrite no bloqueante se quede a medias. En la imagen de PostgreSQL ningún fichero salvo la propia libz contiene esos símbolos: pg_dump y el resto de clientes usan gzwrite, gzopen y gzdopen, y el servidor no usa ninguna función gz* (comprobado en verificar_escaneos.py, f, buscando los símbolos en cada fichero de la imagen, con la propia libz como control). En caddy y redis no se declara: se adoptaron las imágenes del 21 de octubre de 2026, con zlib 1.3.2-r1. Se retira al adoptar la imagen de postgres:18.6-alpine del 5 de noviembre de 2026, con zlib 1.3.2-r1, cumplidos los 14 días (19 de noviembre de 2026; docs/threat-model.md, 6.17)."
+    },
+    {
+      "vulnerability": {"name": "CVE-2026-109518"},
+      "timestamp": "2026-11-06T12:00:00Z",
+      "products": [
+        {"@id": "pkg:deb/debian/apt@3.0.3"},
+        {"@id": "pkg:deb/debian/libapt-pkg7.0@3.0.3"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Un atacante en el camino entre apt y el archivo de paquetes consigue que apt instale un paquete sin verificar mientras se instalan paquetes con reintentos. Solo se alcanza ejecutando apt, y en la imagen de la API nadie lo hace: ninguna orden RUN del Dockerfile llama a apt, apt-get ni dpkg, la imagen declara un usuario sin privilegios (10001:10001) y los cuatro servicios que la usan (api, broker, cartero y gestion) arrancan con read_only y sin otro usuario, así que ni siquiera con ejecución de código dentro se podría instalar nada (comprobado en verificar_escaneos.py, f, con un Dockerfile que llama a apt-get, la imagen base, que no declara usuario, y un compose que pone user 0 y quita read_only como controles). Se retira al adoptar la imagen de python:3.12-slim del 5 de noviembre de 2026, con apt 3.0.4, cumplidos los 14 días (19 de noviembre de 2026; docs/threat-model.md, 6.17)."
     }
   ]
 }

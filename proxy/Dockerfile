@@ -37,7 +37,7 @@ COPY --from=spa --chown=node:node src/ src/
 RUN npx ng build
 
 # Etapa 2: la imagen que se ejecuta.
-FROM caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+FROM caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
 
 # 1. setcap -r: el binario oficial lleva la file capability
 #    cap_net_bind_service=ep para poder escuchar en 80 y 443 sin root. Aquí

@@ -66,7 +66,7 @@ PATRON_ENLACE = re.compile(r"https://\S+")
 # Lo que se ejecuta dentro del contenedor, en la red correo. Lee el límite de
 # la entrada estándar (nada del anfitrión va en la línea de órdenes) y
 # devuelve JSON. La lista de Mailpit viene ordenada de la más nueva a la más
-# antigua (swagger de Mailpit v1.31.6, GET /api/v1/messages).
+# antigua (swagger de Mailpit v1.32.0, GET /api/v1/messages).
 LECTOR = r'''
 import json, sys, urllib.request
 limite = json.load(sys.stdin)

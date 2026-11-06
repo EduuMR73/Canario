@@ -5,7 +5,7 @@ services:
     # Imagen fijada por versión y por digest: la versión es legible para humanos
     # y el digest garantiza que el contenido es exactamente el que revisamos,
     # aunque alguien republique la etiqueta (defensa ante cadena de suministro).
-    image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    image: redis:8.10.2-alpine@sha256:9f8d2d789b9a1d1e3f283f979aa9cbf393373806472e1ccd460e2f9c869b833b
     # Usuario sin privilegios: si el proceso se compromete, no es root dentro
     # del contenedor.
     user: redis
@@ -486,7 +486,7 @@ services:
     # correo_fallido en el log del cartero. En producción el cartero entrega
     # al proveedor (compose.produccion.yaml).
     # Imagen fijada por versión y por digest, como el resto.
-    image: axllent/mailpit:v1.31.6@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
+    image: axllent/mailpit:v1.32.0@sha256:0790692be935ea4420d085694f7985b1f692ca6a8771ab0e0bd8ba75ac180498
     profiles:
       - desarrollo
     restart: unless-stopped
@@ -517,10 +517,10 @@ services:
     # un modo sin TLS. El certificado lo firma la CA local de desarrollo
     # (scripts/generar_tls_desarrollo.py), con el nombre mailpit. Es TLS de
     # servidor: Mailpit no pide ni verifica certificados ajenos (comprobado en
-    # su código, internal/smtpd/smtpd.go de la 1.31.6: solo Certificates), así
-    # que no abre la puerta de CVE-2026-111943 (tests/security/canario.openvex.json).
+    # su código, internal/smtpd/smtpd.go de la 1.32.0: solo Certificates).
     # Solo estas tres variables: verificar_escaneos.py (f) las tiene en lista
-    # blanca y falla con cualquier otra (un reenvío, un webhook).
+    # blanca y falla con cualquier otra (un reenvío, un webhook), porque
+    # cualquiera de ellas haría que un correo de prueba saliera hacia fuera.
     environment:
       MP_SMTP_TLS_CERT: /run/secrets/mailpit_certificado
       MP_SMTP_TLS_KEY: /run/secrets/mailpit_clave

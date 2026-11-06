@@ -172,7 +172,7 @@ MONTAJES_API = [("bind", "", "/run/secrets/clave_firma_tokens"),
                 ("bind", "", "/run/secrets/contrasena_redis")]
 
 IMAGEN_CADDY_OFICIAL = ("caddy:2.11.7-alpine@sha256:"
-                        "d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f")
+                        "e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5")
 CAP_OFICIAL = "cap_net_bind_service=ep"
 RAIZ_CA = "/data/caddy/pki/authorities/local/root.crt"
 

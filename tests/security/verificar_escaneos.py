@@ -16,8 +16,9 @@ Qué prueba:
      correo de desarrollo): ninguna
      vulnerabilidad HIGH o CRITICAL con arreglo publicado que no esté declarada
      como no explotable en tests/security/canario.openvex.json, ningún secreto,
-     declaraciones VEX vigentes (30 días como máximo), con efecto y atadas a la
-     versión exacta del componente; postgres sin gosu y sin root por defecto;
+     declaraciones VEX vigentes (30 días como máximo), con efecto, atadas a la
+     versión exacta del componente y sin suprimir nada más en ninguna imagen;
+     postgres sin gosu y sin root por defecto;
      caddy sin curl, libcurl ni brotli-libs;
      las vulnerabilidades sin arreglo se listan (riesgo residual, sección 8 del
      modelo de amenazas);
@@ -28,8 +29,10 @@ Qué prueba:
      sobre la configuración adaptada);
      mailpit solo con la configuración de TLS de servidor (lista blanca) y solo
      en su red interna; y en postgres, que
-     libcurl solo la enlaza el módulo OAuth del lado cliente de libpq y que
-     pg_hba.conf no tiene el método oauth;
+     libcurl solo la enlaza el módulo OAuth del lado cliente de libpq, que
+     pg_hba.conf no tiene el método oauth y que ningún fichero salvo la libz
+     contiene gzprintf ni gzvprintf; y en la API, que apt nunca se ejecuta
+     (ningún RUN lo llama, USER propio y servicios en solo lectura);
   g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL);
   h) un SBOM CycloneDX por imagen, que se deja en el directorio temporal del
      sistema (canario_sbom);
@@ -178,10 +181,31 @@ IMG_POSTGRES_BASE = "postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4
 LIBPQ_OAUTH = "/usr/local/lib/libpq-oauth-18.so"
 PG_HBA = RAIZ / "db" / "pg_hba.conf"
 PG_HBA_CONTROL = "host canario aplicacion samenet oauth issuer=https://idp.invalid scope=openid\n"
+# Alcanzabilidad de zlib en postgres (CVE-2026-85091): el fallo solo se
+# alcanza con gzprintf o gzvprintf. El único fichero que puede contener esos
+# símbolos es la propia libz, que los exporta (y es el control: la búsqueda
+# encuentra lo que busca). Literal, no derivado de la imagen.
+SIMBOLOS_ZLIB = ("gzprintf", "gzvprintf")
+LIBZ_POSTGRES = "/usr/lib/libz.so.1.3.2"
+
+# Alcanzabilidad de apt en la API (CVE-2026-109518): solo se alcanza
+# ejecutando apt, y para instalar hace falta root y escribir en el sistema de
+# ficheros. Los servicios que usan la imagen de la API y el usuario que
+# declara la imagen (Dockerfile, USER). Literales.
+SERVICIOS_IMAGEN_API = ("api", "broker", "cartero", "gestion")
+USUARIO_API = "10001:10001"
+DOCKERFILE_API = RAIZ / "Dockerfile"
+DOCKERFILE_API_CONTROL = "FROM python:3.12-slim\nRUN apt-get update \\\n && apt-get install -y curl\nUSER 10001:10001\n"
+# Control del compose: la API con usuario root y sin solo lectura.
+COMPOSE_CONTROL_API = """services:
+  api:
+    user: "0"
+    read_only: false
+"""
 
 # Caddy sin curl (proxy/Dockerfile): ni curl ni lo que solo él necesitaba, con
 # sus CVE (CVE-2026-92392 y CVE-2026-111497). Control: la imagen base los trae.
-IMG_CADDY_BASE = "caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f"
+IMG_CADDY_BASE = "caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
 PAQUETES_SIN_CURL = ("curl", "libcurl", "brotli-libs")
 
 # VEX
@@ -195,10 +219,16 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
 # CVE-2026-111943 se retiró el 26 de octubre de 2026, cuando la base de datos
 # de Trivy la bajó a MEDIUM, y se volvió a declarar el 29, cuando la subió
 # otra vez a HIGH. CVE-2026-116587 (go-jose) entró el 29 de octubre de 2026.
-CVES_VEX = {"caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031", "CVE-2026-111943",
+# La de mailpit (CVE-2026-111943, Go 1.27.2) se retiró el 6 de noviembre de
+# 2026 al adoptar mailpit 1.32.0, que la arregla, cumplidos los 14 días.
+# CVE-2026-85091 (zlib, postgres) y CVE-2026-109518 (apt, api) entraron el 6
+# de noviembre de 2026 y se retiran el 19, al adoptar las imágenes base del 5
+# de noviembre, que las arreglan, cumplidos los 14 días. En caddy y redis no
+# se declara la de zlib: se adoptaron sus imágenes del 21 de octubre.
+CVES_VEX = {"api": {"CVE-2026-109518"},
+            "caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031", "CVE-2026-111943",
                       "CVE-2026-116587"},
-            "mailpit": {"CVE-2026-111943"},
-            "postgres": {"CVE-2026-92392", "CVE-2026-111497"}}
+            "postgres": {"CVE-2026-92392", "CVE-2026-111497", "CVE-2026-85091"}}
 # Lo que el mismo VEX declara no explotable en spa/package-lock.json (j).
 # CVE-2026-109869 (undici 8.11.2) se retiró el 29 de octubre de 2026 al
 # adoptar undici 8.12.2, que la arregla, cumplidos los 14 días.
@@ -206,11 +236,13 @@ CVES_VEX_LOCK = set()
 # Para el control de atadura a la versión: las mismas declaraciones con la
 # versión siguiente del componente no deben suprimir nada.
 VERSIONES_VEX = {"pkg:golang/stdlib@v1.26.8": "pkg:golang/stdlib@v1.26.9",
-                 "pkg:golang/stdlib@v1.27.2": "pkg:golang/stdlib@v1.27.3",
                  "pkg:golang/golang.org/x/net@v0.59.0": "pkg:golang/golang.org/x/net@v0.60.0",
                  "pkg:golang/github.com/go-jose/go-jose/v4@v4.1.5": "pkg:golang/github.com/go-jose/go-jose/v4@v4.1.6",
                  "pkg:apk/alpine/libcurl@8.22.0-r0": "pkg:apk/alpine/libcurl@8.23.0-r0",
-                 "pkg:apk/alpine/brotli-libs@1.2.0-r1": "pkg:apk/alpine/brotli-libs@1.2.1-r0"}
+                 "pkg:apk/alpine/brotli-libs@1.2.0-r1": "pkg:apk/alpine/brotli-libs@1.2.1-r0",
+                 "pkg:apk/alpine/zlib@1.3.2-r0": "pkg:apk/alpine/zlib@1.3.2-r1",
+                 "pkg:deb/debian/apt@3.0.3": "pkg:deb/debian/apt@3.0.4",
+                 "pkg:deb/debian/libapt-pkg7.0@3.0.3": "pkg:deb/debian/libapt-pkg7.0@3.0.4"}
 
 # Caddy
 PROTOCOLOS_CADDY = ["h1"]
@@ -703,7 +735,7 @@ def seccion_e():
     # y no a los 30 días. Control: la misma comparación con una declaración
     # de más tiene que fallar (no es una comparación que siempre acierta).
     # Una declaración por cada imagen y CVE: la misma CVE en dos imágenes
-    # (CVE-2026-111943 en caddy y mailpit) son dos declaraciones.
+    # serían dos declaraciones.
     esperadas = collections.Counter([c for cves in CVES_VEX.values() for c in cves] + list(CVES_VEX_LOCK))
 
     def declaradas_en(doc):
@@ -756,6 +788,16 @@ def seccion_e():
         for cve in sorted(cves):
             negativo(f"e) VEX {cve}: suprime el hallazgo en {nombre} (una declaracion sin efecto se revisa y se retira)",
                      (nombre, cve) in suprimidas_total, control_vex[nombre])
+    # Y en ninguna imagen suprime nada más. Una declaración se ata a un paquete
+    # y su versión, no a una imagen: la de zlib 1.3.2-r0 pensada para postgres
+    # taparía en silencio la misma CVE en cualquier otra imagen que volviera a
+    # traer esa versión. Lo suprimido tiene que ser exactamente CVES_VEX.
+    # Control: con una supresión de más (inventada) la comparación falla.
+    esperadas_sup = {(nombre, cve) for nombre, cves in CVES_VEX.items() for cve in cves}
+    control_sobrante = bool((suprimidas_total | {("redis", "CVE-0000-0000")}) - esperadas_sup)
+    pasa(control_sobrante, "e) control: una supresion fuera de CVES_VEX se detecta")
+    negativo("e) VEX: no suprime nada fuera de CVES_VEX en ninguna imagen", not suprimidas_total - esperadas_sup,
+             control_sobrante, f"sobran {sorted(suprimidas_total - esperadas_sup)}")
 
 
 def escribir_vex_movido():
@@ -829,7 +871,8 @@ CONTROL_X509 = [
     ("\treverse_proxy api:8000 {", "\treverse_proxy https://api:8000 {"),
 ]
 # Mailpit con una variable de reenvío, una orden y un punto de entrada propios
-# y en una red con salida: lo que haría que abriese conexiones TLS hacia fuera.
+# y en una red con salida: lo que haría que un correo de prueba saliera hacia
+# fuera.
 # Cada línea rompe una condición de mailpit_sin_salida (el environment se
 # fusiona con el real, así que la lista blanca se ve con una clave de más).
 COMPOSE_CONTROL_MAILPIT = """services:
@@ -844,7 +887,7 @@ COMPOSE_CONTROL_MAILPIT = """services:
 """
 # Lo único que mailpit puede llevar en environment: la configuración de TLS de
 # SERVIDOR (el cartero le entrega el correo por TLS). Literal, no derivado de
-# docker-compose.yml. En Mailpit 1.31.6, ConfigureTLS (internal/smtpd/smtpd.go)
+# docker-compose.yml. En Mailpit 1.32.0, ConfigureTLS (internal/smtpd/smtpd.go)
 # solo fija Certificates en el tls.Config del servidor: no pide ni verifica
 # certificados de cliente, así que no verifica cadenas ajenas.
 ENTORNO_MAILPIT = {
@@ -1015,8 +1058,8 @@ def seccion_f():
              control["acme_server"])
     # CVE-2026-111943: Caddy no verifica ningún certificado ajeno. Control: el
     # Caddyfile con un cambio que rompe cada condición. Sigue sin arreglo en
-    # las imágenes de Caddy y mailpit: esto es lo que demuestra que no se
-    # alcanza y lo que sostiene su declaración en el VEX.
+    # la imagen de Caddy: esto es lo que demuestra que no se alcanza y lo que
+    # sostiene su declaración en el VEX.
     control_x509 = adaptar(caddyfile_control(TEMPORAL / "caddy_x509", CONTROL_X509))
     for condicion, cumple in real["x509"].items():
         negativo(f"f) configuracion adaptada: {condicion} (CVE-2026-111943)", cumple,
@@ -1050,16 +1093,18 @@ def seccion_f():
             continue
         negativo(f"f) produccion: {condicion} (CVE-2026-111943)", cumple,
                  control_x509["x509"][condicion] is False)
-    # CVE-2026-111943 en mailpit: solo la configuración de TLS de servidor
-    # (lista blanca), que no verifica certificados ajenos, sin nada que le haga
-    # abrir TLS hacia fuera y sin salida. Control: un compose adicional con una
-    # variable de reenvío, command, entrypoint y la red edge: cada condición
-    # tiene que fallar.
+    # Mailpit sin reenvío ni salida: solo la configuración de TLS de servidor
+    # (lista blanca), sin nada que le haga entregar hacia fuera y solo en una
+    # red interna. Ya no sostiene ninguna declaración del VEX (la de
+    # CVE-2026-111943 se retiró con mailpit 1.32.0), pero se queda como
+    # invariante: un correo de prueba nunca debe llegar a un buzón real.
+    # Control: un compose adicional con una variable de reenvío, command,
+    # entrypoint y la red edge: cada condición tiene que fallar.
     real_mailpit = mailpit_sin_salida()
     compose_control = escribir(TEMPORAL / "mailpit_control" / "compose.yml", COMPOSE_CONTROL_MAILPIT)
     control_mailpit = mailpit_sin_salida(["-f", str(compose_control)])
     for condicion, cumple in real_mailpit.items():
-        negativo(f"f) mailpit: {condicion} (CVE-2026-111943)", cumple, control_mailpit[condicion] is False)
+        negativo(f"f) mailpit sin reenvio ni salida: {condicion}", cumple, control_mailpit[condicion] is False)
 
     # CVE-2026-92392 y CVE-2026-111497 en postgres: libcurl (y brotli-libs, que
     # solo usa libcurl) solo la enlaza el módulo OAuth del lado cliente de
@@ -1073,6 +1118,41 @@ def seccion_f():
     metodos = metodos_hba(PG_HBA.read_text(encoding="utf-8"))
     negativo(f"f) postgres: db/pg_hba.conf sin el metodo oauth ({sorted(metodos)})", "oauth" not in metodos,
              "oauth" in metodos_hba(PG_HBA_CONTROL))
+
+    # CVE-2026-85091 en postgres: ningún fichero salvo la propia libz contiene
+    # gzprintf ni gzvprintf, así que nadie puede llamarlos. Control: la libz
+    # sí aparece, así que la búsqueda encuentra lo que busca.
+    con_simbolos = contienen_simbolos(NOMBRES["postgres"], SIMBOLOS_ZLIB)
+    control_libz = LIBZ_POSTGRES in con_simbolos
+    pasa(control_libz, f"f) postgres: control: la busqueda encuentra {list(SIMBOLOS_ZLIB)} en {LIBZ_POSTGRES}")
+    negativo(f"f) postgres: solo {LIBZ_POSTGRES} contiene {list(SIMBOLOS_ZLIB)} (CVE-2026-85091) ({con_simbolos})",
+             con_simbolos == [LIBZ_POSTGRES], control_libz)
+
+    # CVE-2026-109518 en la API: apt nunca se ejecuta. Ninguna orden RUN del
+    # Dockerfile lo llama (control: un Dockerfile con apt-get), la imagen
+    # declara un usuario sin privilegios (control: la imagen base no declara
+    # ninguno) y los servicios que la usan no lo cambian y van en solo lectura
+    # (control: un compose con user 0 y sin read_only). Sin root y sin poder
+    # escribir, ni con ejecución de código dentro se instala un paquete.
+    run_apt = ordenes_apt(DOCKERFILE_API.read_text(encoding="utf-8"))
+    control_run = bool(ordenes_apt(DOCKERFILE_API_CONTROL))
+    pasa(control_run, "f) api: control: un Dockerfile con apt-get se detecta")
+    negativo(f"f) api: ninguna orden RUN del Dockerfile llama a apt, apt-get ni dpkg (CVE-2026-109518) {run_apt}",
+             not run_apt, control_run)
+    ejecutar(["docker", "pull", "-q", IMG_PYTHON], timeout=600)
+    usuario_api = usuario_imagen(NOMBRES["api"])
+    control_usuario = usuario_imagen(IMG_PYTHON) == ""
+    pasa(control_usuario, "f) api: control: la imagen base no declara usuario (root)")
+    negativo(f"f) api: la imagen declara USER {USUARIO_API} (CVE-2026-109518) ({usuario_api!r})",
+             usuario_api == USUARIO_API, control_usuario)
+    compose_control_api = escribir(TEMPORAL / "api_control" / "compose.yml", COMPOSE_CONTROL_API)
+    control_compose_api = servicios_api_sin_root(["-f", str(compose_control_api)])["api"] is False
+    pasa(control_compose_api, "f) api: control: un compose con user 0 y sin read_only se detecta")
+    for extra, entorno in (([], "desarrollo"), (["-f", "compose.produccion.yaml"], "produccion")):
+        real = servicios_api_sin_root(extra)
+        for servicio in SERVICIOS_IMAGEN_API:
+            negativo(f"f) {entorno}: {servicio} sin otro usuario y con read_only (CVE-2026-109518)",
+                     real[servicio], control_compose_api)
 
     # ALPN real contra dos Caddy en marcha en una red interna: el de la imagen
     # y uno de control con "protocols h1 h2".
@@ -1106,6 +1186,54 @@ def enlazan_libcurl(imagen):
     r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--user", "70:70",
                   "--entrypoint", "sh", imagen, "-c", orden], timeout=300)
     return sorted(r.out.split())
+
+
+def contienen_simbolos(imagen, simbolos):
+    """Los ficheros de la imagen que contienen alguno de los símbolos. Es
+    conservador: busca el texto en cada fichero, así que un nombre de símbolo
+    en cualquier sitio cuenta (falla de forma visible, nunca se lo salta)."""
+    patrones = " ".join(f"-e {s}" for s in simbolos)
+    orden = ("find /usr /lib /bin /sbin /etc -type f 2>/dev/null | while read -r f; do "
+             f"grep -q -F {patrones} \"$f\" 2>/dev/null && echo \"$f\"; done; true")
+    r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--user", "70:70",
+                  "--entrypoint", "sh", imagen, "-c", orden], timeout=300)
+    return sorted(r.out.split())
+
+
+def ordenes_apt(texto):
+    """Las órdenes RUN de un Dockerfile que llaman a apt, apt-get o dpkg. Une
+    las líneas partidas con barra invertida y quita los comentarios."""
+    logicas, actual = [], ""
+    for linea in texto.splitlines():
+        if linea.lstrip().startswith("#"):
+            continue
+        actual += linea.rstrip()
+        if actual.endswith("\\"):
+            actual = actual[:-1] + " "
+            continue
+        logicas.append(actual.strip())
+        actual = ""
+    if actual.strip():
+        logicas.append(actual.strip())
+    return [l for l in logicas if re.match(r"(?i)RUN\s", l) and re.search(r"\b(apt|apt-get|aptitude|dpkg)\b", l)]
+
+
+def usuario_imagen(imagen):
+    return ejecutar(["docker", "image", "inspect", "--format", "{{.Config.User}}", imagen]).out.strip()
+
+
+def servicios_api_sin_root(extra=()):
+    """Para cada servicio con la imagen de la API: que no cambia el usuario de
+    la imagen (o pone el mismo) y que va en solo lectura. Sin interpolar: lo
+    que se mira es literal y una variable se vería como tal (y fallaría)."""
+    r = ejecutar(BASE + list(extra) + ["--profile", "gestion", "--profile", "desarrollo", "config", "--format", "json",
+                                      "--no-interpolate"])
+    configuracion = json_de_texto(r.out)
+    if configuracion is None:
+        raise Parada(f"docker compose config no devuelve JSON: {r.err.strip()[-300:]}")
+    servicios = configuracion["services"]
+    return {s: servicios[s].get("user", USUARIO_API) == USUARIO_API and servicios[s].get("read_only") is True
+            for s in SERVICIOS_IMAGEN_API}
 
 
 def metodos_hba(texto):
