@@ -192,7 +192,12 @@ etapa. Prueba:
   Leila sale con aria-hidden (si la lista no está vacía, SIN CONCLUSION), y
   también en la 404 (si la ruta no da la 404, SIN CONCLUSION); a 1280 px
   (pulido 1), el botón de cerrar la sesión acaba en el borde derecho de la
-  barra, menos su relleno (control: con el reseteo .barra p de antes, no);
+  barra, menos su relleno (control: con la cuenta suelta en la barra, no); la
+  barra va en dos filas (6 de noviembre de 2026): con un email largo, a 320,
+  640, 1000, 1280 y 1600 px el botón acaba en el borde, el menú va debajo de
+  la marca y la cuenta y después en el DOM, nada desborda y desde 1000 px la
+  cuenta comparte fila con la marca (controles: con la cuenta suelta, el botón
+  no llega al borde; con el menú sin su fila entera, sube junto a la cuenta);
   h1, h2 y h3 miden 24, 20 y 18 px, a 600 (control: con el h2 del navegador,
   no); las patas del canario contrastan al menos 3:1 con la barra y con el
   fondo de /entrar en los dos temas (control: con el contorno casi negro, en
@@ -946,6 +951,21 @@ RUTAS_ANCHO = ["/inicio", "/denuncias", "/cuentas", "/solicitudes", "/auditoria"
 # las patas del canario con lo que tienen detrás (WCAG 2.2, 1.4.11).
 ANCHO_ESCRITORIO = 1280
 HUECO_BARRA = 24
+# p) La barra en dos filas (6 de noviembre de 2026). Con un email largo en su
+# sitio (el peor caso), a cada ancho: el botón de cerrar la sesión acaba a
+# HUECO_BARRA del borde derecho, el menú va debajo de la marca y de la cuenta,
+# el botón va antes que el menú en el DOM y nada desborda. Desde 1000 px, la
+# cuenta comparte fila con la marca; por debajo, con este email, baja entera a
+# la línea siguiente. Medido en Chromium con la hoja real.
+EMAIL_LARGO_BARRA = "nombre.apellido.segundoapellido.largo@departamento-juridico.es"
+ANCHOS_BARRA = [320, 640, 1000, 1280, 1600]
+ANCHOS_BARRA_FILA = [1000, 1280, 1600]
+# Los controles. A 1000 px con el email largo, la cuenta suelta
+# (.cuenta-barra con display: contents, como en la barra de una fila de antes)
+# deja el botón lejos del borde. A 1600 px con el email del admin, el menú sin
+# su fila entera sube junto a la cuenta.
+ANCHO_CONTROL_BARRA = 1000
+ANCHO_CONTROL_MENU = 1600
 TITULOS_ESPERADOS = ["24px 600", "20px 600", "18px 600"]
 CONTRASTE_PATAS = 3.0
 # p) Pulido 2a. El alto de un control de una línea: 20 px de línea (1.25 de
@@ -2307,6 +2327,10 @@ ruta_sin_pagina = sys.argv[8]
 ancho_escritorio = int(sys.argv[9])
 medida_entradilla = sys.argv[10]
 viewbox_anterior = sys.argv[11]
+anchos_barra = json.loads(sys.argv[12])
+email_largo = sys.argv[13]
+ancho_control_barra = int(sys.argv[14])
+ancho_control_menu = int(sys.argv[15])
 usados[secreto_admin] = int(paso_admin)
 # La familia sin comillas, las ponga Chromium o no.
 FUENTES = "() => [...document.fonts].map((f) => [f.family.replace(/[\"']/g, ''), f.status])"
@@ -2342,7 +2366,27 @@ TITULOS = ("() => { const m = document.querySelector('main'); const h3 = documen
 # El color de las patas del canario y el fondo que tienen detrás.
 PATAS = ("(fondo) => [getComputedStyle(document.querySelector('.canario-patas')).stroke, "
          "getComputedStyle(document.querySelector(fondo)).backgroundColor]")
-MUTANTE_BARRA = ".barra p { margin: 0; }"
+# La barra de una fila de antes: la cuenta y el botón sueltos en la barra.
+MUTANTE_BARRA = ".cuenta-barra { display: contents; }"
+MUTANTE_MENU = ".barra > nav { flex-basis: auto; }"
+# La forma de la barra: el hueco del botón al borde derecho; si el botón y el
+# email están en la fila de la marca (su centro dentro de la caja de la
+# marca); si el menú empieza por debajo de la marca, el email y el botón; si
+# el botón va antes que el primer enlace del menú en el DOM; y si la página
+# desborda.
+FORMA_BARRA = ("() => { const b = document.querySelector('.barra button'); const q = document.querySelector('.quien'); "
+               "const m = document.querySelector('.marca'); const n = document.querySelector('.barra nav'); "
+               "const a = document.querySelector('.barra nav a'); const r = (e) => e.getBoundingClientRect(); "
+               "const c = (x) => (x.top + x.bottom) / 2; const rm = r(m), rb = r(b), rq = r(q), rn = r(n); "
+               "return {hueco: Math.round(document.documentElement.clientWidth - rb.right), "
+               "fila: Math.abs(c(rb) - c(rm)) < rm.height / 2 && Math.abs(c(rq) - c(rm)) < rm.height / 2, "
+               "debajo: rn.top >= Math.max(rm.bottom, rb.bottom, rq.bottom) - 0.5, "
+               "orden: (b.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0, "
+               "desborda: document.documentElement.scrollWidth > document.documentElement.clientWidth}; }")
+# El email de la barra: se cambia por uno largo con el DOM y se deja como
+# estaba (es solo texto; la cuenta no cambia).
+PONER_EMAIL = "(t) => { document.querySelector('.quien-email').textContent = t; }"
+LEER_EMAIL = "() => document.querySelector('.quien-email').textContent"
 MUTANTE_H2 = "h2 { font-size: 1.5em; font-weight: 700; }"
 MUTANTE_PATAS = ".canario-patas { stroke: var(--color-canario-contorno); }"
 # Pulido 2a. El alto de cada control, con dos decimales.
@@ -2521,6 +2565,22 @@ async def pasos_estetica(navegador):
     res["hueco_barra_mutante"] = await con_regla(claro, MUTANTE_BARRA, BARRA)
     res["titulos_mutante"] = await con_regla(claro, MUTANTE_H2, TITULOS)
     res["patas_barra_mutante"] = await con_regla(claro, MUTANTE_PATAS, PATAS, ".barra")
+    # La barra en dos filas, a cada ancho con el email largo, y sus dos
+    # controles; después, el email del admin y el ancho de escritorio, como
+    # estaban.
+    await claro.evaluate(PONER_EMAIL, email_largo)
+    res["email_barra"] = await claro.evaluate(LEER_EMAIL)
+    res["forma_barra"] = {}
+    for ancho in anchos_barra:
+        await claro.set_viewport_size({"width": ancho, "height": 800})
+        res["forma_barra"][str(ancho)] = await claro.evaluate(FORMA_BARRA)
+    await claro.set_viewport_size({"width": ancho_control_barra, "height": 800})
+    res["forma_barra_mutante"] = await con_regla(claro, MUTANTE_BARRA, FORMA_BARRA)
+    await claro.evaluate(PONER_EMAIL, email_admin)
+    await claro.set_viewport_size({"width": ancho_control_menu, "height": 800})
+    res["forma_menu"] = await claro.evaluate(FORMA_BARRA)
+    res["forma_menu_mutante"] = await con_regla(claro, MUTANTE_MENU, FORMA_BARRA)
+    await claro.set_viewport_size({"width": ancho_escritorio, "height": 800})
     # Pulido 2c: el email, el rol y su botón en una fila.
     res["invitar"] = await claro.evaluate(INVITAR)
     res["invitar_mutante"] = await con_regla(claro, MUTANTE_INVITAR, INVITAR)
@@ -4611,7 +4671,8 @@ def seccion_p():
         return
     res = navegador("navegador_p", NAVEGADOR_ESTETICA,
                     [SPKI_INTERMEDIA, IDENTIFICADOR, EMAIL_ADMIN, CONTRASENA_ADMIN, SECRETO_ADMIN, str(ULTIMO_PASO),
-                     json.dumps(RUTAS_ANCHO), RUTA_SIN_PAGINA, str(ANCHO_ESCRITORIO), MEDIDA_ENTRADILLA, VIEWBOX_ANTERIOR])
+                     json.dumps(RUTAS_ANCHO), RUTA_SIN_PAGINA, str(ANCHO_ESCRITORIO), MEDIDA_ENTRADILLA, VIEWBOX_ANTERIOR,
+                     json.dumps(ANCHOS_BARRA), EMAIL_LARGO_BARRA, str(ANCHO_CONTROL_BARRA), str(ANCHO_CONTROL_MENU)])
     if res is None:
         sinc("p) no se pudo ejecutar el navegador")
         return
@@ -4675,7 +4736,31 @@ def seccion_p():
     negativo(f"p) a {ANCHO_ESCRITORIO} px el boton de cerrar la sesion acaba en el borde derecho de la barra "
              f"(hueco {hueco}, esperado {HUECO_BARRA})",
              hueco == HUECO_BARRA, isinstance(hueco_mutante, int) and hueco_mutante != HUECO_BARRA,
-             f"control: con .barra p {{ margin: 0 }} el hueco sigue siendo {hueco_mutante}")
+             f"control: con la cuenta suelta (.cuenta-barra {{ display: contents }}) el hueco sigue siendo "
+             f"{hueco_mutante}")
+    # La barra en dos filas, a cada ancho con un email largo.
+    formas, forma_mutante = res.get("forma_barra") or {}, res.get("forma_barra_mutante")
+    control_forma = isinstance(forma_mutante, dict) and forma_mutante.get("hueco") != HUECO_BARRA
+    pasa(control_forma, f"p) control: a {ANCHO_CONTROL_BARRA} px, con la cuenta suelta (.cuenta-barra "
+                        f"{{ display: contents }}), el boton no acaba en el borde ({forma_mutante})")
+    menu, menu_mutante = res.get("forma_menu"), res.get("forma_menu_mutante")
+    control_menu = isinstance(menu_mutante, dict) and menu_mutante.get("debajo") is False
+    pasa(control_menu, f"p) control: a {ANCHO_CONTROL_MENU} px, con el menu sin su fila entera "
+                       f"(flex-basis: auto), el menu sube junto a la cuenta ({menu_mutante})")
+    negativo(f"p) a {ANCHO_CONTROL_MENU} px, con el email del admin, el menu va debajo de la marca y la cuenta ({menu})",
+             isinstance(menu, dict) and menu.get("debajo") is True, control_menu)
+    if res.get("email_barra") != EMAIL_LARGO_BARRA:
+        sinc(f"p) el email largo no quedo en la barra ({res.get('email_barra')!r}): no se puede mirar su forma")
+    else:
+        mal = {ancho: forma for ancho, forma in formas.items()
+               if not (isinstance(forma, dict) and forma.get("hueco") == HUECO_BARRA and forma.get("debajo") is True
+                       and forma.get("orden") is True and forma.get("desborda") is False
+                       and (forma.get("fila") is True or int(ancho) not in ANCHOS_BARRA_FILA))}
+        negativo(f"p) con un email de {len(EMAIL_LARGO_BARRA)} caracteres, a {ANCHOS_BARRA} px: el boton acaba en el "
+                 f"borde, el menu va debajo y despues en el DOM, nada desborda y desde {ANCHOS_BARRA_FILA[0]} px la "
+                 f"cuenta va en la fila de la marca {mal if mal else ''}".rstrip(),
+                 sorted(int(a) for a in formas) == ANCHOS_BARRA and not mal, control_forma and control_menu,
+                 f"{formas}")
     titulos, titulos_mutante = res.get("titulos"), res.get("titulos_mutante")
     negativo(f"p) h1, h2 y h3 con su tamano y su peso {titulos} (esperado {TITULOS_ESPERADOS})",
              titulos == TITULOS_ESPERADOS,

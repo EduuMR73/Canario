@@ -15,7 +15,12 @@ import { nombreRol } from '../nucleo/roles';
 // pintan. Solo se llega aquí con la cuenta cargada (nucleo/permisos.ts,
 // permitirPorRol); el @if es para el tipo, no un estado más.
 //
-// Sin enlace para saltar al menú: el menú son cuatro enlaces, y las páginas
+// La barra va en dos filas (styles.css, .barra): arriba la marca y la cuenta,
+// debajo el menú. El orden del DOM es el que se ve, así que el foco llega a
+// "Cerrar la sesión" antes que al menú, como en la barra de GOV.UK One Login.
+// La cuenta (email, rol y cierre) va en un solo bloque para que no se separe.
+//
+// Sin enlace para saltar al menú: el menú son como mucho seis enlaces, y las páginas
 // ya tienen sus regiones (header, nav, main) y su h1, que recibe el foco al
 // cambiar de página (WCAG 2.2, 2.4.1, técnicas ARIA11 y H69). Un enlace
 // href="#contenido" además no funcionaría aquí: con <base href="/"> lleva a
@@ -39,6 +44,12 @@ import { nombreRol } from '../nucleo/roles';
     @if (sesion.yo(); as yo) {
       <header class="barra">
         <p class="marca"><app-canario />Canario</p>
+        <div class="cuenta-barra">
+          <p class="quien"><span class="quien-email">{{ yo.email }}</span>&ngsp;<span class="quien-rol">{{ nombreRol(yo.rol) }}</span></p>
+          <button type="button" class="secundario" (click)="cerrarSesion()" [attr.aria-disabled]="cerrando() || null">
+            {{ cerrando() ? 'Cerrando la sesión...' : 'Cerrar la sesión' }}
+          </button>
+        </div>
         <nav aria-label="Principal">
           <ul class="menu">
             @for (entrada of menu(); track entrada.ruta) {
@@ -46,10 +57,6 @@ import { nombreRol } from '../nucleo/roles';
             }
           </ul>
         </nav>
-        <p class="quien"><span class="quien-email">{{ yo.email }}</span>&ngsp;<span class="quien-rol">{{ nombreRol(yo.rol) }}</span></p>
-        <button type="button" class="secundario" (click)="cerrarSesion()" [attr.aria-disabled]="cerrando() || null">
-          {{ cerrando() ? 'Cerrando la sesión...' : 'Cerrar la sesión' }}
-        </button>
       </header>
       @if (error(); as texto) {
         <p class="error barra-error" role="alert">{{ texto }}</p>

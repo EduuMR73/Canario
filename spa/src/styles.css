@@ -839,9 +839,14 @@ main.acceso {
   max-width: none;
 }
 
-/* Armazón: la barra con la marca, el menú del rol, la cuenta y el cierre.
-   Oscura en los dos temas. Se parte en líneas en pantallas estrechas, sin
-   desbordar a 320 px. */
+/* Armazón: la barra, oscura en los dos temas, en dos filas con la misma forma
+   en cualquier ancho y para cualquier rol. Arriba, la marca y la cuenta;
+   debajo, el menú. Con una sola fila, cada pieza bajaba de línea por su
+   cuenta en los anchos medios (la cuenta sola en una fila, o el botón suelto
+   a la izquierda), y el ancho del corte dependía del largo del email y del
+   número de enlaces del rol. El orden del DOM es el visual (marca, cuenta,
+   menú), sin order ni grid-template-areas: el foco sigue lo que se ve
+   (WCAG 2.2, 2.4.3). Sin desbordar a 320 px. */
 .barra {
   display: flex;
   flex-wrap: wrap;
@@ -897,10 +902,26 @@ main.acceso {
   border-bottom-color: var(--color-foco-barra);
 }
 
-/* margin-left: auto la empuja, con el botón de cerrar, al extremo derecho
-   de la barra; en una pantalla estrecha, al de su línea. */
+/* El menú ocupa siempre una fila entera, debajo de la marca y la cuenta, y
+   se parte en líneas si no cabe (WCAG 2.2, 1.4.10). */
+.barra > nav {
+  flex-basis: 100%;
+}
+
+/* La cuenta: email, rol y botón de cerrar en un solo bloque, para que no se
+   separen. margin-left: auto lo lleva al extremo derecho de la fila de la
+   marca o, si no cabe en ella, de la línea siguiente. */
+.cuenta-barra {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--espacio-2) var(--espacio-4);
+}
+
 .quien {
-  margin: 0 0 0 auto;
+  margin: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
