@@ -190,6 +190,7 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 - **El código de seguimiento no se puede recuperar.** Es el precio del anonimato.
 - **El correo pasa por Mailjet.** Ve el contenido de cada correo, con los enlaces de un solo uso, aunque no los registre por su seguimiento, que está apagado. Si el cartero se para con correos en cola, se pierden con su evento: se recuperan reinvitando.
 - **La supresión legal no se ejecuta sola:** hay que programarla cada hora ([operacion.md](docs/operacion.md)).
+- **Las copias de seguridad guardan lo suprimido o tachado ~31 días.** Van cifradas a un bucket con Object Lock en modo compliance que nadie puede vaciar antes. Quien tenga root en el VPS puede parar, envenenar, falsificar u ocultar las copias (no borrarlas), y solo se ve desde fuera (los latidos, con el registro de lo subido, y el simulacro mensual); la restauración y la reaplicación de eventos son manuales ([operacion.md](docs/operacion.md), copias de seguridad).
 - **No se puede cambiar el nombre de una empresa.**
 - **Probado solo en Chromium.** Trusted Types y las pruebas del navegador no se ejecutan en Firefox ni Safari.
 - **Sin adjuntos y sin avisos al personal de una denuncia nueva:** diseñados, no implementados (modelo de amenazas, 6.6 y 10).
@@ -210,9 +211,9 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 | Documento | Contenido |
 |---|---|
 | [docs/api.md](docs/api.md) | Rutas de la API, sesión del navegador, páginas de la SPA y del denunciante, registro, correo y su log |
-| [docs/operacion.md](docs/operacion.md) | Puesta en marcha completa, producción en el VPS, correo con Mailjet, `gestion`, supresión legal programada, log y copias de seguridad |
+| [docs/operacion.md](docs/operacion.md) | Puesta en marcha completa, producción en el VPS, correo con Mailjet, `gestion`, supresión legal programada, copias de seguridad cifradas (y restaurarlas), log y reaplicación de eventos |
 | [docs/estudio-costes.md](docs/estudio-costes.md) | Coste de explotar Canario en OVHcloud, Render, AWS, Azure y Google Cloud, con su versión en [PDF](docs/estudio-costes.pdf) |
-| [docs/pruebas.md](docs/pruebas.md) | Las doce baterías de seguridad, las pruebas unitarias y ruff, y cómo ejecutarlas |
+| [docs/pruebas.md](docs/pruebas.md) | Las baterías de seguridad, las pruebas unitarias y ruff, y cómo ejecutarlas |
 | [docs/threat-model.md](docs/threat-model.md) | Modelo de amenazas: decisiones de diseño, tabla de amenazas y límites |
 
 ## Estructura del repositorio

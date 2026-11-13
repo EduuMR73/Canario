@@ -1,0 +1,17 @@
+# Lanza canario-copia-base.service una vez al día (docs/operacion.md).
+[Unit]
+Description=Canario: copia diaria cifrada de la base
+
+[Timer]
+# En UTC explícito: sin la zona, systemd usa la del VPS y la hora cambiaría con
+# ella (y con el horario de verano). Se comprueba con
+# "systemd-analyze calendar '*-*-* 03:30:00 UTC'".
+OnCalendar=*-*-* 03:30:00 UTC
+# Si el VPS estaba apagado a esa hora, la copia se hace al arrancar en vez de
+# saltarse el día.
+Persistent=true
+# Margen pequeño para no coincidir con otras tareas del VPS a la hora en punto.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

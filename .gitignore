@@ -24,6 +24,8 @@ secrets/*
 *.pfx
 
 # Local data
+# Segunda capa: una restauracion de copias (volcado en claro) nunca debe llegar a un commit
+restauracion/
 /data/
 /uploads/
 /attachments/

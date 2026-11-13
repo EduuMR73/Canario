@@ -1,0 +1,88 @@
+# Copia diaria cifrada de la base de Canario a Backblaze B2
+# (despliegue/copias.py; docs/operacion.md, "Copias de seguridad"). La lanza
+# canario-copia-base.timer.
+#
+# Se instala en /etc/systemd/system, como el script en /usr/local/sbin, con
+# dueño root y sin escritura para nadie más: si otro usuario pudiera cambiar
+# ExecStart o el script, tendría root (ATT&CK T1543.002, mitigación M1022).
+[Unit]
+Description=Canario: copia diaria cifrada de la base a Backblaze B2
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/canario-copias.py base
+# pg_dump y la subida tienen sus plazos en el script; esto es el tope de la
+# ejecución entera, para que una unidad colgada falle y se vea.
+TimeoutStartSec=7200
+# El script lleva su propio presupuesto (6600 s) y atiende SIGTERM: al agotarse
+# cualquiera de los dos, hace /fail antes de que systemd mande SIGKILL.
+
+# Credenciales de B2, bucket esperado y URL del latido: systemd las lee de los ficheros de root
+# (0600, directorio 0700) y las expone al proceso en $CREDENTIALS_DIRECTORY,
+# en un directorio que solo ve este servicio. Nunca variables de entorno ni
+# argumentos: los dos salen en /proc.
+LoadCredential=b2_id:/etc/canario-copias/b2_id
+LoadCredential=b2_clave:/etc/canario-copias/b2_clave
+LoadCredential=latido_url:/etc/canario-copias/latido_url
+# No es secreto, pero el script compara con él el bucket de la clave de B2: una
+# clave de otro bucket (sin Object Lock) se rechaza.
+LoadCredential=bucket_id:/etc/canario-copias/bucket_id
+
+# Endurecimiento. Ojo: NO contiene a un atacante ni cuenta como control frente
+# a root. El script habla con el socket de Docker, y quien habla con él
+# equivale a root (puede arrancar un contenedor que monte /); además hay red
+# y las credenciales de B2. Estas directivas solo limitan lo que haría un fallo
+# del propio script. Los controles reales son que solo root pueda cambiar el
+# script, la unidad y las credenciales, y que la clave de B2 solo pueda
+# escribir (Object Lock en el bucket): root en el VPS puede parar, envenenar u
+# ocultar las copias (b2_hide_file está en writeFiles), y eso solo se ve desde
+# fuera (el latido, con lo subido en su cuerpo, y el simulacro mensual).
+# Cada directiva se comprueba en el VPS con systemd-analyze; si una rompe la
+# unidad, se quita esa sola y se anota el motivo.
+NoNewPrivileges=yes
+ProtectSystem=strict
+# El socket de Docker, explícito, aunque ProtectSystem=strict deje /run solo
+# de lectura.
+ReadWritePaths=/run/docker.sock
+ProtectHome=yes
+# Con ProtectHome, el cliente de docker no llega a /root/.docker: su
+# configuración va a un directorio propio y vacío que systemd crea y borra.
+RuntimeDirectory=canario-copia-base
+Environment=DOCKER_CONFIG=%t/canario-copia-base
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# Solo llamadas al sistema de un servicio normal (systemd.exec(5): "@system-service
+# ... excluding any special purpose calls": sin @mount, @swap, @reboot ni @clock).
+# Python, el cliente de docker y age no necesitan nada de eso. Si el filtro
+# matara algo (SIGSYS), se ve con "journalctl -u" y "systemd-analyze syscall-filter".
+SystemCallFilter=@system-service
+# Sin swap: el volcado y las claves viven en memoria y no deben acabar en disco.
+# (systemd.resource-control(5); necesita cgroup v2, el de Ubuntu 24.04.)
+MemorySwapMax=0
+# Sin volcado de memoria si el proceso muere: tendría el volcado en claro.
+LimitCORE=0
+# IPC de System V y colas POSIX propias (systemd 248 o posterior).
+PrivateIPC=yes
+# NO se ponen ProtectProc=invisible ni ProcSubset=pid, a propósito. La página de
+# systemd.exec(5) dice que ProtectProc solo oculta los procesos de OTROS
+# usuarios (root no queda afectado, y este servicio es root) y que ProcSubset=pid
+# "no es adecuado para la mayoría de los programas no triviales": no se ha
+# comprobado que Python, docker y age lo toleren, y no aportaría defensa real.
+# Unix (el socket de Docker) y red (B2 y el latido, por IPv4 o IPv6).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Sin capacidades: todo lo que lee y escribe es de root, y el socket también.
+CapabilityBoundingSet=
+UMask=0077

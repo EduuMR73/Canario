@@ -1,0 +1,82 @@
+# Copia cifrada de los EVENTO de la API (declaracion_no_veraz, redaccion y
+# reutilizacion_renovacion) a Backblaze B2 (despliegue/copias.py;
+# docs/operacion.md, "Copias de seguridad"). La lanza canario-copia-eventos.timer
+# cada 15 minutos.
+#
+# Se instala en /etc/systemd/system, como el script en /usr/local/sbin, con
+# dueño root y sin escritura para nadie más (ATT&CK T1543.002, M1022).
+[Unit]
+Description=Canario: copia cifrada de los eventos de la API a Backblaze B2
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/canario-copias.py eventos
+TimeoutStartSec=1800
+# El script lleva su propio presupuesto (1500 s) y atiende SIGTERM: al agotarse
+# cualquiera de los dos, hace /fail antes de que systemd mande SIGKILL.
+
+# Credenciales de B2, bucket esperado y URL de SU latido (healthchecks.io, check
+# propio de 15 minutos). Es otra credencial distinta de la de la base: con una
+# sola, quien la tuviera taparía el fallo de la otra.
+LoadCredential=b2_id:/etc/canario-copias/b2_id
+LoadCredential=b2_clave:/etc/canario-copias/b2_clave
+LoadCredential=bucket_id:/etc/canario-copias/bucket_id
+LoadCredential=latido_eventos_url:/etc/canario-copias/latido_eventos_url
+
+# Endurecimiento. Ojo: NO contiene a un atacante ni cuenta como control frente
+# a root. El script habla con el socket de Docker (equivale a root) y tiene
+# red; estas directivas solo limitan lo que haría un fallo del propio script.
+# Los controles reales son la integridad del script, la unidad y las
+# credenciales, y que la clave de B2 solo escriba (docs/operacion.md); lo que se
+# sube lo registra, fuera del VPS, el cuerpo del latido.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/docker.sock
+ProtectHome=yes
+RuntimeDirectory=canario-copia-eventos
+Environment=DOCKER_CONFIG=%t/canario-copia-eventos
+# El cursor (eventos.cursor) y el fichero del hueco (eventos.hueco):
+# /var/lib/canario-copias, de root y 0700, que systemd crea y deja escribible
+# aunque ProtectSystem=strict. Es lo único que persiste entre ejecuciones (y lo
+# comparte con nadie: la copia de la base no lo usa).
+StateDirectory=canario-copias
+StateDirectoryMode=0700
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# Solo llamadas al sistema de un servicio normal (systemd.exec(5): "@system-service
+# ... excluding any special purpose calls": sin @mount, @swap, @reboot ni @clock).
+# Python, el cliente de docker y age no necesitan nada de eso. Si el filtro
+# matara algo (SIGSYS), se ve con "journalctl -u" y "systemd-analyze syscall-filter".
+SystemCallFilter=@system-service
+# Sin swap: el volcado y las claves viven en memoria y no deben acabar en disco.
+# (systemd.resource-control(5); necesita cgroup v2, el de Ubuntu 24.04.)
+MemorySwapMax=0
+# Sin volcado de memoria si el proceso muere: tendría el volcado en claro.
+LimitCORE=0
+# IPC de System V y colas POSIX propias (systemd 248 o posterior).
+PrivateIPC=yes
+# NO se ponen ProtectProc=invisible ni ProcSubset=pid, a propósito. La página de
+# systemd.exec(5) dice que ProtectProc solo oculta los procesos de OTROS
+# usuarios (root no queda afectado, y este servicio es root) y que ProcSubset=pid
+# "no es adecuado para la mayoría de los programas no triviales": no se ha
+# comprobado que Python, docker y age lo toleren, y no aportaría defensa real.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+UMask=0077
+# Corre cada 15 minutos. Sin esto, cada ejecución deja dos líneas de systemd
+# (inicio y fin). Lo que importa sale con prioridad notice (EVENTOS SUBIDOS),
+# warning o err, así que sigue pasando.
+LogLevelMax=notice

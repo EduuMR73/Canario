@@ -168,6 +168,8 @@ sudo cmp despliegue/systemd/canario-reconectar-traefik.timer /etc/systemd/system
 
 Si alguno difiere, o el cambio es del repositorio y se reinstala como en la primera vez, o alguien tocó la copia instalada, y eso se investiga antes de nada.
 
+Lo mismo con las copias de seguridad: sus comprobaciones con `cmp` están en "Copias de seguridad" (más abajo).
+
 ### Reconexión automática de Traefik
 
 Dokploy, cada vez que recrea su Traefik (al actualizarse o al cambiar sus ajustes), lo crea solo en su red, sin `canario_edge`, y no tiene ninguna opción para añadir redes (`traefik-setup.ts` de Dokploy v0.30.10). Sin esa conexión, los tres nombres dejan de responder. `despliegue/reconectar_traefik.py` compara cada minuto el estado real con el deseado y, si hace falta, vuelve a conectar Traefik con `10.88.1.2`. Si otro contenedor tiene esa IP, no toca nada y falla: podría ser alguien haciéndose pasar por Traefik ante Caddy. Los motivos, en el modelo de amenazas (6.20); las pruebas, en `verificar_despliegue.py`, g.
@@ -255,6 +257,268 @@ El vigía vive dentro del VPS: si se cae el VPS entero, o Traefik, el vigía no 
 Keyword y no HTTP: el monitor HTTP de UptimeRobot pregunta con `HEAD`, Canario responde `405` a `HEAD` y el monitor lo daría por caído; elegir el método es de los planes de pago. El Keyword pregunta con `GET` y además comprueba que la respuesta es la de Canario. Si cambia el título de la página del denunciante, hay que cambiar su palabra.
 
 Sondean desde fuera en vez de esperar un ping que salga del VPS, así que no añaden ninguna salida desde el VPS.
+
+### Copias de seguridad
+
+Sin copias, un disco perdido o un ransomware (ATT&CK T1486 y T1490) se llevarían las denuncias. `despliegue/copias.py` saca dos cosas del VPS, cifradas con age para dos claves poscuánticas, a un bucket de Backblaze B2 donde el VPS **escribe y oculta, pero no borra**: la capacidad `writeFiles` incluye `b2_upload_file` y `b2_hide_file` (documentación de B2, capacidades de las claves), no `deleteFiles`, y el Object Lock en compliance impide borrar lo ya subido.
+
+- **`base`, cada día (03:30 UTC):** un `pg_dump` de la base y un manifiesto (recuento de filas por tabla y, por empresa, la última secuencia y el último hash de la cadena de auditoría) en un tar, cifrado entero. Va a `base/AAAAMMDDTHHMMSSZ.age` (nombre único, con la hora UTC). Se sube **siempre**: si la base está vacía, la cadena de auditoría está rota o la base no se estabiliza durante la copia, el objeto va a `cuarentena/AAAAMMDDTHHMMSSZ.age` (con el motivo en el manifiesto cifrado: `cadena_rota_en`, `estable`, `motivos`), el latido recibe `/fail` y el código es 6. Una copia sospechosa sigue siendo evidencia y negarse a subirla dejaría sin copia a la vez que el problema; lo que no hace nunca es hacerse pasar por buena.
+- **`eventos`, cada 15 minutos:** las líneas `EVENTO declaracion_no_veraz`, `EVENTO redaccion` y `EVENTO reutilizacion_renovacion` del log de la API, a `eventos/AAAAMMDDTHHMMSSZ.age`. Son el registro para volver a aplicar lo suprimido o tachado tras restaurar (más abajo). Un cursor (`/var/lib/canario-copias/eventos.cursor`) guarda hasta dónde se exportó y el Id del contenedor de la API.
+
+**Latidos (healthchecks.io), uno por suborden.** El de la base avisa si falta el ping del día; el de los eventos, si faltan los de 15 minutos. Cada ping de éxito es un `POST` con, en el cuerpo, una línea JSON por objeto subido (`objeto`, `fileId`, `sha1`, `bytes`). Ese cuerpo es el **único registro, fuera del VPS, de lo que subió el script legítimo**. Hace falta porque `writeFiles` deja a quien tome root ocultar las copias buenas y subir otras falsas, y age no lo impide: cifra un fichero ya existente y falla si se altera, pero no autentica a quien lo cifró (los destinatarios son públicos y están en el VPS). El latido no lo evita; permite descubrirlo y elegir bien al restaurar (más abajo).
+
+**Eventos: qué es un hueco y qué no.**
+
+- **Hueco (código 5).** En el mismo contenedor, la línea más antigua del log es posterior al cursor: la rotación (3 ficheros de 10 MB) se comió líneas. Se sube lo que queda y se escribe `/var/lib/canario-copias/eventos.hueco`. **Mientras ese fichero exista, cada ejecución sigue fallando con el código 5 y `/fail`** (sigue subiendo lo nuevo), para que nadie lo dé por bueno sin haberlo visto. Se reconoce así, tras investigar qué se perdió (las `EVENTO` de ese intervalo, si se recuperan de otro sitio, se anotan a mano):
+
+  ```bash
+  sudo cat /var/lib/canario-copias/eventos.hueco
+  sudo rm /var/lib/canario-copias/eventos.hueco
+  sudo systemctl start canario-copia-eventos.service; echo "rc=$?"
+  ```
+
+- **Contenedor nuevo (aviso, código 0).** Si cambia el Id del contenedor de la API (una actualización la recrea), su log empieza de cero y eso no es una rotación: el script registra `EVENTO contenedor_nuevo: ... última exportación previa en <T>` (en el journal con prioridad warning y en el cuerpo del latido) y exporta todo el log nuevo. Lo que el contenedor anterior escribió después de esa última exportación se fue con él: por eso **antes de recrear la API** se exporta, y se mira que `<T>` sea de ese momento:
+
+  ```bash
+  sudo systemctl start canario-copia-eventos.service; echo "rc=$?"     # antes de recrear: tiene que dar rc=0
+  # ... se recrea la API (Actualizar, arriba) ...
+  sudo systemctl start canario-copia-eventos.service; echo "rc=$?"     # rc=0 y el aviso contenedor_nuevo
+  sudo journalctl -u canario-copia-eventos.service --no-pager -n 5
+  ```
+
+  Si `<T>` es muy anterior a la recreación, la exportación previa no se hizo y hay eventos perdidos: se trata como un hueco.
+
+Se instala **una copia** con dueño root, como el reconciliador: nunca se ejecuta desde `~/apps/canario`. Solo usa la biblioteca estándar de Python y `age` 1.3.2, instalado a mano y no con `apt`: las claves poscuánticas son de la 1.3.0 y no hay garantía de que el paquete de Ubuntu 24.04 las traiga (modelo de amenazas, 8). `docker` se llama por ruta absoluta (`/usr/bin/docker`).
+
+Las pruebas están en `verificar_copias.py`. No prueban Backblaze ni healthchecks.io reales, ni las unidades de systemd, ni el `SIGTERM`: eso se comprueba aquí, en el VPS y en las consolas de los dos servicios.
+
+**Límites operativos que hay que conocer.**
+
+- **Si las copias fallan más de 30 días, no queda ninguna.** El ciclo de vida caduca los objetos por antigüedad (~31 días) y no mira si hay otros más recientes. Un `/fail` o un latido que no llega se atiende en horas, no en semanas: no es un aviso para ver cuando haya tiempo.
+- **Con el tope de gasto en 0 $, basura subida desde un VPS comprometido puede agotar el almacenamiento gratuito y bloquear las copias legítimas durante 30 días** (Object Lock en compliance: no se puede borrar). La respuesta es subir el tope en Caps & Alerts, no intentar borrar. El latido lo hace visible: las subidas legítimas empiezan a fallar con el código 8.
+
+**1. Preparar Backblaze B2** (una vez, desde el PC):
+
+1. Cuenta de B2 con segundo factor TOTP (no SMS) y, en Caps & Alerts, límite de gasto de 0 $ con alerta por correo (ver el límite de arriba).
+2. Un bucket **privado** con **Object Lock activado en modo compliance, 30 días**, de retención por defecto. Object Lock hay que activarlo al crear el bucket. En modo compliance la retención no la puede quitar ni acortar ningún usuario (documentación de B2, Object Lock; en governance sí, con la capacidad adecuada): es lo que sostiene la copia frente a un atacante con root en el VPS (T1485.001, borrado por ciclo de vida, también), y frente a nosotros.
+3. Ciclo de vida del bucket: `daysFromUploadingToHiding` 30 y `daysFromHidingToDeleting` 1. Los objetos desaparecen a los ~31 días, cuando ya se pueden borrar. Un cambio de ciclo de vida que intente borrar antes de que acabe la retención falla (documentación de B2); cómo se combinan exactamente esas dos reglas con un objeto bloqueado no está comprobado: se mira en la consola, pasados 31 días de la primera copia, que los objetos antiguos desaparecen y los recientes no.
+4. Una application key limitada a **ese bucket** y con **solo la capacidad `writeFiles`** (ni `listBuckets`, ni `readFiles`, ni `deleteFiles`, ni prefijo de nombre). Con la CLI `b2` v4, desde el PC (necesita una clave con `writeKeys`, la maestra de la cuenta):
+
+   ```powershell
+   b2 key create --bucket NOMBRE_DEL_BUCKET canario-copias-vps writeFiles
+   ```
+
+   La orden se ha tomado del código fuente de la CLI (`KeyCreateBase` en `b2/_internal/console_tool.py`: los argumentos son el nombre de la clave y la lista de capacidades separadas por comas, y `--bucket` lleva el nombre del bucket); las páginas de documentación de Backblaze que se han podido leer no documentan `b2 key create`, así que `b2 key create --help` manda si difiere. Imprime el `keyID` y el `applicationKey` (solo se ven una vez). **La consola web es la alternativa**, pero no está comprobado que el tipo de acceso "Write Only" dé solo `writeFiles`: si se usa, hay que mirar las capacidades que muestra. En cualquier caso el script se niega a seguir si la clave tiene algo más (se ve en la primera ejecución a mano, paso 5).
+
+   El **`bucketId`** (en los detalles del bucket de la consola) se guarda en la configuración del VPS (paso 4): el script lo compara con el de la clave autorizada y, si no coincide, falla con el código 4. Así una clave de otro bucket (por ejemplo sin Object Lock) no sube copias a un sitio sin retención.
+5. Una segunda key, **para el PC**, con `listFiles` y `readFiles` en ese bucket (y `listBuckets` si la herramienta que se use lo pide), para la restauración y el simulacro. Nunca va al VPS.
+
+**2. Dos latidos en healthchecks.io**, con aviso al correo (y al móvil). Dos checks distintos, cada uno con su URL de ping (`https://hc-ping.com/<uuid>`):
+
+| Check | Periodo | Gracia | Lo pinga |
+|---|---|---|---|
+| Copia de la base | 1 día | 3 horas | `canario-copia-base.service` |
+| Copia de los eventos | 15 minutos | 30 minutos | `canario-copia-eventos.service` |
+
+Cada URL es una credencial: quien la conoce puede avisar de que todo va bien. La semántica, de la documentación de healthchecks.io: un `POST` a la URL señala éxito, un `POST` a `<url>/fail` señala fallo y avisa al momento sin esperar al plazo, las dos aceptan GET, HEAD y POST, y en un `POST` el cuerpo (hasta 100 kB) se guarda. Aquí el cuerpo del éxito es el registro de lo subido y el del `/fail` es el motivo.
+
+**3. Las dos claves age, en el PC** (PowerShell). **No en Descargas**: se sincroniza, se indexa y entra en copias. Las claves se generan en un directorio temporal, se pasan a Bitwarden y al papel, y se borran. age para Windows va a un directorio de herramientas que no guarda secretos y se queda. De la release oficial, con su sha256 comprobado:
+
+```powershell
+$T = Join-Path $env:LOCALAPPDATA 'canario-claves-tmp'
+$H = Join-Path $env:LOCALAPPDATA 'canario-herramientas'
+New-Item -ItemType Directory -Path $T, $H | Out-Null
+cd $H
+curl.exe -fsSLO https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-windows-amd64.zip
+(Get-FileHash age-v1.3.2-windows-amd64.zip -Algorithm SHA256).Hash.ToLower()   # tiene que ser f48d8f8f9ebe903ab5027ed067652f2cc1db94bc206976430133b905dcd8e8c7
+Expand-Archive age-v1.3.2-windows-amd64.zip -DestinationPath age
+cd $T
+& "$H\age\age\age-keygen.exe" -pq -o principal.key
+& "$H\age\age\age-keygen.exe" -pq -o respaldo.key
+& "$H\age\age\age-keygen.exe" -y principal.key | Set-Clipboard    # destinatario principal: se pega en el VPS (paso 4)
+& "$H\age\age\age-keygen.exe" -y respaldo.key | Set-Clipboard     # destinatario de respaldo: ídem, en otra línea
+```
+
+Los destinatarios (`age1pq1...`, de unos 2000 caracteres) no son secretos; los dos ficheros `.key` son las claves privadas: custodia al final de esta sección. Nunca van al VPS. Cuando las dos estén en su sitio (la principal en Bitwarden y la de respaldo impresa), se borra todo lo temporal y se vacía el portapapeles:
+
+```powershell
+Set-Clipboard -Value $null
+Remove-Item -Recurse -Force $T
+```
+
+`Remove-Item` no sobrescribe el contenido: la protección real es que el disco esté cifrado (BitLocker). Si no lo está, `cipher /w:$env:LOCALAPPDATA` sobrescribe el espacio libre (tarda).
+
+**4. En el VPS** (bash, en `~/apps/canario`, después del `git pull`):
+
+```bash
+# age 1.3.2: solo el binario "age" (age-keygen no hace falta: las claves privadas no están en el VPS)
+cd "$(mktemp -d)"
+curl -fsSLO https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
+echo "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  age-v1.3.2-linux-amd64.tar.gz" | sha256sum -c -
+tar -xzf age-v1.3.2-linux-amd64.tar.gz
+sudo install -o root -g root -m 0755 age/age /usr/local/bin/age
+/usr/local/bin/age --version
+cd ~/apps/canario
+
+# configuración de root: directorio 0700, ficheros 0600
+sudo install -d -o root -g root -m 0700 /etc/canario-copias
+sudo sh -c 'umask 077; cat > /etc/canario-copias/destinatarios.txt'    # pegar los dos age1pq1..., uno por línea, y Ctrl-D
+sudo sh -c 'umask 077; cat > /etc/canario-copias/b2_id'                 # pegar el keyID y Ctrl-D
+sudo sh -c 'umask 077; cat > /etc/canario-copias/b2_clave'              # pegar el applicationKey y Ctrl-D
+sudo sh -c 'umask 077; cat > /etc/canario-copias/bucket_id'             # pegar el bucketId esperado y Ctrl-D
+sudo sh -c 'umask 077; cat > /etc/canario-copias/latido_url'            # pegar la URL del latido de la base y Ctrl-D
+sudo sh -c 'umask 077; cat > /etc/canario-copias/latido_eventos_url'    # pegar la URL del latido de los eventos y Ctrl-D
+```
+
+`sha256sum -c` tiene que decir `OK`. Las credenciales se pegan por la entrada estándar y no con `echo`: así no quedan en el historial de la shell ni en `ps`.
+
+Instalar y comprobar el script y las unidades, como con el reconciliador:
+
+```bash
+sudo install -o root -g root -m 0755 despliegue/copias.py /usr/local/sbin/canario-copias.py
+sudo install -o root -g root -m 0644 despliegue/systemd/canario-copia-base.service despliegue/systemd/canario-copia-base.timer despliegue/systemd/canario-copia-eventos.service despliegue/systemd/canario-copia-eventos.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemd-analyze verify /etc/systemd/system/canario-copia-base.service /etc/systemd/system/canario-copia-base.timer /etc/systemd/system/canario-copia-eventos.service /etc/systemd/system/canario-copia-eventos.timer
+systemd-analyze calendar '*-*-* 03:30:00 UTC' '*-*-* *:0/15:00 UTC'
+sudo systemd-analyze security canario-copia-base.service
+```
+
+`verify` no tiene que decir nada y `calendar` tiene que mostrar la hora siguiente de cada timer. Las unidades llevan `SystemCallFilter=@system-service`, `MemorySwapMax=0`, `LimitCORE=0` y `PrivateIPC=yes` (esta última pide systemd 248 o posterior; Ubuntu 24.04 trae la 255). No llevan `ProtectProc=invisible` ni `ProcSubset=pid`: la página de `systemd.exec(5)` dice que el primero no afecta a root y que el segundo no es adecuado para la mayoría de los programas no triviales, y no se ha comprobado que Python, docker y age lo toleren. Si una directiva rompe la unidad (el filtro de llamadas mata con `SIGSYS`; se ve en el journal), se quita esa sola y se anota el motivo en la unidad. El endurecimiento no cuenta como control frente a root: el control es que solo root cambie el script, las unidades y `/etc/canario-copias`, y que la clave de B2 solo pueda escribir.
+
+Después de cada `git pull`, `cmp` no dice nada si las copias instaladas son iguales a las del repositorio:
+
+```bash
+sudo cmp despliegue/copias.py /usr/local/sbin/canario-copias.py
+for u in canario-copia-base.service canario-copia-base.timer canario-copia-eventos.service canario-copia-eventos.timer; do sudo cmp despliegue/systemd/$u /etc/systemd/system/$u; done
+```
+
+**5. Primera ejecución a mano**, antes de activar los timers. `systemctl start` espera a que termine; tiene que dar `rc=0`:
+
+```bash
+sudo systemctl start canario-copia-base.service; echo "rc=$?"
+sudo journalctl -u canario-copia-base.service --no-pager -n 5
+```
+
+Tiene que salir `COPIA SUBIDA: objeto=base/AAAAMMDDTHHMMSSZ.age bytes=...`. Se comprueba en la consola de B2 que el objeto existe y tiene retención (candado, hasta 30 días), y en la de healthchecks.io que llegó el latido con el `fileId` y el `sha1` en su registro. Si dice que la clave tiene capacidades de más o es de otro bucket, se crea otra clave y no se sigue con esta. Después, los eventos (la primera vez exportan todo el log que haya; si no hay ningún `EVENTO` de los tres tipos, no suben nada, el rc es 0 y el latido de los eventos llega igual), y se activan los timers:
+
+```bash
+sudo systemctl start canario-copia-eventos.service; echo "rc=$?"
+sudo systemctl enable --now canario-copia-base.timer canario-copia-eventos.timer
+systemctl list-timers 'canario-copia-*' --no-pager
+```
+
+El vigía avisa de los ficheros nuevos. Se mira que digan solo esto, y entonces se rehace su foto: `/usr/local/sbin/canario-copias.py`, las cuatro unidades de `/etc/systemd/system`, los enlaces de `timers.target.wants` y `/etc/canario-copias`.
+
+```bash
+sudo /usr/local/sbin/vigia.sh base
+```
+
+**Códigos de salida de `copias.py`** (la unidad queda fallida con cualquiera distinto de 0, y el vigía avisa de las unidades fallidas): 0 bien; 1 error inesperado (o cursor dañado); 2 argumentos; 3 destinatarios o credenciales no válidos (tiene que haber exactamente dos destinatarios `age1pq1...` distintos); 4 B2 rechaza la clave, esta tiene permisos de más o es de otro bucket; 5 hueco en el log de eventos (persiste hasta reconocerlo); 6 la base no sirve para copiar (sin ninguna empresa, con la cadena de auditoría rota o cambiando durante la copia: **se sube a `cuarentena/`**); 7 falla un proceso (docker, pg_dump, psql o age); 8 falla la subida a B2; 9 la copia se subió pero falla el latido; 10 se agota el presupuesto de tiempo (6600 s en la base, 1500 s en los eventos, por debajo del `TimeoutStartSec` de la unidad) o systemd manda parar (`SIGTERM`): con 10 el `/fail` llega a salir; con `SIGKILL`, no.
+
+Una base sin ninguna empresa va a cuarentena, a propósito: una copia "buena" de un volcado vacío taparía que las denuncias ya no están. Por eso la primera ejecución se hace después de dar de alta la primera empresa. Un objeto en `cuarentena/` nunca se restaura sin haber entendido por qué está ahí: sirve, sobre todo, para saber cuándo empezó el problema.
+
+El volcado se lee a memoria, para que el texto en claro no pase por el disco, con tope de 512 MiB. La base de un canal de denuncias queda muy por debajo; si algún día se acercara, hay que cambiar el diseño, no subir el tope.
+
+#### Restaurar
+
+Todo en el PC, nunca con la clave de age en el VPS, y **todo fuera del repositorio**: el volcado descifrado es texto en claro (emails del personal, nombres de empresa y metadatos de auditoría, ver el simulacro) y un directorio del repo está a un `git add .` de un commit. Se trabaja en `$R`, y del repo solo se montan, en solo lectura, `db/init/01_roles.sh` y `db/pg_hba.conf`. Una copia restaurada **deshace las supresiones y redacciones posteriores a ella**: por eso el último paso (reaplicar los eventos) no es opcional.
+
+```powershell
+$R = Join-Path $env:LOCALAPPDATA 'canario-restauracion'
+$REPO = 'C:\ruta\al\repositorio'     # la raíz del repositorio (la ruta real, con sus espacios)
+New-Item -ItemType Directory -Path $R, "$R\copia", "$R\secretos" | Out-Null
+```
+
+(`restauracion/` está además en `.gitignore`, como segunda capa por si alguien lo crea dentro del repo.)
+
+1. **Elegir y descargar.** La clave de B2 del VPS escribe y oculta: root en el VPS puede haber ocultado las copias buenas y subido otras falsas que descifran bien (age no autentica a quien cifra). Por eso no se coge "la más reciente" sin más. Con la clave de **lectura del PC** se listan **todas las versiones**, con la hora de subida que pone B2 (no la del nombre, que la escribe el script), y se elige el objeto de `base/` más reciente que cumpla las tres condiciones: (a) subido **antes del corte de confianza**, que es anterior a la fecha en que se sospecha el compromiso del VPS; (b) su `fileId` y su `sha1` **aparecen en el registro del latido de la base** en healthchecks.io (cuerpos de los pings, desde la pestaña del check), con los mismos valores; (c) su manifiesto, una vez descifrado, es coherente (paso 5). Un objeto de `base/` que el registro no explica, o una acción `hide` que nadie hizo, es la señal de que alguien actuó con la clave del VPS. Lo mismo vale para `eventos/`, contra el registro del latido de los eventos. Estas órdenes siguen la documentación de la API nativa v4 de B2 (`b2_authorize_account`, `b2_list_file_versions`, `b2_download_file_by_id`); no se han ejecutado contra B2 real, y el primer simulacro las ensaya:
+
+   ```powershell
+   $cred = Get-Credential -Message 'keyID y applicationKey de LECTURA de B2'
+   $basico = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($cred.UserName + ':' + $cred.GetNetworkCredential().Password))
+   $auth = Invoke-RestMethod -Uri https://api.backblazeb2.com/b2api/v4/b2_authorize_account -Headers @{ Authorization = "Basic $basico" }
+   $api = $auth.apiInfo.storageApi.apiUrl; $token = $auth.authorizationToken; $bucket = $auth.apiInfo.storageApi.allowed.buckets[0].id
+   $lista = Invoke-RestMethod -Uri "$api/b2api/v4/b2_list_file_versions?bucketId=$bucket&prefix=base/&maxFileCount=1000" -Headers @{ Authorization = $token }
+   $lista.files | Sort-Object uploadTimestamp | ForEach-Object { '{0:u} {1} {2} {3} {4}' -f [DateTimeOffset]::FromUnixTimeMilliseconds($_.uploadTimestamp), $_.action, $_.fileName, $_.fileId, $_.contentSha1 }
+   # elegido el fileId (y comprobado contra el registro del latido):
+   Invoke-WebRequest -Uri "$($auth.apiInfo.storageApi.downloadUrl)/b2api/v4/b2_download_file_by_id?fileId=$fileId" -Headers @{ Authorization = $token } -OutFile "$R\objeto.age"
+   (Get-FileHash "$R\objeto.age" -Algorithm SHA1).Hash.ToLower()   # tiene que ser el sha1 del registro
+   ```
+
+2. **Descifrar** con la clave principal (la de respaldo da lo mismo; se saca de Bitwarden a `$R\principal.key`, que se borra con todo `$R` al final) y desempaquetar:
+
+   ```powershell
+   & "$env:LOCALAPPDATA\canario-herramientas\age\age\age.exe" -d -i "$R\principal.key" -o "$R\copia.tar" "$R\objeto.age"
+   if ($LASTEXITCODE -ne 0) { Remove-Item -Force "$R\copia.tar" -ErrorAction SilentlyContinue; throw 'age -d ha fallado: no se sigue con una salida parcial' }
+   tar -xf "$R\copia.tar" -C "$R\copia"
+   (Get-FileHash "$R\copia\volcado.dump" -Algorithm SHA256).Hash.ToLower()   # tiene que ser el volcado_sha256 de manifiesto.json
+   ```
+
+   age protege un fichero existente: si se ha tocado, falla en vez de entregar basura, y por eso se comprueba `$LASTEXITCODE` y se borra la salida parcial. No impide que alguien fabrique un fichero nuevo: eso lo cubre el registro del paso 1.
+3. **Instancia nueva con solo `01_roles.sh`**, sin red (`--network none`). No se aplican `02_esquema.sql` ni los demás: el volcado trae el esquema y los datos. Los secretos de esta instancia son los de la base que se restaura.
+
+   **Simulacro:** secretos inventados con el generador del repo (criptográfico, `secrets.token_urlsafe`), nunca con `Get-Random`, y en `$R`, no en `secrets/` (el generador avisa de que no puede comprobar Git fuera del repositorio; es esperable). Postgres lee los secretos sin extensión:
+
+   ```powershell
+   python "$REPO\scripts\generar_secretos.py" --directorio "$R\generados"
+   foreach ($n in 'contrasena_postgres_superusuario','contrasena_migrador','contrasena_aplicacion','contrasena_plataforma') { Copy-Item "$R\generados\$n.txt" "$R\secretos\$n" }
+   $secretos = @(); foreach ($n in 'contrasena_postgres_superusuario','contrasena_migrador','contrasena_aplicacion','contrasena_plataforma') { $secretos += '--mount', "type=bind,src=$R\secretos\$n,dst=/run/secrets/$n,readonly" }
+   ```
+
+   **Producción:** los secretos reales se montan **directamente** desde `secrets/`, solo lectura y solo esos cuatro ficheros, sin copiarlos a ningún sitio (nunca con `-v`):
+
+   ```powershell
+   $secretos = @(); foreach ($n in 'contrasena_postgres_superusuario','contrasena_migrador','contrasena_aplicacion','contrasena_plataforma') { $secretos += '--mount', "type=bind,src=$REPO\secrets\$n.txt,dst=/run/secrets/$n,readonly" }
+   ```
+
+   Después, igual en los dos casos (del repo solo `01_roles.sh` y `pg_hba.conf`, de solo lectura):
+
+   ```powershell
+   docker run -d --name canario-restauracion --network none --user 70:70 --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /var/run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m -e POSTGRES_DB=canario -e POSTGRES_PASSWORD_FILE=/run/secrets/contrasena_postgres_superusuario --mount type=volume,src=canario-restauracion,dst=/var/lib/postgresql @secretos --mount "type=bind,src=$REPO\db\init\01_roles.sh,dst=/docker-entrypoint-initdb.d/01_roles.sh,readonly" --mount "type=bind,src=$R\copia,dst=/copia,readonly" --mount "type=bind,src=$REPO\db\pg_hba.conf,dst=/etc/postgresql/pg_hba.conf,readonly" canario-postgres postgres -c hba_file=/etc/postgresql/pg_hba.conf -c listen_addresses=* -c unix_socket_permissions=0700 -c password_encryption=scram-sha-256 -c ssl=off
+   ```
+
+   Se espera a que `docker logs canario-restauracion` diga que el servidor está listo para aceptar conexiones. Si la imagen no se llama `canario-postgres`, se mira con `docker image ls`. Para restaurar en producción, la instancia es el servicio `postgres` de siempre con un volumen vacío y ese mismo montaje de `init` (un fichero de Compose añadido con `-f` que sustituya el montaje de `/docker-entrypoint-initdb.d`). Ese camino no está ensayado todavía: el primer simulacro en el VPS lo ensaya antes de que haga falta.
+4. **Restaurar.** `01_roles.sh` deja la base `canario` creada, así que `pg_restore` la borra y la crea de nuevo (`--clean --if-exists`). `--single-transaction` no se puede combinar con `--create` (`pg_restore.c`, PostgreSQL 18): con `--exit-on-error`, ante cualquier error se **descarta la instancia entera** y se empieza de cero; no se sigue con una a medias.
+
+   ```powershell
+   docker exec canario-restauracion pg_restore -U postgres -d postgres --create --clean --if-exists --exit-on-error /copia/volcado.dump; echo "rc=$LASTEXITCODE"
+   ```
+
+5. **Comprobar** contra el `manifiesto.json`: los recuentos por tabla y, por empresa, la última secuencia y el último hash, y que la cadena está intacta. Y que el manifiesto dice `"cadena_rota_en": null`, `"estable": true` y `"motivos": []`.
+
+   ```powershell
+   docker exec canario-restauracion psql -U postgres -d canario -X -A -t -c "select coalesce(canal.verificar_cadena_auditoria()::text, 'NULL')"
+   docker exec canario-restauracion psql -U postgres -d canario -X -A -t -c "select empresa_id, max(secuencia), (array_agg(encode(hash, 'hex') order by secuencia desc))[1] from canal.registro_auditoria group by 1 order by 1"
+   docker exec canario-restauracion psql -U postgres -d canario -X -A -t -c "select count(*) from canal.empresa"
+   ```
+
+   La primera tiene que dar `NULL`. Si da otra cosa, esa copia está manipulada: se prueba con la anterior (y se investiga).
+6. **Reaplicar los eventos**, con el procedimiento de "Protección de datos" (más abajo). Los `eventos/` posteriores a la copia, elegidos con el mismo criterio del paso 1 y descifrados igual (`eventos.log` dentro del tar), son las líneas que ese procedimiento manda buscar en el log. Mientras no se haga, las denuncias declaradas no veraces y los textos tachados desde la copia vuelven a verse.
+7. **Borrar todo lo del PC** cuando se acabe (simulacro o restauración de prueba):
+
+   ```powershell
+   docker rm -f canario-restauracion; docker volume rm canario-restauracion
+   Remove-Item -Recurse -Force $R
+   ```
+
+#### Simulacro mensual
+
+Una vez al mes, en el PC: descargar la última copia (elegida como en el paso 1 de "Restaurar": por la hora de subida de B2 y contra el registro del latido), descifrar, restaurar en una instancia desechable (pasos 2 a 4, con secretos inventados) y comprobar la estructura (las tablas, y `select count(*) from pg_policies where schemaname = 'canal'` igual que en la base viva) y la cadena de auditoría (paso 5). Se anota la fecha y el resultado. Después se borra todo (paso 7).
+
+**El simulacro es un tratamiento de datos personales.** Sin la clave maestra no se lee el contenido de las denuncias ni de los mensajes (van cifrados con la clave de cada empresa), pero **no es verdad que no se lea ningún contenido**: el volcado lleva en claro los emails del personal (`usuario_personal.email` y `solicitud_registro.email`, `db/init/02_esquema.sql`), los nombres de empresa (`empresa.nombre`) y los metadatos de auditoría (actor, acción, fecha, ids de objeto y destino). Por eso: se hace en un disco cifrado (BitLocker) y por una sola persona; no se consultan filas con emails ni nombres, solo recuentos y la cadena; no se hacen capturas ni se pega ninguna salida con datos en chats o tickets; el volcado descifrado no sale de `$R` y se borra al acabar; y el simulacro se anota en el registro de actividades del tratamiento (RGPD, art. 30) con su finalidad (comprobar que la copia existe, se descifra, se restaura y no está manipulada) y su plazo (el tiempo que dura). Es, junto con los latidos, el control frente a un VPS comprometido: alguien con root puede parar, envenenar u ocultar las copias, y solo se ve desde fuera.
+
+#### Custodia de las claves
+
+| Qué | Dónde | Por qué |
+|---|---|---|
+| Clave age principal (`principal.key`) | Bitwarden, con 2FA | Es la que se usa cada mes en el simulacro |
+| Clave age de respaldo (`respaldo.key`) | Impresa en papel, en casa | Si se pierde la principal, las copias siguen abriéndose |
+| Clave de **lectura** de B2 del PC (`keyID` y `applicationKey`, con `listFiles` y `readFiles`) | Bitwarden, con 2FA | Es la única forma de listar versiones y descargar para el simulacro y las restauraciones; no va al VPS, y si se pierde se crea otra en la consola de B2 |
+| Clave maestra y `clave_hmac_codigos` (de `secrets/`) | USB cifrado con BitLocker, en otro lugar | La clave maestra desenvuelve las claves de cada empresa; sin `clave_hmac_codigos`, los códigos de seguimiento dejan de valer |
+
+**Nunca la clave de age junto a la maestra**: quien tenga las dos lee todas las denuncias de todas las copias (modelo de amenazas, 6.4 y 8). Y sin `clave_hmac_codigos`, una restauración completa deja a los denunciantes sin poder seguir su denuncia.
+
+**Pendiente de Eduardo (RGPD):** Backblaze es un encargado del tratamiento en EE. UU.: falta el contrato de encargado (DPA) y anotarlo en el registro de actividades. Lo que ve Backblaze son datos cifrados, su tamaño y la hora de subida.
 
 ### Lo que hay que vigilar
 
@@ -423,7 +687,7 @@ EVENTO redaccion: empresa=<uuid> cuenta=<uuid> denuncia=<uuid> mensaje=<secuenci
 
 Si se restaura una copia de la base de datos, todo lo declarado no veraz o tachado después de la copia vuelve a aparecer (modelo de amenazas, 8). Esas líneas son el registro para volver a aplicarlo, así que en producción:
 
-- **El log de la API sale del anfitrión** y se conserva al menos tanto como las copias. El compose lo rota en 3 ficheros de 10 MB: sin enviarlo fuera, se pierde antes que la copia. Cómo enviarlo depende de cada despliegue.
+- **El log de la API sale del anfitrión** y se conserva al menos tanto como las copias. El compose lo rota en 3 ficheros de 10 MB: sin enviarlo fuera, se pierde antes que la copia. Lo hace `canario-copia-eventos.timer` ("Copias de seguridad", más arriba): exporta cifradas, cada 15 minutos, solo las líneas `declaracion_no_veraz`, `redaccion` y `reutilizacion_renovacion`, y falla de forma visible si la rotación se come líneas. Esos objetos se conservan los mismos ~31 días que las copias de la base.
 - **Tras restaurar una copia**, antes de nada:
   1. Busca en ese log las líneas `EVENTO declaracion_no_veraz` y `EVENTO redaccion` posteriores a la fecha de la copia.
   2. Por cada declaración, un admin se asigna la denuncia y la vuelve a declarar no veraz.

@@ -1,0 +1,17 @@
+# Lanza canario-copia-eventos.service cada 15 minutos (docs/operacion.md).
+[Unit]
+Description=Canario: copia cifrada de los eventos de la API cada 15 minutos
+
+[Timer]
+# Cada cuarto de hora, en UTC explícito. Un cuarto de hora cae en los mismos
+# minutos en cualquier zona horaria, pero así no depende de la del VPS. Se
+# comprueba con "systemd-analyze calendar '*-*-* *:0/15:00 UTC'".
+OnCalendar=*-*-* *:0/15:00 UTC
+# La rotación del log (3 ficheros de 10 MB) no debería comerse nada en 15
+# minutos, pero con Persistent=true un VPS que estuvo apagado exporta al
+# arrancar en vez de esperar al siguiente cuarto de hora.
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target
