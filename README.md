@@ -74,7 +74,7 @@ Un recorrido completo en local. No hay cuentas ni contraseñas de ejemplo: cada 
 
 Antes de empezar:
 
-- **El aviso del navegador.** La primera vez que se abre la demo (y quizá de nuevo en otro puerto), el navegador muestra "La conexión no es privada" (`NET::ERR_CERT_AUTHORITY_INVALID`). Es lo esperado: el certificado lo firma la autoridad propia de Caddy, que el navegador no conoce. La conexión va cifrada igual. En Chrome se acepta con **Avanzado** y después **Acceder a localhost (sitio no seguro)**. No conviene instalar esa autoridad como raíz de confianza del sistema: podría firmar un certificado para cualquier dominio.
+- **El aviso del navegador.** La primera vez que se abre la demo (y quizá de nuevo en otro puerto), el navegador muestra "La conexión no es privada" (`NET::ERR_CERT_AUTHORITY_INVALID`). Es lo esperado: el certificado lo firma la autoridad propia de Caddy, que el navegador no conoce. La conexión va cifrada igual. En Chrome se acepta con **Avanzado** y después **Acceder a localhost (sitio no seguro)**. No conviene instalar esa autoridad como raíz de confianza del sistema: podría firmar un certificado para cualquier dominio. El permiso vale para ese certificado concreto, y Caddy lo renueva solo (dura 12 horas). Después de una renovación, la SPA ya abierta responde "No hay conexión con el servidor" aunque todo funcione: la petición falla antes de llegar, y el navegador no dice por qué. Basta con recargar la página y volver a aceptar el aviso. En producción no pasa, porque el certificado es de Let's Encrypt.
 - **Son dos sitios separados.** El denunciante usa el 8444 y el personal entra por `https://localhost:8445`, que lleva a `/entrar`. Ningún enlace del sitio del denunciante lleva al del personal (el canario de su barra vuelve a su propio inicio): es a propósito.
 - **Los correos no llegan a ningún buzón real.** En la demo, el cartero los entrega a Mailpit y se leen con `python scripts\buzon.py`, que enseña cada enlace en su línea (la hora sale en UTC). La pantalla dirá "recibirá un correo": en producción llegaría de verdad, desde Mailjet ([operacion.md](docs/operacion.md#correo-en-producción-mailjet)).
 
@@ -180,7 +180,6 @@ Errores reconocidos que no se han corregido antes de la entrega:
 
 - **Avisos que un lector de pantalla puede no anunciar.** Algunos mensajes de la SPA (por ejemplo "Copiado" en Cuentas o la confirmación del registro) se crean a la vez que su región viva. No se ha comprobado con un lector de pantalla real.
 - **La redacción no tiene pantalla.** Tachar una parte de una denuncia (art. 32.2) solo se puede hacer por la API.
-- **Renovación fallida una vez.** En una prueba a mano, "Seguir conectado" respondió "No hay conexión con el servidor" con el servicio en marcha. No se ha vuelto a reproducir ni se sabe la causa. Si ocurre, basta con volver a entrar.
 
 ## Límites aceptados
 
