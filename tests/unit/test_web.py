@@ -1,7 +1,8 @@
 """Pruebas unitarias de la lógica pura de app/rutas_web.py: el origen del sitio
 (configuración y comprobación), la lectura estricta del formulario, el orden
-origen antes del cuerpo y las plantillas (autoescape, nada marcado como
-seguro, textos de cada categoría y estado).
+origen antes del cuerpo, las plantillas (autoescape, nada marcado como
+seguro, textos de cada categoría y estado) y los caracteres invisibles del
+texto libre, que se pintan como una marca visible (app/invisibles.py).
 
 Las páginas contra la base de datos y a través de Caddy las prueba la batería
 tests/security/verificar_web.py.
@@ -18,7 +19,7 @@ import jinja2
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app import denuncias, rutas_web
+from app import denuncias, invisibles, rutas_web
 from app.rutas_denuncias import NuevaDenuncia
 
 ORIGEN = "https://localhost:8444"
@@ -168,6 +169,9 @@ class Plantillas(unittest.TestCase):
         # que la comprobación de arriba distingue.
         sin_escape = jinja2.Environment(loader=rutas_web.entorno_plantillas.loader, autoescape=False,
                                         undefined=jinja2.StrictUndefined)
+        # Las mismas funciones que el entorno real (la marca de los invisibles):
+        # solo cambia el autoescape.
+        sin_escape.globals.update(segmentar=invisibles.segmentar, aviso_invisibles=invisibles.aviso)
         crudo = sin_escape.get_template("expediente.html").render(
             longitud_maxima=rutas_web.LONGITUD_MAXIMA_TEXTO, categorias=rutas_web.CATEGORIAS, **datos)
         self.assertEqual(crudo.count("<script>"), 4)
@@ -216,6 +220,120 @@ class Textos(unittest.TestCase):
         errores = rutas_web.errores_por_campo(contexto.exception, {"categoria": rutas_web.ERROR_CATEGORIA,
                                                                    "texto": rutas_web.ERROR_TEXTO})
         self.assertEqual(errores, {"categoria": rutas_web.ERROR_CATEGORIA, "texto": rutas_web.ERROR_TEXTO})
+
+
+
+# Los caracteres invisibles del texto libre (app/invisibles.py). Oráculos
+# literales: los códigos de Unicode (PropList.txt para Bidi_Control y la
+# categoría Cc) y los textos de la página, los mismos que en
+# spa/src/app/denuncias/invisibles.spec.ts. Los invisibles van como escapes:
+# un carácter bidi literal en el fuente reordenaría lo que se lee de la prueba.
+BIDI_CONTROL = ["\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c",
+                "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069"]
+# Lo que no debe llegar sin marcar a la página: los de control salvo
+# tabulador y LF, los 12 de Bidi_Control y los cuatro de ancho cero.
+INVISIBLE_EN_PAGINA = re.compile("[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u180e\u200b\u200e\u200f"
+                                 "\u202a-\u202e\u2060\u2066-\u2069\ufeff]")
+
+
+def normal(texto):
+    return {"segmentos": [{"valor": texto, "marca": None, "codigos": None}], "invisibles": 0}
+
+
+class Invisibles(unittest.TestCase):
+    def test_texto_sin_invisibles_queda_igual(self):
+        # Ni el tabulador, ni los saltos, ni lo que forma texto legítimo: ZWJ
+        # de un emoji compuesto, ZWNJ del persa, la bandera de Escocia con sus
+        # etiquetas, el guion blando y un selector de variación.
+        for texto in ("Pagó 500 € el 21/03.\n\tSegunda línea.\r\nTercera.",
+                      "\U0001f468\u200d\U0001f469\u200d\U0001f467",
+                      "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+                      "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+                      "in\u00adforme \u2764\ufe0f"):
+            with self.subTest(texto=ascii(texto)):
+                self.assertEqual(invisibles.segmentar(texto), normal(texto))
+        self.assertEqual(invisibles.segmentar(""), {"segmentos": [], "invisibles": 0})
+
+    def test_cada_invisible_su_marca(self):
+        self.assertEqual(invisibles.segmentar("pagó \u202e0051\u202c euros"), {"segmentos": [
+            {"valor": "pagó ", "marca": None, "codigos": None},
+            {"valor": "\u202e", "marca": "[invisible: invierte el texto]", "codigos": "U+202E"},
+            {"valor": "0051", "marca": None, "codigos": None},
+            {"valor": "\u202c", "marca": "[invisible: cambia la dirección]", "codigos": "U+202C"},
+            {"valor": " euros", "marca": None, "codigos": None},
+        ], "invisibles": 2})
+        for caracter in BIDI_CONTROL:
+            with self.subTest(caracter=ascii(caracter)):
+                segmentado = invisibles.segmentar("a" + caracter + "b")
+                self.assertEqual(segmentado["invisibles"], 1)
+                self.assertEqual(segmentado["segmentos"][1]["valor"], caracter)
+        for caracter, codigo in (("\r", "U+000D"), ("\u001b", "U+001B"), ("\u000c", "U+000C"), ("\u0085", "U+0085"),
+                                 ("\u007f", "U+007F")):
+            with self.subTest(caracter=ascii(caracter)):
+                self.assertEqual(invisibles.segmentar("a" + caracter + "b")["segmentos"][1],
+                                 {"valor": caracter, "marca": "[invisible: carácter de control]", "codigos": codigo})
+        for caracter in ("\u200b", "\u2060", "\ufeff", "\u180e"):
+            with self.subTest(caracter=ascii(caracter)):
+                self.assertEqual(invisibles.segmentar("a" + caracter + "b")["segmentos"][1]["marca"],
+                                 "[invisible: ancho cero]")
+        # El CR de un CRLF es un salto; el CR suelto, no.
+        self.assertEqual(invisibles.segmentar("a\r\n\tb")["invisibles"], 0)
+        self.assertEqual(invisibles.segmentar("a\r\r\nb")["invisibles"], 1)
+
+    def test_rachas_y_codigos(self):
+        self.assertEqual(invisibles.segmentar("a\u202c\u200b\u200fb")["segmentos"][1], {
+            "valor": "\u202c\u200b\u200f",
+            "marca": "[3 invisibles: cambia la dirección, ancho cero]",
+            "codigos": "U+202C U+200B U+200F",
+        })
+        larga = invisibles.segmentar("\u200b" * 10000)
+        self.assertEqual(len(larga["segmentos"]), 1)
+        self.assertEqual(larga["invisibles"], 10000)
+        self.assertEqual(larga["segmentos"][0]["marca"], "[10000 invisibles: ancho cero]")
+        self.assertEqual(larga["segmentos"][0]["codigos"],
+                         "U+200B U+200B U+200B U+200B U+200B U+200B U+200B U+200B U+200B U+200B y 9990 más")
+
+    def test_marca_escrita_a_mano_no_cuenta(self):
+        falsa = "Mire: [invisible: invierte el texto] y [U+202E]."
+        self.assertEqual(invisibles.segmentar(falsa), normal(falsa))
+
+    def test_aviso(self):
+        self.assertEqual(invisibles.aviso(1), "Este texto tiene 1 carácter invisible. Puede desordenar o esconder "
+                         "parte de lo que se lee, así que se muestra marcado entre corchetes. El texto guardado no "
+                         "cambia.")
+        self.assertEqual(invisibles.aviso(4), "Este texto tiene 4 caracteres invisibles. Pueden desordenar o "
+                         "esconder parte de lo que se lee, así que se muestran marcados entre corchetes. El texto "
+                         "guardado no cambia.")
+
+    def test_marcados_en_la_pagina(self):
+        # Un mensaje del personal con un RLM, una marca escrita a mano, un RLO
+        # y una racha de PDF y espacio de ancho cero; el texto de la denuncia,
+        # sin invisibles, es el control de que el texto normal sale igual.
+        mensaje = "\u200f[invisible: invierte el texto] el plazo es el \u202e21/30\u202c\u200b."
+        datos = expediente(texto_denuncia="Texto <b>normal</b>.",
+                           mensajes=[{"fecha": FECHA, "autor": "Personal de la empresa", "texto": mensaje}])
+        html = rutas_web.pagina("expediente.html", **datos).body.decode()
+        self.assertIsNone(INVISIBLE_EN_PAGINA.search(html))
+        self.assertIn('<div class="texto">Texto &lt;b&gt;normal&lt;/b&gt;.</div>', html)
+        self.assertIn('<p class="aviso" id="aviso-invisibles-1">Este texto tiene 4 caracteres invisibles. Pueden '
+                      'desordenar o esconder parte de lo que se lee, así que se muestran marcados entre corchetes. '
+                      'El texto guardado no cambia.</p>', html)
+        self.assertIn('<div class="texto" aria-describedby="aviso-invisibles-1">'
+                      '<span class="invisible-marcado" title="U+200F">[invisible: cambia la dirección]</span>'
+                      '[invisible: invierte el texto] el plazo es el '
+                      '<span class="invisible-marcado" title="U+202E">[invisible: invierte el texto]</span>21/30'
+                      '<span class="invisible-marcado" title="U+202C U+200B">[2 invisibles: cambia la dirección, '
+                      'ancho cero]</span>.</div>', html)
+        self.assertEqual(html.count('class="invisible-marcado"'), 3)
+        self.assertEqual(html.count('class="aviso"'), 1)
+        # Control: sin segmentar, el RLO llega a la página y la comprobación
+        # lo ve, así que la de arriba distingue.
+        sin_marcar = jinja2.Environment(loader=rutas_web.entorno_plantillas.loader, autoescape=True,
+                                        undefined=jinja2.StrictUndefined)
+        sin_marcar.globals.update(segmentar=normal, aviso_invisibles=invisibles.aviso)
+        crudo = sin_marcar.get_template("expediente.html").render(
+            longitud_maxima=rutas_web.LONGITUD_MAXIMA_TEXTO, categorias=rutas_web.CATEGORIAS, **datos)
+        self.assertIsNotNone(INVISIBLE_EN_PAGINA.search(crudo))
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ import unittest
 import app
 
 LOGICA = ("avisos", "bd", "claves", "cliente_broker", "correo", "cripto", "denuncias", "externo", "instruccion",
-          "personal", "proveedores_externos", "tokens")
+          "invisibles", "personal", "proveedores_externos", "tokens")
 PAQUETES_HTTP = ("fastapi", "starlette")
 TRANSPORTE_PROPIO = ("app.principal", "app.frontera_http", "app.broker")
 

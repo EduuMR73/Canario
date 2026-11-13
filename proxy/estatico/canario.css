@@ -53,6 +53,8 @@
   --color-canario-ala: #eab308;
   --color-canario-pico: #f97316;
   --color-canario-contorno: #1a1a1a;
+  --color-etiqueta-fondo: #fef3c7;
+  --color-etiqueta-texto: #78350f;
 
   --espacio-1: 0.25rem;
   --espacio-2: 0.5rem;
@@ -92,6 +94,8 @@
     --color-canario-ala: #eab308;
     --color-canario-pico: #f97316;
     --color-canario-contorno: #1a1a1a;
+    --color-etiqueta-fondo: #3d2e05;
+    --color-etiqueta-texto: #fde68a;
   }
 }
 
@@ -452,4 +456,19 @@ select {
   background: none;
   border: 0;
   border-radius: 0;
+}
+
+.mensajes .aviso {
+  margin: var(--espacio-2) var(--espacio-4) 0;
+}
+
+/* Un carácter invisible que reordena o esconde texto, cambiado por su marca
+   (app/invisibles.py), como en la SPA. No depende solo del color (WCAG 2.2,
+   1.4.1): los corchetes y las palabras la distinguen. */
+.invisible-marcado {
+  padding: 0 var(--espacio-1);
+  border-radius: var(--radio);
+  background: var(--color-etiqueta-fondo);
+  color: var(--color-etiqueta-texto);
+  font-size: 0.875em;
 }

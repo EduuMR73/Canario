@@ -82,9 +82,9 @@ PRUEBAS_POR_FICHERO = {
     "test_tokens": 10,
     "test_transporte": 18,
     "test_validacion": 8,
-    "test_web": 17,
+    "test_web": 23,
 }
-TOTAL_PRUEBAS = 353
+TOTAL_PRUEBAS = 359
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -150,6 +150,13 @@ MUTANTES = [
      "test_web.Formulario.test_valido", "el CRLF de la codificacion del envio se guarda en la denuncia"),
     ("rutas_web.py", 'or puerto == "443")', ")",
      "test_web.Origen.test_cargar_rechazos", "se acepta un origen con :443, que ningun navegador envia"),
+    # Los caracteres invisibles del texto libre (app/invisibles.py).
+    ("rutas_web.py", "segmentar=invisibles.segmentar,",
+     'segmentar=lambda texto: {"segmentos": [{"valor": texto, "marca": None, "codigos": None}], "invisibles": 0},',
+     "test_web.Invisibles.test_marcados_en_la_pagina",
+     "un U+202E del personal llega sin marcar a la pagina del denunciante (invierte lo que lee)"),
+    ("invisibles.py", B + "u200e" + B + "u200f", "",
+     "test_web.Invisibles.test_cada_invisible_su_marca", "el LRM y el RLM no se marcan"),
     ("limitador.py", 're.compile(r"/(?:v1|web)/empresas/[^/]+/denuncias")', 're.compile(r"/v1/empresas/[^/]+/denuncias")',
      "test_limitador.ReglaDeCadaRuta.test_reglas", "una denuncia por formulario no gasta el cupo de denuncias"),
     ("limitador.py", 'RUTAS_MENSAJES = {"/v1/seguimiento/mensajes", "/web/seguimiento/mensajes"}',

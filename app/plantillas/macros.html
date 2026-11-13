@@ -49,6 +49,18 @@
     el primer salto del texto de la persona. spellcheck="false": el corrector
     mejorado de algunos navegadores envía lo que se escribe a un servicio
     externo. -#}
+{#- Un texto que escribe otra persona: el de la denuncia o el de un mensaje.
+    Los caracteres invisibles que reordenan o esconden texto salen como una
+    marca visible, con un aviso encima unido por aria-describedby
+    (app/invisibles.py). Jinja2 escapa cada segmento. El contenido del <div>
+    va en una sola línea: con white-space: pre-wrap, un espacio de la
+    plantilla se vería dentro del texto. -#}
+{% macro texto_libre(texto, id_aviso) -%}
+{%- set segmentado = segmentar(texto) -%}
+{% if segmentado.invisibles %}<p class="aviso" id="{{ id_aviso }}">{{ aviso_invisibles(segmentado.invisibles) }}</p>
+{% endif %}<div class="texto"{% if segmentado.invisibles %} aria-describedby="{{ id_aviso }}"{% endif %}>{% for segmento in segmentado.segmentos %}{% if segmento.marca is none %}{{ segmento.valor }}{% else %}<span class="invisible-marcado" title="{{ segmento.codigos }}">{{ segmento.marca }}</span>{% endif %}{% endfor %}</div>
+{%- endmacro %}
+
 {% macro area_texto(campo, etiqueta, texto, errores, longitud_maxima) -%}
 <p class="campo">
 <label for="{{ campo }}">{{ etiqueta }}</label>

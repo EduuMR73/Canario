@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import resumen_errores, area_texto %}
+{% from "macros.html" import resumen_errores, area_texto, texto_libre %}
 {% block titulo %}Su denuncia{% endblock %}
 {% block contenido %}
 <h1>Su denuncia</h1>
@@ -10,14 +10,14 @@
 <dt>Categoría</dt><dd>{{ categoria }}</dd>
 </dl>
 <h2>Texto de la denuncia</h2>
-<div class="texto">{{ texto_denuncia }}</div>
+{{ texto_libre(texto_denuncia, "aviso-invisibles-denuncia") }}
 <h2>Mensajes</h2>
 {% if mensajes %}
 <ol class="mensajes">
 {% for mensaje in mensajes %}
 <li>
 <p class="mensaje-cabecera"><strong>{{ mensaje.autor }}</strong>, <time datetime="{{ mensaje.fecha.isoformat() }}">{{ mensaje.fecha.strftime("%d/%m/%Y") }}</time></p>
-<div class="texto">{{ mensaje.texto }}</div>
+{{ texto_libre(mensaje.texto, "aviso-invisibles-" ~ loop.index) }}
 </li>
 {% endfor %}
 </ol>

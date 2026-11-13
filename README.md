@@ -169,6 +169,7 @@ Solo si se ha configurado ([operacion.md](docs/operacion.md)); si no, el botón 
 
 - Quien decide es la API, no la SPA: un instructor o un auditor que pide a la API una ruta de otro rol recibe 403.
 - Un código de seguimiento inventado da 404, sin decir si alguna parte era correcta.
+- **Caracteres invisibles.** Un texto con un U+202E, que da la vuelta a lo que le sigue, se ve en el expediente con la marca "[invisible: invierte el texto]" y un aviso encima; el texto guardado no cambia. Igual en la página del denunciante con los mensajes del personal.
 - **Declarar no veraz (art. 32.3).** Con una segunda denuncia, porque no tiene vuelta atrás: el admin se la asigna, abre el expediente y pulsa "Declarar no veraz" y después "Confirmar: declarar no veraz". La denuncia desaparece del listado, y su código da en el 8444 el mismo "código de seguimiento no válido" que uno inventado. La destruye la siguiente supresión, que en producción se programa cada hora y en la demo se lanza a mano: `docker compose run --rm gestion suprimir-caducadas`, que responde con una línea `suprimidas: ... articulo=art32_3 denuncias=1`. En Auditoría quedan la declaración y la supresión.
 - Cinco intentos de entrada fallidos hacen esperar un minuto a quien entra desde un navegador nuevo, pero el titular sigue entrando desde el suyo.
 - Tras 13 minutos sin actividad, la SPA avisa de que la sesión se cerrará en menos de 2 minutos y deja seguir conectado. Si nadie responde, a los 15 lleva a `/entrar` y dice por qué.
@@ -177,7 +178,6 @@ Solo si se ha configurado ([operacion.md](docs/operacion.md)); si no, el botón 
 
 Errores reconocidos que no se han corregido antes de la entrega:
 
-- **Texto bidireccional sin aislar en la SPA.** El texto libre de una denuncia se guarda tal cual, también los caracteres de formato como U+202E, que invierte lo que le sigue. La SPA lo escapa, pero no lo aísla, así que un texto preparado se puede ver desordenado (ATT&CK T1036.002).
 - **Avisos que un lector de pantalla puede no anunciar.** Algunos mensajes de la SPA (por ejemplo "Copiado" en Cuentas o la confirmación del registro) se crean a la vez que su región viva. No se ha comprobado con un lector de pantalla real.
 - **La redacción no tiene pantalla.** Tachar una parte de una denuncia (art. 32.2) solo se puede hacer por la API.
 - **Renovación fallida una vez.** En una prueba a mano, "Seguir conectado" respondió "No hay conexión con el servidor" con el servicio en marcha. No se ha vuelto a reproducir ni se sabe la causa. Si ocurre, basta con volver a entrar.
@@ -197,7 +197,7 @@ Decisiones tomadas a sabiendas, con su motivo en la [sección 8 del modelo de am
 
 ## Mejoras futuras
 
-1. **Aislar el texto libre** en la SPA (`<bdi>` o `unicode-bidi: isolate`).
+1. **Aviso de homoglifos:** una palabra que mezcla alfabetos, como una "e" cirílica en un nombre latino (Unicode, UTS #39).
 2. **Regiones vivas** que existan antes que su texto, para los lectores de pantalla.
 3. **Pantalla de redacción** en la SPA.
 4. **Adjuntos** y **avisos al personal** de las denuncias nuevas.

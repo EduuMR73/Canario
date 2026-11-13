@@ -152,7 +152,11 @@ etapa. Prueba:
   lee una vez y deja una fila); las cargas salen como texto literal, sin
   crear elementos ni ejecutar nada (control: el main-*.js de un mutante con
   [innerHTML], con la página y su CSP reales, crea el <img> y la CSP bloquea
-  su carga), con dir="auto", y el
+  su carga); ningún carácter invisible que reordena o esconde texto (U+202E,
+  RLM, PDF, ancho cero) llega al texto de la página: cada racha sale como su
+  marca, el aviso dice cuántos hay y va unido al texto, y una marca escrita a
+  mano por el denunciante no cuenta (control: con el mismo mutante, sin
+  marcar, el carácter sigue en la página y se detecta); el
   expediente no va al almacenamiento ni a la consola; el mensaje y los
   cambios de estado no vuelven a leer; cerrar sin mensaje final no envía
   nada (control: con él, sí); "no veraz" solo lo tiene el admin y pide
@@ -528,6 +532,17 @@ PRUEBAS_UNITARIAS = (
     "el autor de un mensaje: denunciante, usted u otra persona del personal",
     "la categoría con su nombre, o tal cual si no se conoce",
     "la ruta de una denuncia solo casa con un uuid",
+    # Los caracteres invisibles del texto libre (denuncias/invisibles.ts).
+    "un texto sin invisibles sale en un solo segmento, igual, con tabulador, saltos y CRLF",
+    "el RLO se cambia por una marca que dice que invierte el texto",
+    "se marcan los 12 de Bidi_Control, también el RLM y el LRM",
+    "se marcan los de control salvo tabulador, LF y el CR de un CRLF; el CR suelto, sí",
+    "se marcan los cuatro de ancho cero",
+    "no se marcan ZWJ, ZWNJ, el guion blando, las etiquetas ni los selectores de variación",
+    "una racha de invisibles seguidos es una sola marca, con cada nombre una vez",
+    "una marca escrita a mano es texto: ni se cuenta ni se separa",
+    "un carácter fuera del plano básico no se parte",
+    "el aviso dice cuántos hay, en singular o en plural, y que lo guardado no cambia",
     "cada acción de la API tiene nombre, y una desconocida se enseña tal cual",
     "quién actúa: su email, plataforma, sistema o el id si la cuenta no se resuelve",
     "sobre qué: la cuenta por su email, la denuncia por su id y la asignación con las dos",
@@ -772,6 +787,8 @@ PAREJAS_8444 = (
     ("--color-acento", "--color-aviso-fondo", 3.0),
     ("--color-peligro", "--color-error-fondo", 3.0),
     ("--color-foco-barra", "--color-barra", 3.0),
+    # La marca de un carácter invisible en el texto libre (app/invisibles.py).
+    ("--color-etiqueta-texto", "--color-etiqueta-fondo", 4.5),
 )
 MUTANTE_8444_DISTINTO = ("  --color-acento: #0b57d0;", "  --color-acento: #0b57d1;")
 MUTANTE_URL = '\n.mutante { background: url("x.png"); }\n'
@@ -875,8 +892,23 @@ RUTA_CSPT = "/denuncias/..%2Fusuarios"
 MARCA_CARGA = "canario-carga-xss"
 CARGA_DENUNCIA = ('<img src=x onerror="window.canarioXss=1"><script>window.canarioXss=2</script>'
                   '<svg onload="window.canarioXss=3"></svg> ' + MARCA_CARGA)
-# Con U+202E (RIGHT-TO-LEFT OVERRIDE), que dir="auto" aísla (CWE-451).
-CARGA_MENSAJE = "\u202e<b>negrita</b> <a href=\"javascript:window.canarioXss=4\">enlace</a> " + MARCA_CARGA
+# Con caracteres invisibles que reordenan o esconden texto (CWE-451): un RLM
+# al principio, que con dir="auto" pondría el párrafo de derecha a izquierda;
+# una marca escrita a mano, que no debe contar; un U+202E (RIGHT-TO-LEFT
+# OVERRIDE), que invertiría lo que le sigue; y una racha de un PDF y un
+# espacio de ancho cero. Se escriben como escapes: un carácter bidi literal en
+# el fuente reordenaría lo que se lee de esta prueba.
+CARGA_MENSAJE = ("\u200f[invisible: invierte el texto] \u202e<b>negrita</b> "
+                 "<a href=\"javascript:window.canarioXss=4\">enlace</a> \u202c\u200b" + MARCA_CARGA)
+# Lo que debe verse (spa/src/app/denuncias/invisibles.ts), escrito a mano:
+# cada racha cambiada por su marca y la marca falsa como texto.
+MENSAJE_MARCADO = ("[invisible: cambia la dirección][invisible: invierte el texto] [invisible: invierte el texto]"
+                   "<b>negrita</b> <a href=\"javascript:window.canarioXss=4\">enlace</a> "
+                   "[2 invisibles: cambia la dirección, ancho cero]" + MARCA_CARGA)
+MARCAS_MENSAJE = ["[invisible: cambia la dirección]", "[invisible: invierte el texto]",
+                  "[2 invisibles: cambia la dirección, ancho cero]"]
+AVISO_MENSAJE = ("Este texto tiene 4 caracteres invisibles. Pueden desordenar o esconder parte de lo que se lee, así "
+                 "que se muestran marcados entre corchetes. El texto guardado no cambia.")
 TEXTO_PERSONAL = "Gracias por su denuncia: la estamos revisando."
 TEXTO_FINAL = "Hemos resuelto la denuncia y aplicado las medidas oportunas."
 TEXTO_MENSAJE_ENVIADO = "Mensaje enviado."
@@ -885,11 +917,14 @@ TEXTO_CIERRE = "Estado cambiado a Resuelta. El mensaje final se ha enviado y sal
 CABECERA_PENDIENTE = "Mensaje final · Usted · saldrá numerado al volver a leer"
 FOCO_EXPEDIENTE = "Expediente"
 FOCO_NO_VERAZ = "Confirmar: declarar no veraz"
-# El control del XSS: el texto de la denuncia con [innerHTML] en vez de
-# interpolación (spa/src/app/denuncias/contenido.ts). El sanitizador de
-# Angular quita onerror, el <script> y el <svg>, pero deja el <img>.
-MUTANTE_XSS = ('<p class="texto-libre" dir="auto" id="expediente-texto">{{ expediente().texto }}</p>',
-               '<p class="texto-libre" dir="auto" id="expediente-texto" [innerHTML]="expediente().texto"></p>')
+# El control del XSS y de los invisibles: el texto libre con [innerHTML] en
+# vez de los segmentos interpolados (spa/src/app/denuncias/texto-libre.ts).
+# El sanitizador de Angular quita onerror, el <script> y el <svg>, pero deja
+# el <img>; y los caracteres invisibles llegan a la página sin marcar.
+MUTANTE_XSS = (('">@for (segmento of segmentado().segmentos; track $index) {@if (segmento.marca === null) '
+                '{<ng-container>{{ segmento.valor }}</ng-container>} @else {<span class="invisible-marcado" '
+                '[attr.title]="segmento.codigos">{{ segmento.marca }}</span>}}</p>'),
+               '" [innerHTML]="texto()"></p>')
 
 # n) La auditoría (spa/src/app/auditoria).
 EMAIL_AUDITOR_N = "auditor.n@spa.test"
@@ -1856,12 +1891,24 @@ with open("/prueba/mutante.js", "rb") as fichero:
     MUTANTE = fichero.read()
 usados[secreto_admin] = int(paso_admin)
 RUTA_D1 = "/v1/personal/denuncias/" + D1
+# Los caracteres invisibles que la SPA marca (spa/src/app/denuncias/
+# invisibles.ts), escritos a mano: los de control salvo tabulador y LF, los 12
+# de Bidi_Control y los cuatro de ancho cero. Si uno llega al texto de la
+# página, no se marcó.
+INVISIBLES = ("/[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f\\u061c\\u180e\\u200b\\u200e"
+              "\\u200f\\u202a-\\u202e\\u2060\\u2066-\\u2069\\ufeff]/u")
 TEXTOS_LIBRES = """() => {
   const bloques = [...document.querySelectorAll('main .texto-libre')];
   return {
     textos: bloques.map((b) => b.textContent),
-    hijos: bloques.reduce((n, b) => n + b.childElementCount, 0),
-    dir: bloques.map((b) => b.getAttribute('dir')),
+    ajenos: bloques.reduce((n, b) => n + [...b.children].filter((e) => !e.matches('span.invisible-marcado')).length, 0),
+    marcas: bloques.map((b) => [...b.querySelectorAll('span.invisible-marcado')].map((e) => e.textContent)),
+    invisibles: bloques.map((b) => """ + INVISIBLES + """.test(b.textContent)),
+    avisos: bloques.map((b) => {
+      const id = b.getAttribute('aria-describedby');
+      const aviso = id === null ? null : document.getElementById(id);
+      return aviso === null ? null : aviso.textContent;
+    }),
     peligrosos: document.querySelectorAll('main img, main script, main svg, main iframe, main a[href^="javascript"]').length,
     bandera: typeof window.canarioXss,
   };
@@ -2026,7 +2073,9 @@ async def pasos_denuncias(navegador):
     await abrir_expediente(instructor)
     res["mutante"] = await instructor.evaluate(
         "() => { const t = document.querySelector('#expediente-texto'); "
-        "return {img: t.querySelectorAll('img').length, hijos: t.childElementCount}; }")
+        "const bloques = [...document.querySelectorAll('main .texto-libre')]; "
+        "return {img: t.querySelectorAll('img').length, hijos: t.childElementCount, "
+        "invisibles: bloques.map((b) => " + INVISIBLES + ".test(b.textContent))}; }")
     await asyncio.sleep(1)
     await instructor.context.unroute(ORIGEN + "/" + principal)
     # Que la CSP seguía puesta con el mutante: bloquea la carga de su <img>.
@@ -4257,8 +4306,8 @@ def main_de_mutante(seccion, fichero_relativo, mutacion, imagen):
 
 
 def main_del_mutante_xss():
-    """El main-*.js de la SPA con el texto de la denuncia en [innerHTML]."""
-    return main_de_mutante("m", pathlib.Path("src", "app", "denuncias", "contenido.ts"), MUTANTE_XSS,
+    """El main-*.js de la SPA con el texto libre en [innerHTML]."""
+    return main_de_mutante("m", pathlib.Path("src", "app", "denuncias", "texto-libre.ts"), MUTANTE_XSS,
                            IMAGEN_MUTANTE_XSS)
 
 
@@ -4338,11 +4387,24 @@ def seccion_m():
                       f"carga ({mutado}, {(res.get('mutante_csp') or [''])[0][:120]!r})")
     xss = res.get("xss") or {}
     negativo(f"m) las cargas salen como texto literal, sin crear ningun elemento ni ejecutar nada "
-             f"({xss.get('hijos')}, {xss.get('peligrosos')}, {xss.get('bandera')})",
-             xss.get("textos") == [CARGA_DENUNCIA, CARGA_MENSAJE] and xss.get("hijos") == 0
+             f"({xss.get('ajenos')}, {xss.get('peligrosos')}, {xss.get('bandera')})",
+             xss.get("textos") == [CARGA_DENUNCIA, MENSAJE_MARCADO] and xss.get("ajenos") == 0
              and xss.get("peligrosos") == 0 and xss.get("bandera") == "undefined", control_xss,
-             f"textos {xss.get('textos')}")
-    pasa(xss.get("dir") == ["auto", "auto"], f"m) los textos libres llevan dir=\"auto\" ({xss.get('dir')})")
+             f"textos {[ascii(t) for t in xss.get('textos') or []]}")
+    # Los invisibles, con el mismo mutante como control: sin marcar, el
+    # carácter llega a la página y la comprobación lo ve. El mutante abre el
+    # expediente al final del recorrido, con cuatro textos: la denuncia, el
+    # mensaje del denunciante (el único con invisibles), el del personal y el
+    # mensaje final.
+    control_invisibles = mutado.get("invisibles") == [False, True, False, False]
+    pasa(control_invisibles, f"m) control: sin marcar, los invisibles del mensaje llegan a la pagina y se detectan "
+                             f"({mutado.get('invisibles')})")
+    negativo(f"m) ningun caracter invisible llega a la pagina: cada racha sale como su marca, y la marca escrita "
+             f"a mano no es una ({xss.get('invisibles')}, {xss.get('marcas')})",
+             xss.get("invisibles") == [False, False] and xss.get("marcas") == [[], MARCAS_MENSAJE], control_invisibles)
+    pasa(xss.get("avisos") == [None, AVISO_MENSAJE],
+         f"m) el aviso de invisibles va unido al texto que los tiene, con su numero, y no al que no tiene "
+         f"({xss.get('avisos')})")
     consola, errores = res.get("consola") or [], res.get("errores") or []
     corte = res.get("consola_antes_del_control", len(consola))
     pasa(res.get("almacen_instructor") == [0, 0] and not any(MARCA_CARGA in m for m in consola[:corte]),

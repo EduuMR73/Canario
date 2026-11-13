@@ -1283,6 +1283,24 @@ button.mostrar {
   border-radius: var(--radio);
 }
 
+/* El componente de un texto libre (spa/src/app/denuncias/texto-libre.ts): el
+   aviso de los caracteres invisibles, si los hay, y el texto. */
+.bloque-texto-libre {
+  display: block;
+}
+
+/* Un carácter invisible que reordena o esconde texto, cambiado por su marca
+   (invisibles.ts). No depende solo del color (WCAG 2.2, 1.4.1): los corchetes
+   y las palabras la distinguen. Con los colores de la etiqueta, que ya tienen
+   su contraste comprobado en los dos temas. */
+.invisible-marcado {
+  padding: 0 var(--espacio-1);
+  border-radius: var(--radio);
+  background: var(--color-etiqueta-fondo);
+  color: var(--color-etiqueta-texto);
+  font-size: 0.875em;
+}
+
 /* Los mensajes como línea de tiempo: una raya a la izquierda y cada mensaje
    en una caja con su cabecera, como los comentarios de una incidencia. */
 .mensajes {
@@ -1313,6 +1331,10 @@ button.mostrar {
   background: none;
   border: 0;
   border-radius: 0;
+}
+
+.mensajes .bloque-texto-libre > .aviso {
+  margin: var(--espacio-2) var(--espacio-4) 0;
 }
 
 /* Las ilustraciones (spa/src/app/marca). Los colores van aquí y no en el

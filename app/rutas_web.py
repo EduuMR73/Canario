@@ -67,7 +67,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 
-from app import cripto, denuncias
+from app import cripto, denuncias, invisibles
 from app.rutas_denuncias import (
     LONGITUD_MAXIMA_TEXTO,
     MENSAJE_CERRADA,
@@ -196,6 +196,10 @@ entorno_plantillas = jinja2.Environment(
     # Las plantillas están en la imagen, de solo lectura: no se vuelven a leer.
     auto_reload=False,
 )
+# Los caracteres invisibles del texto libre se pintan como una marca visible
+# (app/invisibles.py). La plantilla recibe los segmentos y Jinja2 los escapa
+# uno a uno: nada se marca como seguro.
+entorno_plantillas.globals.update(segmentar=invisibles.segmentar, aviso_invisibles=invisibles.aviso)
 for _nombre in entorno_plantillas.list_templates():
     entorno_plantillas.get_template(_nombre)
 
