@@ -15,7 +15,8 @@ frente al Traefik real. Prueba:
   Caddyfile de producción, sin puertos publicados y la red edge interna;
 * b) el enrutado por Traefik: cada nombre llega a su sitio por HTTPS, con una
   sola cabecera HSTS (la de Caddy), y HTTP redirige a HTTPS (301 a un GET,
-  308 a un POST, que conserva el método);
+  308 a un POST, que conserva el método); y el límite de cuerpo a través de
+  Traefik: 128 KiB + 1 reciben el 413 de Caddy sin llegar a la API;
 * c) la IP del cliente a través de Traefik: un cliente agota su límite y otro
   no se ve afectado (las IP se distinguen), y el primero no se libra
   falsificando X-Forwarded-For (ni con una IP inventada ni con la del otro);
@@ -143,6 +144,7 @@ CUERPO_421 = '{"detalle": "host no válido"}'.encode()
 # (proxy/comun.caddy); sin él, Go esperaba el resto del cuerpo hasta read_body
 # y este cliente, con 15 s, se habría quedado sin respuesta.
 CUERPO_413_CADDY = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode()
+LIMITE_CUERPO = 128 * 1024
 LONGITUD_POR_ENCIMA = 128 * 1024 + 1
 # Un login con la forma correcta y datos que no existen: 401 si pasa todo lo
 # demás (app/rutas_personal.py, Login).
@@ -168,6 +170,11 @@ for pet in json.loads(sys.argv[1]):
         c.putrequest(pet["metodo"], pet["ruta"], skip_host=True, skip_accept_encoding=True)
         c.putheader("Host", pet["host"])
         cuerpo = pet["cuerpo"].encode() if pet["cuerpo"] is not None else None
+        # "relleno" genera aquí un cuerpo de n bytes: uno de 128 KiB no cabe en
+        # un argumento de la línea de órdenes (32 767 caracteres en Windows,
+        # 128 KiB por argumento en Linux).
+        if pet.get("relleno") is not None:
+            cuerpo = b"x" * pet["relleno"]
         for k, v in pet["cabeceras"].items():
             c.putheader(k, v)
         if cuerpo is not None:
@@ -401,6 +408,27 @@ def seccion_b():
     post, ubicacion_post = res["http_post"], cabecera(res["http_post"], "location")
     pasa(post[0] == 308 and ubicacion_post == [f"https://{HOST_WEB}/seguimiento/consulta"],
          f"b) POST http://{HOST_WEB}/seguimiento/consulta -> {post[0]} {ubicacion_post}")
+
+    # El límite de cuerpo como lo ve un cliente de internet, a través de
+    # Traefik: un cuerpo real de 128 KiB + 1 recibe el 413 de Caddy, sin llegar
+    # a la API (sin Via: la pone el reverse_proxy de Caddy en lo que viene de la
+    # API). Control: 128 KiB justos llegan a la API, que responde 405 a un POST
+    # en /salud (solo admite GET), con Via.
+    # No se prueba un Content-Length declarado por encima con un cuerpo corto:
+    # a través de Traefik se queda sin respuesta hasta los plazos de Traefik,
+    # también con Caddy 2.11.7 (medido en producción el 20/11/2026;
+    # docs/threat-model.md, 6.11). d) lo prueba directo contra Caddy.
+    res = cliente([{**pet("justo", HOST_API, "/salud", "POST"), "relleno": LIMITE_CUERPO},
+                   {**pet("grande", HOST_API, "/salud", "POST"), "relleno": LONGITUD_POR_ENCIMA}],
+                  "publica", IP_CLIENTE)
+    justo, grande = res["justo"], res["grande"]
+    control_limite = justo[0] == 405 and cabecera(justo, "via") != []
+    pasa(control_limite, f"b) control: 128 KiB justos por Traefik llegan a la API -> {justo[0]}, "
+                         f"Via {cabecera(justo, 'via')}")
+    negativo(f"b) 128 KiB + 1 por Traefik -> 413 de Caddy sin llegar a la API "
+             f"({grande[0]} {grande[2][:40]!r}, Via {cabecera(grande, 'via')})",
+             grande[0] == 413 and grande[2] == CUERPO_413_CADDY and cabecera(grande, "via") == [],
+             control_limite)
 
 
 RUTAS_TRAEFIK_OK = False
