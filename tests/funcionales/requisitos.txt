@@ -1,0 +1,27 @@
+# Paquetes de las pruebas funcionales, instalados dentro del contenedor de
+# Playwright (Python 3.12, Linux x86_64, imagen noble) con
+#   pip install --no-deps --only-binary :all: --require-hashes --target /tmp/pw
+# Versiones exactas y el sha256 de la rueda que instala esa plataforma,
+# sacado del JSON de PyPI (https://pypi.org/pypi/<paquete>/<version>/json).
+# --no-deps: lo que no está aquí no se instala. Se comprobaron los
+# requires_dist de cada uno: colorama (solo win32), exceptiongroup y tomli
+# (solo Python < 3.11) no hacen falta en esta plataforma.
+#
+# Los cuatro de Playwright, con los mismos hashes que
+# tests/security/verificar_spa.py (REQUISITOS_PLAYWRIGHT).
+playwright==1.63.0 --hash=sha256:ad21bc07516b187965a7521c5cf0df0bd657b17482eaad74335272d35a2b07de
+pyee==13.0.1 --hash=sha256:af2f8fede4171ef667dfded53f96e2ed0d6e6bd7ee3bb46437f77e3b57689228
+greenlet==3.5.6 --hash=sha256:975736b002ed080d124cf81a79cb7e05cb26d6b3f5c7a7b651c0fcce70353aa1
+typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+# pytest y sus dependencias en Linux con Python 3.12.
+pytest==9.2.0 --hash=sha256:07acdcf88ec174f907dc01af70bf52d49b014bbab03faeeade31c96b18c2e588
+pluggy==1.7.0 --hash=sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec
+iniconfig==2.3.1 --hash=sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pygments==2.21.0 --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+# El informe HTML: pytest-html y lo que pide (pytest-metadata y Jinja2, que
+# pide MarkupSafe; de MarkupSafe, la rueda cp312 manylinux x86_64).
+pytest-html==4.2.0 --hash=sha256:ff5caf3e17a974008e5816edda61168e6c3da442b078a44f8744865862a85636
+pytest-metadata==3.1.1 --hash=sha256:c8e0844db684ee1c798cfa38908d20d67d0463ecb6137c72e91f418558dd5f4b
+jinja2==3.1.6 --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+markupsafe==3.0.4 --hash=sha256:8e124f974786f831d6043728e38296969d3579db8896fe004682f5758e613581
