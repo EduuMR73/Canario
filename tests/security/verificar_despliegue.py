@@ -21,7 +21,8 @@ frente al Traefik real. Prueba:
   falsificando X-Forwarded-For (ni con una IP inventada ni con la del otro);
 * d) que Caddy solo atiende a Traefik: lo que llega a Caddy por otra IP de la
   red edge recibe 403 en cada tipo de ruta (API, estáticos, páginas del
-  denunciante, la SPA y la API del personal), y un Host ajeno, 421;
+  denunciante, la SPA y la API del personal), un Host ajeno, 421, y un
+  Content-Length por encima del límite, 413 de Caddy antes que el 403;
 * e) los orígenes de producción: la API del personal acepta el de
   canario-personal y rechaza el de localhost, el de otra aplicación del mismo
   dominio (same-site) y un Sec-Fetch-Site same-site; los formularios del
@@ -136,6 +137,13 @@ CUERPO_SALUD = b'{"estado":"ok"}'
 CUERPO_403_API = b'{"detalle": "permiso denegado"}'
 CUERPO_403_CADDY = '{"detalle": "petición no válida"}'.encode()
 CUERPO_421 = '{"detalle": "host no válido"}'.encode()
+# El 413 de Caddy en el sitio de la API (handle_errors de sitio_api) y el límite
+# de cuerpo (128 KiB) más un byte: el Content-Length que d) declara de más, con
+# un cuerpo corto. Sale al momento por el Connection: close de los 413
+# (proxy/comun.caddy); sin él, Go esperaba el resto del cuerpo hasta read_body
+# y este cliente, con 15 s, se habría quedado sin respuesta.
+CUERPO_413_CADDY = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode()
+LONGITUD_POR_ENCIMA = 128 * 1024 + 1
 # Un login con la forma correcta y datos que no existen: 401 si pasa todo lo
 # demás (app/rutas_personal.py, Login).
 LOGIN_FALSO = json.dumps({"empresa": "0" * 32, "email": "nadie@despliegue.test", "contrasena": "x" * 12,
@@ -163,7 +171,8 @@ for pet in json.loads(sys.argv[1]):
         for k, v in pet["cabeceras"].items():
             c.putheader(k, v)
         if cuerpo is not None:
-            c.putheader("Content-Length", str(len(cuerpo)))
+            # "longitud" declara un Content-Length distinto del cuerpo enviado.
+            c.putheader("Content-Length", str(pet.get("longitud", len(cuerpo))))
         c.endheaders(cuerpo)
         r = c.getresponse()
         res[pet["id"]] = [r.status, r.getheaders(), base64.b64encode(r.read()).decode()]
@@ -437,6 +446,28 @@ def seccion_d():
     pasa(cabecera(res["api"], "strict-transport-security") == [HSTS], "d) el 403 lleva las cabeceras del sitio")
     ajeno = res["ajeno"]
     pasa(ajeno[0] == 421 and ajeno[2] == CUERPO_421, f"d) Host ajeno -> {ajeno[0]} {ajeno[2][:40]!r}")
+
+    # request_body va antes que los handle en el orden de directivas de Caddy, y
+    # desde 2.11.8 decide el 413 en cuanto el Content-Length supera el límite
+    # (que salga al momento lo da el Connection: close, ver
+    # LONGITUD_POR_ENCIMA): quien no es Traefik y declara un cuerpo de más
+    # recibe el 413 de Caddy y no el 403.
+    # Sigue sin llegar a la API; solo cambia qué rechazo ve primero. Control: la
+    # misma petición con su longitud real recibe el 403 de Caddy.
+    peticion_post = pet("normal", HOST_API, "/v1/personal/sesiones", "POST", {"Content-Type": "application/json"}, "{}")
+    res = cliente([{**peticion_post, **directo},
+                   {**peticion_post, **directo, "id": "grande", "longitud": LONGITUD_POR_ENCIMA}],
+                  "edge", IP_INTRUSO_EDGE)
+    control_403 = res["normal"][0] == 403 and res["normal"][2] == CUERPO_403_CADDY
+    pasa(control_403, f"d) control: un POST normal desde {IP_INTRUSO_EDGE} -> {res['normal'][0]} {res['normal'][2][:40]!r}")
+    negativo(f"d) Content-Length por encima desde {IP_INTRUSO_EDGE} -> 413 de Caddy antes del 403 "
+             f"({res['grande'][0]} {res['grande'][2][:40]!r})",
+             res["grande"][0] == 413 and res["grande"][2] == CUERPO_413_CADDY, control_403)
+    # También en producción el 413 lleva Connection: close (proxy/comun.caddy).
+    # Control: el 403 de la petición normal no la lleva.
+    control_cierre = control_403 and cabecera(res["normal"], "connection") != ["close"]
+    negativo(f"d) el 413 de Caddy lleva Connection: close ({cabecera(res['grande'], 'connection')})",
+             cabecera(res["grande"], "connection") == ["close"], control_cierre)
 
 
 def seccion_e():

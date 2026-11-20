@@ -3,7 +3,7 @@
 # Caddyfile solo pone las direcciones de los sitios, el TLS y la confianza en
 # el proxy de delante, e importa aquí el resto: una regla cambiada aquí vale en
 # los dos entornos, y lo que las baterías demuestran en local (cabeceras, rutas,
-# la quita de Range) es lo que corre en producción.
+# errores) es lo que corre en producción.
 #
 # Los puertos que citan los comentarios (8443, 8444, 8445) son los de local. En
 # producción cada sitio tiene su propio nombre (docs/operacion.md): la API, el
@@ -138,22 +138,8 @@
 	}
 }
 
-# Quita la cabecera Range de la petición. El binario de la imagen fijada (Go
-# 1.26.8) tiene una denegación de servicio con cabeceras Range en ServeContent
-# (CVE-2026-78667), que es lo que usa file_server. Sin Range, ServeContent ni
-# siquiera la analiza: responde el fichero entero con 200 (comprobado con la
-# imagen fijada: con la quita, dos rangos dan 200; sin ella, 206). No se pierde
-# nada: los estáticos son pequeños y no hay descargas que reanudar. Se importa
-# en todos los sitios, pero lo que la prueba exige (verificar_escaneos.py, f)
-# es que vaya delante de cada file_server: un file_server nuevo sin la quita
-# falla de forma visible.
-(sin_range) {
-	request_header -Range
-}
-
 # API (8443 en local): solo JSON. Sin las páginas del denunciante.
 (sitio_api) {
-	import sin_range
 	import cabeceras_api
 
 	# Las cookies no se aíslan por puerto (RFC 6265, 8.5): las de la SPA del
@@ -179,9 +165,13 @@
 	error @sitio_denunciante 404
 
 	reverse_proxy api:8000 {
-		# max_size solo falla al leer el cuerpo, y por defecto el proxy lo
-		# reenvía mientras lo lee: una petición demasiado grande llegaba a la API
-		# (comprobado). Con un buffer algo mayor que el límite, Caddy lee el
+		# Desde Caddy 2.11.8, request_body decide el 413 en cuanto el
+		# Content-Length declarado supera max_size, aunque nada lea el cuerpo
+		# (que salga al momento depende del Connection: close de handle_errors).
+		# Un cuerpo por trozos (chunked) no declara longitud: max_size solo
+		# falla al leerlo, y por defecto el proxy lo reenvía mientras lo lee, así
+		# que una petición demasiado grande llegaba a la API (comprobado con
+		# Caddy 2.11.7). Con un buffer algo mayor que el límite, Caddy lee el
 		# cuerpo antes de contactar con la API y corta él mismo con 413, como
 		# client_max_body_size en nginx. La documentación avisa de que es
 		# ineficiente con cuerpos grandes; aquí el máximo es 128 KiB y el tiempo
@@ -212,7 +202,17 @@
 		@no_encontrado expression {err.status_code} == 404
 		respond @no_encontrado `{"detalle": "recurso no encontrado"}` 404
 
+		# Connection: close en cada 413. Si el cliente declara un Content-Length
+		# por encima del límite y envía menos, net/http de Go, antes de escribir
+		# la respuesta, lee y descarta lo pendiente cuando es menor de 256 KiB
+		# (maxPostHandlerReadBytes), para reutilizar la conexión: el 413 no salía
+		# hasta read_body y la conexión quedaba ocupada 30 s. Con esta cabecera
+		# Go marca la conexión para cerrarla (closeAfterReply) y se salta ese
+		# drenaje: el 413 sale al momento y la conexión se libera. Es lo que Go
+		# ya hace solo cuando lo pendiente supera 256 KiB o un cuerpo por trozos
+		# se pasa del límite.
 		@demasiado_grande expression {err.status_code} == 413
+		header @demasiado_grande Connection close
 		respond @demasiado_grande `{"detalle": "cuerpo de la petición demasiado grande"}` 413
 
 		@no_disponible expression {err.status_code} >= 500
@@ -227,7 +227,6 @@
 # resuelve en Windows. Sirve los estáticos y, para todo lo demás, las páginas
 # del adaptador HTML de la API (app/rutas_web.py, bajo /web).
 (sitio_denunciante) {
-	import sin_range
 	import cabeceras_html
 
 	# Las cookies no se aíslan por puerto (RFC 6265, 8.5): las de la sesión del
@@ -250,10 +249,6 @@
 	# la imagen fijada). Solo GET y HEAD; el resto da 405 con "Allow: GET, HEAD".
 	handle /estatico/* {
 		root * /srv
-		# ServeContent anuncia "Accept-Ranges: bytes" aunque Range se haya
-		# quitado (comprobado). Se quita para no prometer rangos que no se
-		# sirven (RFC 9110, 14.3).
-		header -Accept-Ranges
 		file_server
 	}
 
@@ -334,7 +329,10 @@
 </html>
 ` 404
 
+		# Connection: close, para que el 413 salga al momento (ver el
+		# handle_errors de sitio_api).
 		@demasiado_grande expression {err.status_code} == 413
+		header @demasiado_grande Connection close
 		respond @demasiado_grande `<!doctype html>
 <html lang="es">
 <meta charset="utf-8">
@@ -398,13 +396,7 @@
 # configurar mal. Es el único puerto por el que viajan las cookies de sesión
 # del personal (app/rutas_personal.py).
 (sitio_spa) {
-	import sin_range
 	import cabeceras_spa
-
-	# ServeContent anuncia "Accept-Ranges: bytes" aunque Range se haya quitado
-	# (ver el sitio del 8444). Aquí va en todo el sitio: la API no la pone, y
-	# así ningún file_server de la SPA queda sin la quita.
-	header -Accept-Ranges
 
 	# El mismo límite que en el 8443 y que en la API.
 	request_body {
@@ -444,7 +436,10 @@
 	#    script, y el fallo quedaría escondido.
 	# 3. Cualquier otra ruta es de la SPA (/denuncias/x): index.html, y el
 	#    router de Angular pinta la página o "Página no encontrada". Ninguna
-	#    ruta de la SPA lleva un punto (spa/src/app/app.routes.ts).
+	#    ruta de la SPA lleva un punto (spa/src/app/app.routes.ts). Desde Caddy
+	#    2.11.8, una ruta que termina en "/" nunca casa con @fichero (salvo "/",
+	#    que sirve index.html): ni "/main-x.js/" ni "/media/" son ficheros, así
+	#    que también caen aquí.
 	# Solo GET y HEAD; file_server responde 405 al resto.
 	handle {
 		root * /srv/spa
@@ -473,7 +468,10 @@
 		@no_encontrado expression {err.status_code} == 404
 		respond @no_encontrado `{"detalle": "recurso no encontrado"}` 404
 
+		# Connection: close, para que el 413 salga al momento (ver el
+		# handle_errors de sitio_api).
 		@demasiado_grande expression {err.status_code} == 413
+		header @demasiado_grande Connection close
 		respond @demasiado_grande `{"detalle": "cuerpo de la petición demasiado grande"}` 413
 
 		@no_disponible expression {err.status_code} >= 500
@@ -488,7 +486,6 @@
 # con las cabeceras y el formato JSON de la API: nadie llega aquí desde un
 # enlace del sitio, solo con un Host manipulado.
 (sitio_por_defecto) {
-	import sin_range
 	import cabeceras_api
 	header Content-Type "application/json"
 	respond `{"detalle": "host no válido"}` 421

@@ -37,13 +37,16 @@ COPY --from=spa --chown=node:node src/ src/
 RUN npx ng build
 
 # Etapa 2: la imagen que se ejecuta.
-FROM caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
 
 # 1. setcap -r: el binario oficial lleva la file capability
-#    cap_net_bind_service=ep para poder escuchar en 80 y 443 sin root. Aquí
-#    Caddy escucha en 8443 (no privilegiado) y no la necesita. Además, con
-#    cap_drop ALL el kernel no puede concederla y rechaza el execve
-#    ("operation not permitted", comprobado). Se quita la causa en vez de
+#    cap_net_bind_service=p para poder escuchar en 80 y 443 sin root (hasta
+#    Caddy 2.11.7 era =ep, con el bit efectivo). Aquí Caddy escucha en 8443 (no
+#    privilegiado) y no la necesita. Con =ep y cap_drop ALL el kernel no podía
+#    concederla y rechazaba el execve ("operation not permitted", comprobado);
+#    con =p no hay bit efectivo y el execve ya no fallaría, pero la capability
+#    sigue sin hacer falta. Se quita igualmente: se elimina la causa en vez de
+#    depender de cómo la declare la imagen oficial en cada versión, y sin
 #    devolver la capability al contenedor.
 # 2. /data/caddy guarda el CA local y su clave privada. La imagen lo deja en
 #    1777 (escribible por cualquiera); aquí pasa a ser del usuario de Caddy con

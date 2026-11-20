@@ -19,13 +19,16 @@ Qué prueba:
      declaraciones VEX vigentes (30 días como máximo), con efecto, atadas a la
      versión exacta del componente y sin suprimir nada más en ninguna imagen;
      postgres sin gosu y sin root por defecto;
-     caddy sin curl, libcurl ni brotli-libs;
+     caddy sin curl, libcurl ni brotli-libs, y con el índice de la imagen base
+     fijado cuyo manifiesto linux/amd64 es el literal esperado (la plataforma
+     que se ejecuta, la que cuenta para la espera de 14 días);
      las vulnerabilidades sin arreglo se listan (riesgo residual, sección 8 del
      modelo de amenazas);
-  f) que lo que el VEX declara no alcanzable no lo es: Caddy solo con HTTP/1.1
-     (configuración adaptada y ALPN real en los dos puertos), cada file_server
-     detrás de la quita de la cabecera Range, sin ECH, sin el servidor ACME
-     (acme_server) y sin verificar nunca el certificado de otro (lista blanca
+  f) que lo que el VEX declara no alcanzable no lo es, y las invariantes de
+     configuración que reducen superficie: Caddy solo con HTTP/1.1
+     (configuración adaptada y ALPN real en los tres puertos), sin ECH, sin el
+     servidor ACME (acme_server, que es la barrera frente a go-jose/v3 3.0.5,
+     sin arreglo) y sin verificar nunca el certificado de otro (lista blanca
      sobre la configuración adaptada);
      mailpit solo con la configuración de TLS de servidor (lista blanca) y solo
      en su red interna; y en postgres, que
@@ -205,8 +208,17 @@ COMPOSE_CONTROL_API = """services:
 
 # Caddy sin curl (proxy/Dockerfile): ni curl ni lo que solo él necesitaba, con
 # sus CVE (CVE-2026-92392 y CVE-2026-111497). Control: la imagen base los trae.
-IMG_CADDY_BASE = "caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
+IMG_CADDY_BASE = "caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0"
 PAQUETES_SIN_CURL = ("curl", "libcurl", "brotli-libs")
+# Regla de los 14 días (docs/threat-model.md, 6.17): para una imagen cuenta la
+# subida del manifiesto de la plataforma que se ejecuta, no la del índice. El
+# índice de 2.11.9 se re-publicó el 13 de noviembre de 2026 solo para añadir
+# riscv64; el manifiesto linux/amd64 es del 5 de noviembre (20:52 UTC). Si el
+# índice fijado apuntase a otro amd64, la fecha de la espera ya no valdría:
+# literal comprobado en Docker Hub el 19 de noviembre de 2026, no derivado de
+# la imagen que se prueba.
+PLATAFORMA_CADDY = {"os": "linux", "architecture": "amd64"}
+MANIFIESTO_AMD64_CADDY = "sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424"
 
 # VEX
 VEX = RAIZ / "tests" / "security" / "canario.openvex.json"
@@ -216,9 +228,18 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
                            "vulnerable_code_cannot_be_controlled_by_adversary",
                            "inline_mitigations_already_exist"}
 # Lo que el VEX declara no explotable en cada imagen.
-# CVE-2026-111943 se retiró el 26 de octubre de 2026, cuando la base de datos
-# de Trivy la bajó a MEDIUM, y se volvió a declarar el 29, cuando la subió
-# otra vez a HIGH. CVE-2026-116587 (go-jose) entró el 29 de octubre de 2026.
+# Las de caddy (CVE-2026-78667, CVE-2026-78669, CVE-2026-97031, CVE-2026-111943
+# y CVE-2026-116587) se retiraron el 19 de noviembre de 2026 al adoptar Caddy
+# 2.11.9 (Go 1.27.3, go-jose v4 4.1.6), que las arregla, cumplidos los 14 días
+# de su manifiesto amd64. Si Trivy reportara en 2.11.9 go-jose/v3 3.0.5
+# (CVE-2026-116587, sin arreglo en v3), se vería en e) y se declararía con su
+# propio análisis; no se anticipa aquí, porque e) exige que cada declaración
+# suprima algo.
+# CVE-2026-78661 (x/net/html 0.60.0, caddy) entró el 20 de noviembre de 2026:
+# Trivy la reporta en 2.11.9, pero html.Parse solo lo alcanza un comando de
+# ayuda de urfave/cli que Caddy nunca ejecuta (govulncheck en modo fuente para
+# linux/amd64 con las etiquetas del release, sin ningún camino de llamada). Se
+# retira al adoptar una Caddy oficial con x/net 0.62.0, cumplidos los 14 días.
 # La de mailpit (CVE-2026-111943, Go 1.27.2) se retiró el 6 de noviembre de
 # 2026 al adoptar mailpit 1.32.0, que la arregla, cumplidos los 14 días.
 # CVE-2026-85091 (zlib, postgres) y CVE-2026-109518 (apt, api) entraron el 6
@@ -226,8 +247,7 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
 # de noviembre, que las arreglan, cumplidos los 14 días. En caddy y redis no
 # se declara la de zlib: se adoptaron sus imágenes del 21 de octubre.
 CVES_VEX = {"api": {"CVE-2026-109518"},
-            "caddy": {"CVE-2026-78667", "CVE-2026-78669", "CVE-2026-97031", "CVE-2026-111943",
-                      "CVE-2026-116587"},
+            "caddy": {"CVE-2026-78661"},
             "postgres": {"CVE-2026-92392", "CVE-2026-111497", "CVE-2026-85091"}}
 # Lo que el mismo VEX declara no explotable en spa/package-lock.json (j).
 # CVE-2026-109869 (undici 8.11.2) se retiró el 29 de octubre de 2026 al
@@ -235,14 +255,12 @@ CVES_VEX = {"api": {"CVE-2026-109518"},
 CVES_VEX_LOCK = set()
 # Para el control de atadura a la versión: las mismas declaraciones con la
 # versión siguiente del componente no deben suprimir nada.
-VERSIONES_VEX = {"pkg:golang/stdlib@v1.26.8": "pkg:golang/stdlib@v1.26.9",
-                 "pkg:golang/golang.org/x/net@v0.59.0": "pkg:golang/golang.org/x/net@v0.60.0",
-                 "pkg:golang/github.com/go-jose/go-jose/v4@v4.1.5": "pkg:golang/github.com/go-jose/go-jose/v4@v4.1.6",
-                 "pkg:apk/alpine/libcurl@8.22.0-r0": "pkg:apk/alpine/libcurl@8.23.0-r0",
+VERSIONES_VEX = {"pkg:apk/alpine/libcurl@8.22.0-r0": "pkg:apk/alpine/libcurl@8.23.0-r0",
                  "pkg:apk/alpine/brotli-libs@1.2.0-r1": "pkg:apk/alpine/brotli-libs@1.2.1-r0",
                  "pkg:apk/alpine/zlib@1.3.2-r0": "pkg:apk/alpine/zlib@1.3.2-r1",
                  "pkg:deb/debian/apt@3.0.3": "pkg:deb/debian/apt@3.0.4",
-                 "pkg:deb/debian/libapt-pkg7.0@3.0.3": "pkg:deb/debian/libapt-pkg7.0@3.0.4"}
+                 "pkg:deb/debian/libapt-pkg7.0@3.0.3": "pkg:deb/debian/libapt-pkg7.0@3.0.4",
+                 "pkg:golang/golang.org/x/net@v0.60.0": "pkg:golang/golang.org/x/net@v0.62.0"}
 
 # Caddy
 PROTOCOLOS_CADDY = ["h1"]
@@ -694,6 +712,17 @@ def seccion_e():
     negativo(f"e) caddy: la imagen no contiene {list(PAQUETES_SIN_CURL)} ({en_caddy})", en_caddy == [],
              en_base == sorted(PAQUETES_SIN_CURL), f"control: la base trae {en_base}")
 
+    # Caddy: el manifiesto linux/amd64 del índice fijado. La espera de 14 días
+    # cuenta desde la subida de ese manifiesto, y el índice se puede
+    # re-publicar sin cambiarlo (riscv64, atestaciones). Control: el índice se
+    # puede leer y tiene alguna entrada linux/amd64; sin él, la comparación
+    # con el literal no demostraría nada (SIN CONCLUSION).
+    indice = indice_oci(IMG_CADDY_BASE)
+    amd64 = entradas_plataforma(indice, PLATAFORMA_CADDY)
+    negativo(f"e) caddy: el manifiesto linux/amd64 del indice fijado es {MANIFIESTO_AMD64_CADDY} ({amd64})",
+             amd64 == [MANIFIESTO_AMD64_CADDY], len(amd64) >= 1,
+             "control: el indice no se pudo leer con docker buildx imagetools inspect --raw o no tiene entrada linux/amd64")
+
     # Control de Trivy: rootfs sintético con Jinja2 2.10 y un token.
     token = token_sintetico()
     rfs = TEMPORAL / "control_rootfs"
@@ -800,6 +829,26 @@ def seccion_e():
              control_sobrante, f"sobran {sorted(suprimidas_total - esperadas_sup)}")
 
 
+def indice_oci(imagen):
+    """El índice OCI de una imagen fijada por digest, tal cual lo publica el
+    registro (docker buildx imagetools inspect --raw), o None si no se puede
+    leer. Consulta el registro: necesita red."""
+    r = ejecutar(["docker", "buildx", "imagetools", "inspect", "--raw", imagen], timeout=120)
+    if r.rc != 0:
+        return None
+    return json_de_texto(r.out)
+
+
+def entradas_plataforma(indice, plataforma):
+    """Los digests de las entradas del índice de esa plataforma (os y
+    architecture), sin las atestaciones, que no llevan plataforma ejecutable
+    (architecture "unknown")."""
+    if not isinstance(indice, dict):
+        return []
+    return [m["digest"] for m in indice.get("manifests") or []
+            if all((m.get("platform") or {}).get(k) == v for k, v in plataforma.items())]
+
+
 def escribir_vex_movido():
     """El VEX con cada componente en su versión siguiente: no debe suprimir
     nada (control de la atadura a la versión, e y j)."""
@@ -817,7 +866,8 @@ def json_de_texto(texto):
 
 
 # ---------------------------------------------------------------------------
-# f) Alcanzabilidad en Caddy (lo que sostiene el VEX)
+# f) Invariantes de configuración de Caddy (reducen superficie; ya no
+# sostienen ninguna declaración del VEX)
 # ---------------------------------------------------------------------------
 CLIENTE_ALPN = """import socket
 import ssl
@@ -851,15 +901,14 @@ PUERTOS_CADDY_PRODUCCION = ["8080"]
 # Lo que carga el Caddyfile local: él y los ficheros que importa
 # (proxy/Caddyfile). Los controles se construyen sobre una copia de todos.
 FICHEROS_CADDY = ("Caddyfile", "global.caddy", "servidor.caddy", "comun.caddy")
-# Condición de la lista blanca de CVE-2026-111943 que en producción no aplica:
-# allí Caddy no gestiona ningún certificado (sin app tls), lo que se comprueba
-# aparte y es más estricto que tener solo emisores internal.
+# Condición de la lista blanca de x509 que en producción no aplica: allí Caddy
+# no gestiona ningún certificado (sin app tls), lo que se comprueba aparte y es
+# más estricto que tener solo emisores internal.
 CONDICION_SOLO_INTERNAL = "solo emisores internal"
-# Cambio que convierte el Caddyfile real en el de control de la quita de Range:
-# el sitio del denunciante, el que tiene file_server, sin importar sin_range.
-CONTROL_SIN_RANGE = ("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n")
-# CVE-2026-111943: cambios que hacen que Caddy verifique certificados ajenos,
-# uno por condición de la lista blanca. Se aplican en orden y cada uno a la
+# Invariante de configuración (reducción de superficie, ya no una CVE
+# declarada: la de crypto/x509, CVE-2026-111943, está arreglada en Go 1.27.3):
+# cambios que hacen que Caddy verifique certificados ajenos, uno por condición
+# de la lista blanca. Se aplican en orden y cada uno a la
 # primera aparición: el emisor acme va en el sitio sin nombre (con localhost
 # en dos políticas, caddy adapt se niega) y client_auth en el primer sitio.
 CONTROL_X509 = [
@@ -897,38 +946,6 @@ ENTORNO_MAILPIT = {
 }
 
 
-def quita_range(manejador):
-    """Un manejador headers que borra Range de la petición."""
-    borradas = ((manejador.get("request") or {}).get("delete") or [])
-    return manejador.get("handler") == "headers" and "range" in [b.lower() for b in borradas]
-
-
-def file_servers(rutas, quitado=False):
-    """Para cada file_server, si alguna ruta anterior quita Range a todas las
-    peticiones que llegan a él.
-
-    Se recorre en el orden en que Caddy ejecuta las rutas. Dentro de una ruta,
-    la quita vale para los manejadores siguientes. Para las rutas siguientes,
-    solo si la ruta que la hace no tiene condición (match): una quita con
-    condición no cubre a todas. Lo que se quite dentro de una subruta no se
-    hereda hacia fuera. Es conservador: ante la duda da "sin quita" y la
-    prueba falla de forma visible.
-    """
-    hallados = []
-    for ruta in rutas:
-        local = quitado
-        for manejador in ruta.get("handle", []):
-            if quita_range(manejador):
-                local = True
-            elif manejador.get("handler") == "file_server":
-                hallados.append(local)
-            elif manejador.get("handler") == "subroute":
-                hallados += file_servers(manejador.get("routes", []), local)
-        if not ruta.get("match"):
-            quitado = local
-    return hallados
-
-
 def transportes(nodo):
     """Todos los transportes de los manejadores, a cualquier profundidad."""
     if isinstance(nodo, dict):
@@ -939,10 +956,36 @@ def transportes(nodo):
     return []
 
 
+def manejadores(nodo, tipo):
+    """Todos los manejadores de ese tipo ("handler"), a cualquier profundidad."""
+    if isinstance(nodo, dict):
+        propios = [nodo] if nodo.get("handler") == tipo else []
+        return propios + [m for v in nodo.values() for m in manejadores(v, tipo)]
+    if isinstance(nodo, list):
+        return [m for v in nodo for m in manejadores(v, tipo)]
+    return []
+
+
+def buffers_sobre_limite(configuracion):
+    """Todo reverse_proxy lee el cuerpo entero antes de reenviarlo: su
+    request_buffers supera el max_size de todos los request_body. Además de
+    cortar con 413 un cuerpo por trozos demasiado grande (comun.caddy), así el
+    servidor nunca escribe las cabeceras de la respuesta mientras lee el cuerpo
+    limitado por MaxBytesReader, que es la carrera de GO-2026-6859 (net/http,
+    arreglada en Go 1.27.4; Caddy 2.11.9 trae Go 1.27.3). Sin request_body o
+    sin reverse_proxy no hay nada que comprobar y no cuenta como cumplida."""
+    limites = [c.get("max_size") for c in manejadores(configuracion, "request_body")]
+    proxies = manejadores(configuracion, "reverse_proxy")
+    return (bool(limites) and bool(proxies) and all(limites)
+            and all((rp.get("request_buffers") or 0) > max(limites) for rp in proxies))
+
+
 def condiciones_x509(configuracion):
     """Lista blanca de lo que mantiene a Caddy sin verificar nunca la cadena
-    de un certificado ajeno (CVE-2026-111943). En Caddy 2.11.7 eso pasa en el
-    admin remoto, en la instalación de la raíz local en el almacén del sistema
+    de un certificado ajeno. Es una invariante de configuración que reduce la
+    superficie (la CVE que la motivó, CVE-2026-111943 en crypto/x509, está
+    arreglada en Go 1.27.3): la verificación de cadenas solo ocurre en el admin
+    remoto, en la instalación de la raíz local en el almacén del sistema
     (trusted() con las raíces del sistema), en los emisores que no son el CA
     interno (ACME es un cliente TLS), en la autenticación de clientes y en
     los transportes con TLS. Lo que no está en la lista falla: una política
@@ -1010,64 +1053,75 @@ def adaptar(caddyfile=None, ruta="/etc/caddy/Caddyfile"):
     if configuracion is None:
         raise Parada(f"caddy adapt falla: {r.err.strip()[-300:]}")
     servidores = configuracion["apps"]["http"]["servers"].values()
-    # Las rutas normales y las de error de cada servidor, cada una desde cero.
-    con_quita = [q for s in servidores
-                 for rutas in (s.get("routes", []), (s.get("errors") or {}).get("routes", []))
-                 for q in file_servers(rutas)]
     return {"protocolos": [s.get("protocols") for s in servidores],
             "escucha": sorted(d.rsplit(":", 1)[1] for s in servidores for d in s.get("listen", [])),
-            "file_server": con_quita,
-            # Recuento independiente del recorrido: si file_servers() se saltase
-            # alguno, no coincidiría.
-            "file_server_total": json.dumps(configuracion).count('"handler": "file_server"'),
             "ech": "encrypted_client_hello" in json.dumps(configuracion["apps"].get("tls", {})),
             # La app tls es la que gestiona certificados (emite, renueva y,
             # con ACME, verifica los del servidor ACME).
             "app_tls": "tls" in configuracion["apps"],
-            # CVE-2026-116587: el servidor ACME de Caddy (el único sitio que
-            # parsea JWK de clientes) es este manejador.
+            # El servidor ACME de Caddy (el único sitio que parsea JWK de
+            # clientes, con go-jose) es este manejador.
             "acme_server": '"handler": "acme_server"' in json.dumps(configuracion),
+            # La compresión de respuestas (klauspost/compress, GO-2026-6865)
+            # solo se ejecuta con el manejador encode.
+            "encode": bool(manejadores(configuracion, "encode")),
+            "buffers": buffers_sobre_limite(configuracion),
             "x509": condiciones_x509(configuracion)}
 
 
 def seccion_f():
-    p("=== f) alcanzabilidad en Caddy y en PostgreSQL (lo que sostiene el VEX)")
+    p("=== f) alcanzabilidad en PostgreSQL (lo que sostiene el VEX) e invariantes de Caddy")
     real = adaptar()
     control = adaptar(caddyfile_control(TEMPORAL / "caddy_adapt", [
         ("\tprotocols h1\n", "\tprotocols h1 h2\n"),
         ("\tskip_install_trust\n", "\tskip_install_trust\n\tech ech.canario.invalid\n"),
-        ("\trequest_header -Cookie\n", "\tacme_server\n\trequest_header -Cookie\n"),
-        CONTROL_SIN_RANGE]))
+        ("\trequest_header -Cookie\n", "\tacme_server\n\tencode\n\trequest_header -Cookie\n"),
+        ("\t\trequest_buffers 129KiB\n", "")]))
     pasa(real["escucha"] == list(PUERTOS_CADDY), f"f) configuracion adaptada: servidores en {real['escucha']}")
+    # Invariante de configuración: solo HTTP/1.1, de forma permanente. En
+    # producción Caddy escucha sin TLS detrás de Traefik (h2 en claro exigiría
+    # h2c), así que ese tramo es HTTP/1.1 de todos modos: con h1 también en
+    # local, lo que se prueba es lo que se despliega, y con menos superficie.
+    # Control: el Caddyfile con "protocols h1 h2".
     negativo(f"f) configuracion adaptada: todos los servidores con protocols {PROTOCOLOS_CADDY} (sin HTTP/2)",
              real["protocolos"] and all(x == PROTOCOLOS_CADDY for x in real["protocolos"]),
              control["protocolos"] and all(x == ["h1", "h2"] for x in control["protocolos"]), str(real["protocolos"]))
-    # CVE-2026-78667: cada file_server con la quita de Range delante. Control: el
-    # mismo Caddyfile sin importar sin_range en el sitio del file_server.
-    negativo(f"f) configuracion adaptada: cada file_server detras de la quita de Range (CVE-2026-78667) {real['file_server']}",
-             bool(real["file_server"]) and all(real["file_server"])
-             and len(real["file_server"]) == real["file_server_total"],
-             False in control["file_server"], f"control: {control['file_server']}")
-    negativo("f) configuracion adaptada: sin encrypted_client_hello (CVE-2026-97031)", not real["ech"], control["ech"])
-    # CVE-2026-116587: go-jose solo parsea JWK que llegan de fuera en el
-    # servidor ACME (acme_server, que monta los endpoints ACME de smallstep).
-    # El cliente ACME de Caddy (acmez) y el CA interno no la usan con datos
-    # ajenos, y con admin off nadie puede añadir el manejador en caliente.
-    # Control: el Caddyfile con acme_server en el sitio del 8443.
-    negativo("f) configuracion adaptada: sin el manejador acme_server (CVE-2026-116587)", not real["acme_server"],
+    # Invariante de configuración: sin ECH. Caddy solo instala claves ECH con la
+    # opción global "ech"; sin ella no hay superficie de ECH que exponer.
+    # Control: el Caddyfile con la opción "ech".
+    negativo("f) configuracion adaptada: sin encrypted_client_hello", not real["ech"], control["ech"])
+    # Invariante de configuración: sin acme_server. Es la barrera real frente a
+    # go-jose/v3 3.0.5 (GHSA-mgcc-cww5-fp2q), que el binario de Caddy 2.11.9
+    # sigue llevando sin arreglo en v3: go-jose solo parsea JWK que llegan de
+    # fuera en el servidor ACME (acme_server, que monta los endpoints ACME de
+    # smallstep). El cliente ACME de Caddy (acmez) y el CA interno no la usan
+    # con datos ajenos, y con admin off nadie puede añadir el manejador en
+    # caliente. Control: el Caddyfile con acme_server en el sitio del 8443.
+    negativo("f) configuracion adaptada: sin el manejador acme_server (go-jose/v3 3.0.5)", not real["acme_server"],
              control["acme_server"])
-    # CVE-2026-111943: Caddy no verifica ningún certificado ajeno. Control: el
-    # Caddyfile con un cambio que rompe cada condición. Sigue sin arreglo en
-    # la imagen de Caddy: esto es lo que demuestra que no se alcanza y lo que
-    # sostiene su declaración en el VEX.
+    # Invariante de configuración: sin encode. govulncheck encuentra un camino
+    # a GO-2026-6865 (klauspost/compress) solo a través del manejador encode,
+    # que Canario no usa. Control: el Caddyfile con encode en el sitio del 8443.
+    negativo("f) configuracion adaptada: sin el manejador encode (GO-2026-6865)", not real["encode"],
+             control["encode"])
+    # Invariante de configuración: todo reverse_proxy con request_buffers por
+    # encima del max_size de request_body (ver buffers_sobre_limite, contiene
+    # GO-2026-6859). Control: el Caddyfile sin el primer request_buffers.
+    negativo("f) configuracion adaptada: todo reverse_proxy con request_buffers > max_size (GO-2026-6859)",
+             real["buffers"], control["buffers"] is False)
+    # Invariante de configuración: Caddy no verifica ningún certificado ajeno
+    # (lista blanca de x509). Reduce superficie: la CVE que lo motivó
+    # (CVE-2026-111943) está arreglada en Go 1.27.3, pero la verificación de
+    # cadenas ajenas no tiene motivo para existir en este despliegue. Control:
+    # el Caddyfile con un cambio que rompe cada condición.
     control_x509 = adaptar(caddyfile_control(TEMPORAL / "caddy_x509", CONTROL_X509))
     for condicion, cumple in real["x509"].items():
-        negativo(f"f) configuracion adaptada: {condicion} (CVE-2026-111943)", cumple,
+        negativo(f"f) configuracion adaptada: {condicion}", cumple,
                  control_x509["x509"][condicion] is False)
 
     # El Caddyfile de producción (proxy/Caddyfile.produccion), de la misma
-    # imagen: el VEX tiene que valer para lo que corre en producción, no solo
-    # en local. Comparte con el local todo lo que aquí se mira (global.caddy,
+    # imagen: las invariantes tienen que valer para lo que corre en
+    # producción, no solo en local. Comparte con el local todo lo que aquí se mira (global.caddy,
     # servidor.caddy y comun.caddy), y los controles de arriba ya demostraron
     # que cada comprobación distingue.
     produccion = adaptar(ruta="/etc/caddy/Caddyfile.produccion")
@@ -1077,21 +1131,20 @@ def seccion_f():
              produccion["protocolos"] and all(x == PROTOCOLOS_CADDY for x in produccion["protocolos"]),
              control["protocolos"] and all(x == ["h1", "h2"] for x in control["protocolos"]),
              str(produccion["protocolos"]))
-    negativo(f"f) produccion: cada file_server detras de la quita de Range (CVE-2026-78667) {produccion['file_server']}",
-             bool(produccion["file_server"]) and all(produccion["file_server"])
-             and len(produccion["file_server"]) == produccion["file_server_total"],
-             False in control["file_server"], f"control: {control['file_server']}")
-    negativo("f) produccion: sin encrypted_client_hello (CVE-2026-97031)", not produccion["ech"], control["ech"])
-    negativo("f) produccion: sin el manejador acme_server (CVE-2026-116587)", not produccion["acme_server"],
+    negativo("f) produccion: sin encrypted_client_hello", not produccion["ech"], control["ech"])
+    negativo("f) produccion: sin el manejador acme_server (go-jose/v3 3.0.5)", not produccion["acme_server"],
              control["acme_server"])
+    negativo("f) produccion: sin el manejador encode (GO-2026-6865)", not produccion["encode"], control["encode"])
+    negativo("f) produccion: todo reverse_proxy con request_buffers > max_size (GO-2026-6859)",
+             produccion["buffers"], control["buffers"] is False)
     # Control: el local sí tiene app tls (tls internal), así que la
     # comprobación encuentra lo que busca.
-    negativo("f) produccion: sin app tls, Caddy no gestiona ningun certificado (CVE-2026-111943)",
+    negativo("f) produccion: sin app tls, Caddy no gestiona ningun certificado",
              not produccion["app_tls"], real["app_tls"])
     for condicion, cumple in produccion["x509"].items():
         if condicion == CONDICION_SOLO_INTERNAL:
             continue
-        negativo(f"f) produccion: {condicion} (CVE-2026-111943)", cumple,
+        negativo(f"f) produccion: {condicion}", cumple,
                  control_x509["x509"][condicion] is False)
     # Mailpit sin reenvío ni salida: solo la configuración de TLS de servidor
     # (lista blanca), sin nada que le haga entregar hacia fuera y solo en una

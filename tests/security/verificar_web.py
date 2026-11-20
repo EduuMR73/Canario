@@ -19,7 +19,10 @@ haga la API. Prueba:
   la página de error del sitio, con su estado, Retry-After y Allow;
 * f) las cabeceras de seguridad de las páginas reenviadas y de los errores;
 * g) que /web no es alcanzable desde el 8443, con el mismo 404 que la API;
-* h) el límite de cuerpo en el 8444.
+* h) el límite de cuerpo en el 8444 y el 8445: 413 de Caddy, con las cabeceras
+  de seguridad, Connection: close y sin Server, con el cuerpo entero, por
+  trozos y con un Content-Length declarado por encima (control: 128 KiB justos
+  llegan enteros).
 
 Parte B, la pila entera: la API real (app/rutas_web.py) con PostgreSQL y
 Redis, una empresa dada de alta con gestion y peticiones como las de un
@@ -112,7 +115,9 @@ LIMITE_CUERPO = 128 * 1024
 
 # b) Lo que ve la API (ruta cruda y consulta) para lo que pide el navegador.
 # Observado con caddy:2.11.7-alpine el 15 de octubre de 2026: el rewrite no
-# normaliza, y un %2F se decodifica.
+# normaliza, y un %2F se decodifica. La batería lo vuelve a comprobar con la
+# imagen fijada (caddy:2.11.9, adoptada el 19 de noviembre de 2026): si algún
+# oráculo cambiara con la versión, b) falla de forma visible.
 REENVIADAS = {
     "/": "/web/",
     "/seguimiento": "/web/seguimiento",
@@ -153,6 +158,21 @@ CABECERAS_HTML = {
     "cross-origin-opener-policy": "same-origin",
     "cross-origin-resource-policy": "same-origin",
 }
+
+# h) Cabeceras de la SPA del personal (8445, proxy/comun.caddy, cabeceras_spa) y
+# el 413 de Caddy en JSON de ese sitio (handle_errors de sitio_spa). Literales.
+CABECERAS_SPA = {
+    "strict-transport-security": "max-age=63072000",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "same-origin",
+    "content-security-policy": ("default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+                                "connect-src 'self'; require-trusted-types-for 'script'; trusted-types angular; "
+                                "base-uri 'self'; form-action 'none'; frame-ancestors 'none'"),
+    "cache-control": "no-store",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-origin",
+}
+CUERPO_413_JSON = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode()
 
 # g) /web en el 8443: el mismo cuerpo que el 404 de la API (app/frontera_http.py).
 CUERPO_404_API = b'{"detalle": "recurso no encontrado"}'
@@ -345,12 +365,16 @@ def log_de(servicio):
     return dc("logs", "--no-color", "--no-log-prefix", servicio).todo
 
 
-def peticion(metodo, ruta, puerto=PUERTO_WEB, cabeceras=None, cuerpo=b""):
+def peticion(metodo, ruta, puerto=PUERTO_WEB, cabeceras=None, cuerpo=b"", longitud=None, trozos=False):
     """Petición al proxy publicado en 127.0.0.1 con SNI localhost y TLS validado.
 
     Devuelve (estado, {cabecera en minúsculas: [valores]}, cuerpo). La ruta se
     envía tal cual (http.client no la normaliza). Si Caddy corta mientras se
     envía el cuerpo (413), se lee igualmente su respuesta.
+
+    longitud declara un Content-Length distinto del cuerpo que se envía (un
+    cuerpo corto con una longitud declarada enorme). trozos envía el cuerpo con
+    Transfer-Encoding: chunked, sin Content-Length.
     """
     contexto = ssl.create_default_context(cafile=str(CA_LOCAL))
     s = socket.create_connection(("127.0.0.1", puerto), timeout=30)
@@ -358,12 +382,20 @@ def peticion(metodo, ruta, puerto=PUERTO_WEB, cabeceras=None, cuerpo=b""):
     c.sock = contexto.wrap_socket(s, server_hostname="localhost")
     c.putrequest(metodo, ruta, skip_host=True, skip_accept_encoding=True)
     c.putheader("Host", f"localhost:{puerto}")
-    c.putheader("Content-Length", str(len(cuerpo)))
+    if trozos:
+        c.putheader("Transfer-Encoding", "chunked")
+    else:
+        c.putheader("Content-Length", str(len(cuerpo) if longitud is None else longitud))
     for nombre, valor in (cabeceras or {}).items():
         c.putheader(nombre, valor)
     c.endheaders()
     try:
-        if cuerpo:
+        if trozos:
+            for i in range(0, len(cuerpo), 16384):
+                trozo = cuerpo[i:i + 16384]
+                c.send(f"{len(trozo):x}\r\n".encode("ascii") + trozo + b"\r\n")
+            c.send(b"0\r\n\r\n")
+        elif cuerpo:
             c.send(cuerpo)
     except (BrokenPipeError, ConnectionResetError, ssl.SSLError):
         pass
@@ -542,15 +574,54 @@ def seccion_g():
 
 
 def seccion_h():
-    p("=== h) limite de cuerpo en el 8444")
-    cabeceras = {"Content-Type": "application/x-www-form-urlencoded"}
-    justo = peticion("POST", "/seguimiento", cabeceras=cabeceras, cuerpo=b"a" * LIMITE_CUERPO)
-    eco = eco_de(justo) or {}
-    control = eco.get("bytes") == LIMITE_CUERPO
-    pasa(control, f"h) control: un cuerpo de 128 KiB llega entero a la API ({eco.get('bytes')} bytes)")
-    encima = peticion("POST", "/seguimiento", cabeceras=cabeceras, cuerpo=b"a" * (LIMITE_CUERPO + 1))
-    negativo(f"h) un byte por encima -> 413 del sitio, sin llegar a la API ({encima[0]})",
-             generada_por_caddy(encima, 413, "Texto demasiado largo"), control)
+    p("=== h) limite de cuerpo en el 8444 y el 8445")
+    # Tres formas de pasarse del límite, en cada sitio: el cuerpo entero con su
+    # Content-Length, por trozos (sin Content-Length) y un Content-Length
+    # declarado por encima con un cuerpo corto (desde Caddy 2.11.8,
+    # request_body decide el 413 en cuanto lo ve, aunque nada lea el cuerpo, y
+    # con el Connection: close de los 413 sale al momento; sin la cabecera, Go
+    # esperaba el resto del cuerpo hasta read_body). El 8443, y el tiempo de
+    # respuesta, los prueba verificar_denuncia.py (k), con la API real.
+    casos = {
+        "un byte por encima": {"cuerpo": b"a" * (LIMITE_CUERPO + 1)},
+        "por trozos, un byte por encima": {"cuerpo": b"a" * (LIMITE_CUERPO + 1), "trozos": True},
+        "Content-Length declarado por encima, con cuerpo corto": {"cuerpo": b"a", "longitud": LIMITE_CUERPO + 1},
+    }
+    # 8444: formulario, respuesta del sitio en HTML. 8445: la API del personal
+    # (el eco responde en /v1/personal/...), respuesta en JSON.
+    sitios = (("8444", PUERTO_WEB, "/seguimiento", {"Content-Type": FORMULARIO}, CABECERAS_HTML),
+              ("8445", PUERTO_SPA, "/v1/personal/eco", {"Content-Type": "application/json"}, CABECERAS_SPA))
+    for nombre_sitio, puerto, ruta, cabeceras, esperadas in sitios:
+        # Control: 128 KiB justos llegan enteros a la API, con Content-Length y
+        # por trozos. Si no, un 413 posterior no probaría que el límite corta.
+        justo = peticion("POST", ruta, puerto=puerto, cabeceras=cabeceras, cuerpo=b"a" * LIMITE_CUERPO)
+        justo_trozos = peticion("POST", ruta, puerto=puerto, cabeceras=cabeceras, cuerpo=b"a" * LIMITE_CUERPO,
+                                trozos=True)
+        recibidos = ((eco_de(justo) or {}).get("bytes"), (eco_de(justo_trozos) or {}).get("bytes"))
+        control = recibidos == (LIMITE_CUERPO, LIMITE_CUERPO)
+        pasa(control, f"h) control: en el {nombre_sitio}, un cuerpo de 128 KiB llega entero a la API, con "
+                      f"Content-Length y por trozos ({recibidos} bytes)")
+        for nombre, parametros in casos.items():
+            respuesta = peticion("POST", ruta, puerto=puerto, cabeceras=cabeceras, **parametros)
+            estado_r, cab, cuerpo = respuesta
+            if puerto == PUERTO_WEB:
+                de_caddy = generada_por_caddy(respuesta, 413, "Texto demasiado largo")
+            else:
+                de_caddy = (estado_r == 413 and "via" not in cab and "x-eco" not in cab
+                            and una(cab, "content-type") == "application/json" and cuerpo == CUERPO_413_JSON)
+            negativo(f"h) {nombre_sitio}, {nombre}: 413 del sitio con su cuerpo, sin llegar a la API "
+                     f"({estado_r}, {una(cab, 'content-type')!r})", de_caddy, control)
+            # Todas las respuestas de Caddy llevan las cabeceras de seguridad y
+            # ninguna Server (un 413 temprano podría saltarse handle_errors).
+            faltan = {n: cab.get(n) for n, v in esperadas.items() if una(cab, n) != v}
+            negativo(f"h) {nombre_sitio}, {nombre}: el 413 lleva las cabeceras de seguridad y ninguna Server "
+                     f"(faltan {sorted(faltan)}, Server: {cab.get('server')!r})",
+                     estado_r == 413 and not faltan and "server" not in cab, control)
+            # Connection: close en todo 413 de Caddy (proxy/comun.caddy).
+            # Control: la respuesta de 128 KiB justos no la lleva.
+            control_cierre = control and una(justo[1], "connection") != "close"
+            negativo(f"h) {nombre_sitio}, {nombre}: el 413 lleva Connection: close ({cab.get('connection')})",
+                     estado_r == 413 and una(cab, "connection") == "close", control_cierre)
 
 
 # ---------------------------------------------------------------------------

@@ -329,6 +329,19 @@ CABECERAS_SEGURIDAD = {
     "cache-control": "no-store",
 }
 PLAZO_CUERPO_CADDY = 30  # read_body del Caddyfile, en segundos
+# k) Content-Length declarado por encima del límite con un cuerpo corto. Sin el
+# Connection: close de los 413 (proxy/comun.caddy), net/http de Go lee y
+# descarta lo pendiente (menos de 256 KiB) antes de escribir la respuesta, y el
+# 413 no salía hasta read_body: observado el 20 de noviembre de 2026 con
+# caddy:2.11.9 (el cliente, con un plazo de 30 s, se quedó sin respuesta). Con
+# la cabecera tiene que salir al momento. El cliente espera más que read_body
+# (MARGEN_PLAZO) para que un 413 tardío se mida y no lo corte el plazo del
+# cliente; "al momento" es por debajo de PLAZO_INMEDIATO.
+MARGEN_PLAZO = 15
+PLAZO_INMEDIATO = 5
+# Lo que dura la pausa del control de la subida lenta: el reloj del cliente
+# tiene que medirla (control de que "segundos" mide de verdad).
+PAUSA_CORTA = 2
 CUERPO_405 = '{"detalle": "método no permitido"}'.encode()
 CUERPO_413 = '{"detalle": "cuerpo de la petición demasiado grande"}'.encode()
 CUERPO_422 = '{"detalle": "petición no válida"}'.encode()
@@ -497,22 +510,20 @@ def lento(pt):
     return {"estado": estado, "cuerpo": base64.b64encode(datos.split(b"\r\n\r\n", 1)[-1]).decode("ascii"),
             "segundos": round(time.monotonic() - inicio, 1)}
 
-salida = []
-for pt in json.load(sys.stdin):
+def normal(pt, espera):
+    """Una petición con http.client. Devuelve el estado, el cuerpo y las
+    cabeceras; los errores los recoge quien llama."""
     conexion = None
     try:
-        if pt.get("pausa") is not None:
-            salida.append(lento(pt))
-            continue
         if pt.get("tls"):
             contexto = ssl.create_default_context()
             contexto.check_hostname = False
             contexto.verify_mode = ssl.CERT_NONE
-            crudo = socket.create_connection((pt["host"], pt["puerto"]), timeout=30)
-            conexion = http.client.HTTPConnection("localhost", pt["puerto"], timeout=30)
+            crudo = socket.create_connection((pt["host"], pt["puerto"]), timeout=espera)
+            conexion = http.client.HTTPConnection("localhost", pt["puerto"], timeout=espera)
             conexion.sock = contexto.wrap_socket(crudo, server_hostname="localhost")
         else:
-            conexion = http.client.HTTPConnection(pt["host"], pt["puerto"], timeout=30)
+            conexion = http.client.HTTPConnection(pt["host"], pt["puerto"], timeout=espera)
         if "tamano" in pt:
             # Cuerpo JSON válido de un tamaño exacto: el JSON admite espacios
             # al final.
@@ -530,13 +541,32 @@ for pt in json.load(sys.stdin):
             conexion.request(pt["metodo"], pt["ruta"], body=cuerpo, headers=pt.get("cabeceras", {}))
         respuesta = conexion.getresponse()
         datos = respuesta.read()
-        salida.append({"estado": respuesta.status, "cuerpo": base64.b64encode(datos).decode("ascii"),
-                       "cabeceras": {k.lower(): v for k, v in respuesta.getheaders()}})
-    except Exception as error:
-        salida.append({"error": type(error).__name__})
+        return {"estado": respuesta.status, "cuerpo": base64.b64encode(datos).decode("ascii"),
+                "cabeceras": {k.lower(): v for k, v in respuesta.getheaders()}}
     finally:
         if conexion is not None:
             conexion.close()
+
+
+salida = []
+for pt in json.load(sys.stdin):
+    resultado = None
+    # "espera" alarga el plazo del cliente (30 s por defecto) y añade los
+    # segundos que tardó la respuesta o el error, medidos aquí para cualquier
+    # tipo de petición (también la lenta). Solo cuando se pide: el resto de
+    # comprobaciones comparan respuestas enteras.
+    espera = pt.get("espera", 30)
+    inicio = time.monotonic()
+    try:
+        if pt.get("pausa") is not None:
+            resultado = lento(pt)
+        else:
+            resultado = normal(pt, espera)
+    except Exception as error:
+        resultado = {"error": type(error).__name__}
+    if "espera" in pt:
+        resultado["segundos"] = round(time.monotonic() - inicio, 1)
+    salida.append(resultado)
 print(json.dumps(salida))
 '''
 
@@ -1879,13 +1909,22 @@ def seccion_k():
         "un byte por encima": por_caddy({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO + 1}),
         "por trozos, un byte por encima": por_caddy({**base, "prefijo": prefijo, "tamano": LIMITE_CUERPO + 1,
                                                      "trozos": True}),
+        # Desde Caddy 2.11.8, request_body decide el 413 en cuanto el
+        # Content-Length declarado supera el límite, aunque el cuerpo enviado
+        # sea corto y nada lo lea: no reenvía nada a la API. Con el
+        # Connection: close sale al momento (ver PLAZO_INMEDIATO, abajo).
+        "Content-Length declarado por encima, con cuerpo corto": por_caddy(
+            pt("POST", ruta_denuncias(ident_a), crudo=b"{}", cabeceras={"Content-Length": str(LIMITE_CUERPO + 1)},
+               espera=PLAZO_CUERPO_CADDY + MARGEN_PLAZO)),
     }
     respuestas = dict(zip(casos, http(list(casos.values()), red="edge")))
+    respuestas_limite = respuestas
     aceptada = respuestas["justo en el limite"]
     control = aceptada.get("estado") == 201 and "via" in (aceptada.get("cabeceras") or {})
     pasa(control, f"k) control: a traves de Caddy, 128 KiB se aceptan y pasan por la API "
                   f"({aceptada.get('estado')}, Via: {(aceptada.get('cabeceras') or {}).get('via')})")
-    for nombre in ("un byte por encima", "por trozos, un byte por encima"):
+    for nombre in ("un byte por encima", "por trozos, un byte por encima",
+                   "Content-Length declarado por encima, con cuerpo corto"):
         respuesta = respuestas[nombre]
         cabeceras = respuesta.get("cabeceras") or {}
         negativo(f"k) a traves de Caddy, {nombre}: 413 de Caddy (sin Via: no llega a la API) con su JSON",
@@ -1896,6 +1935,11 @@ def seccion_k():
                  f"{faltan if faltan else ''}".strip(),
                  not faltan and "server" not in cabeceras and cabeceras.get("content-type") == "application/json",
                  control, f"cabeceras: {cabeceras}")
+        # Connection: close en todo 413 de Caddy (proxy/comun.caddy). Control:
+        # la respuesta aceptada no la lleva, así que la comprobación distingue.
+        control_cierre = control and (aceptada.get("cabeceras") or {}).get("connection") != "close"
+        negativo(f"k) el 413 de Caddy ({nombre}) lleva Connection: close ({cabeceras.get('connection')!r})",
+                 cabeceras.get("connection") == "close", control_cierre)
     faltan = {k: v for k, v in CABECERAS_SEGURIDAD.items() if (aceptada.get("cabeceras") or {}).get(k) != v}
     pasa(not faltan and "server" not in (aceptada.get("cabeceras") or {}),
          "k) la respuesta normal a traves de Caddy lleva las mismas cabeceras y ninguna Server")
@@ -1905,7 +1949,8 @@ def seccion_k():
     # la petición no se acepta y no crea ninguna denuncia.
     lento = {**base, "host": "caddy", "puerto": 8443, "prefijo": json.dumps({"categoria": "otros", "texto": "lento"})}
     antes = sup("select count(*) from canal.denuncia;").out.strip()
-    corta, larga = http([{**lento, "pausa": 2}, {**lento, "pausa": PLAZO_CUERPO_CADDY + 5}], red="edge")
+    corta, larga = http([{**lento, "pausa": PAUSA_CORTA, "espera": PAUSA_CORTA + 30},
+                         {**lento, "pausa": PLAZO_CUERPO_CADDY + 5}], red="edge")
     despues = sup("select count(*) from canal.denuncia;").out.strip()
     p(f"   subida lenta: pausa 2 s -> {corta}; pausa {PLAZO_CUERPO_CADDY + 5} s -> {larga}")
     control_lento = corta.get("estado") == 201
@@ -1913,6 +1958,20 @@ def seccion_k():
     negativo(f"k) una subida parada mas de read_body ({PLAZO_CUERPO_CADDY} s) se corta sin crear denuncia",
              larga.get("estado") != 201 and int(despues) == int(antes) + 1, control_lento,
              f"antes {antes}, despues {despues}")
+
+    # El 413 del Content-Length declarado por encima sale al momento, no a los
+    # read_body segundos (lo que pasaba sin el Connection: close). Control: el
+    # mismo reloj del cliente mide la pausa de la subida corta, así que
+    # "segundos" mide tiempo de verdad.
+    declarada = respuestas_limite["Content-Length declarado por encima, con cuerpo corto"]
+    segundos = declarada.get("segundos")
+    control_reloj = control_lento and (corta.get("segundos") or 0) >= PAUSA_CORTA
+    pasa(control_reloj, f"k) control: el reloj del cliente mide la pausa de {PAUSA_CORTA} s de la subida corta "
+                        f"({corta.get('segundos')} s)")
+    negativo(f"k) Content-Length declarado por encima, con cuerpo corto: el 413 sale en menos de {PLAZO_INMEDIATO} s "
+             f"y no a los {PLAZO_CUERPO_CADDY} s de read_body ({segundos} s)",
+             declarada.get("estado") == 413 and segundos is not None and segundos < PLAZO_INMEDIATO, control_reloj,
+             f"respuesta: {declarada}")
 
     # Host distinto de localhost: 421 del sitio por defecto, por las rutas, con
     # las cabeceras de seguridad y el JSON. Control: con el Host correcto, 200.

@@ -536,7 +536,7 @@ services:
         max-file: "3"
 
   caddy:
-    # Imagen propia (proxy/Dockerfile) sobre caddy:2.11.7-alpine fijada por
+    # Imagen propia (proxy/Dockerfile) sobre caddy:2.11.9-alpine fijada por
     # digest: sin la file capability del binario, /data/caddy solo para el
     # usuario 10002 y el Caddyfile dentro de la imagen. La SPA del personal se
     # compila en una primera etapa con Node, que no llega a la imagen final.

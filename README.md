@@ -40,7 +40,7 @@ El enunciado recomienda React o Vue. Se usa Angular porque trae de serie lo que 
 | Base de datos | PostgreSQL 18.6, con seguridad por filas (RLS) entre empresas |
 | Límites de peticiones | Redis 8.10.2 |
 | Frontend | Angular 22.2.2, TypeScript 6.0.3 |
-| Proxy y TLS | Caddy 2.11.7, con su propia autoridad de certificación |
+| Proxy y TLS | Caddy 2.11.9, con su propia autoridad de certificación |
 | Criptografía | Argon2id (argon2-cffi), JWT (PyJWT), AES-GCM para el contenido de las denuncias (cryptography) |
 | Correo | Un servicio propio (el cartero) que entrega por TLS: a Mailjet en producción, a Mailpit en desarrollo |
 | Pruebas | Baterías propias en Python, unittest, Vitest, Playwright con Chromium, ruff, bandit, pip-audit, gitleaks y Trivy |

@@ -9,8 +9,12 @@ cache ni correo, ni en su propio 127.0.0.1); que los únicos puertos
 publicados son los tres del proxy (8443, la API; 8444, el sitio del
 denunciante; 8445, la SPA del personal) y solo en 127.0.0.1; que solo /salud responde; las cabeceras de
 seguridad con valores literales y sin Server; que un Host que no coincide con
-el SNI recibe 421; que el sitio del denunciante sirve sus estáticos con sus
-cabeceras y sin rangos, y que desde él no se alcanza la API fuera de /web (n;
+el SNI recibe 421; que un Host inválido (solo puntos o con barra invertida)
+recibe 400 en los tres puertos, sin reflejar el Host y sin HTML (q), y que ese
+400 es el observado y aceptado, sin cabeceras de seguridad (control: con un
+Host válido, el mismo puerto responde 200 con ellas); que el sitio del
+denunciante sirve sus estáticos con sus cabeceras, y que desde él no se alcanza
+la API fuera de /web (n;
 el reenvío a /web lo prueba verificar_web.py); que la IP del cliente no queda en los logs de
 Caddy ni de la API ni en el volumen de Caddy tras una ráfaga de peticiones; que
 un X-Forwarded-For falsificado no llega a la API tal cual y que uvicorn solo
@@ -116,12 +120,36 @@ CABECERAS_HTML = {
     "cross-origin-opener-policy": "same-origin",
     "cross-origin-resource-policy": "same-origin",
 }
+# SPA del personal (8445): sus cabeceras, para el control de q).
+CABECERAS_SPA = {
+    "strict-transport-security": "max-age=63072000",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "same-origin",
+    "content-security-policy": ("default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; "
+                                "connect-src 'self'; require-trusted-types-for 'script'; trusted-types angular; "
+                                "base-uri 'self'; form-action 'none'; frame-ancestors 'none'"),
+    "cache-control": "no-store",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-origin",
+}
 RUTA_CSS = "/estatico/canario.css"
 TIPO_CSS = "text/css; charset=utf-8"
+# q) Hosts que Caddy 2.11.8 rechaza con 400 en todos los protocolos (#8328):
+# solo puntos y con barra invertida. Literales, no derivados del código.
+HOSTS_INVALIDOS = {"solo puntos": "..", "con barra invertida": "canario" + chr(92) + "evil"}
+# Lo que se observó el 19 de noviembre de 2026 con caddy:2.11.9-alpine en los
+# tres puertos (aceptación documentada en docs/threat-model.md, 6.11): el 400
+# sale fuera de las rutas, sin ninguna cabecera de seguridad. El de ".." lo da
+# Caddy (Server: Caddy, sin cuerpo ni Content-Type); el de "\" lo da el
+# servidor de Go antes de llegar a Caddy (sin Server, texto plano). Se fija como
+# literal para que un cambio de comportamiento en una versión futura se vea:
+# para bien (ya lleva las cabeceras) o para mal (refleja el Host o es HTML).
+# Valores: (Server, Content-Type, cuerpo).
+CUATROCIENTOS_OBSERVADOS = {"solo puntos": ("Caddy", None, b""),
+                            "con barra invertida": (None, "text/plain; charset=utf-8",
+                                                    b"400 Bad Request: malformed Host header")}
 TIPO_HTML = "text/html; charset=utf-8"
 METODOS_ESTATICOS = "GET, HEAD"
-RANGO_DOBLE = "bytes=0-1,3-4"
-TIPO_RANGOS = "multipart/byteranges"
 # Rutas que no son un estático existente ni una página: la API fuera de /web
 # (el 8444 las reenvía como /web/salud, /web/v1/denuncias..., que no existen),
 # un directorio sin index (no debe listarse), un fichero que no existe y cuatro
@@ -171,9 +199,12 @@ MONTAJES_API = [("bind", "", "/run/secrets/clave_firma_tokens"),
                 ("bind", "", "/run/secrets/contrasena_aplicacion"),
                 ("bind", "", "/run/secrets/contrasena_redis")]
 
-IMAGEN_CADDY_OFICIAL = ("caddy:2.11.7-alpine@sha256:"
-                        "e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5")
-CAP_OFICIAL = "cap_net_bind_service=ep"
+IMAGEN_CADDY_OFICIAL = ("caddy:2.11.9-alpine@sha256:"
+                        "003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0")
+# La que fija el Dockerfile oficial de Caddy 2.11 (setcap cap_net_bind_service=+p;
+# hasta la 2.11.7 era =ep). Literal: g) comprueba con getcap que la imagen
+# oficial la lleva, que es el control de que la nuestra no.
+CAP_OFICIAL = "cap_net_bind_service=p"
 RAIZ_CA = "/data/caddy/pki/authorities/local/root.crt"
 
 # Literales del código de Caddy (caddy.go) y de su log de arranque
@@ -754,64 +785,6 @@ def seccion_f():
     negativo(f"f) Host distinto del SNI -> 421 ({codigo})", codigo == 421, control)
 
 
-# Cliente para n): pide el CSS sin Range y con dos rangos a cada destino (el
-# Caddy del proyecto y el de control) desde la red edge, y devuelve el código,
-# el Content-Type y el Accept-Ranges. Reintenta mientras el de control arranca.
-CLIENTE_RANGOS = r'''
-import http.client, json, socket, ssl, sys, time
-
-SIN_VERIFICAR = ssl.create_default_context()
-SIN_VERIFICAR.check_hostname = False
-SIN_VERIFICAR.verify_mode = ssl.CERT_NONE
-
-
-def pedir(destino, cabeceras):
-    for _ in range(30):
-        try:
-            s = SIN_VERIFICAR.wrap_socket(socket.create_connection((destino, 8444), timeout=10),
-                                          server_hostname="localhost")
-            break
-        except OSError:
-            time.sleep(1)
-    else:
-        return None
-    c = http.client.HTTPConnection("localhost", 8444, timeout=10)
-    c.sock = s
-    c.request("GET", "/estatico/canario.css", headers={"Host": "localhost:8444", **cabeceras})
-    r = c.getresponse()
-    r.read()
-    c.close()
-    return [r.status, r.getheader("Content-Type"), r.getheader("Accept-Ranges")]
-
-
-res = {}
-for destino in sys.argv[2:]:
-    res[destino] = {"sin_rango": pedir(destino, {}), "dos_rangos": pedir(destino, {"Range": sys.argv[1]})}
-print(json.dumps(res, sort_keys=True))
-'''
-# Cambios que convierten el Caddyfile del proyecto en el de control de n): el
-# sitio del denunciante sin la quita de Range y sin quitar Accept-Ranges. Se
-# construye desde el fichero real para que el control solo difiera en eso.
-CAMBIOS_CONTROL_RANGOS = [("\timport sin_range\n\timport cabeceras_html\n", "\timport cabeceras_html\n"),
-                          ("\t\theader -Accept-Ranges\n", "")]
-# Lo que carga el Caddyfile local: él y los ficheros que importa
-# (proxy/Caddyfile). El control se construye sobre una copia de todos.
-FICHEROS_CADDY = ("Caddyfile", "global.caddy", "servidor.caddy", "comun.caddy")
-
-
-def caddyfile_control_rangos(destino):
-    """Copia en destino la configuración local de Caddy con los cambios del
-    control de n). Cada texto debe aparecer una sola vez en el conjunto de
-    ficheros: si no, el control no se puede construir y se ve."""
-    textos = {nombre: (RAIZ / "proxy" / nombre).read_text(encoding="utf-8") for nombre in FICHEROS_CADDY}
-    for viejo, nuevo in CAMBIOS_CONTROL_RANGOS:
-        if sum(texto.count(viejo) for texto in textos.values()) != 1:
-            raise Parada(f"proxy/ no contiene una sola vez {viejo.strip()!r}: el control de n) no se puede construir")
-        textos = {nombre: texto.replace(viejo, nuevo) for nombre, texto in textos.items()}
-    for nombre, texto in textos.items():
-        (destino / nombre).write_text(texto, encoding="utf-8", newline="\n")
-
-
 def cabeceras_exactas(etiqueta, cab, esperadas):
     nombres = [k.lower() for k, _ in cab]
     valores = {k.lower(): v for k, v in cab}
@@ -822,7 +795,7 @@ def cabeceras_exactas(etiqueta, cab, esperadas):
 
 
 def seccion_n():
-    p("=== n) sitio del denunciante (8444): estaticos, cabeceras, rangos y errores")
+    p("=== n) sitio del denunciante (8444): estaticos, cabeceras y errores")
     # Control de todo n): el CSS se sirve, con su tipo y el contenido del repo.
     codigo, cab, cuerpo = peticion("GET", RUTA_CSS, puerto=PUERTO_DENUNCIANTE)
     valores = {k.lower(): v for k, v in cab}
@@ -831,42 +804,6 @@ def seccion_n():
     pasa(control, f"n) GET {RUTA_CSS} -> {codigo}, {len(cuerpo)} bytes iguales al fichero del repo (control)")
     pasa(valores.get("content-type") == TIPO_CSS, f"n) {RUTA_CSS}: content-type: {valores.get('content-type')!r}")
     cabeceras_exactas(f"n) {RUTA_CSS}", cab, CABECERAS_HTML)
-
-    # Rangos y Accept-Ranges: el Caddy del proyecto frente a uno de control con
-    # la misma imagen y el sitio del denunciante sin la quita de Range ni la de
-    # Accept-Ranges. El de control debe responder 206 y anunciar bytes; si no,
-    # la comprobación no distinguiría nada.
-    (TEMPORAL / "control_rangos").mkdir()
-    caddyfile_control_rangos(TEMPORAL / "control_rangos")
-    (TEMPORAL / "rangos.py").write_text(CLIENTE_RANGOS, encoding="utf-8", newline="\n")
-    nombre = f"{PROYECTO}_control_rangos"
-    ejecutar(["docker", "run", "-d", "--name", nombre, "--network", f"{PROYECTO}_edge",
-              "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-              "--mount", "type=volume,dst=/data",
-              # El directorio entero: el Caddyfile importa sus vecinos.
-              "--mount", f"type=bind,src={TEMPORAL / 'control_rangos'},dst=/etc/caddy,readonly",
-              IMAGEN_PROXY])
-    try:
-        r = docker_run("--network", f"{PROYECTO}_edge",
-                       "--mount", f"type=bind,src={TEMPORAL},dst=/prueba,readonly",
-                       "--entrypoint", "python", IMAGEN_API, "-I", "/prueba/rangos.py", RANGO_DOBLE, "caddy", nombre,
-                       timeout=120)
-    finally:
-        ejecutar(["docker", "rm", "-f", "-v", nombre])
-    try:
-        res = json.loads(r.out.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        sinc(f"n) no se pudo ejecutar el cliente de rangos: {r.err.strip()[-300:]!r}")
-        return
-    real, ctl = res.get("caddy") or {}, res.get(nombre) or {}
-    p(f"   rangos: proyecto {real}; control {ctl}")
-    ctl_dos, ctl_sin = ctl.get("dos_rangos") or [None] * 3, ctl.get("sin_rango") or [None] * 3
-    real_dos, real_sin = real.get("dos_rangos") or [None] * 3, real.get("sin_rango") or [None] * 3
-    negativo(f"n) dos rangos -> 200 con el CSS entero, no 206 (CVE-2026-78667) ({real_dos[0]})",
-             real_dos[0] == 200 and real_dos[1] == TIPO_CSS,
-             ctl_dos[0] == 206 and str(ctl_dos[1]).startswith(TIPO_RANGOS), f"control: {ctl_dos}")
-    negativo(f"n) sin Accept-Ranges ({real_sin[2]!r})", real_sin[0] == 200 and real_sin[2] is None,
-             ctl_sin[0] == 200 and ctl_sin[2] == "bytes", f"control: {ctl_sin}")
 
     # Lo que no es un estático existente da 404 en HTML, con las cabeceras del
     # sitio. /salud además demuestra que desde el 8444 no se alcanza la API
@@ -889,6 +826,62 @@ def seccion_n():
              control)
     codigo = peticion("GET", RUTA_CSS, host="otro.ejemplo", puerto=PUERTO_DENUNCIANTE)[0]
     negativo(f"n) Host distinto del SNI en {PUERTO_DENUNCIANTE} -> 421 ({codigo})", codigo == 421, control)
+
+
+def peticion_sin_excepcion(*args, **kwargs):
+    """peticion() que devuelve (None, [], b"") si el servidor cierra la
+    conexión sin responder, en vez de abortar la batería: un cierre sin
+    respuesta es un resultado de la prueba (FALLA), no un fallo de la prueba."""
+    try:
+        return peticion(*args, **kwargs)
+    except (OSError, http.client.HTTPException):
+        return None, [], b""
+
+
+def seccion_q():
+    p("=== q) Host invalido (400) en los tres puertos locales")
+    # Desde Caddy 2.11.8 un Host inválido o solo de puntos se rechaza con 400
+    # antes de que corra ninguna ruta (#8328): un Host con "/" o "\" o ".." no
+    # puede escapar de un directorio si alguna vez se usa en una ruta de
+    # fichero. En HTTP/1.1 lo de "\" ya lo rechaza el servidor de Go antes de
+    # llegar a Caddy. Como ocurre fuera de las rutas, el 400 sale sin las
+    # cabeceras de seguridad ni el handle_errors del sitio, y desde el Caddyfile
+    # no se puede cambiar. Aceptado (docs/threat-model.md, 6.11): en producción
+    # Traefik solo enruta los tres Host de Canario, así que ese Host no llega a
+    # Caddy, y en local el 400 solo lo recibe quien ya habla con el puerto; un
+    # navegador no puede enviar esos Host. Lo que sí se exige es que no refleje
+    # el Host ni sea HTML; y lo observado se fija como literal
+    # (CUATROCIENTOS_OBSERVADOS) para que cualquier cambio se vea.
+    for puerto, ruta, esperadas in ((PUERTO, "/salud", CABECERAS),
+                                    (PUERTO_DENUNCIANTE, RUTA_CSS, CABECERAS_HTML),
+                                    (PUERTO_SPA, "/", CABECERAS_SPA)):
+        # Control: con un Host válido, el mismo puerto y la misma ruta responden
+        # 200 con las cabeceras de seguridad y sin Server.
+        codigo, cab, _ = peticion("GET", ruta, puerto=puerto)
+        nombres = [k.lower() for k, _ in cab]
+        valores = {k.lower(): v for k, v in cab}
+        con_cabeceras = (all(nombres.count(n) == 1 and valores.get(n) == v for n, v in esperadas.items())
+                         and "server" not in nombres)
+        control = codigo == 200 and con_cabeceras
+        pasa(control, f"q) control: Host valido en {puerto} -> {codigo} con las cabeceras de seguridad y sin Server")
+        for etiqueta, host in HOSTS_INVALIDOS.items():
+            codigo, cab, cuerpo = peticion_sin_excepcion("GET", ruta, host=host, puerto=puerto)
+            nombres = [k.lower() for k, _ in cab]
+            valores = {k.lower(): v for k, v in cab}
+            tipo = valores.get("content-type")
+            negativo(f"q) {puerto} Host {etiqueta} -> 400, sin reflejar el Host y sin text/html "
+                     f"({codigo}, {tipo!r}, {cuerpo[:60]!r})",
+                     codigo == 400 and host.encode() not in cuerpo and not (tipo or "").lower().startswith("text/html"),
+                     control)
+            # El control de arriba demuestra que la comprobación distingue: con
+            # un Host válido las cabeceras sí están.
+            server, tipo_obs, cuerpo_obs = CUATROCIENTOS_OBSERVADOS[etiqueta]
+            presentes = sorted(n for n in esperadas if n in nombres)
+            negativo(f"q) {puerto} Host {etiqueta}: el 400 es el observado y aceptado (Server {server!r}, "
+                     f"Content-Type {tipo_obs!r}, sin cabeceras de seguridad) (Server: {valores.get('server')!r}, "
+                     f"Content-Type: {tipo!r}, cuerpo: {cuerpo[:60]!r}, presentes: {presentes})",
+                     codigo == 400 and valores.get("server") == server and tipo == tipo_obs
+                     and cuerpo == cuerpo_obs and not presentes, control)
 
 
 def seccion_g():
@@ -1368,7 +1361,7 @@ def main():
     parada = None
     try:
         seccion_a()
-        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_o, seccion_p, seccion_f, seccion_n, seccion_g,
+        for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_o, seccion_p, seccion_f, seccion_n, seccion_q, seccion_g,
                         seccion_h, seccion_i, seccion_j, seccion_k, seccion_l, seccion_m):
             seccion()
     except Parada as e:
@@ -1378,7 +1371,7 @@ def main():
         parada = "error inesperado en el test"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
-        for nombre in ("cliente", "control_volumen", "control_autosave", "control_log", "control_rangos"):
+        for nombre in ("cliente", "control_volumen", "control_autosave", "control_log"):
             ejecutar(["docker", "rm", "-f", "-v", f"{PROYECTO}_{nombre}"])
         limpiar_sin_internet()
         if parada is not None:

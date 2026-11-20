@@ -39,7 +39,7 @@ etapa. Prueba:
   puestos en una copia de spa/ (en node_modules/, en dist/ y en la raíz) no
   llegan a la etapa de compilación (control: package.json sí llega);
 * f) el recorrido de rutas del 8445 (ficheros, rutas de la SPA, ficheros que
-  no existen, intentos de salir de /srv, métodos y rangos), que el 8444 no
+  no existen, rutas con barra final, intentos de salir de /srv y métodos), que el 8444 no
   sirve la SPA (control: sirve su CSS) y que el 8443 tampoco;
 * g) la SPA en un Chromium real (imagen de Playwright fijada por digest): carga
   "/" (que lleva a /entrar) y una ruta profunda en recarga directa sin ninguna
@@ -464,6 +464,12 @@ RUTAS_SPA = [
     ("GET", "/index.html", 200, TIPO_HTML, "spa"),
     ("GET", "/denuncias/abc", 200, TIPO_HTML, "spa"),
     ("GET", "/a/b/c/d", 200, TIPO_HTML, "spa"),
+    # Rutas con barra final: nunca son un fichero (Caddy 2.11.8, #8326 y #8352:
+    # un candidato que termina en "/" solo casa con un directorio, y @fichero
+    # usa la ruta tal cual), así que caen en la regla de la SPA: index.html, y
+    # no un 404 ni el script. "/media/" es un directorio real de /srv/spa.
+    ("GET", "/main-x.js/", 200, TIPO_HTML, "spa"),
+    ("GET", "/media/", 200, TIPO_HTML, "spa"),
     ("GET", "/main-NOEXISTE.js", 404, TIPO_JSON, "404"),
     ("GET", "/media/NOEXISTE.woff2", 404, TIPO_JSON, "404"),
     ("GET", "/favicon.ico", 404, TIPO_JSON, "404"),
@@ -3515,7 +3521,7 @@ def seccion_b():
         pasa(una(cab, "content-type") == tipo, f"b) {etiqueta}: content-type: {cab.get('content-type')!r}")
         for nombre, valor in CABECERAS_SPA.items():
             pasa(una(cab, nombre) == valor, f"b) {etiqueta}: {nombre}: {cab.get(nombre)!r}")
-        pasa("server" not in cab and "accept-ranges" not in cab, f"b) {etiqueta}: sin Server ni Accept-Ranges")
+        pasa("server" not in cab, f"b) {etiqueta}: sin cabecera Server")
 
     # La fuente: la referencia la hoja del build, y Caddy la sirve con su
     # tipo, las mismas cabeceras y los bytes del release fijado.
@@ -3532,7 +3538,7 @@ def seccion_b():
          f"b) fuente: {codigo}, content-type: {cab.get('content-type')!r}")
     for nombre, valor in CABECERAS_SPA.items():
         pasa(una(cab, nombre) == valor, f"b) fuente: {nombre}: {cab.get(nombre)!r}")
-    pasa("server" not in cab and "accept-ranges" not in cab, "b) fuente: sin Server ni Accept-Ranges")
+    pasa("server" not in cab, "b) fuente: sin cabecera Server")
     huella = hashlib.sha256(cuerpo).hexdigest()
     pasa(huella == SHA256_FUENTE, f"b) fuente: es la del release fijado (sha256 {huella[:16]}..., {len(cuerpo)} bytes)")
 
@@ -3615,10 +3621,11 @@ def seccion_f():
               and b"root:" not in cuerpo and "via" not in cab)
         negativo(f"f) {metodo} {ruta} -> {estado_esperado} {cuerpo_esperado} ({codigo}, {una(cab, 'content-type')!r})",
                  ok, control, f"{cuerpo[:120]!r}")
-    codigo, cab, cuerpo = peticion("GET", f"/{MAIN}", cabeceras={"Range": "bytes=0-1,3-4"})
-    negativo(f"f) dos rangos sobre /{MAIN} -> 200 con el fichero entero ({codigo}, {len(cuerpo)} bytes)",
-             codigo == 200 and una(cab, "content-type") == TIPO_JS and len(cuerpo) > 1000
-             and "accept-ranges" not in cab, control)
+    # El script real con una barra final no es un fichero: index.html, no el
+    # script (#8326). Control: sin la barra, el mismo script se sirve (arriba).
+    codigo, cab, cuerpo = peticion("GET", f"/{MAIN}/")
+    negativo(f"f) /{MAIN}/ (con barra final) -> index.html, no el script ({codigo}, {una(cab, 'content-type')!r})",
+             codigo == 200 and una(cab, "content-type") == TIPO_HTML and FRAGMENTO_SPA in cuerpo, control)
 
     codigo, _, _ = peticion("GET", RUTA_CSS_8444, puerto=PUERTO_WEB)
     control_web = codigo == 200

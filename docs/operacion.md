@@ -84,10 +84,9 @@ En el **VPS** (`ssh ovh`, bash). Todo lo de Docker va con `sudo`: el usuario del
    sudo docker image ls --format '{{.Repository}} {{.CreatedSince}}' | grep '^canario-'
    ```
 
-   Tienen que salir las cinco (`canario-postgres`, `canario-api`, `canario-broker`, `canario-gestion` y `canario-caddy`) con la fecha de la construcción del paso 1. Solo entonces se borra el fichero: si la carga falló a medias, sin él habría que repetir la copia desde el PC.
+   Tienen que salir las cinco (`canario-postgres`, `canario-api`, `canario-broker`, `canario-gestion` y `canario-caddy`) con la fecha de la construcción del paso 1. El fichero **no se borra**: es la versión desplegada, y es lo que se vuelve a cargar si hay que revertir (más abajo, "Revertir"). Si la carga falló a medias, sin él habría que repetir la copia desde el PC.
 
    ```bash
-   rm ~/canario-imagenes.tar
    git clone https://github.com/EduuMR73/Canario.git ~/apps/canario
    cd ~/apps/canario
    ```
@@ -154,9 +153,27 @@ En el **VPS** (`ssh ovh`, bash). Todo lo de Docker va con `sudo`: el usuario del
 
 ### Actualizar
 
-Cada cambio se prueba en el PC y se despliega igual: el paso 1, el 2 (en vez de `git clone`, `cd ~/apps/canario` y `git pull --ff-only`), el 3 y el 4, todos desde `~/apps/canario`. El paso 3 se repite siempre: `generar_secretos.py` nunca sobrescribe un fichero existente, solo crea los que una versión nueva necesita y aún no están (como `smtp_usuario.txt` y `smtp_contrasena.txt`), y sin ellos el paso 4 no arranca. Los que ya existen, incluida la clave maestra, se quedan como están. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 6; la conexión de Traefik se queda como está. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
+Cada cambio se prueba en el PC y se despliega igual: el paso 1, el 2 (en vez de `git clone`, `cd ~/apps/canario` y `git pull --ff-only`), el 3 y el 4, todos desde `~/apps/canario`. Dos cambios respecto a la primera vez, para poder revertir (más abajo, "Revertir"):
 
-La API (imagen `canario-api`) y la SPA (va dentro de `canario-caddy`) se despliegan y se revierten juntas, siempre de la misma versión del repositorio: el paso 1 construye las dos y el 4 las arranca a la vez. Nunca se cambia una sola de esas imágenes. Hay contratos entre las dos que no se comprueban en marcha. Por ejemplo, la vuelta de Google al vincular una cuenta va a `/cuenta/externas` (`app/rutas_externo.py`, `DESTINOS`); con una API nueva y una SPA vieja, o al revés, esa vuelta cae en una página que no completa el vínculo, y la persona no ve ningún error.
+1. **En el paso 1, el `scp` va a `ovh:canario-imagenes-nueva.tar`** y el paso 2 carga ese fichero (`sudo docker load -i ~/canario-imagenes-nueva.tar`): `~/canario-imagenes.tar` es la versión que corre, y no se pisa.
+2. **Antes de ese `docker load`** (en el VPS, bash), se etiquetan las cinco imágenes actuales como `:anterior`:
+
+   ```bash
+   for i in postgres api broker gestion caddy; do sudo docker tag "canario-$i:latest" "canario-$i:anterior"; done
+   ```
+
+   El `docker load` mueve `:latest` a las imágenes nuevas y deja las viejas sin nombre, y una limpieza de imágenes sin usar las borraría. Con `:anterior` siguen ahí. Solo cuando la carga ha ido bien (las cinco imágenes con la fecha nueva, como en el paso 2) se rotan los ficheros:
+
+   ```bash
+   mv -f ~/canario-imagenes.tar ~/canario-imagenes-anterior.tar
+   mv ~/canario-imagenes-nueva.tar ~/canario-imagenes.tar
+   ```
+
+   En el VPS quedan siempre dos ficheros: el de la versión que corre y el de la anterior (sustituye al de la actualización previa). Tras el paso 4 se hace la comprobación de `.Image` contra `.Id` que describe "Revertir": un `up -d` que no recrea un contenedor lo deja con la versión de antes sin avisar.
+
+El paso 3 se repite siempre: `generar_secretos.py` nunca sobrescribe un fichero existente, solo crea los que una versión nueva necesita y aún no están (como `smtp_usuario.txt` y `smtp_contrasena.txt`), y sin ellos el paso 4 no arranca. Los que ya existen, incluida la clave maestra, se quedan como están. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 6; la conexión de Traefik se queda como está. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
+
+La API (imagen `canario-api`) y la SPA (va dentro de `canario-caddy`) se despliegan y se revierten juntas, siempre de la misma versión del repositorio: el paso 1 construye las dos y el 4 las arranca a la vez (el procedimiento para revertir, abajo). Nunca se cambia una sola de esas imágenes. Hay contratos entre las dos que no se comprueban en marcha. Por ejemplo, la vuelta de Google al vincular una cuenta va a `/cuenta/externas` (`app/rutas_externo.py`, `DESTINOS`); con una API nueva y una SPA vieja, o al revés, esa vuelta cae en una página que no completa el vínculo, y la persona no ve ningún error.
 
 Después de cada `git pull`, la copia instalada del reconciliador tiene que ser igual a la del repositorio (más abajo). `cmp` no dice nada si son iguales:
 
@@ -169,6 +186,32 @@ sudo cmp despliegue/systemd/canario-reconectar-traefik.timer /etc/systemd/system
 Si alguno difiere, o el cambio es del repositorio y se reinstala como en la primera vez, o alguien tocó la copia instalada, y eso se investiga antes de nada.
 
 Lo mismo con las copias de seguridad: sus comprobaciones con `cmp` están en "Copias de seguridad" (más abajo).
+
+### Revertir
+
+Si la versión nueva falla, se vuelve a la anterior con las imágenes que se guardaron al actualizar. **Las cinco juntas, API y SPA incluidas**: nunca una sola (arriba). En el VPS (bash), desde `~/apps/canario`:
+
+```bash
+for i in postgres api broker gestion caddy; do sudo docker tag "canario-$i:anterior" "canario-$i:latest"; done
+sudo docker compose -f docker-compose.yml -f compose.produccion.yaml up -d --wait
+```
+
+Compose recrea los contenedores cuya imagen ha cambiado. Si las etiquetas `:anterior` ya no existen (por ejemplo, tras limpiar imágenes), se carga el fichero de la versión anterior, que deja sus imágenes como `:latest`, y se ejecuta la misma segunda orden:
+
+```bash
+sudo docker load -i ~/canario-imagenes-anterior.tar
+```
+
+Se comprueba, igual que tras cada actualización, que cada contenedor corre la imagen que lleva ahora `:latest`: el `.Image` del contenedor tiene que ser el `.Id` de la imagen. Un `up -d` que no recrea un contenedor lo deja con la versión de antes sin avisar:
+
+```bash
+for s in postgres api broker caddy; do
+  c=$(sudo docker compose -f docker-compose.yml -f compose.produccion.yaml ps -q "$s")
+  echo "$s $(sudo docker inspect --format '{{.Image}}' "$c") $(sudo docker image inspect --format '{{.Id}}' "canario-$s")"
+done
+```
+
+Las dos columnas de cada fila tienen que ser iguales. Revertir no deshace datos ni esquema: sin migraciones, solo vale si la versión nueva no cambió `db/init/` (arriba, "Actualizar una instalación existente"). La etiqueta `:anterior` se pisa en la siguiente actualización: guarda una sola versión atrás.
 
 ### Reconexión automática de Traefik
 
