@@ -56,17 +56,17 @@ Detalles de ejecución: en serie, una empresa nueva por ejecución, una cuenta p
 
 ### Estrés en local (`tests/estres/`, k6 v2.3.0 por digest)
 
-**Recursos.** Ningún servicio declara `cpus` en los compose: en producción, Canario no tiene tope de CPU. En la pila de estrés se fijan `cpus` en la API y en PostgreSQL con los núcleos del VPS, y k6 corre aislado con `--cpuset-cpus` en otros núcleos, para no medir el generador. Aun así, los resultados son **relativos**: describen el comportamiento y el orden en que cede cada pieza, no la capacidad del VPS. Modelo abierto (tasa de llegada constante), con calentamiento, 3 repeticiones (se toma la mediana) y una duración que da al menos 600 muestras por ruta medida.
+**Recursos.** Ningún servicio declara `cpus` en los compose: en producción, Canario no tiene tope de CPU. En la pila de estrés todos los servicios de Canario comparten un cpuset de 2 núcleos, los del VPS (las mismas 2 CPU lógicas, sin hermanas de hiperhilo), y k6 corre aislado con `--cpuset-cpus` en otros núcleos, para no medir el generador. Aun así, los resultados son **relativos**: describen el comportamiento y el orden en que cede cada pieza, no la capacidad del VPS. Modelo abierto (tasa de llegada constante), con calentamiento, 3 repeticiones (se toma la mediana) y una duración que da al menos 600 muestras por ruta medida.
 
-**Qué se registra en todas.** Latencias p50, p95 y p99 por ruta; códigos de estado; y aparte, las conexiones cortadas, los fin de fichero inesperados y los plazos agotados, que no dejan línea en el log de la API (por ejemplo, si se agotan los hilos de trabajo, la petición espera al limitador de hilos de AnyIO dentro del bucle de eventos, y la corta el plazo `write 30s` del servidor de Caddy). Los 429 los cuenta k6, porque la API no los registra (una línea con hora situaría al denunciante). CPU y memoria de cada contenedor (`docker stats`).
+**Qué se registra en todas.** Latencias p50, p95 y p99 por ruta; códigos de estado; y aparte, las conexiones cortadas, los fin de fichero inesperados y los plazos agotados, que no dejan línea en el log de la API (por ejemplo, si se agotan los hilos de trabajo, la petición espera al limitador de hilos de AnyIO dentro del bucle de eventos, y la corta el plazo `write 30s` del servidor de Caddy). Los 429 los cuenta k6, porque la API no los registra (una línea con hora situaría al denunciante). CPU y memoria de cada contenedor (`docker stats`). En cada escalón, dos sondas de atribución a 1 petición por segundo: `POST /salud` (sin base de datos ni limitador) y `GET /web/seguimiento` (síncrona y barata). Si sube solo la de `/web/seguimiento`, faltan hilos; si suben las dos, falta CPU; si no sube ninguna y aparece `SIN CONEXION`, el límite es el pool de 5 conexiones.
 
-**Cota para los vecinos.** Con `cpus` fijados, la CPU de la pila mide los topes de la propia prueba. Por eso hay una pasada extra de L1 **sin topes de CPU**, como en producción: su CPU total en el codo es la cota de lo que Canario puede quitar a las aplicaciones vecinas del VPS.
+**Cota para los vecinos.** Con el cpuset de 2 núcleos, la CPU de la pila mide los topes de la propia prueba. Por eso hay una pasada extra de L1 **sin topes de CPU**, como en producción: su CPU total en el codo es la cota de lo que Canario puede quitar a las aplicaciones vecinas del VPS.
 
 **Control del generador.** Si k6 descarta iteraciones (`dropped_iterations` > 0) o su CPU se satura, el resultado es `SIN CONCLUSION`: se habría medido el generador, no Canario.
 
 | Id | Prueba | Qué se mide | Control positivo | Límites |
 |---|---|---|---|---|
-| L1 | Capacidad y codo de las rutas caras: login con empresa o email inexistentes (el mismo trabajo de Argon2 que uno real, sin tocar cuentas ni bloqueos), presentar denuncia y seguimiento | Tasa sostenida con p95 bajo el SLO hasta el codo, y qué cede primero: `SIN CONEXION: PoolTimeout`, `SATURACION`, `EVENTO hashes_saturados`, `EVENTO limitador_no_disponible`, contenedor `OOMKilled` o reiniciado, o cola de hilos (conexiones cortadas sin línea en el log) | El primer escalón, a tasa baja, cumple el SLO; si no, `SIN CONCLUSION` (la pila de prueba está mal) | Relajados |
+| L1 | Capacidad y codo de las rutas caras: login con empresa o email inexistentes (el mismo trabajo de Argon2 que uno real, sin tocar cuentas ni bloqueos), presentar denuncia y seguimiento. El login mide Argon2 más lecturas, no las escrituras de un fallo con cuenta real ni la sesión de un login correcto; el seguimiento inexistente solo calcula el HMAC y hace un SELECT, sin descifrar | Tasa sostenida con p95 bajo el SLO hasta el codo, y qué cede primero: `SIN CONEXION: PoolTimeout`, `SATURACION`, `EVENTO hashes_saturados`, `EVENTO limitador_no_disponible`, contenedor `OOMKilled` o reiniciado, o cola de hilos (conexiones cortadas sin línea en el log) | El primer escalón, a tasa baja, cumple el SLO; si no, `SIN CONCLUSION` (la pila de prueba está mal) | Relajados |
 | L2 | **Aislamiento** (la prueba principal): se inunda el login y, a la vez, se mide el p95 de presentar denuncia, de seguimiento y de una ruta síncrona barata (`GET /web/seguimiento`) a una tasa baja constante | p95 de cada ruta con y sin la inundación, frente al SLO. La ruta barata separa "falta CPU o base de datos" de "faltan hilos". Si se rompe, es el hallazgo: se mitiga y se vuelve a medir | La medida de las mismas rutas sin inundación, en la misma ejecución | Relajados: representan una carga repartida entre muchas IPs, cada una bajo su límite (20 logins por segundo sostenidos equivalen a unas 600 IPs a 10 cada 5 minutos) |
 | L3 | Carga repartida: k6 en el lugar de Traefik (10.88.1.2, red `edge`) con `Caddyfile.produccion` y la cabecera `Host` de producción, cada IP simulada al final de `X-Forwarded-For` (sin relajar `trusted_proxies`), con 200 IPs | El caudal agregado que llega a la API (200 IPs a 60 seguimientos por minuto son 12 000 por minuto) frente al codo de L1. Oráculo por IP y ventana: como mucho 60 respuestas que no son 429 (hasta 120 si la ráfaga cruza la frontera, el defecto conocido de la ventana fija, que aquí se mide) | Las 60 primeras peticiones de cada IP en su ventana no son 429 | **Producción** |
 | L4 | Pico de 10 veces la tasa base durante 30 s y recuperación | Segundos hasta volver al p95 base, y F1 en verde después de la carga | El p95 base medido justo antes del pico | Relajados |
@@ -105,8 +105,20 @@ El VPS aloja otras aplicaciones con usuarios reales. Por eso, en producción **n
 
 Se congelan en dos commits propios, cada uno **con push a GitHub antes de medir**: la fecha del push la pone el servidor, no quien hace el commit.
 
-1. **Primera congelación**, antes de L1 y de P5: los SLO, el criterio de degradación, la definición de error y las hipótesis. Incluye el tiempo de un hash de Argon2 medido dentro del contenedor de la API de la pila de prueba (mediana de 20 hashes), que necesita H1. Medir un hash no es una prueba de carga.
+1. **Primera congelación**, antes de L1 y de P5: los SLO, el criterio de degradación, la definición de error y las hipótesis. Incluye el tiempo de un hash de Argon2 medido dentro del contenedor de la API de la pila de prueba (mediana de 20 `verify()` en serie, el mismo trabajo que hace un login), que necesita H1. Medir un hash no es una prueba de carga.
 2. **Segunda congelación**, antes de L2, L4, L7 y P6: la tasa baja de L2 y L7, la tasa base de L4 y las líneas base de P5, todas sacadas de L1 y P5.
+
+### Tiempo de un hash (t)
+
+Medido el 21/11/2026 con `python tests\estres\lanzar.py --hash`, en la pila de prueba con el cpuset de 2 núcleos, con Argon2id m=19456 KiB, t=2, p=1 (comprobado como literal en `app/personal.py`):
+
+| Medida | Valor |
+|---|---|
+| `hash()`, una vez | 45,4 ms |
+| `verify()`, 20 en serie: mediana | 19,6 ms |
+| `verify()`, 20 en serie: mínimo y máximo | 18,5 ms y 33,7 ms |
+
+**t = 0,0196 s**, y 2 / t = 101,91 logins por segundo. H1 predice, por tanto, un codo del login entre 76,4 y 127,4 logins por segundo (±25 %).
 
 ### Definición de error
 
@@ -114,7 +126,7 @@ Cuenta como error: un 5xx, una conexión cortada, un fin de fichero inesperado o
 
 ### SLO de la pila de prueba (L1)
 
-Son umbrales de esta pila, con `cpus` fijados, no del VPS. Definen el codo de L1: la primera tasa con un p95 por encima del umbral o con un 1 % o más de errores.
+Son umbrales de esta pila, con el cpuset de 2 núcleos, no del VPS. Definen el codo de L1: la primera tasa con un p95 por encima del umbral o con un 1 % o más de errores.
 
 | Ruta | p95 | Errores |
 |---|---|---|
@@ -132,9 +144,9 @@ En producción (P5 y P6) los umbrales son absolutos, porque es la máquina real:
 ### Hipótesis
 
 - **H1 (L1, login).** Con 2 hashes simultáneos, el login sostiene 2 / t logins por segundo (t, el tiempo de un hash de la primera congelación), con una tolerancia de ±25 %. Por encima, 503 con `EVENTO hashes_saturados` tras 2 s de espera.
-- **H2 (L1, denuncia y seguimiento).** El codo lo marca el pool de 5 conexiones con PostgreSQL: por encima aparece `SIN CONEXION: PoolTimeout` tras 10 s de espera, antes que cualquier otra señal.
+- **H2 (L1, denuncia y seguimiento).** El codo lo marca el pool de 5 conexiones con PostgreSQL: por encima aparece `SIN CONEXION: PoolTimeout` tras 10 s de espera, antes que cualquier otra señal. En local, el disco virtual de WSL2 puede adelantarse al pool: por eso se anota el BlockIO de PostgreSQL en cada escalón.
 - **H3 (L2).** La inundación del login degrada denuncia, seguimiento y `GET /web/seguimiento` según el criterio de degradación, sin que esas rutas víctima dejen ninguna línea en el log (la inundación sí deja `EVENTO login_fallido` y `EVENTO hashes_saturados`). Mecanismo: las rutas son síncronas y comparten un pool de hilos limitado, y un login retiene su hilo hasta 2 s esperando el semáforo y hasta 10 s esperando una conexión.
-- **H4 (L7).** `/salud` es síncrona pero responde al momento: pasa por el pool de hilos de AnyIO en cada petición, pero no retiene un hilo. Si degrada algo, es por la CPU del único proceso de uvicorn (sin `--workers`), que el GIL limita a un núcleo. Predicción: no hay degradación mientras el proceso de la API está por debajo de un núcleo y de su tope de `cpus`, y sí la hay cuando llega a uno de los dos, lo que ocurra antes. La ruta barata de L7 distingue además si se encolan hilos.
+- **H4 (L7).** `/salud` es síncrona pero responde al momento: pasa por el pool de hilos de AnyIO en cada petición, pero no retiene un hilo. Si degrada algo, es por la CPU del único proceso de uvicorn (sin `--workers`), que el GIL limita a un núcleo. Predicción: no hay degradación mientras el proceso de la API está por debajo de un núcleo y del cpuset de 2 núcleos, y sí la hay cuando llega a uno de los dos, lo que ocurra antes. La ruta barata de L7 distingue además si se encolan hilos.
 - **H5 (L6).** Con la regla de denuncia (cada clave vive 3600 s desde su creación) y unos 100 B por clave (supuesto sin medir), en 64 MB caben unas 500 000 claves: a 150 peticiones por segundo desde IPs siempre nuevas, el 503 para los clientes legítimos aparece antes de 60 minutos (unos 55), y `/salud` sigue en 200. Sin intervención, el servicio vuelve de forma gradual a partir de una hora después del inicio de la carga.
 - **H6 (L4).** Tras el pico, el p95 calculado en ventanas deslizantes de 10 s vuelve a cumplir el criterio de degradación frente a la base en menos de 60 s, sin reinicios de ningún contenedor.
 
