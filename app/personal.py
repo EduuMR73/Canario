@@ -78,9 +78,13 @@ fila del contador se notaría en el tiempo (ver SQL_RESERVA_ASINCRONA).
 
 Argon2id con m=19 MiB, t=2, p=1 (OWASP Password Storage Cheat Sheet). El
 perfil por defecto de argon2-cffi usa 64 MiB y la API tiene 256 MiB de
-memoria (docker-compose.yml): un semáforo acota los hashes simultáneos y, si
-no hay hueco, se responde 503 en vez de agotar la memoria. Argon2 se calcula
-fuera de toda transacción, para no retener conexiones del pool.
+memoria más 256 MiB de swap (docker-compose.yml, mem_limit sin
+memswap_limit). Todos los Argon2 se calculan en los 2 hilos de un ejecutor
+propio (iniciar_ejecutor_hashes) y un semáforo acota cuántos esperan: si no
+hay hueco en ESPERA_HASH segundos, 503. El semáforo solo NO acotaba la
+memoria: cada hilo de AnyIO que calculaba un hash dejaba sus 19 MiB en su
+arena de glibc (banco D1, ver "Argon2 en un ejecutor propio"). Argon2 se
+calcula fuera de toda transacción, para no retener conexiones del pool.
 
 Login con un proveedor externo (docs/threat-model.md, 6.19): sustituye a la
 contraseña, nunca al TOTP, y solo desde un dispositivo de confianza vigente
@@ -119,6 +123,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -145,10 +150,22 @@ ROLES_AUDITORIA = ("admin", "auditor")
 MEMORIA_ARGON2_KIB = 19456
 ITERACIONES_ARGON2 = 2
 PARALELISMO_ARGON2 = 1
-# Hashes de contraseña simultáneos: 2 x 19 MiB caben con margen en los 256
-# MiB de la API. Si no hay hueco en ESPERA_HASH segundos, 503.
+# Hashes de contraseña simultáneos: es a la vez el tope del semáforo y el
+# número de hilos del ejecutor de Argon2. Lo que acota la memoria son los
+# HILOS que calculan hashes (cada uno retiene un bloque de 19 MiB en su arena
+# de glibc), no los hashes simultáneos: 2 hilos son unos 45 MiB retenidos, con
+# margen en los 256 MiB de la API. Si no hay hueco en ESPERA_HASH segundos,
+# 503.
 HASHES_SIMULTANEOS = 2
 ESPERA_HASH = 2.0
+# Hilos del ejecutor: se llaman argon2_0 y argon2_1 (thread_name_prefix más
+# el índice, CPython 3.12, concurrent/futures/thread.py, _adjust_thread_count).
+# El arranque exige exactamente estos nombres, como literal.
+PREFIJO_HILOS_HASH = "argon2"
+NOMBRES_HILOS_HASH = frozenset({"argon2_0", "argon2_1"})
+# Plazo de la barrera con la que el arranque obliga a crear los 2 hilos. Si
+# vence, el ejecutor tiene menos hilos de los esperados y la API no arranca.
+ESPERA_ARRANQUE_HILOS = 5.0
 
 # Bloqueo progresivo (ver la cabecera).
 FALLOS_ANTES_DE_ESPERAR = 5
@@ -195,9 +212,20 @@ _hasher = PasswordHasher(time_cost=ITERACIONES_ARGON2, memory_cost=MEMORIA_ARGON
                          parallelism=PARALELISMO_ARGON2, hash_len=32, salt_len=16, type=Type.ID)
 # Hash de una contraseña aleatoria que nadie conoce, con los mismos
 # parámetros: cuando no hay cuenta, se verifica contra él y el tiempo es el
-# mismo que con una cuenta real.
+# mismo que con una cuenta real. Es el único Argon2 fuera del ejecutor: se
+# calcula al importar, en el hilo principal. Su bloque de 19 MiB supera el
+# umbral de mmap inicial, así que va por mmap y se devuelve al liberarlo; pero
+# esa liberación sube el umbral dinámico de mmap a unos 19 MiB (glibc 2.41,
+# malloc.c:3457-3462), y desde entonces cada Argon2 sale de la arena del hilo
+# que lo calcula y se queda en ella.
 _HASH_FICTICIO = _hasher.hash(secrets.token_urlsafe(32))
 _semaforo = threading.BoundedSemaphore(HASHES_SIMULTANEOS)
+# Ejecutor de Argon2 (ver "Argon2 en un ejecutor propio"). Lo crea
+# iniciar_ejecutor_hashes y lo asigna una sola vez el arranque de la API
+# (app/principal.py); las pruebas lo asignan y lo restauran. None hasta
+# entonces: un hash pedido sin ejecutor es un 503, nunca un cálculo en el hilo
+# de la petición.
+_ejecutor = None
 
 
 # Parámetros del bloqueo, enlazados en cada reserva como cualquier otro valor:
@@ -533,6 +561,26 @@ class Saturado(Exception):
     """No hay hueco para calcular un hash de contraseña: 503."""
 
 
+class EjecutorNoDisponible(Saturado):
+    """El ejecutor de Argon2 no está creado o está cerrado: 503 con EVENTO
+    ejecutor_no_disponible. Hereda de Saturado para que la traducción a 503
+    con Retry-After de app/rutas_personal.py la cubra sin una entrada propia
+    (Starlette busca el manejador por la MRO de la excepción): el cliente no
+    necesita distinguirla, y quien opera la distingue por su EVENTO."""
+
+
+class EjecutorNoArrancado(Exception):
+    """Los hilos del ejecutor de Argon2 no quedaron como se esperaba al
+    arrancar: la API no arranca (app/principal.py, ArranqueBloqueado)."""
+
+
+class HashAnidado(Exception):
+    """Un hash pedido desde un hilo del propio ejecutor. Nunca ocurre en el
+    código actual; si ocurriera, el hilo esperaría a un trabajo encolado
+    detrás de sí mismo y, con los 2 hilos así, el ejecutor se bloquearía. Se
+    rechaza en el acto, visible."""
+
+
 class Prohibido(Exception):
     """La cuenta no tiene el rol necesario: 403."""
 
@@ -654,27 +702,170 @@ class CambioDeVinculo:
 
 
 # ---------------------------------------------------------------------------
-# Piezas comunes
+# Argon2 en un ejecutor propio
 # ---------------------------------------------------------------------------
+# Por qué (banco D1, 21/11/2026, tests/estres/diagnosticar_memoria.py): con
+# el semáforo solo, cada hilo de AnyIO que calculaba un Argon2 dejaba su
+# bloque de 19 MiB en su propia arena de glibc. Tras una ráfaga a 150/s: 40
+# arenas, 766 MiB retenidos y 761 MiB libres que glibc no devuelve (el top
+# del heap de una arena de hilo no se recorta, glibc 2.41, malloc.c:5255; ni
+# el reposo ni malloc_trim los devolvieron). Con 256 MiB más 256 MiB de
+# swap, esa ráfaga acaba en OOM las 3 veces; con un solo hilo, el retenido
+# máximo fue de 25,9 MiB. El semáforo acotaba los hashes SIMULTÁNEOS, no los
+# HILOS que los calculan. Por eso cada Argon2 de la API corre en uno de los 2
+# hilos de este ejecutor: como mucho 2 arenas con un bloque de 19 MiB.
+#
+# Invariantes:
+# * result() sin plazo. Con plazo, el llamante soltaría el semáforo mientras
+#   su hash sigue corriendo en el ejecutor, y un tercero se encolaría detrás:
+#   el semáforo dejaría de reflejar lo que hay en el ejecutor.
+# * El ejecutor no se cierra ni se recrea mientras la API vive: un hilo
+#   muerto deja su arena, con su bloque de 19 MiB, en la lista de arenas
+#   libres de glibc, y nada obliga a que los hilos de un ejecutor nuevo la
+#   reutilicen en vez de crecer otras. Al salir, el atexit de
+#   concurrent.futures (threading._register_atexit(_python_exit), CPython
+#   3.12, thread.py) ya espera a sus hilos.
+# * El tope de arenas de glibc es 8 x CPU en línea (arena.c:834): 128 en la
+#   VM local de 16 CPU, 16 en un VPS de 2. Si los hilos del proceso superan
+#   el tope, los de AnyIO comparten arenas, también las del ejecutor. No hace
+#   crecer la memoria, porque los hilos de AnyIO ya no piden bloques de 19
+#   MiB; solo añade contención en el cerrojo de la arena. Depende de los
+#   núcleos del anfitrión.
+# * Depende de glibc 2.41 (la de la imagen): con musl o jemalloc hay que
+#   repetir la regresión de memoria (tests/estres, --regresion).
+# * _hasher solo aparece en su definición, en _HASH_FICTICIO y en las dos
+#   funciones que corren en el ejecutor (_verificar_hash y _crear_hash), y
+#   estas solo se envían al ejecutor: lo vigila una guarda estática con ast
+#   (tests/unit/test_ejecutor_hashes.py).
 
-@contextmanager
-def _hueco_hash():
-    if not _semaforo.acquire(timeout=ESPERA_HASH):
-        registro.warning("EVENTO hashes_saturados: no hay hueco para calcular un hash de contrasena")
-        raise Saturado
+def iniciar_ejecutor_hashes():
+    """Crea el ejecutor de Argon2 y arranca sus 2 hilos. Devuelve el
+    ejecutor sin instalarlo, o lanza EjecutorNoArrancado. La usan el arranque
+    de la API, las pruebas unitarias y el banco de memoria en --regresion:
+    nunca una copia."""
+    ejecutor = ThreadPoolExecutor(max_workers=HASHES_SIMULTANEOS, thread_name_prefix=PREFIJO_HILOS_HASH)
     try:
-        yield
+        _arrancar_hilos(ejecutor)
+    except EjecutorNoArrancado:
+        ejecutor.shutdown(wait=False, cancel_futures=True)
+        raise
+    return ejecutor
+
+
+def _arrancar_hilos(ejecutor):
+    """Crea los 2 hilos ANTES de servir: así sus PIDs se reservan al arrancar
+    (pids_limit 64 en el compose) y no en un login con la API cargada.
+
+    ThreadPoolExecutor crea hilos al enviar trabajo, pero no crea uno si
+    otro está libre (CPython 3.12, thread.py, _adjust_thread_count). Dos
+    tareas cortas enviadas seguidas pueden acabar en el mismo hilo; por eso
+    las dos esperan en una barrera de 2, que solo se abre si corren en 2
+    hilos distintos a la vez. Las tareas NO calculan Argon2: la base de la
+    regresión de memoria debe medirse sin las arenas del ejecutor crecidas."""
+    barrera = threading.Barrier(HASHES_SIMULTANEOS, timeout=ESPERA_ARRANQUE_HILOS)
+    tareas = [ejecutor.submit(_nombre_tras_la_barrera, barrera) for _ in range(HASHES_SIMULTANEOS)]
+    try:
+        # Con plazo, a diferencia de los hashes: la barrera ya lo tiene, y el
+        # arranque nunca debe quedarse colgado.
+        nombres = {tarea.result(timeout=2 * ESPERA_ARRANQUE_HILOS) for tarea in tareas}
+    except (threading.BrokenBarrierError, TimeoutError):
+        raise EjecutorNoArrancado(
+            f"la barrera de arranque no se abre en {ESPERA_ARRANQUE_HILOS} s: menos de "
+            f"{HASHES_SIMULTANEOS} hilos") from None
+    # _threads es interno de ThreadPoolExecutor: se mira solo aquí, al
+    # arrancar, para confirmar que no hay ningún hilo de más.
+    if nombres != NOMBRES_HILOS_HASH or len(ejecutor._threads) != HASHES_SIMULTANEOS:
+        raise EjecutorNoArrancado(
+            f"hilos {sorted(nombres)} ({len(ejecutor._threads)} en el ejecutor) y se esperaban "
+            f"{sorted(NOMBRES_HILOS_HASH)}")
+
+
+def _nombre_tras_la_barrera(barrera):
+    barrera.wait()
+    return threading.current_thread().name
+
+
+def instalar_ejecutor_hashes(ejecutor):
+    """Lo llama una vez el arranque de la API (app/principal.py). Las pruebas
+    no lo usan: sustituyen _ejecutor con mock.patch.object y lo restauran."""
+    global _ejecutor
+    _ejecutor = ejecutor
+
+
+def _verificar_en_ejecutor(hash_guardado, contrasena):
+    """Verifica la contraseña en un hilo del ejecutor (siempre un Argon2
+    completo). Saturado si no hay hueco en ESPERA_HASH segundos."""
+    _rechazar_llamada_anidada()
+    _tomar_hueco_hash()
+    try:
+        verificacion = _enviar_al_ejecutor(_verificar_hash, hash_guardado, contrasena)
+        return verificacion.result()
     finally:
         _semaforo.release()
 
 
+def _crear_hash_en_ejecutor(contrasena):
+    """Hash Argon2id nuevo, calculado en un hilo del ejecutor. Saturado si no
+    hay hueco en ESPERA_HASH segundos."""
+    _rechazar_llamada_anidada()
+    _tomar_hueco_hash()
+    try:
+        calculo = _enviar_al_ejecutor(_crear_hash, contrasena)
+        return calculo.result()
+    finally:
+        _semaforo.release()
+
+
+def _rechazar_llamada_anidada():
+    if threading.current_thread().name.startswith(PREFIJO_HILOS_HASH + "_"):
+        raise HashAnidado
+
+
+def _tomar_hueco_hash():
+    """Va antes del try de quien lo llama: sin hueco no hay nada que liberar."""
+    if not _semaforo.acquire(timeout=ESPERA_HASH):
+        registro.warning("EVENTO hashes_saturados: no hay hueco para calcular un hash de contrasena")
+        raise Saturado
+
+
+def _enviar_al_ejecutor(funcion, *argumentos):
+    """Envía el trabajo al ejecutor o lanza EjecutorNoDisponible. Solo la
+    llaman las dos funciones de arriba, con _verificar_hash o _crear_hash (lo
+    vigila la guarda estática). RuntimeError se captura SOLO alrededor de
+    submit, que la lanza con el ejecutor cerrado (thread.py, submit): lo que
+    lance el hash sale de result() tal cual y llega al llamante."""
+    ejecutor = _ejecutor
+    if ejecutor is None:
+        raise _ejecutor_no_disponible("sin_crear")
+    try:
+        return ejecutor.submit(funcion, *argumentos)
+    except RuntimeError:
+        raise _ejecutor_no_disponible("cerrado") from None
+
+
+def _ejecutor_no_disponible(motivo):
+    # Error de despliegue o de código, no de carga: nivel error.
+    registro.error("EVENTO ejecutor_no_disponible: motivo=%s", motivo)
+    return EjecutorNoDisponible(motivo)
+
+
 def _verificar_hash(hash_guardado, contrasena):
-    """Siempre un Argon2 completo: contra el hash ficticio si no hay cuenta."""
+    """Corre en el ejecutor. Siempre un Argon2 completo: contra el hash
+    ficticio si no hay cuenta."""
     try:
         return _hasher.verify(hash_guardado or _HASH_FICTICIO, contrasena) and hash_guardado is not None
     except (VerificationError, InvalidHashError):
         return False
 
+
+def _crear_hash(contrasena):
+    """Corre en el ejecutor."""
+    return _hasher.hash(contrasena)
+
+
+# ---------------------------------------------------------------------------
+# Piezas comunes
+# ---------------------------------------------------------------------------
 
 def normalizar_contrasena(texto):
     return unicodedata.normalize("NFKC", texto)
@@ -772,8 +963,7 @@ def _nueva_sesion(conexion, claves, empresa_id, identificador, usuario_id, dispo
 def _comprobar_factores(claves, empresa_id, reservada, envuelta, contrasena, codigo, instante):
     """Contraseña y TOTP, con el mismo trabajo haya cuenta o no. Devuelve el
     paso TOTP aceptado si los dos valen, o None."""
-    with _hueco_hash():
-        contrasena_ok = _verificar_hash(reservada[3] if reservada else None, normalizar_contrasena(contrasena))
+    contrasena_ok = _verificar_en_ejecutor(reservada[3] if reservada else None, normalizar_contrasena(contrasena))
     if reservada is not None and envuelta is not None:
         secreto = _descifrar_secreto(claves, empresa_id, reservada[1], envuelta[0], reservada[5], reservada[4])
     else:
@@ -935,8 +1125,7 @@ def cambiar_contrasena(pool, claves, sesion, actual, nueva, codigo, instante=Non
     if paso is None:
         _avisar_fallo(sesion.empresa_id, reservada, "dispositivo")
         raise CredencialesNoValidas
-    with _hueco_hash():
-        hash_nuevo = _hasher.hash(nueva)
+    hash_nuevo = _crear_hash_en_ejecutor(nueva)
     with bd.transaccion_empresa(pool, sesion.empresa_id) as conexion:
         cambiada = conexion.execute(SQL_CAMBIAR_CONTRASENA, {
             "nuevo": hash_nuevo, "paso": paso, "usuario": sesion.usuario_id, "hash": reservada[3]}).fetchone()
@@ -1182,8 +1371,7 @@ def activar(pool, claves, token, contrasena):
     invitacion_id, usuario_id, email, nombre = fila
     version, envuelta = clave
     normal = validar_contrasena(contrasena, email, nombre)
-    with _hueco_hash():
-        hash_nuevo = _hasher.hash(normal)
+    hash_nuevo = _crear_hash_en_ejecutor(normal)
     secreto = cripto.generar_secreto_totp()
     clave_empresa = cripto.desenvolver_clave(claves.maestra, bytes(envuelta), empresa_id, version)
     cifrado = cripto.cifrar(clave_empresa, secreto, cripto.aad_totp(empresa_id, usuario_id))

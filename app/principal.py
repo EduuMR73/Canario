@@ -7,7 +7,8 @@ app/rutas_externo.py), detrás
 de la frontera HTTP (app/frontera_http.py):
 límite de cuerpo, limitador de peticiones con Redis (app/limitador.py),
 errores internos sin detalles y respuestas de error uniformes. Al arrancar
-comprueba los secretos (contraseña, claves de cifrado y contraseña de Redis)
+crea el ejecutor de Argon2 con sus 2 hilos (app/personal.py), comprueba los
+secretos (contraseña, claves de cifrado y contraseña de Redis)
 y los límites, abre el pool de conexiones a PostgreSQL, verifica la base de
 datos y después Redis; si algo no es lo esperado, la API no arranca
 (docs/threat-model.md, 6.10).
@@ -23,6 +24,7 @@ from app import (
     claves,
     frontera_http,
     limitador,
+    personal,
     rutas_denuncias,
     rutas_externo,
     rutas_personal,
@@ -50,6 +52,18 @@ async def ciclo_de_vida(app):
     Bloquea el bucle de eventos mientras arranca, a propósito: hasta que la
     verificación termina no se sirve ninguna petición.
     """
+    # Lo primero: el ejecutor de Argon2, el único sitio donde la API calcula
+    # un hash de contraseña (banco D1: con los hilos de AnyIO, cada hilo
+    # retenía 19 MiB en su arena de glibc). Sus 2 hilos y sus PIDs quedan
+    # creados antes de servir, no en un login con la API cerca de pids_limit.
+    # No se cierra al parar: un ejecutor cerrado o recreado en vida dejaría
+    # arenas huérfanas, y al salir el atexit de concurrent.futures ya espera a
+    # sus hilos.
+    try:
+        personal.instalar_ejecutor_hashes(personal.iniciar_ejecutor_hashes())
+    except personal.EjecutorNoArrancado as error:
+        registro.error("ARRANQUE BLOQUEADO: ejecutor_hashes: %s", error)
+        raise verificacion_arranque.ArranqueBloqueado("ejecutor_hashes") from None
     try:
         bd.comprobar_secreto()
     except bd.ErrorConfiguracion as error:

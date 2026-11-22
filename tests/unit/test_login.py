@@ -8,6 +8,11 @@ batería tests/security/verificar_personal.py); aquí se comprueba la causa:
 en todos los caminos se calcula un Argon2 y una verificación TOTP, con
 unittest.mock en modo wraps (la función real se ejecuta y solo se cuentan
 las llamadas).
+
+El Argon2 de la contraseña corre en el ejecutor de la API
+(personal.iniciar_ejecutor_hashes): el módulo crea uno con esa misma función
+y cada prueba lo instala y lo restaura. En qué hilo corre cada hash lo
+prueba tests/unit/test_ejecutor_hashes.py.
 """
 import unittest
 import uuid
@@ -26,6 +31,12 @@ SECRETO_RFC = b"12345678901234567890"
 INSTANTE = 150
 CODIGO = "254676"
 CONTRASENA = "Contrasena-correcta-1"
+EJECUTOR = None
+
+
+def setUpModule():
+    global EJECUTOR
+    EJECUTOR = personal.iniciar_ejecutor_hashes()
 
 
 def cuenta(contrasena=CONTRASENA, usuario_aad=USUARIO):
@@ -46,6 +57,9 @@ def factores(reservada, envuelta, contrasena=CONTRASENA, codigo=CODIGO, claves_r
 
 
 class ComprobarFactores(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.object(personal, "_ejecutor", EJECUTOR))
+
     def test_cuenta_valida(self):
         claves_reales, reservada, envuelta = cuenta()
         self.assertEqual(factores(reservada, envuelta, claves_reales=claves_reales), 5)

@@ -391,7 +391,13 @@ class LoQueRevocaLosVinculos(unittest.TestCase):
     def test_cambio_de_contrasena(self):
         base = Base({personal.SQL_RESERVAR_DISPOSITIVO_SESION: RESERVADA, personal.SQL_CLAVE_VERSION: ENVUELTA,
                      personal.SQL_NUEVA_SESION: NUEVA_SESION})
-        with parches(base), mock.patch.object(personal, "_comprobar_factores", return_value=5):
+        # cambiar_contrasena calcula el hash nuevo en el ejecutor de Argon2
+        # (sin él, EjecutorNoDisponible): se crea con la misma función que el
+        # arranque de la API, como en test_login, y se cierra al terminar.
+        ejecutor = personal.iniciar_ejecutor_hashes()
+        self.addCleanup(ejecutor.shutdown)
+        with parches(base), mock.patch.object(personal, "_comprobar_factores", return_value=5), \
+                mock.patch.object(personal, "_ejecutor", ejecutor):
             personal.cambiar_contrasena(None, CLAVES, SESION_PERSONAL, "Contrasena-actual-1", "Contrasena-nueva-12",
                                         CODIGO, INSTANTE)
         self.assertTrue(base.antes(personal.SQL_CAMBIAR_CONTRASENA, personal.SQL_REVOCAR_VINCULOS))

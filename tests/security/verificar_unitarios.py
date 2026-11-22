@@ -68,6 +68,7 @@ PRUEBAS_POR_FICHERO = {
     "test_correo": 7,
     "test_cripto": 42,
     "test_denuncias": 10,
+    "test_ejecutor_hashes": 16,
     "test_errores": 11,
     "test_externo": 16,
     "test_frontera": 12,
@@ -84,7 +85,11 @@ PRUEBAS_POR_FICHERO = {
     "test_validacion": 8,
     "test_web": 23,
 }
-TOTAL_PRUEBAS = 359
+# Con el arreglo R1, todo hash exige el ejecutor de Argon2 instalado: las
+# pruebas que llegan a un hash lo crean con personal.iniciar_ejecutor_hashes
+# y lo instalan con mock.patch.object sobre personal._ejecutor (test_login y
+# test_login_externo.LoQueRevocaLosVinculos.test_cambio_de_contrasena).
+TOTAL_PRUEBAS = 375
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -429,6 +434,35 @@ MUTANTES = [
     ("frontera_http.py", "    destino = NAVEGACION.get(ruta)\n", "    destino = None\n",
      "test_rutas_externo.FronteraEnLaVuelta.test_limitador_responde_303_en_la_vuelta",
      "un 429 en la vuelta es un JSON en la pantalla, sin forma de volver"),
+    # Argon2 en un ejecutor de 2 hilos (arreglo R1 de la memoria, banco D1).
+    ("personal.py", "ThreadPoolExecutor(max_workers=HASHES_SIMULTANEOS,", "ThreadPoolExecutor(max_workers=40,",
+     "test_ejecutor_hashes.Ejecutor.test_dos_hilos_como_maximo",
+     "el ejecutor crece hasta 40 hilos y cada uno retiene 19 MiB en su arena (OOM)"),
+    ("personal.py", "    contrasena_ok = _verificar_en_ejecutor(", "    contrasena_ok = _verificar_hash(",
+     "test_ejecutor_hashes.CadaCamino.test_iniciar_sesion",
+     "el login calcula Argon2 en el hilo de AnyIO (una arena de 19 MiB por hilo)"),
+    ("personal.py", "    hash_nuevo = _crear_hash_en_ejecutor(nueva)\n", "    hash_nuevo = _crear_hash(nueva)\n",
+     "test_ejecutor_hashes.CadaCamino.test_cambiar_contrasena",
+     "el cambio de contrasena calcula Argon2 en el hilo de AnyIO"),
+    ("personal.py", "    hash_nuevo = _crear_hash_en_ejecutor(normal)\n", "    hash_nuevo = _crear_hash(normal)\n",
+     "test_ejecutor_hashes.CadaCamino.test_activar",
+     "la activacion calcula Argon2 en el hilo de AnyIO"),
+    ("personal.py", "        return verificacion.result()\n    finally:\n        _semaforo.release()\n",
+     "        return verificacion.result()\n    finally:\n        pass\n",
+     "test_ejecutor_hashes.Semaforo.test_libre_tras_cada_salida",
+     "cada login se queda un hueco del semaforo: a los 2 logins, todo es 503"),
+    ("personal.py",
+     ("    _tomar_hueco_hash()\n    try:\n"
+      "        verificacion = _enviar_al_ejecutor(_verificar_hash, hash_guardado, contrasena)\n"
+      "        return verificacion.result()\n    finally:\n        _semaforo.release()\n"),
+     ("    verificacion = _enviar_al_ejecutor(_verificar_hash, hash_guardado, contrasena)\n"
+      "    return verificacion.result()\n"),
+     "test_login.ComprobarFactores.test_saturado_sin_calcular_el_hash",
+     "el login no toma el semaforo: la cola del ejecutor crece sin tope y nunca hay 503"),
+    ("personal.py", "        return verificacion.result()\n",
+     "        return verificacion.result(timeout=ESPERA_HASH)\n",
+     "test_ejecutor_hashes.ResultadoSinPlazo.test_sin_plazo_y_la_tercera_satura_sin_encolarse",
+     "result con plazo: el llamante suelta el hueco con su hash en marcha y un tercero se encola"),
 ]
 
 PRUEBA_QUE_FALLA = '''import unittest
