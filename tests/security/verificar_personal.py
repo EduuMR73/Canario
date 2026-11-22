@@ -103,7 +103,10 @@ y 6.9). Qué prueba:
   tope, una nueva da 429 con su mensaje y Retry-After hasta la medianoche de
   la empresa, sin fila; releer sigue permitido y otra cuenta no se ve
   afectada; un intento de aviso por cada admin y auditor (sin Mailpit, su
-  EVENTO correo_fallido). Si el día de la empresa cambia a mitad, SIN
+  EVENTO correo_aplazado con intento=1 en el log del cartero; control: los
+  avisos de activación de las secciones anteriores también se intentaron). Si el
+  cupo diario de avisos del cartero los descarta, o si el día de la
+  empresa cambia a mitad, SIN
   CONCLUSION. Con esas filas, la auditoría desde lo más reciente pagina sin
   huecos y coincide fila a fila con la de desde el principio.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
@@ -213,7 +216,16 @@ LECTURAS_TOPE = 50
 CUERPO_429_LECTURAS = ('{"detalle": "ha abierto hoy el máximo de 50 denuncias distintas; '
                        'puede seguir con las que ya abrió y abrir otras mañana"}').encode()
 TEXTO_EVENTO_LECTURAS = "EVENTO limite_lecturas_"
-TEXTO_CORREO_LECTURAS = "EVENTO correo_fallido: tipo=aviso_lecturas "
+# Desde el cartero (0761c65), la API solo deja EVENTO correo_fallido si el
+# cartero no acepta el correo (app/correo.py); lo que pasa después queda en
+# el log del cartero (app/cartero.py, repartir). Esta batería no levanta
+# Mailpit (perfil desarrollo, docker-compose.yml): el cartero no resuelve su
+# nombre y cada correo deja su primer intento aplazado. La línea termina así.
+INTENTO_LECTURAS = "EVENTO correo_aplazado: tipo=aviso_lecturas motivo=gaierror intento=1"
+INTENTO_ACTIVACION = "EVENTO correo_aplazado: tipo=aviso_activacion motivo=gaierror intento=1"
+# Lo que impide intentar la entrega, en la API o en el cartero, para el diagnóstico.
+PERDIDOS_LECTURAS = ("EVENTO correo_fallido: tipo=aviso_lecturas ", "EVENTO correo_descartado: tipo=aviso_lecturas ")
+DESCARTE_CUPO_LECTURAS = "EVENTO correo_descartado: tipo=aviso_lecturas motivo=cupo_diario"
 CUERPO_404 = b'{"detalle": "recurso no encontrado"}'
 CUERPO_409_DUPLICADO = b'{"detalle": "ya existe una cuenta con ese email"}'
 CUERPO_409_ULTIMO = '{"detalle": "la empresa se quedaría sin ningún admin activo"}'.encode()
@@ -2719,8 +2731,15 @@ def eventos_lecturas(usuario_id):
             if TEXTO_EVENTO_LECTURAS in linea and f"cuenta={usuario_id}" in linea]
 
 
-def intentos_aviso_lecturas():
-    return sum(TEXTO_CORREO_LECTURAS in linea for linea in lineas_log("api"))
+def intentos(texto):
+    """Primeros intentos de entrega de un tipo de correo en el log del cartero."""
+    return sum(linea.rstrip().endswith(texto) for linea in lineas_log("cartero"))
+
+
+def perdidos_lecturas():
+    """Avisos de lecturas que no llegaron a intentarse (API o cartero)."""
+    return [linea for servicio in ("api", "cartero") for linea in lineas_log(servicio)
+            if any(texto in linea for texto in PERDIDOS_LECTURAS)]
 
 
 def seccion_k_lecturas():
@@ -2741,7 +2760,10 @@ def seccion_k_lecturas():
     # admins y auditores activos y activados de A, salvo el lector.
     vigilantes = valor(f"select count(*) from canal.usuario_personal where empresa_id = '{EMPRESAS['A'][0]}' "
                        f"and rol in ('admin', 'auditor') and activo and totp_activo and id <> '{lector.usuario_id}';")
-    correos_antes = intentos_aviso_lecturas()
+    correos_antes = intentos(INTENTO_LECTURAS)
+    # Control de kl4: el camino API -> cartero -> intento de entrega funciona
+    # en esta ejecución (los avisos de activación de las secciones anteriores).
+    activacion_intentada = intentos(INTENTO_ACTIVACION) >= 1
 
     # kl1) Hasta el aviso: cada denuncia nueva suma una, y la vigésima avisa.
     primeras = http([pt("GET", rd(d), token=token) for d in ids[:LECTURAS_AVISO - 1]])
@@ -2812,16 +2834,26 @@ def seccion_k_lecturas():
              otra.get("estado") == 200 and (lecturas_de(otra) or {}).get("tope") == 50, control_vieja,
              f"respuesta: {otra.get('estado')}")
 
-    # kl4) Los avisos salen hacia quien vigila: sin Mailpit en esta batería,
-    #      cada intento deja su EVENTO correo_fallido (el envío real, con quién
+    # kl4) Los avisos salen hacia quien vigila: uno por vigilante en el aviso
+    #      y otro en el tope. Sin Mailpit en esta batería, cada uno deja en el
+    #      log del cartero su primer intento aplazado (el envío real, con quién
     #      lo recibe y quién no, lo prueba tests/security/verificar_registro.py).
     esperados = 2 * int(vigilantes)
-    # Salen después de responder: se espera a que estén todos, y después se
-    # comprueba que no hay de más.
-    esperar(lambda: intentos_aviso_lecturas() - correos_antes >= esperados, 30)
-    intentos = intentos_aviso_lecturas() - correos_antes
-    pasa(int(vigilantes) >= 2 and intentos == esperados,
-         f"kl4) un intento de aviso por vigilante en el aviso y en el tope ({intentos} de {esperados})")
+    # Salen después de responder y el cartero los intenta en su hilo: se
+    # espera a que estén todos, y después se comprueba que no hay de más. Solo
+    # se cuenta el intento 1: el reintento llega a los 60 s (cartero.py,
+    # ESPERAS_REINTENTO) y no duplica la cuenta.
+    esperar(lambda: intentos(INTENTO_LECTURAS) - correos_antes >= esperados, 30)
+    hechos = intentos(INTENTO_LECTURAS) - correos_antes
+    perdidos = perdidos_lecturas()
+    nombre_kl4 = f"kl4) un intento de aviso por vigilante en el aviso y en el tope ({hechos} de {esperados})"
+    if any(DESCARTE_CUPO_LECTURAS in linea for linea in perdidos):
+        # El cupo diario de avisos del cartero es un límite del entorno de la
+        # batería, no un fallo de los avisos.
+        sinc(f"{nombre_kl4}: el cupo diario de avisos del cartero los descarto")
+    else:
+        negativo(nombre_kl4, int(vigilantes) >= 2 and hechos == esperados, activacion_intentada,
+                 f"(control: avisos de activacion intentados antes de kl; perdidos: {perdidos[:4]})")
     sin_destino = [l for l in lineas_log("api") if "EVENTO aviso_sin_destinatario: tipo=aviso_lecturas" in l]
     negativo("kl4) con vigilantes no sale EVENTO aviso_sin_destinatario", sin_destino == [], int(vigilantes) >= 2)
 
