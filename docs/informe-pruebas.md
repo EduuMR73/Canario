@@ -262,6 +262,29 @@ Dentro de cada rango, las IPs se reparten de forma circular por iteración, nunc
 
 **E13. Escala OWASP.** Si se conoce el impacto de negocio, se usa ese; si no, el técnico. No se promedian todos los factores de impacto juntos.
 
+**E14 y E15 no son aclaraciones, son desviaciones.** Las dos cambian un oráculo de la segunda congelación: E14 le añade una condición al de F2, y E15 cambia cómo cuenta L3b en el RESULTADO GLOBAL. Por eso no les vale la frase de la introducción de este anexo ("Ninguna de estas aclaraciones cambia una tasa ni el sentido de un oráculo"). Salieron de la revisión de la implementación y se congelan en su propio commit, con push, antes de medir.
+
+**E14. Descartes de k6 en L4 (F2).** La dictaminó el QA. El motivo es que, si se miraran solo las peticiones que k6 llegó a enviar, una ventana podría parecer recuperada justo porque las más lentas no se enviaron.
+- Las rutas de F2 son cuatro: denuncia, seguimiento, `GET /web/seguimiento` y login. `POST /salud` no cuenta.
+- Un descarte es una fila `dropped_iterations` del CSV de k6 en el escenario de una de esas cuatro rutas, en cualquier fase. Su instante es la marca de esa fila. Igual que en E9, cuenta en todas las ventanas [s, s + 10) que contienen ese instante.
+- **Comprobación previa en la sonda de k6, antes de medir.** Se lanza un escenario `constant-arrival-rate` a 2/s, con 1 VU, contra un endpoint que tarda 2 s. Las marcas de `dropped_iterations` tienen que quedar separadas unos 0,5 s y la primera tiene que caer a menos de 0,5 s del inicio del escenario. Si no es así, la ejecución para y se revisa E14.
+- Una ventana en la que una ruta tiene algún descarte no cumple el criterio para esa ruta, lleve o no el descarte el aviso `Insufficient VUs`. Los descartes sin el aviso son además un fallo de validez (J1).
+- En la RECUPERACIÓN, esa ventana cuenta como no recuperada (es un resultado).
+- En la BASE de L4, un solo descarte en cualquiera de las cuatro rutas, con su instante entre el inicio y el fin programados de la BASE, da `SIN CONCLUSION` por validez, como en L2, sea cual sea el 95 % de F2.
+- En el PICO no se evalúa ningún oráculo: sus descartes solo se informan, ruta por ruta.
+
+**E15. L3b da dos veredictos, y una FALLA de L3b-b impide el OK.** La segunda congelación no decía cómo se combinan los dos oráculos de D6, que esperan resultados opuestos. Esta aclaración lo fija:
+- **Dos veredictos separados**, cada uno con su línea en la salida:
+  - **L3b-a**, el oráculo por IP y ventana, con su validez propia: J2, D3, J5 y el control de strict.
+  - **L3b-b**, las víctimas, con su validez propia: la BASE y el control B2, que solo actúa sobre L3b-b.
+  - La validez común (generador, detector, muertes y 00:00 UTC) se aplica a los dos. Ninguna línea junta los dos en un único veredicto de L3b.
+- **Una FALLA de L3b-b da NO OK aunque el diseño la espere,** por la regla común de la sección 2 (Reglas comunes): "Un `SIN CONCLUSION`, una prueba saltada o un fallo esperado (`xfail`, ...) impiden el OK". El threat model (§8, l.693) acepta que el límite sea por cliente, pero no que el denunciante se quede sin canal. Esa consecuencia es la amenaza ABIERTA de l.760-764 ("Agotar los hilos de la API con logins"). La salida lo dice tal cual: "L3b-b: FALLA (esperada por el diseño; NO OK; misma amenaza que L2, threat-model §8, ABIERTA)".
+- Una FALLA de L3b-b da NO OK **también si L2 da PASA**. Una FALLA de L3b-a o cualquier `SIN CONCLUSION` dan NO OK.
+- Si L3b-b da PASA con B2 cumplido, la diferencia con L2 se explica en el informe. No sirve para cerrar la amenaza.
+- Debajo de L3b-b se da la cifra del coste solo si L3b-b es FALLA y B2 se cumple. Es una cota superior, no el mínimo: 3402 IPs IPv4 durante 300 s a 102,04/s. Para un corte de 30 s, unas 306 IPs (153 aprovechando la frontera de la ventana), calculadas a mano y sin medir.
+- En el threat model, L3b no abre una entrada nueva. Entra en l.760-764 como factor de probabilidad de la escala OWASP (B6). En l.693 solo se remite a esa entrada y se dice que la amenaza está medida, no cerrada.
+- L3b-b solo podría pasar a ser informativa con una aceptación explícita del riesgo, con responsable y fecha, en una congelación posterior. Nunca después de ver el resultado.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |
