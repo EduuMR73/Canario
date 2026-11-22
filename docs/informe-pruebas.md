@@ -150,6 +150,70 @@ En producción (P5 y P6) los umbrales son absolutos, porque es la máquina real:
 - **H5 (L6).** Con la regla de denuncia (cada clave vive 3600 s desde su creación) y unos 100 B por clave (supuesto sin medir), en 64 MB caben unas 500 000 claves: a 150 peticiones por segundo desde IPs siempre nuevas, el 503 para los clientes legítimos aparece antes de 60 minutos (unos 55), y `/salud` sigue en 200. Sin intervención, el servicio vuelve de forma gradual a partir de una hora después del inicio de la carga.
 - **H6 (L4).** Tras el pico, el p95 calculado en ventanas deslizantes de 10 s vuelve a cumplir el criterio de degradación frente a la base en menos de 60 s, sin reinicios de ningún contenedor.
 
+### Segunda congelación (22/11/2026): L2, L3, L3b y L4
+
+Se congela en su propio commit, con push antes de ejecutar L2, L3, L3b o L4. L7 y P6 no entran: sus tasas se congelarán en otro commit antes de medirlas.
+
+**Fe de erratas de la primera congelación.** Donde dice "2 / t = 101,91 logins por segundo", con t = 0,0196 s el valor correcto es **2 / t = 102,04** (la salida de L1 ya lo calcula bien: "0.5 x 2/t=51.02/s"). Se deja el texto original sin tocar y se corrige aquí. La predicción de H1, ±25 %, pasa a ser de 76,5 a 127,6 logins por segundo. El codo medido, 76/s, queda justo por debajo del límite inferior: H1 sigue refutada, igual que con la cifra errónea.
+
+**Regla de las tasas y por qué.** Todas las tasas salen de t = 0,0196 s, el valor que se pasa con `--t`, y no del codo de L1. Es una desviación de la lista de arriba ("todas sacadas de L1 y P5"). El motivo es que t se congeló antes de cualquier carga, mientras que el codo es un resultado (de una sola repetición el 22/11; L1 × 3 aún no se ha ejecutado). Si las tasas se eligieran viendo los resultados, se podría sospechar que se ajustaron para que la prueba saliera de una forma concreta. Para que se pueda comparar, esto es lo que habría salido con el codo de 76/s:
+
+| Prueba | Con t (lo que se congela) | Con el codo de L1 (no se usa) |
+|---|---|---|
+| L2, inundación del login | 1,5 × 2/t = **153,06/s** (el último escalón de L1) | 1,5 × 76 = 114/s |
+| L4, login en el pico | 2/t = **102,04/s** (la capacidad que predice H1) | 76/s |
+| L4, login en la base | 0,1 × 2/t = **10,20/s** | 7,6/s |
+| L3b, IPs del ataque | ceil(102,04 × 300 / 9) = **3402** | ceil(76 × 300 / 9) = 2534 |
+
+La base del login de L4 se eligió hacia atrás: el pico es 10 veces la base, así que la base es una décima parte del pico.
+
+**Escenarios congelados.**
+
+- **L2** (límites relajados de estrés, Caddyfile local). Hay dos empresas: A, la atacada, y B, la del denunciante. Las víctimas van a 5/s cada una: denuncia contra B, seguimiento inexistente y `GET /web/seguimiento`, con 50 VUs por víctima. La inundación es `login_email` contra A a 153,06/s, con un máximo de 600 VUs. Además, `POST /salud` a 1/s. Fases: calentamiento de 30 s, BASE de 120 s, INUNDACIÓN de 120 s y RECUPERACIÓN de 120 s. La inundación termina en su fin programado (inicio más duración); los 20 s siguientes no se cuentan.
+- **L4** (límites relajados). Un escenario `constant-arrival-rate` por ruta y fase, para saber a qué ruta corresponde cada descarte. En la BASE: denuncia contra B, seguimiento y `GET /web/seguimiento` a 5/s cada una, y login a 10,20/s, en total 25,20/s. En el PICO, durante 30 s, todo por 10: 50/s en cada víctima y 102,04/s en el login. Fases: calentamiento de 30 s, BASE de 120 s, PICO de 30 s y RECUPERACIÓN de 180 s. Además, `POST /salud` a 1/s.
+- **L3** (límites de producción). Se usa `Caddyfile.produccion` y la red `edge` va con `internal: true`. k6 se pone en 10.88.1.2 con la cabecera `Host` de producción y la IP simulada al final de `X-Forwarded-For`. Hay 200 IPs de 198.18.0.0/15, que se turnan por iteración, a 1,5/s por IP: 300/s contra seguimiento inexistente durante 300 s. Empieza justo después de una frontera de minuto UTC, según el reloj de la VM. Con el Host de producción, la página web es `/seguimiento`.
+- **L3b** (el mismo montaje que L3). El ataque es `login_email` contra A a 102,04/s desde 3402 IPs: 9 peticiones por IP en cada ventana de 300 s, por debajo del límite de 10 de `acceso`. El email inexistente solo consume `acceso`. El ataque dura como mínimo 300 s y empieza justo después de una frontera de 5 minutos UTC. Las víctimas son las de L2, con rangos de IPs que no se solapan con el ataque ni entre sí, calculados con su regla y un margen de 1,5: 428 IPs para la denuncia y 8 para cada una de las otras dos. Fases: calentamiento de 30 s, BASE de 120 s, ATAQUE de 300 s y RECUPERACIÓN de 120 s. Hay 10 IPs de control, distintas de todas las demás, que reciben 11 peticiones en la misma ventana. El resultado es una **cota superior** de lo que le cuesta el ataque a un atacante a esa tasa y durante ese tiempo, no el mínimo. Se da en función de la duración del corte; para un corte de 30 s se calcula a mano (unas 306 IPs, o 153 aprovechando la frontera de la ventana), sin medirlo. Solo cubre IPv4: el dominio no tiene registro AAAA. La comparación con las unas 2300 IPs de `docs/threat-model.md` es 0,75 × 102,04 × 300 / 10 = 2296.
+- **Tras el pico de L4, un humo HTTP en vez de F1** (es una desviación de la matriz, fila L4). F1 levanta su propia pila, con las mismas subredes, así que no puede comprobar que la pila de estrés se ha recuperado. El humo se lanza en la misma pila 120 s después del fin del pico: denuncia en B (201 y código), `POST /v1/seguimiento` con ese código (200 y el texto sembrado), `GET /web/seguimiento` (200) y el formulario de consulta del 8444 con el código (200 y el texto). El control es el mismo humo justo antes del pico. Las peticiones de los dos humos llevan su propia etiqueta y no cuentan para el p95.
+
+**Reglas comunes de veredicto (J1).** Hay dos clases de control:
+
+- **Validez:** la CPU de k6 por encima del 320 %, descartes sin el aviso `Insufficient VUs`, un OOM o un código de salida de k6 distinto de 0, la BASE fuera del SLO, un hueco del lector de más de 3 s, un protocolo distinto de HTTP/1.1, una repetición que cruza las 00:00 UTC, una línea de límites distinta de la literal o un fallo del control del detector. Cualquiera de ellos da `SIN CONCLUSION`, y `SIN CONCLUSION` **gana a FALLA**. Basta con una repetición `SIN CONCLUSION` por validez para que toda la prueba sea `SIN CONCLUSION`.
+- **Control de que el ataque existe:** solo puede convertir un PASA en `SIN CONCLUSION`. Nunca toca una FALLA.
+- **La muerte de un servicio de Canario es FALLA**, y ningún fallo de validez la anula, salvo el OOM global de la VM, que da `SIN CONCLUSION`. Un hueco del lector o un fallo del detector durante una muerte ya identificada no cuenta como fallo de validez.
+- Hacen falta 3 repeticiones válidas. El p95 y la degradación se evalúan sobre la mediana de las tres, y se publica también el veredicto de cada repetición.
+- **Comprobación de que no se filtran datos:** al final, en cada fichero guardado (incluidos los de una ejecución abortada) se buscan los valores sembrados, tal cual y codificados para URL o JSON. Si aparece alguno, `SIN CONCLUSION`. El control es un valor centinela que la batería planta a propósito en un fichero y que la búsqueda tiene que encontrar.
+
+**Oráculos.**
+
+- **B1, cada víctima de L2 y L3b durante la inundación o el ataque.** FALLA si está degradada (según el criterio de degradación), si su p95 supera el SLO, si tiene un 1 % o más de errores (incluidos los plazos agotados y las respuestas con un estado distinto del esperado) o si hay descartes con el aviso en su escenario. Si no, PASA. El 99 % del estado esperado solo da `SIN CONCLUSION` en la BASE: una víctima caída es FALLA. El veredicto de la prueba es el de la peor víctima.
+- **B2, control de que el ataque existe en L2 y L3b.** Se cumple si el p95 del login supera 1500 ms, si el login tiene un 1 % o más de errores o si hay descartes con el aviso en el escenario del login. La CPU de la API y la tasa realmente atendida solo se informan. Predicciones informativas de la espera de las víctimas: 560 / 102,04 = 5,5 s y 560 / 73 (lo que la API sirvió en L1) = 7,7 s.
+- **C1, por IP y ventana en L3.** Una petición es ambigua si el intervalo entre su inicio y su fin (marca menos duración, marca) cruza una frontera de minuto UTC. Solo cuentan como aceptadas las respuestas 404 (J3); los 503 se cuentan aparte y se comparan uno a uno con las líneas `EVENTO`. FALLA si en algún par IP-ventana hay más de 60 aceptadas no ambiguas. `SIN CONCLUSION` si solo se pasa de 60 al contar también las ambiguas. PASA en el resto de casos. Todo 429 debe llevar `Retry-After` entre 1 y 60.
+- **J2, control positivo de L3.** No pueden ser 429 las primeras peticiones no ambiguas de cada par, en número de 60 menos las ambiguas del principio del par y menos las anteriores del mismo par con estado 0 o 503.
+- **Desviación de la tabla de arriba, fila L3** ("hasta 120 si la ráfaga cruza la frontera"). El defecto de la ventana fija ya no forma parte del oráculo. Se mide aparte, como información: el máximo de aceptadas por IP en cualquier tramo de 60 s, que se espera que sea como mucho 120.
+- **Controles de configuración de L3 y L3b.** Si alguno falla, la ejecución para:
+  - una petición desde 10.88.1.3 con el Host de producción debe recibir el 403 literal de `Caddyfile.produccion`;
+  - 70 peticiones con `X-Forwarded-For: <IP falsa que cambia en cada una>, 198.19.255.254` deben contar todas para 198.19.255.254, así que dan 429 a partir de la 61. Si cruzan la frontera de minuto, el resultado es `SIN CONCLUSION`;
+  - entre repeticiones se recrea la API, y la primera petición de una IP usada en la repetición anterior no puede ser 429.
+- **D3, control de que el límite está activo en L3b.** La 11.ª petición de cada una de las 10 IPs de control tiene que ser 429; si no, `SIN CONCLUSION`.
+- **D6, L3b.** (a) Por IP y ventana, como C1 pero con un límite de 10 en una ventana de 300 s, contando solo los 401 como aceptados, y con el control J2 calculado sobre 10. (b) Las víctimas, con B1 y el control B2. Lo que espera el diseño: (a) PASA, y (b) FALLA.
+- **F2, recuperación en L4.** Se calcula el p95 en ventanas de 10 s que avanzan de 1 en 1 s, con cada petición asignada a la ventana de su inicio. Solo cuentan las ventanas que empiezan después del fin programado del pico. El tiempo de recuperación es el inicio de la primera ventana a partir de la cual todas las rutas cumplen el criterio de degradación frente a su BASE durante 30 s seguidos. El control es el mismo cálculo sobre la propia BASE: debe encadenar 30 s seguidos dentro del criterio, y al menos el 95 % de sus ventanas tiene que cumplirlo. Si no, `SIN CONCLUSION`.
+- **F3, L4.** PASA si se recupera en menos de 60 s, sin reinicios y con el humo correcto. FALLA si tarda 60 s o más o no se recupera en los 180 s (H6 refutada), si se reinicia algún contenedor o si el humo falla.
+
+**Severidad de los hallazgos: la escala OWASP Risk Rating.** La probabilidad y el impacto se puntúan de 0 a 9, cada uno como la media de sus factores:
+
+- **Probabilidad:** habilidad, motivo, oportunidad y tamaño del atacante; facilidad para descubrir la vulnerabilidad y para explotarla, cuánto se conoce y cómo de fácil es detectar el ataque.
+- **Impacto:** técnico (confidencialidad, integridad, disponibilidad y trazabilidad) y de negocio (daño económico, reputación, incumplimiento normativo y privacidad).
+
+Cada media es BAJA si va de 0 a menos de 3, MEDIA de 3 a menos de 6 y ALTA de 6 a 9. La severidad final sale de esta tabla:
+
+| Impacto \ Probabilidad | BAJA | MEDIA | ALTA |
+|---|---|---|---|
+| ALTO | Media | Alta | Crítica |
+| MEDIO | Baja | Media | Alta |
+| BAJO | Nota | Baja | Media |
+
+Si L2 da FALLA, se registra en `docs/threat-model.md` §8 con esta escala, en estado ABIERTO, y el `RESULTADO GLOBAL` queda en NO OK.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |
