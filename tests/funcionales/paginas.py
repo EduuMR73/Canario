@@ -10,8 +10,9 @@ la ejecución (códigos, contraseñas, enlaces ni textos), porque acaba en el
 informe HTML.
 
 Aquí viven también, porque las usan conftest.py y las pruebas a la vez, el
-TOTP de la prueba con su memoria de pasos, la excepción SinConclusion y paso(),
-que traduce los errores de Playwright.
+TOTP de la prueba con su memoria de pasos, la excepción SinConclusion, concluir()
+(la regla "control fallido: SIN CONCLUSION") y paso(), que traduce los errores
+de Playwright.
 """
 import base64
 import contextlib
@@ -40,6 +41,16 @@ class SinConclusion(Exception):
 
 class FalloPaso(AssertionError):
     """Un paso del circuito no se pudo completar en el navegador."""
+
+
+def concluir(control_ok, resultado_ok, mensaje):
+    """Prueba negativa con control positivo: si el control falla, la prueba no
+    demuestra nada y es SIN CONCLUSION (aunque el resultado también falle);
+    solo con el control en verde cuenta el resultado. El mensaje es un literal,
+    sin datos de la ejecución."""
+    if not control_ok:
+        raise SinConclusion(f"{mensaje}: el control positivo falló")
+    assert resultado_ok, mensaje
 
 
 @contextlib.contextmanager
@@ -91,13 +102,15 @@ class Denunciante8444:
 
     def __init__(self, pagina):
         self.pagina = pagina
+        # La última respuesta de navegación, para comparar su cuerpo (F2).
+        self.respuesta = None
 
     def _enviar(self):
         # El estado HTTP de la respuesta que pinta la página nueva.
         with self.pagina.expect_navigation() as navegacion:
             self.pagina.click("main form button[type=submit]")
-        respuesta = navegacion.value
-        return -1 if respuesta is None else respuesta.status
+        self.respuesta = navegacion.value
+        return -1 if self.respuesta is None else self.respuesta.status
 
     def abrir_formulario(self, identificador):
         respuesta = self.pagina.goto(f"{WEB}/empresas/{identificador}")
@@ -107,6 +120,40 @@ class Denunciante8444:
         self.pagina.select_option("#categoria", categoria)
         self.pagina.fill("#texto", texto)
         return self._enviar()
+
+    def elegir_categoria(self, categoria):
+        self.pagina.select_option("#categoria", categoria)
+
+    def escribir_texto(self, texto):
+        self.pagina.fill("#texto", texto)
+
+    def pulsar_enviar(self):
+        """Pulsa "Enviar" sin esperar una navegación: si la validación del
+        navegador bloquea el envío, no hay ninguna."""
+        self.pagina.click("main form button[type=submit]")
+
+    def url(self):
+        return self.pagina.url
+
+    def campo_invalido(self, campo):
+        """Exactamente un elemento con ese id y aria-invalid="true"."""
+        return self.pagina.locator(f'#{campo}[aria-invalid="true"]').count() == 1
+
+    def alerta_visible(self):
+        """Exactamente un role="alert" en el contenido principal, y visible."""
+        alertas = self.pagina.locator("main [role=alert]")
+        return alertas.count() == 1 and alertas.first.is_visible()
+
+    def alerta_contiene(self, literal):
+        return literal in normalizado(self.pagina.locator("main [role=alert]").first.text_content())
+
+    def error_codigo_es(self, literal):
+        """El mensaje unido al campo del código (#error-codigo), entero."""
+        error = self.pagina.locator("#error-codigo")
+        return error.count() == 1 and normalizado(error.text_content()) == literal
+
+    def cuerpo_ultima_respuesta(self):
+        return self.respuesta.body()
 
     def h1_es(self, literal):
         return normalizado(self.pagina.locator("main h1").text_content()) == literal

@@ -1,4 +1,4 @@
-"""F1: el circuito entre actores en Chromium (docs/informe-pruebas.md, 2).
+"""F1: el circuito entre actores en Chromium y Firefox (docs/informe-pruebas.md, 2).
 
 El denunciante presenta en el 8444 sin JavaScript; el admin asigna la
 denuncia a la instructora; la instructora la abre, responde y cambia el
@@ -14,6 +14,7 @@ anterior (el texto de un actor tiene que llegar al otro).
 import re
 import secrets
 
+import pytest
 from paginas import Denunciante8444, paso
 
 # Un nonce por ejecución en cada texto sembrado.
@@ -42,7 +43,9 @@ PATRON_CODIGO = re.compile(r"([A-Z2-7]{4}-){7}[A-Z2-7]{4}")
 PATRON_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
-def test_f1_circuito_entre_actores_chromium(cuentas, nuevo_contexto, registrar_secreto):
+# F1 corre en Chromium y Firefox; WebKit solo corre F2 y F3 (informe de pruebas, 2).
+@pytest.mark.motores("chromium", "firefox")
+def test_f1_circuito_entre_actores(cuentas, nuevo_contexto, registrar_secreto):
     identificador = cuentas["identificador"]
     admin, instructora = cuentas["admin"], cuentas["instructora"]
 

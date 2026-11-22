@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lanzador de las pruebas funcionales (tests/funcionales/, F1 de
+"""Lanzador de las pruebas funcionales (tests/funcionales/, F1, F2 y F3 de
 docs/informe-pruebas.md). Se ejecuta en el host, desde la raíz del repo:
 
     python tests\\funcionales\\lanzar.py [--conservar]
@@ -14,18 +14,26 @@ Qué hace, en orden:
   configurar y el correo con una CA de la prueba (nunca los ficheros de
   secrets/, que la pila monta como en las baterías y que aquí no se leen), y
   comprueba la línea entera de límites del log de la API;
-* da de alta una empresa y su admin con gestion. El token de invitación del
-  admin no se imprime nunca: va a datos.json, en otro temporal montado de
-  solo lectura en el contenedor de Playwright (ni por argv ni por -e, donde
-  lo vería docker inspect);
-* ejecuta pytest dentro de la imagen de Playwright, endurecida como en
-  verificar_spa.py, y mientras corre comprueba que docker inspect del
-  contenedor no contiene el token;
-* al terminar, el escáner anti-fuga busca en el informe HTML y en la salida
-  del contenedor cada secreto de la ejecución (y sus formas escapadas), con
-  un centinela como control positivo, y genera el informe publicable;
-* interpreta el resultado de pytest (código de salida y resumen.json) y
-  termina con RESULTADO GLOBAL: OK o NO OK, con código 0 solo si es OK;
+* lee la hoja que Caddy sirve en 8444 y 8445 con un handshake TLS desde el
+  host (validez y CN: datos públicos, van por argv). Es el control de
+  identidad de Firefox y WebKit, que no tienen el SPKI de Chromium;
+* ejecuta pytest una vez por motor (chromium, firefox, webkit), cada uno con
+  su empresa, su contenedor de Playwright y su salida. Solo chromium y firefox
+  corren F1 y dan de alta un admin con gestion: webkit corre F2 y F3 y no deja
+  ningún token vivo. El token de invitación del admin no se imprime nunca: va
+  a datos.json, en otro temporal montado de solo lectura en el contenedor (ni
+  por argv ni por -e, donde lo vería docker inspect). El contenedor está
+  endurecido como en verificar_spa.py y, mientras corre, se comprueba que
+  docker inspect no contiene ningún token (con un marcador público como
+  control). Antes de las pruebas, cada motor pasa un humo (humo.json): si
+  falla, PARADA, y nunca se relaja el endurecimiento;
+* al terminar todos los motores, el escáner anti-fuga busca en el informe HTML
+  y en la salida de CADA motor los secretos de TODAS las ejecuciones (y sus
+  formas escapadas), con un centinela por motor como control positivo, y
+  genera el informe publicable;
+* interpreta el resultado de cada motor (código de salida y resumen.json, con
+  3, 3 y 2 pruebas esperadas) y termina con RESULTADO GLOBAL: OK o NO OK, con
+  código 0 solo si es OK;
 * limpia en finally: down -v --rmi local, restos con el prefijo, git status
   igual al del arranque y los temporales, salvo el de salida (informe y
   trazas), cuya ruta imprime.
@@ -45,6 +53,7 @@ import pathlib
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -54,7 +63,6 @@ import urllib.parse
 RAIZ = pathlib.Path(__file__).resolve().parent.parent.parent
 DIR_PRUEBAS = RAIZ / "tests" / "funcionales"
 PROYECTO = "canario_funcionales"
-CONTENEDOR_PRUEBAS = f"{PROYECTO}_playwright"
 SALIDA_TEXTO = pathlib.Path(tempfile.gettempdir()) / "verificacion_funcionales.txt"
 # Con los perfiles gestion (alta de la empresa y del admin) y desarrollo
 # (Mailpit y el cartero). down solo actúa sobre los servicios de los perfiles
@@ -95,9 +103,15 @@ PATRON_INVITACION = re.compile(r"token_invitacion=([0-9a-f]{32}\.[A-Za-z0-9_-]{4
 # El mismo literal que EMAIL_ADMIN de conftest.py.
 EMAIL_ADMIN = "admin@funcionales.test"
 
-# Oráculos del resultado: el número de pruebas que deben pasar, escrito a
-# mano (si una prueba no se recogiera, no pasaría en silencio).
-PRUEBAS_ESPERADAS = 1
+# Oráculos del resultado: el número de pruebas que deben pasar en cada motor,
+# escrito a mano (si una prueba no se recogiera, no pasaría en silencio).
+# chromium: F1, F2 y F3; firefox: F1, F2 y F3; webkit: F2 y F3.
+MOTORES = ("chromium", "firefox", "webkit")
+PRUEBAS_ESPERADAS = {"chromium": 3, "firefox": 3, "webkit": 2}
+# El alta del admin solo en los motores que corren F1: en webkit sería un token
+# vivo que nadie usa.
+MOTORES_CON_ADMIN = ("chromium", "firefox")
+PUERTOS_HOJA = (8444, 8445)
 INFORME_BRUTO = "informe_bruto.html"
 INFORME_PUBLICABLE = "informe.html"
 # El elemento con el que conftest.py escribe el centinela en el informe.
@@ -119,7 +133,7 @@ ORDEN_PRUEBAS = (
     "--target /tmp/pw -r /pruebas/requisitos.txt && PYTHONPATH=/tmp/pw exec python3 -m pytest /pruebas "
     "-p no:cacheprovider -p pytest_metadata.plugin -p pytest_html.plugin -o xfail_strict=true "
     "--assert=plain --tb=short --show-capture=no --color=no "
-    f"--html=/salida/{INFORME_BRUTO} --self-contained-html --spki \"$1\""
+    f"--html=/salida/{INFORME_BRUTO} --self-contained-html --spki \"$1\" --motor \"$2\" --hojas \"$3\""
 )
 
 
@@ -356,9 +370,39 @@ def preparar_overrides(temporal):
 # ---------------------------------------------------------------------------
 # Pasos
 # ---------------------------------------------------------------------------
+def contenedor_de(motor):
+    return f"{PROYECTO}_playwright_{motor}"
+
+
+def hoja_servida(puerto):
+    """Validez y CN de la hoja que Caddy sirve en 127.0.0.1:<puerto>, leída
+    con un handshake TLS desde el host (ssl de la biblioteca estándar), no de
+    un fichero de /data. Son datos públicos y viajan por argv. La verificación
+    se desactiva solo para este handshake: lo que se quiere es leer la hoja,
+    no confiar en ella (la confianza de Firefox y WebKit se comprueba después,
+    en conftest.py, contra estos valores). Docker publica los puertos solo en
+    127.0.0.1."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    contexto = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    contexto.check_hostname = False
+    contexto.verify_mode = ssl.CERT_NONE
+    with socket.create_connection(("127.0.0.1", puerto), timeout=10) as conexion:
+        with contexto.wrap_socket(conexion, server_hostname="localhost") as tls:
+            der = tls.getpeercert(binary_form=True)
+    if not der:
+        raise Parada(f"Caddy no envía certificado en 127.0.0.1:{puerto}")
+    hoja = x509.load_der_x509_certificate(der)
+    nombres = hoja.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return {"desde": int(hoja.not_valid_before_utc.timestamp()), "hasta": int(hoja.not_valid_after_utc.timestamp()),
+            "cn": nombres[0].value if nombres else None}
+
+
 def arrancar(temporal):
-    """Levanta la pila y devuelve (identificador, token del admin, SPKI)."""
-    p("=== arranque de la pila y alta de la empresa y su admin")
+    """Levanta la pila (una vez para todos los motores) y devuelve el SPKI de
+    la CA intermedia y las hojas servidas (JSON en base64)."""
+    p("=== arranque de la pila")
     # Antes de arrancar: los secretos de Google salen del directorio temporal
     # y no de secrets/. Solo se imprimen los dos nombres, nunca la
     # configuración entera.
@@ -382,73 +426,94 @@ def arrancar(temporal):
     pasa(limites_ok, f"la API usa los limites relajados y el log lo dice ({TEXTO_LIMITES_PRUEBA!r})")
     if not limites_ok:
         raise Parada("la API no anuncia los limites relajados: el circuito no seria valido")
-    r = dc("run", "--rm", "-T", "gestion", "alta-empresa", "--nombre", "Empresa funcionales", "--zona",
+    pem = dc("exec", "-T", "caddy", "cat", INTERMEDIA_CA).out
+    if "BEGIN CERTIFICATE" not in pem:
+        raise Parada("no se pudo leer el certificado de la CA intermedia de Caddy")
+    try:
+        hojas = {str(puerto): hoja_servida(puerto) for puerto in PUERTOS_HOJA}
+    except OSError as error:
+        raise Parada(f"no se pudo leer la hoja que sirve Caddy ({type(error).__name__})") from None
+    p("   hojas servidas por Caddy (validez y CN, datos publicos): " + json.dumps(hojas, sort_keys=True))
+    hojas_b64 = base64.b64encode(json.dumps(hojas, sort_keys=True).encode("ascii")).decode("ascii")
+    return spki_de(pem), hojas_b64
+
+
+def alta_empresa(motor):
+    """Da de alta una empresa para el motor y, si corre F1, su admin. Devuelve
+    (identificador, token del admin o None)."""
+    r = dc("run", "--rm", "-T", "gestion", "alta-empresa", "--nombre", f"Empresa funcionales {motor}", "--zona",
            "Europe/Madrid")
     alta = PATRON_ALTA.search(r.out)
     if r.rc != 0 or alta is None:
-        raise Parada(f"no se pudo dar de alta la empresa de prueba: {r.err.strip()[-300:]!r}")
+        raise Parada(f"no se pudo dar de alta la empresa de prueba de {motor}: {r.err.strip()[-300:]!r}")
     identificador = alta.group(2)
+    p(f"   {motor}: empresa de prueba {identificador}")
+    if motor not in MOTORES_CON_ADMIN:
+        return identificador, None
     # La salida de alta-admin lleva el token: no se imprime nunca, ni stdout
     # ni stderr, tampoco en la PARADA.
     r = dc("run", "--rm", "-T", "gestion", "alta-admin", "--identificador", identificador, "--email", EMAIL_ADMIN)
     invitacion = PATRON_INVITACION.search(r.out)
     if r.rc != 0 or invitacion is None:
-        raise Parada(f"no se pudo emitir la invitacion del admin (codigo {r.rc})")
-    token = invitacion.group(1)
-    p(f"   empresa de prueba: {identificador}")
-    pem = dc("exec", "-T", "caddy", "cat", INTERMEDIA_CA).out
-    if "BEGIN CERTIFICATE" not in pem:
-        raise Parada("no se pudo leer el certificado de la CA intermedia de Caddy")
-    return identificador, token, spki_de(pem)
+        raise Parada(f"no se pudo emitir la invitacion del admin de {motor} (codigo {r.rc})")
+    return identificador, invitacion.group(1)
 
 
-def ejecutar_pruebas(datos, salida, temporal, spki, token):
-    """Ejecuta pytest en el contenedor de Playwright y devuelve (código de
-    pytest o None, salida del contenedor)."""
-    p("=== pruebas en Chromium (contenedor de Playwright)")
+def ejecutar_pruebas(motor, datos, salida, temporal, spki, hojas_b64, tokens):
+    """Ejecuta pytest de un motor en su contenedor de Playwright y devuelve
+    (código de pytest o None, salida del contenedor). tokens: los tokens de
+    admin de este motor y de los anteriores."""
+    p(f"=== pruebas en {motor} (contenedor de Playwright)")
+    contenedor = contenedor_de(motor)
     caddy = dc("ps", "-q", "caddy").out.strip()
     if not caddy:
         raise Parada("no se encuentra el contenedor de Caddy")
     # El navegador comparte la red del contenedor de Caddy: localhost:8444 y
-    # :8445 son Caddy, con el mismo Host y el mismo SNI que desde el host.
-    # Mínimo privilegio: pwuser, raíz de solo lectura, sin capacidades y sin
-    # nuevos privilegios. La red la usa pip. Sin --rm: docker inspect y docker
-    # logs se leen antes de borrarlo (en finally).
-    r = ejecutar(["docker", "run", "-d", "--name", CONTENEDOR_PRUEBAS, "--network", f"container:{caddy}",
+    # :8445 son Caddy, con el mismo Host y el mismo SNI que desde el host. En
+    # esos puertos de localhost solo puede estar Caddy, y por eso el control de
+    # identidad de Firefox y WebKit (que no es criptográfico) basta.
+    # Mínimo privilegio, igual para los tres motores: pwuser, raíz de solo
+    # lectura, sin capacidades y sin nuevos privilegios. NO se relaja para que
+    # un motor arranque (nada de --ipc=host, SYS_ADMIN, seccomp=unconfined ni
+    # root): si no arranca, el humo da PARADA. La red la usa pip. Sin --rm:
+    # docker inspect y docker logs se leen antes de borrarlo (en finally).
+    r = ejecutar(["docker", "run", "-d", "--name", contenedor, "--network", f"container:{caddy}",
                   "--user", USUARIO_PLAYWRIGHT, "--read-only", "--cap-drop", "ALL",
                   "--security-opt", "no-new-privileges", "--shm-size", "512m", "--tmpfs", "/tmp:size=600m,exec",
                   "-e", "HOME=/tmp", "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
                   "--mount", f"type=bind,src={DIR_PRUEBAS},dst=/pruebas,readonly",
                   "--mount", f"type=bind,src={datos},dst=/datos,readonly",
                   "--mount", f"type=bind,src={salida},dst=/salida",
-                  "-w", "/pruebas", "--entrypoint", "sh", IMG_PLAYWRIGHT, "-c", ORDEN_PRUEBAS, "funcionales", spki],
+                  "-w", "/pruebas", "--entrypoint", "sh", IMG_PLAYWRIGHT, "-c", ORDEN_PRUEBAS, "funcionales", spki,
+                  motor, hojas_b64],
                  timeout=900)
     if r.rc != 0:
-        raise Parada(f"no arranca el contenedor de Playwright: {r.err.strip()[-500:]!r}")
+        raise Parada(f"no arranca el contenedor de Playwright de {motor}: {r.err.strip()[-500:]!r}")
 
     # Mientras corre: la configuración del contenedor (órdenes, entorno y
-    # montajes) no lleva el token. Control: sí lleva el SPKI, que va por
-    # argv, así que se está leyendo la configuración de verdad.
-    r = ejecutar(["docker", "inspect", CONTENEDOR_PRUEBAS])
+    # montajes) no lleva ningún token de admin. Control: sí lleva el SPKI, que
+    # va por argv en todos los motores aunque Firefox y WebKit no lo usen, así
+    # que se está leyendo la configuración de verdad.
+    r = ejecutar(["docker", "inspect", contenedor])
     if r.rc != 0 or not r.out.strip():
-        sinc("docker inspect del contenedor de pruebas no se pudo leer: no se sabe si lleva el token")
+        sinc(f"docker inspect del contenedor de {motor} no se pudo leer: no se sabe si lleva algun token")
     else:
-        negativo("docker inspect del contenedor de pruebas no contiene el token del admin",
-                 token not in r.out, spki in r.out)
+        negativo(f"docker inspect del contenedor de {motor} no contiene ningun token de admin",
+                 not any(token in r.out for token in tokens), spki in r.out)
 
     try:
-        r = ejecutar(["docker", "wait", CONTENEDOR_PRUEBAS], timeout=1800)
+        r = ejecutar(["docker", "wait", contenedor], timeout=1800)
         codigo = int(r.out.strip()) if r.rc == 0 and r.out.strip().lstrip("-").isdigit() else None
     except subprocess.TimeoutExpired:
-        ejecutar(["docker", "kill", CONTENEDOR_PRUEBAS])
+        ejecutar(["docker", "kill", contenedor])
         codigo = None
         p("   el contenedor de pruebas supera 30 minutos: se detiene")
-    r = ejecutar(["docker", "logs", CONTENEDOR_PRUEBAS])
+    r = ejecutar(["docker", "logs", contenedor])
     texto = r.out + r.err
     # La salida se guarda en el temporal y no se imprime entera: con un
     # fallo, las trazas de pytest podrían llevar datos.
-    (temporal / "salida_contenedor.txt").write_text(texto, encoding="utf-8", newline="\n")
-    p(f"   pytest termina con codigo {codigo}; salida guardada en {temporal / 'salida_contenedor.txt'}")
+    (temporal / f"salida_contenedor_{motor}.txt").write_text(texto, encoding="utf-8", newline="\n")
+    p(f"   pytest termina con codigo {codigo}; salida guardada en {temporal / f'salida_contenedor_{motor}.txt'}")
     return codigo, texto
 
 
@@ -457,6 +522,23 @@ def leer_json(ruta):
         return json.loads(ruta.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def comprobar_humo(motor, salida):
+    """Lee humo.json del motor. PARADA si el humo falló o no terminó; un
+    SIN CONCLUSION (por ejemplo, el literal del error de certificado sin
+    fijar) no para: las pruebas ya lo reflejan, y aquí se imprime lo observado
+    para fijarlo."""
+    humo = leer_json(salida / "humo.json")
+    if not isinstance(humo, dict):
+        raise Parada(f"{motor}: el humo no dejo humo.json")
+    p(f"   humo de {motor}: {json.dumps(humo, ensure_ascii=False, sort_keys=True)}")
+    if humo.get("estado") == "parada":
+        raise Parada(f"{motor}: {humo.get('motivo')}")
+    if humo.get("estado") == "sin_conclusion":
+        sinc(f"el humo de {motor} no concluye: {humo.get('motivo')}")
+    elif humo.get("estado") != "ok":
+        raise Parada(f"{motor}: el humo no termino (estado {humo.get('estado')!r})")
 
 
 def formas(valor):
@@ -481,28 +563,29 @@ def fugas(secretos, textos):
     return vistos
 
 
-def antifuga(salida, secretos, texto_contenedor):
-    """Escáner anti-fuga sobre el informe real y la salida guardada, con el
-    centinela como control positivo. Si todo está limpio, genera el informe
-    publicable sin el centinela y borra el bruto. Devuelve True solo si el
-    control funcionó y no apareció ningún secreto."""
-    p("=== anti-fuga: secretos de la ejecucion en el informe y en la salida del contenedor")
+def antifuga(motor, salida, secretos, centinelas, texto_contenedor):
+    """Escáner anti-fuga sobre el informe real y la salida guardada de un
+    motor, contra los secretos de TODAS las ejecuciones (un secreto de un motor
+    en la salida de otro también es una fuga), con el centinela del motor como
+    control positivo. Si todo está limpio, genera el informe publicable sin el
+    centinela y borra el bruto. Devuelve True solo si el control funcionó y no
+    apareció ningún secreto."""
+    p(f"=== anti-fuga ({motor}): secretos de todas las ejecuciones en el informe y en la salida del contenedor")
     bruto = salida / INFORME_BRUTO
     contenido = bruto.read_text(encoding="utf-8") if bruto.is_file() else ""
-    pasa(bool(contenido.strip()), "el informe HTML existe y no esta vacio")
+    pasa(bool(contenido.strip()), f"{motor}: el informe HTML existe y no esta vacio")
     if not contenido.strip():
         return False
     # El HTML tal cual y desescapado (atributos y entidades).
     textos = [contenido, html.unescape(contenido), texto_contenedor]
-    centinelas = secretos.pop("centinela", [])
     elemento = FORMATO_CENTINELA.format(centinelas[0]) if len(centinelas) == 1 else None
     control = elemento is not None and contenido.count(elemento) == 1
     if not control:
-        sinc("el centinela no aparece una vez en el informe: el escaner no demuestra nada")
+        sinc(f"{motor}: el centinela no aparece una vez en el informe: el escaner no demuestra nada")
     adjuntos = [a for a in ADJUNTOS_BASE64 if a in contenido]
-    pasa(not adjuntos, f"el informe no lleva adjuntos en base64, que el escaner no lee ({adjuntos})")
+    pasa(not adjuntos, f"{motor}: el informe no lleva adjuntos en base64, que el escaner no lee ({adjuntos})")
     vistos = fugas(secretos, textos)
-    negativo(f"ningun secreto de la ejecucion aparece en el informe ni en la salida (revisados: "
+    negativo(f"{motor}: ningun secreto de las ejecuciones aparece en el informe ni en la salida (revisados: "
              f"{sorted(secretos)}; vistos: {vistos})", not vistos, control)
     if not control or vistos or adjuntos:
         p(f"   NO PUBLICAR {bruto}: puede llevar secretos de esta ejecucion")
@@ -512,31 +595,32 @@ def antifuga(salida, secretos, texto_contenedor):
     # publicable a medias. Se comprueba otra vez antes de borrar el bruto.
     publicable = contenido.replace(elemento, "", 1)
     limpio = centinelas[0] not in publicable and not fugas(secretos, [publicable, html.unescape(publicable)])
-    pasa(limpio, "el informe publicable no lleva el centinela ni ningun secreto")
+    pasa(limpio, f"{motor}: el informe publicable no lleva el centinela ni ningun secreto")
     if limpio:
         (salida / INFORME_PUBLICABLE).write_text(publicable, encoding="utf-8", newline="\n")
         bruto.unlink()
     return True
 
 
-def interpretar(codigo, resumen):
-    p("=== resultado de pytest")
+def interpretar(motor, codigo, resumen):
+    p(f"=== resultado de pytest ({motor})")
+    esperadas = PRUEBAS_ESPERADAS[motor]
     if resumen is None:
-        pasa(False, "conftest.py no dejo resumen.json")
+        pasa(False, f"{motor}: conftest.py no dejo resumen.json")
         return
     p(f"   {json.dumps(resumen, ensure_ascii=False)}")
     if resumen.get("sin_conclusion", 0):
-        sinc(f"{resumen['sin_conclusion']} prueba(s) SIN CONCLUSION: un control positivo fallo")
+        sinc(f"{motor}: {resumen['sin_conclusion']} prueba(s) SIN CONCLUSION: un control positivo fallo")
     pasa(resumen.get("fallidas") == 0 and resumen.get("errores_coleccion") == 0,
-         f"ninguna prueba falla ni hay errores de recogida ({resumen.get('fallidas')}, "
+         f"{motor}: ninguna prueba falla ni hay errores de recogida ({resumen.get('fallidas')}, "
          f"{resumen.get('errores_coleccion')})")
     pasa(resumen.get("saltadas") == 0 and resumen.get("xfail") == 0 and resumen.get("xpass") == 0,
-         f"ninguna prueba saltada ni fallo esperado ({resumen.get('saltadas')}, {resumen.get('xfail')}, "
+         f"{motor}: ninguna prueba saltada ni fallo esperado ({resumen.get('saltadas')}, {resumen.get('xfail')}, "
          f"{resumen.get('xpass')})")
-    pasa(resumen.get("recogidas") == PRUEBAS_ESPERADAS and resumen.get("pasadas") == PRUEBAS_ESPERADAS,
-         f"pasan las {PRUEBAS_ESPERADAS} pruebas esperadas ({resumen.get('pasadas')} de {resumen.get('recogidas')})")
+    pasa(resumen.get("recogidas") == esperadas and resumen.get("pasadas") == esperadas,
+         f"{motor}: pasan las {esperadas} pruebas esperadas ({resumen.get('pasadas')} de {resumen.get('recogidas')})")
     pasa(codigo == 0 and resumen.get("codigo_salida") == 0,
-         f"pytest termina con codigo 0 ({codigo}, {resumen.get('codigo_salida')})")
+         f"{motor}: pytest termina con codigo 0 ({codigo}, {resumen.get('codigo_salida')})")
 
 
 def orden_powershell(args):
@@ -544,7 +628,8 @@ def orden_powershell(args):
 
 
 def main():
-    analizador = argparse.ArgumentParser(description="Pruebas funcionales de Canario (F1, Chromium)")
+    analizador = argparse.ArgumentParser(description="Pruebas funcionales de Canario (F1, F2 y F3; Chromium, "
+                                                     "Firefox y WebKit)")
     analizador.add_argument("--conservar", action="store_true",
                             help="no borra la pila ni los temporales (solo para desarrollar)")
     conservar = analizador.parse_args().conservar
@@ -574,13 +659,13 @@ def main():
         terminar_con_parada()
 
     temporal = pathlib.Path(tempfile.mkdtemp(prefix="canario_funcionales_"))
-    datos = pathlib.Path(tempfile.mkdtemp(prefix="canario_funcionales_datos_"))
-    salida = pathlib.Path(tempfile.mkdtemp(prefix="canario_funcionales_salida_"))
+    datos_raiz = pathlib.Path(tempfile.mkdtemp(prefix="canario_funcionales_datos_"))
+    salida_raiz = pathlib.Path(tempfile.mkdtemp(prefix="canario_funcionales_salida_"))
     try:
         overrides = preparar_overrides(temporal)
     except ImportError:
         p("PARADA: falta cryptography en el Python que ejecuta las pruebas (pip install -r requirements.txt)")
-        for directorio in (temporal, datos, salida):
+        for directorio in (temporal, datos_raiz, salida_raiz):
             shutil.rmtree(directorio, ignore_errors=True)
         terminar_con_parada()
     for fichero in overrides:
@@ -588,28 +673,49 @@ def main():
 
     parada = None
     try:
-        identificador, token, spki = arrancar(temporal)
-        # Solo el identificador y el token, en un fichero que el contenedor
-        # monta de solo lectura.
-        (datos / "datos.json").write_text(json.dumps({"identificador": identificador, "token_admin": token}),
-                                          encoding="utf-8", newline="\n")
-        codigo, texto = ejecutar_pruebas(datos, salida, temporal, spki, token)
-        # secretos.json se lee, se usa y se borra: nunca se publica. El token
-        # del admin lo conoce el host; el resto lo registra conftest.py.
-        secretos = leer_json(salida / "secretos.json")
-        (salida / "secretos.json").unlink(missing_ok=True)
-        if not isinstance(secretos, dict):
-            sinc("conftest.py no dejo secretos.json: el escaner no sabe que buscar")
-            secretos = {}
-        secretos.setdefault("token_admin", [])
-        secretos["token_admin"] = [*secretos["token_admin"], token]
-        if antifuga(salida, secretos, texto):
-            # Solo con el escáner limpio y su control en verde se enseña el
-            # final de la salida de pytest (el resumen de la terminal).
-            p("   final de la salida del contenedor:")
-            for linea in texto.strip().splitlines()[-15:]:
-                p(f"   | {linea}")
-        interpretar(codigo, leer_json(salida / "resumen.json"))
+        spki, hojas_b64 = arrancar(temporal)
+        # Por motor: su salida (/salida/<motor> en el host), su empresa y su
+        # fichero de datos, que el contenedor monta de solo lectura.
+        salidas, resultados, tokens = {}, {}, []
+        secretos_todos, centinelas = {}, {}
+        for motor in MOTORES:
+            salida = salidas[motor] = salida_raiz / motor
+            salida.mkdir()
+            datos = datos_raiz / motor
+            datos.mkdir()
+            identificador, token = alta_empresa(motor)
+            if token is not None:
+                tokens.append(token)
+            (datos / "datos.json").write_text(json.dumps({"identificador": identificador, "token_admin": token}),
+                                              encoding="utf-8", newline="\n")
+            codigo, texto = ejecutar_pruebas(motor, datos, salida, temporal, spki, hojas_b64, tokens)
+            # secretos.json se lee, se usa y se borra: nunca se publica. El
+            # token del admin lo conoce el host; el resto lo registra
+            # conftest.py. Cada token entra en el escáner.
+            secretos = leer_json(salida / "secretos.json")
+            (salida / "secretos.json").unlink(missing_ok=True)
+            if not isinstance(secretos, dict):
+                sinc(f"{motor}: conftest.py no dejo secretos.json: el escaner no sabe que buscar")
+                secretos = {}
+            centinelas[motor] = secretos.pop("centinela", [])
+            if token is not None:
+                secretos.setdefault("token_admin", []).append(token)
+            for nombre, valores in secretos.items():
+                secretos_todos.setdefault(nombre, []).extend(valores)
+            resultados[motor] = (codigo, texto)
+            # Si el humo falla, PARADA: no se sigue con los demás motores.
+            comprobar_humo(motor, salida)
+        # El escáner, con los secretos de TODAS las ejecuciones contra la
+        # salida de cada motor.
+        for motor in MOTORES:
+            codigo, texto = resultados[motor]
+            if antifuga(motor, salidas[motor], secretos_todos, centinelas[motor], texto):
+                # Solo con el escáner limpio y su control en verde se enseña el
+                # final de la salida de pytest (el resumen de la terminal).
+                p(f"   final de la salida del contenedor de {motor}:")
+                for linea in texto.strip().splitlines()[-15:]:
+                    p(f"   | {linea}")
+            interpretar(motor, codigo, leer_json(salidas[motor] / "resumen.json"))
     except Parada as e:
         parada = str(e)
         p(f"PARADA: {parada}")
@@ -617,15 +723,16 @@ def main():
         parada = "error inesperado en el lanzador"
         p("ERROR INESPERADO:\n" + traceback.format_exc())
     finally:
-        (salida / "secretos.json").unlink(missing_ok=True)
-        ejecutar(["docker", "rm", "-f", CONTENEDOR_PRUEBAS])
+        for motor in MOTORES:
+            (salida_raiz / motor / "secretos.json").unlink(missing_ok=True)
+            ejecutar(["docker", "rm", "-f", contenedor_de(motor)])
         if conservar:
             p("=== --conservar: la pila y los temporales siguen ahi")
             p("AVISO: las credenciales de esta ejecucion siguen vivas en la pila, y datos.json guarda el token "
-              "del admin. Borre todo en cuanto termine.")
+              "del admin de cada motor. Borre todo en cuanto termine.")
             p("   Para borrarlo (PowerShell, desde cualquier directorio):")
             p("   " + orden_powershell([*BASE, "down", "-v", "--rmi", "local"]))
-            for directorio in (temporal, datos):
+            for directorio in (temporal, datos_raiz):
                 p(f"   Remove-Item -Recurse -Force \"{directorio}\"")
         else:
             p("=== limpieza")
@@ -634,8 +741,8 @@ def main():
             restos = recursos_previos()
             pasa(not restos, f"ningun contenedor, red, volumen ni imagen con prefijo {PROYECTO} {restos or ''}".strip())
             shutil.rmtree(temporal, ignore_errors=True)
-            shutil.rmtree(datos, ignore_errors=True)
-            pasa(not datos.exists(), "datos.json (con el token del admin) se ha borrado")
+            shutil.rmtree(datos_raiz, ignore_errors=True)
+            pasa(not datos_raiz.exists(), "datos.json (con los tokens de los admin) se ha borrado")
         git_final = estado_git()
         if git_arranque is None or git_final is None:
             sinc("no se pudo comparar el estado de Git")
@@ -645,7 +752,7 @@ def main():
             if not iguales:
                 p(f"   al arrancar: {git_arranque}")
                 p(f"   al terminar: {git_final}")
-        p(f"Informe y trazas (si hubo fallo): {salida}")
+        p(f"Informe y trazas (si hubo fallo), una carpeta por motor: {salida_raiz}")
         p("   Las trazas llevan codigos, contrasenas y textos de la ejecucion: no se publican y se borran al "
           "terminar de revisarlas.")
     if parada is not None:
