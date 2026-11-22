@@ -26,6 +26,7 @@ Diecisiete baterías, una por área (una de ellas, `verificar_google_real.py`, s
 | `verificar_escaneos.py` | Secretos en Git, dependencias de Python y de npm, análisis estático, imágenes y SBOM (lo que sostiene el VEX de Caddy, también con el Caddyfile de producción) |
 | `verificar_unitarios.py` | Las pruebas unitarias (`tests/unit/`) en la imagen de la API, y mutantes que demuestran que fallan cuando deben |
 | `tests/funcionales/lanzar.py` | Funcional, no de seguridad: F1, el circuito entre el denunciante (8444 sin JavaScript) y el personal (8445) en Chromium, con pytest y Playwright, informe HTML y un escáner anti-fuga con centinela ([README](../tests/funcionales/README.md)) |
+| `tests/estres/lanzar.py` | Estrés, no de seguridad: L1, capacidad y codo de login (empresa o email inexistentes), seguimiento y denuncia con k6 v2.3.0, en una pila con un cpuset de 2 núcleos y límites de estrés comprobados en el log; `--hash` mide t (Argon2id) y `--l1 --t <t>` lanza la escalera con sondas de atribución, controles del generador y del oráculo de estado, con 3 repeticiones independientes (`--repeticiones`), un detector de muertes desde fuera (docker events y lector de cgroup), un control positivo en sandwich y la puerta de R1 (0 reinicios y memoria de 160 MiB en el login); deja tabla, CSV, JSON y el panel de k6 ([README](../tests/estres/README.md)); las funciones de analisis tienen pruebas sin Docker en `tests/estres/test_lanzar.py` |
 
 Para ejecutarlas:
 
