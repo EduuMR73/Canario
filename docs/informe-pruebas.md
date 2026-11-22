@@ -214,6 +214,54 @@ Cada media es BAJA si va de 0 a menos de 3, MEDIA de 3 a menos de 6 y ALTA de 6 
 
 Si L2 da FALLA, se registra en `docs/threat-model.md` §8 con esta escala, en estado ABIERTO, y el `RESULTADO GLOBAL` queda en NO OK.
 
+### Erratas y aclaraciones de la segunda congelación (22/11/2026)
+
+La segunda congelación (commit `d1432c1`) se subió antes de que terminara su revisión independiente. Su texto no se toca. Lo que corrige o concreta esa revisión va aquí, en un commit propio y también con push antes de medir. Ninguna de estas aclaraciones cambia una tasa ni el sentido de un oráculo: corrigen la redacción o eligen una de las dos lecturas posibles de un texto ambiguo.
+
+**E1. De dónde sale el 101,91.** No fue un error de cálculo. La salida de `lanzar.py --hash` del 21/11 imprime "t = 0.0196 s; 2/t = 101.91": el 2/t se calculó con la mediana sin redondear (unos 0,019625 s), y el t se mostró redondeado. L1 se ejecuta con `--t 0.0196`, que da 102,04, y ese es el valor que se congela. En la segunda congelación, donde dice "el valor correcto es" debe leerse "el valor con t = 0,0196 s es".
+
+**E2. H1 y el codo.** El codo de `login_email` en la L1 del 22/11 (una repetición) es el escalón e2, a 0,75 × 2/t = **76,53/s**: es la primera tasa con un p95 por encima del SLO (9120 ms). No es "76/s", y no cae por debajo del intervalo: queda exactamente en su borde inferior. La frase "queda justo por debajo del límite inferior" de la segunda congelación es incorrecta. H1 se evalúa con la regla que ya estaba en `lanzar.py` cuando se obtuvo la evidencia de L1 (commit `ef85f28`): solo se confirma si el codo cae en 1,0 o 1,25 × 2/t y en ese escalón aparece `EVENTO hashes_saturados`. La ejecución del 22/11 la refuta. La refutación se apoya en que no hay ninguna línea `hashes_saturados`, no en dónde cae el codo: estar en el borde inferior solo pone la tolerancia del ±25 % al límite. El veredicto definitivo de H1 lo da L1 × 3. En la tabla de la regla de las tasas, la columna "con el codo de L1" queda así: 1,5 × 76,53 = 114,80/s; 76,53/s en el pico; 7,65/s en la base; y 2551 IPs (76,53 × 300 / 9, con 76,53 redondeado a dos decimales). Siguen sin usarse.
+
+**E3. L7 y P6 (desviación de la lista de congelaciones).** La lista de arriba metía L7 y P6 en la segunda congelación. Se sacan, y esta es la desviación que lo declara. Hay dos motivos. Para L7 no hay todavía un plan revisado. La tasa de P6 depende de la línea base de P5, que aún no se ha medido en producción. Las dos tendrán su propio commit de congelación, con push antes de medirlas. Por eso los commits de congelación serán más de los "dos" que dice el principio de esta sección 3.
+
+**E4. Rangos de IPs de las víctimas de L3b (D4 y J5).** Cada rango se calcula así: peticiones de la víctima en los 570 s con tráfico, divididas entre su límite y multiplicadas por 1,5 de margen, redondeando hacia arriba.
+- Denuncia (10 por hora): 5/s × 570 s = 2850 peticiones; 2850 / 10 = 285; × 1,5 = 428.
+- Seguimiento y `/seguimiento` (60 por minuto): 5/s son 300 por minuto; 300 / 60 = 5; × 1,5 = 8.
+
+Dentro de cada rango, las IPs se reparten de forma circular por iteración, nunca al azar, para que ninguna pase de su límite. Los rangos del ataque, de las víctimas y de los controles no se solapan entre sí, y cambian en cada repetición. Los bloques concretos de 198.18.0.0/15 los fija el código, y la batería comprueba al arrancar que no se solapan; si se solapan, la ejecución para.
+
+**E5. Clase de cada control (J1).** El control de que el ataque existe (B2) es el único que solo rebaja un PASA. Todos los demás son controles de **validez**: si fallan, dan `SIN CONCLUSION` y ganan a FALLA. La excepción es la de J1: la muerte de un servicio de Canario es FALLA y ningún fallo de validez la anula, salvo el OOM global de la VM.
+- Por J1, son de validez los controles que el plan termina con "si no, SIN CONCLUSION": el control positivo de L3 y L3b (J2), el de las IPs de control de L3b (D3), el de la propia BASE en L4 (F2, con sus 30 s seguidos y su 95 %) y el humo previo de L4.
+- El plan no da clase a la comprobación de J5 (la petición desde una IP ya usada después de recrear la API). Esta aclaración la clasifica como de validez, por decisión propia.
+- Como en L1, también es de validez un 429 donde no toca.
+
+**E6. D3 cuando alguna petición no cuenta.** Las 11 peticiones de cada IP de control tienen que caer en la misma ventana de 300 s, sin ser ambiguas. Las 10 primeras tienen que ser 401 aceptados, y entonces la 11.ª tiene que ser 429. Si alguna de las 10 primeras no es un 401 (estado 0, 503 u otro) o si alguna es ambigua, el control da `SIN CONCLUSION`: la 11.ª ya no demuestra nada.
+
+**E7. `Retry-After`.** En L3, todo 429 lleva `Retry-After` entre 1 y 60; en L3b, entre 1 y 300, porque su ventana es de 300 s. Si falta o está fuera de rango, el oráculo por IP y ventana da FALLA.
+
+**E8. Errores del login en B2.** B2 usa la palabra "errores" sin redefinirla, así que vale la definición de error de la primera congelación. Esa definición solo habla de L2; esta aclaración la extiende a L3b, por el mismo motivo (un 503 rápido cuando no hay hueco para un hash es el diseño). En L2 y L3b, los 503 del login inundado no cuentan como errores. Por tanto, B2 se cumple si el p95 del login supera 1500 ms, si un 1 % o más de las peticiones del login acaban en conexión cortada, fin de fichero inesperado, plazo agotado o un 5xx que no sea 503, o si hay descartes con el aviso en su escenario. Los 503 del login se informan aparte.
+
+**E9. Recuperación de L4 (F2 y F3).**
+- Cada petición cuenta en todas las ventanas [s, s + 10) que contienen el instante en que empezó.
+- "30 s seguidos" quiere decir 30 ventanas consecutivas, con inicios de s₀ a s₀ + 29, todas dentro del criterio. El tiempo de recuperación es s₀ menos el fin programado del pico.
+- Se calcula el tiempo de recuperación de cada repetición, y F3 se evalúa sobre la mediana de los tres. Si una repetición no se recupera en los 180 s, su tiempo cuenta como infinito. Se publican los tres tiempos.
+
+**E10. El humo de L4.** Se lanza 120 s después del fin programado del pico. Si el humo previo falla, la prueba da `SIN CONCLUSION` por validez (E5).
+
+**E11. Otros detalles.**
+- En L2 y L3b, los 20 s que no se cuentan son los primeros de la RECUPERACIÓN (B4), justo después del fin programado de la inundación o del ataque.
+- El control del 403 compara el estado y el cuerpo JSON literales de `handle_errors` en `proxy/Caddyfile.produccion`.
+- El control de `trusted_proxies_strict` se hace desde 10.88.1.2, contra seguimiento inexistente.
+- La IP 198.19.255.254 queda fuera de todos los rangos de L3 y L3b.
+- La batería comprueba además que una petición con el Host de producción no da 421; si lo da, la ejecución para.
+- La tasa literal del login es 102,04/s en el pico de L4 y en L3b; 10,20/s en la base de L4 es su décima parte, redondeada.
+- Donde dice "ceil", léase "redondeo hacia arriba".
+- IPv4: la comprobación del 22/11 (`Resolve-DnsName -Type AAAA`) es para `canario-api.eduumr.dev`, el único nombre que reciben los denunciantes en producción.
+
+**E12. Qué espera el diseño en el resto de pruebas** (de la v1 del plan). L2, FALLA (H3). L3, PASA por IP: la carga agregada pasa igualmente, a ráfagas al principio de cada minuto. L4, PASA (H6).
+
+**E13. Escala OWASP.** Si se conoce el impacto de negocio, se usa ese; si no, el técnico. No se promedian todos los factores de impacto juntos.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |
