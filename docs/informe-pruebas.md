@@ -285,6 +285,26 @@ Dentro de cada rango, las IPs se reparten de forma circular por iteración, nunc
 - En el threat model, L3b no abre una entrada nueva. Entra en l.760-764 como factor de probabilidad de la escala OWASP (B6). En l.693 solo se remite a esa entrada y se dice que la amenaza está medida, no cerrada.
 - L3b-b solo podría pasar a ser informativa con una aceptación explícita del riesgo, con responsable y fecha, en una congelación posterior. Nunca después de ver el resultado.
 
+**E16. Criterio de la sonda de E14 (corrige E14; es una desviación).** El criterio que se congeló en E14 ("separadas unos 0,5 s" y "la primera a menos de 0,5 s del inicio") haría parar la sonda siempre, aunque k6 se comporte como se espera. Lo detectó la revisión de la implementación, y lo confirmaron después el QA, el revisor de seguridad y el de Python. Python lo comprobó en el fuente de k6 v2.3.0 (`lib/executor/constant_arrival_rate.go`, líneas 328-347).
+- Parámetros de la sonda, también congelados: escenario `constant-arrival-rate` de 12 s, a 2/s, con 1 VU (`preAllocatedVUs` y `maxVUs` a 1), `gracefulStop` de 5 s y un endpoint que tarda 2 s.
+- Con `constant-arrival-rate`, cada llegada intenta lanzar su iteración sin esperar. Si el VU está libre, la iteración se lanza y no deja marca. Si está ocupado, la llegada se descarta y deja una marca `dropped_iterations` con la hora del momento del descarte.
+- Con 2/s, 1 VU y 2 s por petición: k6 lanza la iteración de 0 s y descarta las de 0,5, 1,0, 1,5 y 2,0 s. Lanza la de 2,5 s, descarta de nuevo y así sucesivamente. Por eso la primera marca cae hacia los 0,5 s y, después de cada llegada lanzada, hay un hueco de 1,0 s entre marcas.
+- **El criterio que sustituye al de E14** es este. Sea T0 el fin de `setup()`, y para cada marca, k = redondeo((marca − T0) / 0,5). La sonda pasa si se cumplen las seis condiciones; si falla alguna, la ejecución para y se revisa E14:
+  1. hay al menos 5 marcas;
+  2. cada marca está a ±0,2 s de T0 + 0,5·k, con k ≥ 0;
+  3. no hay dos marcas con el mismo k;
+  4. la primera marca tiene k = 0 o k = 1 (cae antes de 0,7 s después de T0). Tiene k = 0 solo si la llegada de 0 s se descartó porque el VU todavía no estaba esperando: k6 manda cada llegada sin esperar a un canal sin buffer (`ramping_arrival_rate.go`, líneas 528-535), así que puede haber esa carrera al arrancar;
+  5. entre dos marcas consecutivas, k aumenta en 1 o en 2;
+  6. las marcas más las filas `iterations` del CSV suman **24 llegadas (12 s × 2/s), ±1**. `iterations` cuenta las iteraciones que terminan. La última que se lanza, hacia los 10,0 s, termina hacia los 12 s, antes de que se agote el `gracefulStop`.
+- La propiedad que necesita E14 es la (2): la marca coincide con el instante programado de la llegada, con un error de ±0,2 s. En ventanas de 10 s que avanzan de 1 en 1 s, ese error no importa.
+- Las condiciones (3) y (4) descartan dos fallos: que las marcas se emitan cuando el VU queda libre (se amontonarían en el mismo k) o todas al final. La (6) comprueba que ninguna llegada se queda sin contar. La tolerancia de 0,2 s es menor que 0,25 s, así que el k de cada marca nunca es ambiguo.
+
+**E17. La línea de L3b-b cuando da PASA (completa E15).** La propusieron el revisor de seguridad y el QA. Se imprime **solo** si L3b-b da PASA y B2 se cumple; si da `SIN CONCLUSION`, no se imprime. Es una línea literal, sin ninguna cifra de IPs, para que no se lea como una cota del coste:
+
+"L3b-b: PASA con B2 cumplido: en este montaje (IPv4, 102,04/s, 300 s) las víctimas no se degradaron; no se da cifra de coste (E15); no cierra threat-model §8 l.760-764, que sigue ABIERTA; la diferencia con L2 se explica en el informe".
+
+En el mismo sentido, el literal de FALLA de E15 ("esperada por el diseño") solo se usa cuando la FALLA de L3b-b sale del oráculo de las víctimas (B1). Si muere un servicio de Canario, la línea es "L3b-b: FALLA (murió un servicio de Canario; NO OK)", con sus motivos y sin cifra de coste. ¿Y por qué? Porque el diseño espera que las víctimas se degraden, no que se caiga un servicio.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |
