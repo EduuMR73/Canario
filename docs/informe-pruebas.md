@@ -317,6 +317,31 @@ En el mismo sentido, el literal de FALLA de E15 ("esperada por el diseño") solo
 - **De dónde sale la evidencia de L1 x3.** Del commit de este arreglo, sobre la pila de `70c8bee`. Esa pila lleva otro PostgreSQL que la L1 del 22/11, así que es relevante para H2 y para comparar con E2.
 - **La ejecución del 23/11** (salida `canario_estres_salida_lau1808z`) queda abortada, es solo informativa y no se usa como evidencia.
 
+**E19. La API que se recrea entre rutas no construye y tiene que tener la imagen de la repetición 1 (control de validez nuevo; no es una desviación de ningún oráculo).** Completa E18, que comprobaba la imagen al empezar cada repetición pero no la de la API recreada entre rutas.
+- **Causa probable, no comprobada.** `recrear_api` hacía `up -d --force-recreate --no-deps --wait api`, sin `--no-build`. El servicio `api` tiene `build:` sin `image:` ni `pull_policy`, así que, sin `--no-build`, compose construye si falta la imagen. Lo probable es que nunca construyera, porque la etiqueta existía, pero no se comprobó; no se afirma que ninguna ruta midiera otra imagen. Además, nadie comparaba la imagen de la API recreada con la de la repetición 1.
+- **Qué cambia.**
+  - La recreación lleva `--no-build`: `up -d --force-recreate --no-deps --no-build --wait api`. Si falta la imagen, el `up` falla y hay `PARADA`, en vez de una construcción implícita.
+  - Tras comprobar los ids de la pila, se lee la imagen del contenedor nuevo de la API y se compara con la referencia de la repetición 1, nunca con la API anterior. Si difiere, o su id está vacío o no es `sha256:<64 hex>`, hay `PARADA` antes del lector de la ruta; si coincide, una línea `PASA` por recreación.
+  - Si la imagen de referencia de la repetición 1 no existe, hay `PARADA` antes de abrir la ventana de mantenimiento.
+  - El `docker inspect` de la imagen (también el del arranque de cada repetición) tiene un plazo de 60 s y, si no responde o da un código distinto de 0, hay `PARADA` con la causa (el código y la cola del stderr), en vez de un id vacío.
+- **Qué no cambia.** Es un control de validez nuevo. No cambia ninguna tasa, escalera, SLO ni oráculo, ni la regla de H1, ni la aplicación.
+- **Alcance hacia atrás (inferencia, no observación).** Sale de la salida de la L1 x3 del 23/11 sobre `0a04158` (copia `canario_estres_salida_1gtfzgjo\verificacion_estres_copia.txt`; el original se sobrescribe). La referencia de la repetición 1 (línea 16) es:
+  ```
+     repeticion 1: imagenes de referencia, api sha256:74c1cbee7b2fb474348b67edaaac75599a845c297322e81b0e511fa0eec890e6 y caddy sha256:e7bf10a352168a760df9006f9e0318ae26681013bee23cbac21f02e92e786ad9
+  ```
+  Las repeticiones 2 y 3 arrancan sin construir y dan la misma imagen de la API que la referencia (líneas 336 y 340, 651 y 655):
+  ```
+  up -d --no-build --wait api caddy -> codigo 0
+  PASA  repeticion 2: misma imagen que la repeticion 1 en api (sha256:74c1cbee7b2fb474348b67edaaac75599a845c297322e81b0e511fa0eec890e6) y caddy (sha256:e7bf10a352168a760df9006f9e0318ae26681013bee23cbac21f02e92e786ad9)
+  up -d --no-build --wait api caddy -> codigo 0
+  PASA  repeticion 3: misma imagen que la repeticion 1 en api (sha256:74c1cbee7b2fb474348b67edaaac75599a845c297322e81b0e511fa0eec890e6) y caddy (sha256:e7bf10a352168a760df9006f9e0318ae26681013bee23cbac21f02e92e786ad9)
+  ```
+  Las 9 recreaciones de la API de esa ejecución dan la misma línea, `up -d --force-recreate --no-deps --wait api -> codigo 0`: las líneas 43, 55 y 73 (repetición 1), 358, 370 y 388 (repetición 2) y 673, 685 y 703 (repetición 3).
+  - **La inferencia.** Si alguna de las 6 recreaciones de las repeticiones 1 y 2 hubiera construido, la etiqueta habría pasado a otro id y el arranque de la repetición siguiente, que usa esa etiqueta con `--no-build`, habría dado `PARADA` en la comprobación de E18. No la dio.
+  - **Sus dos suposiciones.** Que solo una construcción mueve la etiqueta a otro id, y que una construcción nueva no reproduce el id `74c1`: E18 observó una sola vez que dos builds seguidas dan ids distintos.
+  - **Limitación declarada.** Las 3 recreaciones de la repetición 3 (líneas 673, 685 y 703) no tienen ninguna comprobación posterior: esta evidencia no dice nada de ellas.
+  - La evidencia que dura es la de las líneas literales de esta E19, no la copia, que es temporal.
+
 ### H7 y su criterio (23/11/2026, escrito antes de medir)
 
 Hipótesis nueva, fuera de las congelaciones anteriores (como E3).

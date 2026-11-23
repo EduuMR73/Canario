@@ -12,6 +12,7 @@ import csv
 import io
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import time
@@ -864,6 +865,235 @@ class OrquestacionImagen(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 L.iniciar_lector(ej, "login")
         self.assertEqual(lector.call_args[0][0], IMAGEN_REF)
+
+
+ARGUMENTOS_INSPECT_API_NUEVO = ["docker", "inspect", "--format", "{{.Image}}", "b" * 64]
+
+
+class ArgumentosRecreacion(unittest.TestCase):
+    def test_la_recreacion_no_construye(self):
+        self.assertEqual(L.argumentos_recreacion(),
+                         ["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait", "api"])
+        self.assertNotIn("--build", L.argumentos_recreacion())
+        # Control positivo: el arranque de la repetición 1 sí lleva --build,
+        # así que el assertNotIn de arriba sabe ver la opción.
+        self.assertIn("--build", L.argumentos_arranque(1))
+
+
+class MismaImagenConRuta(unittest.TestCase):
+    """Los dos mensajes con `ruta`. El control (sin `ruta`, los de siempre)
+    son las pruebas de MismaImagen, que no cambian."""
+
+    def test_imagen_distinta_con_ruta(self):
+        with self.assertRaises(L.Parada) as ctx:
+            L.comprobar_misma_imagen(IMAGEN_REF, IMAGEN_OTRA, "api", 2, ruta="login_empresa")
+        self.assertEqual(str(ctx.exception),
+                         "la imagen de api de la API recreada para login_empresa (repeticion 2) no es la de la "
+                         "repeticion 1 (sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671 "
+                         "frente a sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)")
+
+    def test_formato_con_ruta(self):
+        with self.assertRaises(L.Parada) as ctx:
+            L.comprobar_misma_imagen(IMAGEN_REF, "", "api", 3, ruta="denuncia")
+        self.assertEqual(str(ctx.exception),
+                         "no se obtiene un id de imagen sha256:<64 hex> de api en la API recreada para denuncia "
+                         "(repeticion 3): ''")
+
+    def test_control_con_ruta_y_misma_imagen_no_para(self):
+        self.assertIsNone(L.comprobar_misma_imagen(IMAGEN_REF, IMAGEN_REF, "api", 2, ruta="login_empresa"))
+
+
+class RecrearApi(unittest.TestCase):
+    """recrear_api con Docker simulado. Cada negativo parte del montaje del
+    control y cambia una sola cosa."""
+
+    def montar(self, imagen_nueva=IMAGEN_REF, inspect=None):
+        """`imagen_nueva` es la imagen del contenedor nuevo de la API;
+        `inspect`, si se da, sustituye la respuesta del docker inspect."""
+        self.llamadas_dc, self.inspecciones, self.limites, self.lineas = [], [], [], []
+        # Orden de las horas del motor y del up: la ventana de mantenimiento
+        # tiene que abrirse antes del up y cerrarse después.
+        self.orden = []
+        horas = iter([100.0, 101.0])
+        imagen_de = {ID_API_NUEVO: imagen_nueva}
+
+        def hora_falsa():
+            hora = next(horas)
+            self.orden.append(("hora", hora))
+            return hora
+
+        def ejecutar_falso(args, timeout=900):
+            # Registra el plazo: el inspect tiene que llevar el suyo de 60 s.
+            self.inspecciones.append((list(args), timeout))
+            if inspect is not None:
+                return inspect()
+            # Un id desconocido (el contenedor viejo, por ejemplo) da KeyError.
+            return L.R(0, imagen_de[args[-1]] + "\n", "")
+
+        def dc_falso(*args, timeout=900):
+            self.llamadas_dc.append((list(args), timeout))
+            self.orden.append(("dc",))
+            return L.R(0, "", "")
+
+        ids = {"api": ID_API_NUEVO, "caddy": ID_CADDY, "postgres": ID_PG, "redis": "f" * 64}
+        self.misma = mock.MagicMock(wraps=L.comprobar_misma_imagen)
+        parches = [mock.patch.object(L, "ejecutar", ejecutar_falso), mock.patch.object(L, "dc", dc_falso),
+                   mock.patch.object(L, "ids_servicios", lambda: dict(ids)),
+                   mock.patch.object(L, "comprobar_limites_api", self.limites.append),
+                   mock.patch.object(L, "hora_motor_ahora", hora_falsa),
+                   mock.patch.object(L, "comprobar_misma_imagen", self.misma),
+                   mock.patch.object(L, "p", self.lineas.append),
+                   mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False})]
+        for parche in parches:
+            parche.start()
+            self.addCleanup(parche.stop)
+        ej = L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {})
+        ej.ids = {"api": ID_API, "caddy": ID_CADDY, "postgres": ID_PG, "redis": "f" * 64}
+        ej.imagenes = {"api": IMAGEN_REF, "caddy": IMAGEN_CADDY}
+        return ej
+
+    def test_control_misma_imagen(self):
+        ej = self.montar()
+        L.recrear_api(ej, 2, "login_empresa")
+        self.assertEqual(self.llamadas_dc,
+                         [(["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait", "api"], 900)])
+        self.assertIn("up -d --force-recreate --no-deps --no-build --wait api -> codigo 0", self.lineas)
+        self.assertEqual(self.inspecciones, [(ARGUMENTOS_INSPECT_API_NUEVO, 60)])
+        self.assertIn("PASA  repeticion 2, login_empresa: la API recreada tiene la imagen de la repeticion 1 "
+                      "(sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671)", self.lineas)
+        self.assertEqual(ej.ids["api"], ID_API_NUEVO)
+        self.assertEqual(self.limites, [ID_API_NUEVO])
+        self.assertEqual(ej.mantenimientos[-1]["desde"], 100.0)
+        self.assertEqual(ej.mantenimientos[-1]["hasta"], 101.0)
+        self.assertEqual(ej.mantenimientos[-1]["ids"], frozenset([ID_API]))
+        # La ventana se abre antes del up y se cierra después (mata mover
+        # "hasta" delante del up, que los valores 100.0 y 101.0 no ven).
+        self.assertEqual(self.orden, [("hora", 100.0), ("dc",), ("hora", 101.0)])
+        self.misma.assert_called_once_with(IMAGEN_REF, IMAGEN_REF, "api", 2, ruta="login_empresa")
+        self.assertFalse(L.estado["falla"])
+
+    def test_imagen_distinta_da_parada(self):
+        ej = self.montar(imagen_nueva=IMAGEN_OTRA)
+        with self.assertRaises(L.Parada) as ctx:
+            L.recrear_api(ej, 2, "login_empresa")
+        self.assertEqual(str(ctx.exception),
+                         "la imagen de api de la API recreada para login_empresa (repeticion 2) no es la de la "
+                         "repeticion 1 (sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671 "
+                         "frente a sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)")
+        # El estado refleja el contenedor real aunque haya PARADA.
+        self.assertEqual(ej.ids["api"], ID_API_NUEVO)
+        self.assertEqual(ej.mantenimientos[-1]["hasta"], 101.0)
+        self.assertEqual(self.limites, [])
+        self.assertFalse([linea for linea in self.lineas if linea.startswith("PASA  repeticion")])
+
+    def test_sin_imagen_de_referencia_da_parada(self):
+        ej = self.montar()
+        ej.imagenes = None
+        with self.assertRaises(L.Parada) as ctx:
+            L.recrear_api(ej, 2, "login_empresa")
+        self.assertEqual(str(ctx.exception), "la API se recrea sin la imagen de referencia de la repeticion 1")
+        self.assertEqual(self.llamadas_dc, [])
+        self.assertEqual(ej.mantenimientos, [])
+
+    def test_inspect_con_codigo_1_da_parada_con_la_cola_del_stderr(self):
+        # 100 "C" y 300 "D" con salto final: la PARADA lleva solo los 300
+        # ÚLTIMOS caracteres tras el strip, que son las "D".
+        ej = self.montar(inspect=lambda: L.R(1, "", "C" * 100 + "D" * 300 + "\n"))
+        with self.assertRaises(L.Parada) as ctx:
+            L.recrear_api(ej, 2, "login_empresa")
+        self.assertEqual(str(ctx.exception),
+                         "docker inspect de la API recreada para login_empresa (repeticion 2) falla (codigo 1): '"
+                         + "D" * 300 + "'")
+        self.misma.assert_not_called()
+        self.assertEqual(self.limites, [])
+
+    def test_inspect_que_no_responde_da_parada(self):
+        # Solo el inspect lanza TimeoutExpired; el up (dc) responde con 0.
+        # Control: test_control_misma_imagen, con el plazo de 60 s registrado.
+        def colgado():
+            raise subprocess.TimeoutExpired(ARGUMENTOS_INSPECT_API_NUEVO, 60)
+
+        ej = self.montar(inspect=colgado)
+        with self.assertRaises(L.Parada) as ctx:
+            L.recrear_api(ej, 2, "login_empresa")
+        self.assertEqual(str(ctx.exception),
+                         "docker inspect de la API recreada para login_empresa (repeticion 2) no responde en 60 s")
+        self.assertEqual(self.inspecciones, [(ARGUMENTOS_INSPECT_API_NUEVO, 60)])
+        self.misma.assert_not_called()
+
+
+class ComprobarImagenesInspect(unittest.TestCase):
+    """PY-2: comprobar_imagenes ya no descarta el código ni el stderr de
+    docker inspect, y le da su plazo de 60 s."""
+
+    def montar(self, respuesta):
+        self.inspecciones, self.lineas = [], []
+
+        def ejecutar_falso(args, timeout=900):
+            self.inspecciones.append((list(args), timeout))
+            return respuesta(args)
+
+        parches = [mock.patch.object(L, "ejecutar", ejecutar_falso),
+                   mock.patch.object(L, "p", self.lineas.append)]
+        for parche in parches:
+            parche.start()
+            self.addCleanup(parche.stop)
+        ej = L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {})
+        ej.ids = {"api": ID_API, "caddy": ID_CADDY, "postgres": ID_PG, "redis": "f" * 64}
+        return ej
+
+    def test_control_codigo_0_con_plazo_de_60_s(self):
+        imagen_de = {ID_API: IMAGEN_REF, ID_CADDY: IMAGEN_CADDY}
+        ej = self.montar(lambda args: L.R(0, imagen_de[args[-1]] + "\n", ""))
+        L.comprobar_imagenes(ej, 1)
+        self.assertEqual(self.inspecciones,
+                         [(["docker", "inspect", "--format", "{{.Image}}", "a" * 64], 60),
+                          (["docker", "inspect", "--format", "{{.Image}}", "e" * 64], 60)])
+        self.assertEqual(ej.imagenes, {"api": IMAGEN_REF, "caddy": IMAGEN_CADDY})
+
+    def test_inspect_con_codigo_1_da_parada(self):
+        # Control: test_control_codigo_0_con_plazo_de_60_s y
+        # OrquestacionImagen.test_id_mal_formado_en_la_1_da_parada (rc 0).
+        ej = self.montar(lambda args: L.R(1, "", "Error: No such object: aaaa\n"))
+        with self.assertRaises(L.Parada) as ctx:
+            L.comprobar_imagenes(ej, 1)
+        self.assertEqual(str(ctx.exception),
+                         "docker inspect de api en la repeticion 1 falla (codigo 1): 'Error: No such object: aaaa'")
+        self.assertIsNone(ej.imagenes)
+
+
+class ConexionRecrearApi(unittest.TestCase):
+    """ejecutar_ruta llama a recrear_api con la repetición y la ruta, ANTES
+    del lector de la ruta."""
+
+    def lanzar(self, n_ruta):
+        orden = []
+
+        class Centinela(Exception):
+            pass
+
+        def lector_falso(ej, nombre):
+            orden.append(("lector", nombre))
+            raise Centinela
+
+        parches = [mock.patch.object(L, "recrear_api", lambda *args: orden.append(("recrear", args))),
+                   mock.patch.object(L, "iniciar_lector", lector_falso),
+                   mock.patch.object(L, "p")]
+        for parche in parches:
+            parche.start()
+            self.addCleanup(parche.stop)
+        ej = L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {"login_empresa": []})
+        with self.assertRaises(Centinela):
+            L.ejecutar_ruta(ej, 2, "login_empresa", n_ruta, False, {"salida": pathlib.Path(".")})
+        return ej, orden
+
+    def test_recrear_api_antes_del_lector(self):
+        ej, orden = self.lanzar(1)
+        self.assertEqual(orden, [("recrear", (ej, 2, "login_empresa")), ("lector", "rep2_login_empresa")])
+
+    def test_control_primera_ruta_no_recrea(self):
+        _, orden = self.lanzar(0)
+        self.assertEqual(orden, [("lector", "rep2_login_empresa")])
 
 
 class FalsoProceso:

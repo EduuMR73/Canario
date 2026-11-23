@@ -2357,21 +2357,44 @@ PATRON_IMAGEN = re.compile(r"sha256:[0-9a-f]{64}")
 SERVICIOS_IMAGEN = ("api", "caddy")
 
 
-def comprobar_misma_imagen(referencia, actual, servicio, rep):
+def comprobar_misma_imagen(referencia, actual, servicio, rep, *, ruta=None):
     """PARADA si la imagen de `servicio` en la repetición `rep` no es la de la
     repetición 1. Pura. ¿Por qué un control y no fiarse de --no-build? Porque
     todo lo que se mide (el lector, el control positivo, la API de cada ruta)
     asume que la pila es la misma en las tres repeticiones; si la imagen
     cambiara, las repeticiones no serían repeticiones. Un id vacío o que no
     sea sha256:<64 hex> (docker inspect falló) también es PARADA: un fallo
-    visible, nunca una comparación de dos vacíos que daría PASA."""
+    visible, nunca una comparación de dos vacíos que daría PASA.
+
+    Con `ruta`, la comparación es la de la API recreada para esa ruta: el
+    mensaje lo dice, para que la PARADA no se confunda con la del arranque de
+    la repetición. El mismo `donde` sirve a los dos mensajes, y sin `ruta` son
+    los de siempre."""
+    donde = f"la repeticion {rep}" if ruta is None else f"la API recreada para {ruta} (repeticion {rep})"
     for ident in (referencia, actual):
         if not isinstance(ident, str) or not PATRON_IMAGEN.fullmatch(ident):
-            raise Parada(f"no se obtiene un id de imagen sha256:<64 hex> de {servicio} en la repeticion {rep}: "
+            raise Parada(f"no se obtiene un id de imagen sha256:<64 hex> de {servicio} en {donde}: "
                          f"{ident!r}")
     if actual != referencia:
-        raise Parada(f"la imagen de {servicio} de la repeticion {rep} no es la de la repeticion 1 "
+        raise Parada(f"la imagen de {servicio} de {donde} no es la de la repeticion 1 "
                      f"({referencia} frente a {actual})")
+
+
+def leer_imagen(ident, donde):
+    """.Image del contenedor `ident`, o PARADA con la causa. ¿Por qué no basta
+    con que comprobar_misma_imagen rechace un id vacío? Porque esa PARADA solo
+    diría "id mal formado" y escondería por qué falló docker inspect: el
+    código y la cola del stderr la hacen visible. El plazo de 60 s es propio:
+    con el de 900 s de ejecutar, un motor colgado tendría la ejecución parada
+    un cuarto de hora sin decir nada. El formato del id lo valida
+    comprobar_misma_imagen, no esta función."""
+    try:
+        r = ejecutar(["docker", "inspect", "--format", "{{.Image}}", ident], timeout=60)
+    except subprocess.TimeoutExpired:
+        raise Parada(f"docker inspect de {donde} no responde en 60 s") from None
+    if r.rc != 0:
+        raise Parada(f"docker inspect de {donde} falla (codigo {r.rc}): {r.err.strip()[-300:]!r}")
+    return r.out.strip()
 
 
 def comprobar_imagenes(ej, rep):
@@ -2379,8 +2402,7 @@ def comprobar_imagenes(ej, rep):
     guardan como referencia (ej.imagenes) y ej.imagen, la de la API que usan el
     lector y el control, se fija una sola vez. En las siguientes se comparan con
     la referencia, ANTES de lanzar ningún lector."""
-    actuales = {s: ejecutar(["docker", "inspect", "--format", "{{.Image}}", ej.ids[s]]).out.strip()
-                for s in SERVICIOS_IMAGEN}
+    actuales = {s: leer_imagen(ej.ids[s], f"{s} en la repeticion {rep}") for s in SERVICIOS_IMAGEN}
     if rep == 1:
         for s in SERVICIOS_IMAGEN:
             # Con la propia lectura como referencia solo se valida el formato.
@@ -2487,17 +2509,32 @@ def bajar_pila(ej):
         raise Parada(f"down -v falla: {r.todo.strip()[-300:]!r}")
 
 
-def recrear_api(ej):
+def argumentos_recreacion():
+    """Argumentos de `docker compose` para recrear la API entre rutas. Pura.
+    ¿Por qué --no-build? El servicio api tiene `build:` sin `image:` ni
+    `pull_policy`, y sin --no-build compose construye si falta la imagen: la
+    API de la ruta podría ser otra imagen que la medida en la repetición 1.
+    Con --no-build, si falta, el up falla y hay PARADA visible."""
+    return ["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait", "api"]
+
+
+def recrear_api(ej, rep, ruta):
     """API nueva entre rutas (cada ruta parte de una API recién arrancada). El
     die del id viejo es esperado; PostgreSQL, Redis y Caddy no deben cambiar de
-    id (k6 usa el espacio de red de Caddy por id)."""
+    id (k6 usa el espacio de red de Caddy por id). La imagen de la API recreada
+    se compara con la de la repetición 1, antes de lanzar el lector de la ruta."""
+    # Sin la referencia no hay con qué comparar: PARADA antes de abrir la
+    # ventana de mantenimiento, para no dejar una ventana sin recreación.
+    if ej.imagenes is None:
+        raise Parada("la API se recrea sin la imagen de referencia de la repeticion 1")
     viejo = ej.ids["api"]
     mantenimiento = {"ids": frozenset([viejo]), "desde": hora_motor_ahora(), "hasta": None,
                      "motivo": "recreacion de la API"}
     ej.mantenimientos.append(mantenimiento)
-    r = dc("up", "-d", "--force-recreate", "--no-deps", "--wait", "api", timeout=900)
+    argumentos = argumentos_recreacion()
+    r = dc(*argumentos, timeout=900)
     mantenimiento["hasta"] = hora_motor_ahora()
-    p(f"up -d --force-recreate --no-deps --wait api -> codigo {r.rc}")
+    p(f"{' '.join(argumentos)} -> codigo {r.rc}")
     if r.rc != 0:
         raise Parada(f"no se recrea la API: {r.todo.strip()[-500:]!r}")
     nuevos = ids_servicios()
@@ -2506,7 +2543,14 @@ def recrear_api(ej):
             raise Parada(f"el id de {servicio} cambio al recrear la API: la medida ya no es de la misma pila")
     if nuevos["api"] == viejo:
         raise Parada("la API recreada conserva el id: no se recreo")
+    # Antes de leer la imagen: si después hay PARADA, el estado refleja el
+    # contenedor que existe de verdad, no el que ya se destruyó.
     ej.ids = nuevos
+    # Siempre contra la referencia de la repetición 1, nunca contra la API
+    # anterior: comparar en cadena dejaría pasar una deriva ya aceptada.
+    actual = leer_imagen(nuevos["api"], f"la API recreada para {ruta} (repeticion {rep})")
+    comprobar_misma_imagen(ej.imagenes["api"], actual, "api", rep, ruta=ruta)
+    pasa(True, f"repeticion {rep}, {ruta}: la API recreada tiene la imagen de la repeticion 1 ({actual})")
     comprobar_limites_api(nuevos["api"])
 
 
@@ -2609,7 +2653,7 @@ def ejecutar_ruta(ej, rep, ruta, n_ruta, ultima, contexto_rep):
     la ruta entera (calentamiento y reposos incluidos), y sus escalones."""
     pasos = ej.escalera[ruta]
     if n_ruta:
-        recrear_api(ej)
+        recrear_api(ej, rep, ruta)
     p(f"=== repeticion {rep}, {ruta}")
     salida_rep = contexto_rep["salida"]
     with contextlib.ExitStack() as pila:
