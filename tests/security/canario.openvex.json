@@ -4,8 +4,8 @@
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "last_updated": "2026-11-20T15:30:00Z",
-  "version": 11,
+  "last_updated": "2026-11-23T12:00:00Z",
+  "version": 12,
   "statements": [
     {
       "vulnerability": {"name": "CVE-2026-78661"},
@@ -21,36 +21,6 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "Complejidad cuadrática en html.Parse de golang.org/x/net/html (GO-2026-6860). En el binario oficial de Caddy 2.11.9, x/net/html solo lo importa smallstep/cli-utils/usage, y solo lo llama la acción 'help --html' de su CLI urfave/cli, que el enlazador conserva porque un init de cli-utils/command guarda el comando en una variable global. Caddy usa cobra y ningún paquete del binario ejecuta esos comandos (nadie llama a command.Retrieve), así que el parser nunca procesa una petición HTTP, sea cual sea la configuración. Comprobado con govulncheck v1.9.0 (base de datos de vuln.go.dev actualizada el 11 de noviembre de 2026) en modo fuente sobre caddy v2.11.9 para linux/amd64 con las etiquetas del release (nobadger, nomysql, nopgx), el 20 de noviembre de 2026: x/net/html aparece importado, pero sin ningún camino de llamada. GO-2026-6866 (html.Render) tiene el mismo camino muerto. Se retira al adoptar una imagen oficial de Caddy con x/net 0.62.0 o posterior, cumplidos los 14 días de su manifiesto amd64 (docs/threat-model.md, 6.17); mientras tanto, se renueva cada 30 días repitiendo el análisis."
-    },
-    {
-      "vulnerability": {"name": "CVE-2026-92392"},
-      "timestamp": "2026-10-26T21:10:00Z",
-      "products": [
-        {"@id": "pkg:apk/alpine/libcurl@8.22.0-r0"}
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Uso tras liberar en libcurl al subir datos por HTTP/2. En la imagen de PostgreSQL, libcurl solo la enlaza /usr/local/lib/libpq-oauth-18.so, el módulo OAuth del lado cliente de libpq: el servidor no lo carga, ningún binario de /usr/local/bin enlaza libcurl y pg_hba.conf no tiene el método oauth (comprobado en verificar_escaneos.py, f, con ldd sobre la imagen y con el propio módulo como control). En la imagen de Caddy no está: proxy/Dockerfile quita curl. Se retira al publicarse una imagen de PostgreSQL con libcurl 8.23.0-r0 o posterior y 14 días."
-    },
-    {
-      "vulnerability": {"name": "CVE-2026-111497"},
-      "timestamp": "2026-10-26T21:10:00Z",
-      "products": [
-        {"@id": "pkg:apk/alpine/brotli-libs@1.2.0-r1"}
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Escritura fuera de límites en el decodificador de Brotli. En la imagen de PostgreSQL, brotli-libs solo la usa libcurl (apk info -r), para descomprimir respuestas HTTP, y libcurl solo la carga el módulo OAuth del lado cliente de libpq, que el servidor no usa (ver CVE-2026-92392, comprobado en verificar_escaneos.py, f). En la imagen de Caddy no está: se va con curl. Se retira al publicarse una imagen de PostgreSQL con brotli-libs 1.2.1-r0 o posterior y 14 días."
-    },
-    {
-      "vulnerability": {"name": "CVE-2026-85091"},
-      "timestamp": "2026-11-06T12:00:00Z",
-      "products": [
-        {"@id": "pkg:apk/alpine/zlib@1.3.2-r0"}
-      ],
-      "status": "not_affected",
-      "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Desbordamiento de memoria en gz_vacate de zlib 1.3.1.2 a 1.3.2, que solo se alcanza llamando a gzprintf o gzvprintf después de que un gzwrite no bloqueante se quede a medias. En la imagen de PostgreSQL ningún fichero salvo la propia libz contiene esos símbolos: pg_dump y el resto de clientes usan gzwrite, gzopen y gzdopen, y el servidor no usa ninguna función gz* (comprobado en verificar_escaneos.py, f, buscando los símbolos en cada fichero de la imagen, con la propia libz como control). En caddy y redis no se declara: se adoptaron las imágenes del 21 de octubre de 2026, con zlib 1.3.2-r1. Se retira al adoptar la imagen de postgres:18.6-alpine del 5 de noviembre de 2026, con zlib 1.3.2-r1, cumplidos los 14 días (19 de noviembre de 2026; docs/threat-model.md, 6.17)."
     },
     {
       "vulnerability": {"name": "CVE-2026-109518"},

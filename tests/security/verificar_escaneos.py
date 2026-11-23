@@ -19,9 +19,21 @@ Qué prueba:
      declaraciones VEX vigentes (30 días como máximo), con efecto, atadas a la
      versión exacta del componente y sin suprimir nada más en ninguna imagen;
      postgres sin gosu y sin root por defecto;
-     caddy sin curl, libcurl ni brotli-libs, y con el índice de la imagen base
-     fijado cuyo manifiesto linux/amd64 es el literal esperado (la plataforma
-     que se ejecuta, la que cuenta para la espera de 14 días);
+     caddy sin curl, libcurl ni brotli-libs;
+     caddy y postgres con el índice de la imagen base fijado cuyo manifiesto
+     linux/amd64 es el literal esperado (la plataforma que se ejecuta, la que
+     cuenta para la espera de 14 días);
+     que Trivy informa para cada imagen la familia y la versión del sistema
+     operativo de una tabla literal y que esa versión tiene soporte (EOSL);
+     el control de "ninguna HIGH o CRITICAL con arreglo sin declarar" de cada
+     imagen se elige por esa tabla, no por lo que diga Trivy, y es el del
+     sistema de esa familia y versión (un rootfs sintético con zlib 1.2.12 y
+     CVE-2022-37434: Alpine 3.23, Alpine 3.24 y Debian 13) más el de Jinja2.
+     Esos controles pasan por la misma función de escaneo y los mismos flags
+     que las imágenes, VEX real incluido; lo único que cambia es "rootfs"
+     frente a "image --input". Residual: las capas, los whiteouts y la
+     configuración de la imagen solo existen en modo imagen, así que el
+     control no los ejerce;
      las vulnerabilidades sin arreglo se listan (riesgo residual, sección 8 del
      modelo de amenazas);
   f) que lo que el VEX declara no alcanzable no lo es, y las invariantes de
@@ -31,12 +43,18 @@ Qué prueba:
      sin arreglo) y sin verificar nunca el certificado de otro (lista blanca
      sobre la configuración adaptada);
      mailpit solo con la configuración de TLS de servidor (lista blanca) y solo
-     en su red interna; y en postgres, que
-     libcurl solo la enlaza el módulo OAuth del lado cliente de libpq, que
-     pg_hba.conf no tiene el método oauth y que ningún fichero salvo la libz
-     contiene gzprintf ni gzvprintf; y en la API, que apt nunca se ejecuta
-     (ningún RUN lo llama, USER propio y servicios en solo lectura);
-  g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL);
+     en su red interna; y en la API, que apt nunca se ejecuta (ningún RUN lo
+     llama, USER propio y servicios en solo lectura).
+     Las comprobaciones de alcanzabilidad de postgres (libcurl enlazada solo
+     por el módulo OAuth de libpq, pg_hba.conf sin el método oauth, gzprintf y
+     gzvprintf solo en la libz) se retiraron el 23 de noviembre de 2026 al
+     adoptar la imagen de postgres con libcurl 8.23.0, brotli-libs 1.2.1 y zlib
+     1.3.2-r1: ya no sostienen ninguna declaración del VEX. pg_hba.conf ya lo
+     vigila con lista blanca exacta verificar_esquema.py (au), y el resto ya no
+     respalda ninguna afirmación;
+  g) Trivy sobre los Dockerfiles (sin fallos HIGH o CRITICAL) y los FROM de
+     los tres Dockerfiles contra una lista blanca literal, ordenada y por
+     fichero (imagen y digest; sin --platform, ARG ni variables);
   h) un SBOM CycloneDX por imagen, que se deja en el directorio temporal del
      sistema (canario_sbom);
   i) versiones de las herramientas y fecha de la base de datos de Trivy, para
@@ -177,19 +195,11 @@ SBOM_API_CONTROL = ("fastapi", "0.143.0")
 # Postgres
 GOSU = "/usr/local/bin/gosu"
 USUARIO_POSTGRES = "70:70"
-IMG_POSTGRES_BASE = "postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
-# Alcanzabilidad de libcurl en postgres (CVE-2026-92392 y CVE-2026-111497): el
-# único fichero que la enlaza, el módulo OAuth del lado cliente de libpq, y el
-# pg_hba.conf real. Control: una regla con el método oauth.
-LIBPQ_OAUTH = "/usr/local/lib/libpq-oauth-18.so"
-PG_HBA = RAIZ / "db" / "pg_hba.conf"
-PG_HBA_CONTROL = "host canario aplicacion samenet oauth issuer=https://idp.invalid scope=openid\n"
-# Alcanzabilidad de zlib en postgres (CVE-2026-85091): el fallo solo se
-# alcanza con gzprintf o gzvprintf. El único fichero que puede contener esos
-# símbolos es la propia libz, que los exporta (y es el control: la búsqueda
-# encuentra lo que busca). Literal, no derivado de la imagen.
-SIMBOLOS_ZLIB = ("gzprintf", "gzvprintf")
-LIBZ_POSTGRES = "/usr/lib/libz.so.1.3.2"
+IMG_POSTGRES_BASE = "postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b"
+# Nota de recuperación: libpq-oauth y libcurl siguen en la imagen de postgres.
+# Si llega otra CVE de libcurl, el análisis de alcanzabilidad (ldd y pg_hba) y
+# sus pruebas se recuperan del historial de git (commit anterior al del 23 de
+# noviembre de 2026).
 
 # Alcanzabilidad de apt en la API (CVE-2026-109518): solo se alcanza
 # ejecutando apt, y para instalar hace falta root y escribir en el sistema de
@@ -210,15 +220,37 @@ COMPOSE_CONTROL_API = """services:
 # sus CVE (CVE-2026-92392 y CVE-2026-111497). Control: la imagen base los trae.
 IMG_CADDY_BASE = "caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0"
 PAQUETES_SIN_CURL = ("curl", "libcurl", "brotli-libs")
+# Node de la etapa de compilación de la SPA (proxy/Dockerfile, FROM de la
+# etapa "compilacion"). Duplica IMG_NODE de verificar_spa.py (l.393), que es
+# donde se prueba la SPA: si una cambia, la otra también.
+IMG_NODE = "node:24.20.0-alpine3.23@sha256:0388af2af070cd4736a1567cfed02469ba117848845b4165d87a333edb53d2ca"
 # Regla de los 14 días (docs/threat-model.md, 6.17): para una imagen cuenta la
-# subida del manifiesto de la plataforma que se ejecuta, no la del índice. El
-# índice de 2.11.9 se re-publicó el 13 de noviembre de 2026 solo para añadir
-# riscv64; el manifiesto linux/amd64 es del 5 de noviembre (20:52 UTC). Si el
-# índice fijado apuntase a otro amd64, la fecha de la espera ya no valdría:
-# literal comprobado en Docker Hub el 19 de noviembre de 2026, no derivado de
-# la imagen que se prueba.
-PLATAFORMA_CADDY = {"os": "linux", "architecture": "amd64"}
-MANIFIESTO_AMD64_CADDY = "sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424"
+# subida del manifiesto de la plataforma que se ejecuta, no la del índice, que
+# se puede re-publicar sin cambiar lo que se ejecuta. Si el índice fijado
+# apuntase a otro amd64, la fecha de la espera ya no valdría. Literales, no
+# derivados de la imagen que se prueba.
+PLATAFORMA_AMD64 = {"os": "linux", "architecture": "amd64"}
+MANIFIESTOS_AMD64 = {
+    # Docker Hub, comprobado el 19 de noviembre de 2026. El índice de 2.11.9 se
+    # re-publicó el 13 de noviembre de 2026 solo para añadir riscv64; el
+    # manifiesto linux/amd64 es del 5 de noviembre (20:52 UTC).
+    "caddy": (IMG_CADDY_BASE, "sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424"),
+    # Docker Hub, comprobado el 23 de noviembre de 2026. El manifiesto amd64 se
+    # subió el 2026-11-05T22:10:27Z (elegible desde el 19 de noviembre a las
+    # 22:10 UTC); el índice se re-publicó el 11 de noviembre solo para añadir
+    # riscv64.
+    "postgres": (IMG_POSTGRES_BASE, "sha256:300ebd02c6d4de9ee27ad7f6855d5d21b4d3a4a5117767c1197d284c635d9736"),
+}
+# Lista blanca de los FROM de cada Dockerfile (g): la imagen con su digest, en
+# orden, una por etapa. Se comparan con las constantes de esta batería, no con
+# copias: cambiar una base obliga a cambiar aquí a propósito.
+FROM_ESPERADOS = {
+    "Dockerfile": [IMG_PYTHON, IMG_PYTHON],
+    "proxy/Dockerfile": [IMG_NODE, IMG_CADDY_BASE],
+    "db/Dockerfile": [IMG_POSTGRES_BASE],
+}
+# Otro digest, sintético, para los controles de FROM.
+IMG_PYTHON_OTRO_DIGEST = "python:3.12-slim@sha256:" + "0" * 64
 
 # VEX
 VEX = RAIZ / "tests" / "security" / "canario.openvex.json"
@@ -242,23 +274,25 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
 # retira al adoptar una Caddy oficial con x/net 0.62.0, cumplidos los 14 días.
 # La de mailpit (CVE-2026-111943, Go 1.27.2) se retiró el 6 de noviembre de
 # 2026 al adoptar mailpit 1.32.0, que la arregla, cumplidos los 14 días.
-# CVE-2026-85091 (zlib, postgres) y CVE-2026-109518 (apt, api) entraron el 6
-# de noviembre de 2026 y se retiran el 19, al adoptar las imágenes base del 5
-# de noviembre, que las arreglan, cumplidos los 14 días. En caddy y redis no
-# se declara la de zlib: se adoptaron sus imágenes del 21 de octubre.
+# CVE-2026-109518 (apt, api) entró el 6 de noviembre de 2026 y SIGUE
+# declarada: la imagen base de Python que la arregla se adopta en otro bloque
+# (el "se retiran el 19" anterior no ocurrió para la API) y la declaración
+# caduca el 6 de diciembre de 2026 (30 días). Las de postgres
+# (libcurl, brotli-libs y zlib) se retiraron el 23 de noviembre de 2026 al
+# adoptar su imagen del 5 de noviembre, que las arregla.
+# Ojo: el control de que el VEX es lo que suprime en el binario de Go de caddy
+# depende hoy de CVE-2026-78661 (la única de caddy). Cuando se retire, caddy
+# dejará de estar en CVES_VEX y necesitará un control propio para el binario
+# de Go, o su cobertura desaparece en silencio.
 CVES_VEX = {"api": {"CVE-2026-109518"},
-            "caddy": {"CVE-2026-78661"},
-            "postgres": {"CVE-2026-92392", "CVE-2026-111497", "CVE-2026-85091"}}
+            "caddy": {"CVE-2026-78661"}}
 # Lo que el mismo VEX declara no explotable en spa/package-lock.json (j).
 # CVE-2026-109869 (undici 8.11.2) se retiró el 29 de octubre de 2026 al
 # adoptar undici 8.12.2, que la arregla, cumplidos los 14 días.
 CVES_VEX_LOCK = set()
 # Para el control de atadura a la versión: las mismas declaraciones con la
 # versión siguiente del componente no deben suprimir nada.
-VERSIONES_VEX = {"pkg:apk/alpine/libcurl@8.22.0-r0": "pkg:apk/alpine/libcurl@8.23.0-r0",
-                 "pkg:apk/alpine/brotli-libs@1.2.0-r1": "pkg:apk/alpine/brotli-libs@1.2.1-r0",
-                 "pkg:apk/alpine/zlib@1.3.2-r0": "pkg:apk/alpine/zlib@1.3.2-r1",
-                 "pkg:deb/debian/apt@3.0.3": "pkg:deb/debian/apt@3.0.4",
+VERSIONES_VEX = {"pkg:deb/debian/apt@3.0.3": "pkg:deb/debian/apt@3.0.4",
                  "pkg:deb/debian/libapt-pkg7.0@3.0.3": "pkg:deb/debian/libapt-pkg7.0@3.0.4",
                  "pkg:golang/golang.org/x/net@v0.60.0": "pkg:golang/golang.org/x/net@v0.62.0"}
 
@@ -269,6 +303,68 @@ ALPN_CONTROL = "h2"
 
 IMAGENES = ("api", "caddy", "postgres", "redis", "mailpit")
 SEVERIDADES = "HIGH,CRITICAL"
+# Sistema operativo que debe informar Trivy de cada imagen: (familia, versión),
+# con la versión según la familia (alpine: mayor.menor de Metadata.OS.Name;
+# debian: mayor). Literal, sin valor por defecto: una imagen de IMAGENES que no
+# esté aquí es una PARADA, y el control del escaneo de cada imagen se elige por
+# esta tabla, nunca por lo que diga Trivy (que sería la propia respuesta que se
+# quiere comprobar).
+SO_ESPERADO = {
+    "api": ("debian", "13"),
+    "caddy": ("alpine", "3.24"),
+    "postgres": ("alpine", "3.24"),
+    "redis": ("alpine", "3.23"),
+    "mailpit": ("alpine", "3.24"),
+}
+# Controles sintéticos de sistema operativo: un rootfs mínimo por (familia,
+# versión) con zlib 1.2.12 (antes de su arreglo), que Trivy tiene que
+# informar como CVE-2022-37434 (CRITICAL, arreglada en la 1.2.12-r2 de Alpine
+# 3.23 y 3.24 según su secdb y en 1:1.2.11.dfsg-4.1 de Debian, y trixie figura
+# como arreglada). Oráculo literal, no derivado de las imágenes.
+CVE_CONTROL_SO = "CVE-2022-37434"
+APK_ZLIB_CONTROL = ("P:zlib\n"
+                    "V:1.2.12-r1\n"
+                    "A:x86_64\n"
+                    "o:zlib\n"
+                    "L:Zlib\n"
+                    "\n")
+OS_RELEASE_DEBIAN_13 = ('PRETTY_NAME="Debian GNU/Linux 13 (trixie)"\n'
+                        'NAME="Debian GNU/Linux"\n'
+                        'VERSION_ID="13"\n'
+                        'VERSION="13 (trixie)"\n'
+                        "VERSION_CODENAME=trixie\n"
+                        "ID=debian\n")
+DPKG_ZLIB_CONTROL = ("Package: zlib1g\n"
+                     "Status: install ok installed\n"
+                     "Architecture: amd64\n"
+                     "Source: zlib\n"
+                     "Version: 1:1.2.11.dfsg-2\n"
+                     "\n")
+CONTROLES_SO = {
+    ("alpine", "3.23"): {"etc/alpine-release": "3.23.0\n", "lib/apk/db/installed": APK_ZLIB_CONTROL},
+    ("alpine", "3.24"): {"etc/alpine-release": "3.24.0\n", "lib/apk/db/installed": APK_ZLIB_CONTROL},
+    ("debian", "13"): {"etc/os-release": OS_RELEASE_DEBIAN_13, "etc/debian_version": "13.0\n",
+                       "var/lib/dpkg/status": DPKG_ZLIB_CONTROL},
+}
+
+# Control de la comprobación de soporte (EOSL), uno por familia de SO_ESPERADO:
+# sin él, "el sistema tiene soporte" sería un PASA aunque Trivy no informase
+# nunca el campo, y Trivy calcula el fin de soporte con una tabla por familia,
+# así que el control de una familia no ejerce la de otra. Alpine 3.10 dejó de
+# tener soporte el 1 de mayo de 2021 y Debian 9 (stretch) el 30 de junio de
+# 2022 (fin de su LTS), así que Trivy tiene que marcar Metadata.OS.EOSL en los
+# dos rootfs. Literales, no derivados de las imágenes.
+OS_RELEASE_DEBIAN_9 = ('PRETTY_NAME="Debian GNU/Linux 9 (stretch)"\n'
+                       'NAME="Debian GNU/Linux"\n'
+                       'VERSION_ID="9"\n'
+                       'VERSION="9 (stretch)"\n'
+                       "VERSION_CODENAME=stretch\n"
+                       "ID=debian\n")
+CONTROLES_EOSL = {
+    "alpine": ("3.10", {"etc/alpine-release": "3.10.0\n", "lib/apk/db/installed": APK_ZLIB_CONTROL}),
+    "debian": ("9", {"etc/os-release": OS_RELEASE_DEBIAN_9, "etc/debian_version": "9.13\n",
+                     "var/lib/dpkg/status": DPKG_ZLIB_CONTROL}),
+}
 
 TEMPORAL = None
 ESTADO_GIT_ARRANQUE = None
@@ -601,10 +697,23 @@ def trivy(args, montajes=(), red=False, timeout=900):
     return herramienta(IMG_TRIVY, ["--cache-dir", "/cache", *args], montajes=[cache, *montajes], red=red, timeout=timeout)
 
 
-def escanear(nombre, vex=None, extra=()):
-    """Trivy sobre la imagen exportada, sin red y sin actualizar la base de datos."""
-    montajes = [montaje(TEMPORAL / "imagenes", "/img")]
-    args = ["image", "--input", f"/img/{nombre}.tar", "--scanners", "vuln,secret", "--severity", SEVERIDADES,
+def escanear(nombre=None, vex=None, extra=(), rootfs=None):
+    """Trivy sin red y sin actualizar la base de datos, con los mismos flags
+    para las dos vías: sobre la imagen exportada (image --input, con nombre) o,
+    solo en los controles sintéticos de sistema operativo, sobre un directorio
+    (rootfs, con la ruta). Lo único que cambia es la orden y su entrada: así el
+    control pasa por el mismo escaneo, el mismo VEX y los mismos filtros que lo
+    que controla. Residual: las capas, los whiteouts y la configuración de la
+    imagen solo existen en modo imagen; el control no los ejerce."""
+    if (nombre is None) == (rootfs is None):
+        raise Parada("escanear necesita exactamente una de las dos entradas: nombre de imagen o rootfs")
+    if rootfs is None:
+        montajes = [montaje(TEMPORAL / "imagenes", "/img")]
+        entrada = ["image", "--input", f"/img/{nombre}.tar"]
+    else:
+        montajes = [montaje(rootfs, "/rfs")]
+        entrada = ["rootfs", "/rfs"]
+    args = [*entrada, "--scanners", "vuln,secret", "--severity", SEVERIDADES,
             "--skip-db-update", "--offline-scan", "--skip-version-check", "--no-progress", "-q", "--format", "json",
             "--show-suppressed", *extra]
     if vex is not None:
@@ -626,6 +735,84 @@ def hallazgos(informe):
             secretos_img.append((res["Target"], s["RuleID"]))
         suprimidas.extend(res.get("ExperimentalModifiedFindings") or [])
     return vulns, suprimidas, secretos_img
+
+
+def graves_con_arreglo(vulns):
+    """El criterio de e): HIGH o CRITICAL (SEVERIDADES) y con FixedVersion. Lo
+    usan igual el negativo de cada imagen y los controles de sistema, para que
+    el control pase por el mismo filtro que lo que controla."""
+    return {(v["VulnerabilityID"], v["PkgName"], v.get("InstalledVersion"), v.get("FixedVersion"))
+            for _, v in vulns if v.get("Severity") in SEVERIDADES.split(",") and v.get("FixedVersion")}
+
+
+def version_so(familia, nombre):
+    """La versión del sistema según su familia: alpine, mayor.menor de
+    Metadata.OS.Name ("3.24.4" -> "3.24"); debian, el mayor ("13.7" -> "13").
+    None si no se puede leer o la familia no es una de esas dos."""
+    partes = (nombre or "").split(".")
+    if familia == "alpine" and len(partes) >= 2 and partes[0].isdigit() and partes[1].isdigit():
+        return f"{partes[0]}.{partes[1]}"
+    if familia == "debian" and partes[0].isdigit():
+        return partes[0]
+    return None
+
+
+def so_informado(informe):
+    """(familia, versión) que informa Trivy en Metadata.OS, o None si falta
+    Metadata.OS o su Family (entonces no se sabe qué sistema es: SIN
+    CONCLUSION, no FALLA). Con la familia pero una versión ilegible, la
+    versión es None y no coincidirá con la tabla."""
+    so = ((informe or {}).get("Metadata") or {}).get("OS") or {}
+    if not so.get("Family"):
+        return None
+    return (so["Family"], version_so(so["Family"], so.get("Name")))
+
+
+def controles_sistema():
+    """Un rootfs sintético por (familia, versión) de CONTROLES_SO, escaneado con
+    la misma función y los mismos flags que las imágenes, VEX real incluido. El
+    control exige que Trivy informe esa familia y versión y que reporte
+    CVE_CONTROL_SO por el mismo filtro que el negativo (graves_con_arreglo).
+    Devuelve {(familia, versión): cumplido}."""
+    resultado = {}
+    for clave, ficheros in sorted(CONTROLES_SO.items()):
+        familia, version_esperada = clave
+        rfs = TEMPORAL / "control_so" / f"{familia}_{version_esperada}"
+        for fichero, contenido in ficheros.items():
+            escribir(rfs / fichero, contenido)
+        r, informe = escanear(rootfs=rfs, vex=VEX)
+        if informe is None:
+            pasa(False, f"e) control: Trivy no produjo JSON para el rootfs sintetico de {familia} {version_esperada}: "
+                        f"{r.err.strip()[-200:]}")
+            resultado[clave] = False
+            continue
+        informado = so_informado(informe)
+        coincide = informado == clave
+        detecta = CVE_CONTROL_SO in {c for c, *_ in graves_con_arreglo(hallazgos(informe)[0])}
+        pasa(coincide, f"e) control: Trivy informa {familia} {version_esperada} en el rootfs sintetico (informa {informado})")
+        pasa(detecta, f"e) control: Trivy detecta {CVE_CONTROL_SO} ({SEVERIDADES}, con arreglo) en el rootfs "
+                      f"sintetico de {familia} {version_esperada}")
+        resultado[clave] = coincide and detecta
+    return resultado
+
+
+def control_eosl():
+    """Un rootfs sintético sin soporte por familia (CONTROLES_EOSL), escaneado
+    como los demás: Trivy tiene que informar esa familia y versión y marcar
+    Metadata.OS.EOSL. Devuelve {familia: cumplido}; si una familia no cumple,
+    la comprobación de soporte de sus imágenes queda SIN CONCLUSION."""
+    resultado = {}
+    for familia, (version, ficheros) in sorted(CONTROLES_EOSL.items()):
+        rfs = TEMPORAL / "control_so" / f"{familia}_{version}_eosl"
+        for fichero, contenido in ficheros.items():
+            escribir(rfs / fichero, contenido)
+        r, informe = escanear(rootfs=rfs, vex=VEX)
+        so = ((informe or {}).get("Metadata") or {}).get("OS") or {}
+        cumplido = so_informado(informe) == (familia, version) and so.get("EOSL") is True
+        pasa(cumplido, f"e) control: Trivy marca EOSL en un rootfs sintetico de {familia} {version} "
+                       f"(informa {so or r.err.strip()[-200:]})")
+        resultado[familia] = cumplido
+    return resultado
 
 
 def preparar_imagenes():
@@ -712,16 +899,21 @@ def seccion_e():
     negativo(f"e) caddy: la imagen no contiene {list(PAQUETES_SIN_CURL)} ({en_caddy})", en_caddy == [],
              en_base == sorted(PAQUETES_SIN_CURL), f"control: la base trae {en_base}")
 
-    # Caddy: el manifiesto linux/amd64 del índice fijado. La espera de 14 días
-    # cuenta desde la subida de ese manifiesto, y el índice se puede
-    # re-publicar sin cambiarlo (riscv64, atestaciones). Control: el índice se
-    # puede leer y tiene alguna entrada linux/amd64; sin él, la comparación
-    # con el literal no demostraría nada (SIN CONCLUSION).
-    indice = indice_oci(IMG_CADDY_BASE)
-    amd64 = entradas_plataforma(indice, PLATAFORMA_CADDY)
-    negativo(f"e) caddy: el manifiesto linux/amd64 del indice fijado es {MANIFIESTO_AMD64_CADDY} ({amd64})",
-             amd64 == [MANIFIESTO_AMD64_CADDY], len(amd64) >= 1,
-             "control: el indice no se pudo leer con docker buildx imagetools inspect --raw o no tiene entrada linux/amd64")
+    # Caddy y postgres: el manifiesto linux/amd64 del índice fijado de su imagen
+    # base. La espera de 14 días cuenta desde la subida de ese manifiesto, y el
+    # índice se puede re-publicar sin cambiarlo (riscv64, atestaciones).
+    # Control: el índice se puede leer y tiene alguna entrada linux/amd64; sin
+    # él, la comparación con el literal no demostraría nada (SIN CONCLUSION).
+    # Las claves de la tabla son exactamente caddy y postgres (literal): una
+    # imagen base nueva sin su manifiesto, o uno que sobra, se ve aquí.
+    pasa(set(MANIFIESTOS_AMD64) == {"caddy", "postgres"},
+         f"e) manifiestos amd64: la tabla es exactamente {{caddy, postgres}} ({sorted(MANIFIESTOS_AMD64)})")
+    for servicio, (imagen_base, manifiesto) in sorted(MANIFIESTOS_AMD64.items()):
+        indice = indice_oci(imagen_base)
+        amd64 = entradas_plataforma(indice, PLATAFORMA_AMD64)
+        negativo(f"e) {servicio}: el manifiesto linux/amd64 del indice fijado es {manifiesto} ({amd64})",
+                 amd64 == [manifiesto], len(amd64) >= 1,
+                 "control: el indice no se pudo leer con docker buildx imagetools inspect --raw o no tiene entrada linux/amd64")
 
     # Control de Trivy: rootfs sintético con Jinja2 2.10 y un token.
     token = token_sintetico()
@@ -738,6 +930,12 @@ def seccion_e():
     pasa(control_vuln, f"e) control: Trivy detecta {CVE_CONTROL_TRIVY} en un rootfs con Jinja2 2.10")
     pasa(control_secreto, f"e) control: Trivy detecta un secreto {REGLA_SECRETO_TRIVY} en el rootfs")
     negativo("e) control: el token sintetico no aparece en la salida de Trivy", token not in r.todo, control_secreto)
+    # Controles de sistema operativo, aparte del de Jinja2 (que ejerce el
+    # escáner de paquetes de Python): ejercen el detector de cada familia y
+    # versión de la tabla SO_ESPERADO, que es lo que hace falta para que "ninguna
+    # vulnerabilidad del sistema con arreglo" signifique algo en cada imagen.
+    controles_so = controles_sistema()
+    control_soporte = control_eosl()
 
     # VEX: forma y vigencia de cada declaración.
     documento = json_de(VEX)
@@ -795,22 +993,58 @@ def seccion_e():
                  cves <= cves_movido, control_vex[nombre], f"siguen {sorted(cves_movido & cves)}")
 
     # Las cinco imágenes con el VEX real.
+    sin_tabla = [n for n in IMAGENES if n not in SO_ESPERADO]
+    if sin_tabla:
+        raise Parada(f"las imagenes {sin_tabla} no estan en SO_ESPERADO: sin su sistema esperado no hay control posible")
     suprimidas_total = set()
     for nombre in IMAGENES:
         r, informe = escanear(nombre, vex=VEX)
         if informe is None:
             raise Parada(f"Trivy no produjo JSON para {nombre}: {r.err.strip()[-300:]}")
         vulns, suprimidas, secretos_img = hallazgos(informe)
-        con_arreglo = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("InstalledVersion"), v.get("FixedVersion"))
-                              for _, v in vulns if v.get("FixedVersion")})
+        con_arreglo = sorted(graves_con_arreglo(vulns))
         sin_arreglo = sorted({(v["VulnerabilityID"], v["PkgName"], v.get("Status")) for _, v in vulns if not v.get("FixedVersion")})
         for m in suprimidas:
             if m.get("Status") == "not_affected" and str(m.get("Source", "")).endswith(VEX.name):
                 suprimidas_total.add((nombre, m["Finding"]["VulnerabilityID"]))
-        negativo(f"e) {nombre}: ninguna vulnerabilidad {SEVERIDADES} con arreglo sin declarar en el VEX",
-                 not con_arreglo, control_vuln, str(con_arreglo))
-        negativo(f"e) {nombre}: ningun secreto en la imagen", not secretos_img, control_secreto, str(secretos_img))
+        # El sistema que informa Trivy contra la tabla literal. Sin
+        # Metadata.OS o sin Family no se sabe qué detector ha corrido: SIN
+        # CONCLUSION. Si no coincide, FALLA (otra base, o un escaneo que ya no
+        # es el que se controló), y el negativo de la imagen también queda SIN
+        # CONCLUSION: su control ya no es el que le corresponde.
         so = (informe.get("Metadata") or {}).get("OS") or {}
+        esperado_so = SO_ESPERADO[nombre]
+        informado_so = so_informado(informe)
+        if informado_so is None:
+            sinc(f"e) {nombre}: Trivy no informa Metadata.OS ni su Family; no se sabe que sistema se escaneo")
+            so_ok = False
+        else:
+            so_ok = informado_so == esperado_so
+            pasa(so_ok, f"e) {nombre}: Trivy informa el sistema {esperado_so[0]} {esperado_so[1]} "
+                        f"(informa {informado_so[0]} {informado_so[1]})")
+            # Una base sin soporte ya no recibe avisos de seguridad: "ninguna
+            # vulnerabilidad con arreglo" seria cierto por vacio.
+            # El control es el de la familia de la TABLA (no la que diga
+            # Trivy); sin él, o fallido, no se sabe si Trivy informa el campo:
+            # SIN CONCLUSION, no PASA.
+            eosl = so.get("EOSL") is True
+            negativo(f"e) {nombre}: el sistema tiene soporte", not eosl,
+                     control_soporte.get(esperado_so[0], False),
+                     "version sin soporte, cambia la imagen base" if eosl else "")
+        # El control se elige POR LA TABLA, no por lo que diga Trivy, y se
+        # SUMA al de Jinja2: sistema (esta familia y versión) y paquetes de
+        # Python. Sin control sintético para esa clave, SIN CONCLUSION.
+        control_so = controles_so.get(esperado_so)
+        if control_so is None:
+            sinc(f"e) {nombre}: no hay control sintetico de sistema para {esperado_so}")
+            control_so = False
+        control_grave = control_vuln and control_so and so_ok
+        negativo(f"e) {nombre}: ninguna vulnerabilidad {SEVERIDADES} con arreglo sin declarar en el VEX",
+                 not con_arreglo, control_grave,
+                 str(con_arreglo) if control_grave else
+                 f"(control Jinja2: {control_vuln}; control de sistema {esperado_so}: {control_so}; "
+                 f"familia y version informadas como se espera: {so_ok})")
+        negativo(f"e) {nombre}: ningun secreto en la imagen", not secretos_img, control_secreto, str(secretos_img))
         p(f"   {nombre} ({so.get('Family', '?')} {so.get('Name', '')}): sin arreglo publicado {len(sin_arreglo)}"
           + (f" -> {sorted({c for c, _, _ in sin_arreglo})}" if sin_arreglo else ""))
     for nombre, cves in sorted(CVES_VEX.items()):
@@ -818,7 +1052,7 @@ def seccion_e():
             negativo(f"e) VEX {cve}: suprime el hallazgo en {nombre} (una declaracion sin efecto se revisa y se retira)",
                      (nombre, cve) in suprimidas_total, control_vex[nombre])
     # Y en ninguna imagen suprime nada más. Una declaración se ata a un paquete
-    # y su versión, no a una imagen: la de zlib 1.3.2-r0 pensada para postgres
+    # y su versión, no a una imagen: la de apt 3.0.3 pensada para la API
     # taparía en silencio la misma CVE en cualquier otra imagen que volviera a
     # traer esa versión. Lo suprimido tiene que ser exactamente CVES_VEX.
     # Control: con una supresión de más (inventada) la comparación falla.
@@ -854,6 +1088,12 @@ def escribir_vex_movido():
     nada (control de la atadura a la versión, e y j)."""
     texto = VEX.read_text(encoding="utf-8")
     for actual, siguiente in VERSIONES_VEX.items():
+        # Una clave que no está en el VEX no movería nada y el control de
+        # atadura a la versión pasaría en vacío: se ve (PARADA) en vez de
+        # callar. Ocurre al retirar una declaración sin quitar su entrada.
+        if actual not in texto:
+            raise Parada(f"VERSIONES_VEX tiene {actual}, que no aparece en el VEX: el control de atadura "
+                         "a la version no movería nada")
         texto = texto.replace(actual, siguiente)
     return escribir(TEMPORAL / "vex_movido" / "movido.openvex.json", texto)
 
@@ -1070,7 +1310,7 @@ def adaptar(caddyfile=None, ruta="/etc/caddy/Caddyfile"):
 
 
 def seccion_f():
-    p("=== f) alcanzabilidad en PostgreSQL (lo que sostiene el VEX) e invariantes de Caddy")
+    p("=== f) alcanzabilidad de apt en la API (lo que sostiene el VEX) e invariantes de Caddy y mailpit")
     real = adaptar()
     control = adaptar(caddyfile_control(TEMPORAL / "caddy_adapt", [
         ("\tprotocols h1\n", "\tprotocols h1 h2\n"),
@@ -1159,28 +1399,6 @@ def seccion_f():
     for condicion, cumple in real_mailpit.items():
         negativo(f"f) mailpit sin reenvio ni salida: {condicion}", cumple, control_mailpit[condicion] is False)
 
-    # CVE-2026-92392 y CVE-2026-111497 en postgres: libcurl (y brotli-libs, que
-    # solo usa libcurl) solo la enlaza el módulo OAuth del lado cliente de
-    # libpq; ningún binario del servidor. Control: ese módulo sí aparece, así
-    # que la búsqueda con ldd encuentra lo que busca.
-    enlazan = enlazan_libcurl(NOMBRES["postgres"])
-    control_ldd = LIBPQ_OAUTH in enlazan
-    pasa(control_ldd, f"f) postgres: control: ldd encuentra libcurl en {LIBPQ_OAUTH}")
-    negativo(f"f) postgres: solo {LIBPQ_OAUTH} enlaza libcurl, ningun binario del servidor ({enlazan})",
-             enlazan == [LIBPQ_OAUTH], control_ldd)
-    metodos = metodos_hba(PG_HBA.read_text(encoding="utf-8"))
-    negativo(f"f) postgres: db/pg_hba.conf sin el metodo oauth ({sorted(metodos)})", "oauth" not in metodos,
-             "oauth" in metodos_hba(PG_HBA_CONTROL))
-
-    # CVE-2026-85091 en postgres: ningún fichero salvo la propia libz contiene
-    # gzprintf ni gzvprintf, así que nadie puede llamarlos. Control: la libz
-    # sí aparece, así que la búsqueda encuentra lo que busca.
-    con_simbolos = contienen_simbolos(NOMBRES["postgres"], SIMBOLOS_ZLIB)
-    control_libz = LIBZ_POSTGRES in con_simbolos
-    pasa(control_libz, f"f) postgres: control: la busqueda encuentra {list(SIMBOLOS_ZLIB)} en {LIBZ_POSTGRES}")
-    negativo(f"f) postgres: solo {LIBZ_POSTGRES} contiene {list(SIMBOLOS_ZLIB)} (CVE-2026-85091) ({con_simbolos})",
-             con_simbolos == [LIBZ_POSTGRES], control_libz)
-
     # CVE-2026-109518 en la API: apt nunca se ejecuta. Ninguna orden RUN del
     # Dockerfile lo llama (control: un Dockerfile con apt-get), la imagen
     # declara un usuario sin privilegios (control: la imagen base no declara
@@ -1231,31 +1449,9 @@ def seccion_f():
                  f"real={elegido.get(f'real:{puerto}')} control={elegido.get('control:8443')}")
 
 
-def enlazan_libcurl(imagen):
-    """Los ficheros de la imagen que enlazan libcurl, según ldd: los de
-    PostgreSQL (/usr/local) y los ejecutables del sistema."""
-    orden = ("find /usr/local /bin /sbin /usr/bin /usr/sbin -type f 2>/dev/null | while read -r f; do "
-             "ldd \"$f\" 2>/dev/null | grep -q libcurl && echo \"$f\"; done; true")
-    r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--user", "70:70",
-                  "--entrypoint", "sh", imagen, "-c", orden], timeout=300)
-    return sorted(r.out.split())
-
-
-def contienen_simbolos(imagen, simbolos):
-    """Los ficheros de la imagen que contienen alguno de los símbolos. Es
-    conservador: busca el texto en cada fichero, así que un nombre de símbolo
-    en cualquier sitio cuenta (falla de forma visible, nunca se lo salta)."""
-    patrones = " ".join(f"-e {s}" for s in simbolos)
-    orden = ("find /usr /lib /bin /sbin /etc -type f 2>/dev/null | while read -r f; do "
-             f"grep -q -F {patrones} \"$f\" 2>/dev/null && echo \"$f\"; done; true")
-    r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--user", "70:70",
-                  "--entrypoint", "sh", imagen, "-c", orden], timeout=300)
-    return sorted(r.out.split())
-
-
-def ordenes_apt(texto):
-    """Las órdenes RUN de un Dockerfile que llaman a apt, apt-get o dpkg. Une
-    las líneas partidas con barra invertida y quita los comentarios."""
+def lineas_logicas(texto):
+    """Las instrucciones de un Dockerfile, una por elemento. Une las líneas
+    partidas con barra invertida y quita los comentarios."""
     logicas, actual = [], ""
     for linea in texto.splitlines():
         if linea.lstrip().startswith("#"):
@@ -1268,7 +1464,61 @@ def ordenes_apt(texto):
         actual = ""
     if actual.strip():
         logicas.append(actual.strip())
-    return [l for l in logicas if re.match(r"(?i)RUN\s", l) and re.search(r"\b(apt|apt-get|aptitude|dpkg)\b", l)]
+    return logicas
+
+
+def ordenes_apt(texto):
+    """Las órdenes RUN de un Dockerfile que llaman a apt, apt-get o dpkg."""
+    return [l for l in lineas_logicas(texto)
+            if re.match(r"(?i)RUN\s", l) and re.search(r"\b(apt|apt-get|aptitude|dpkg)\b", l)]
+
+
+def froms_de(texto):
+    """Los FROM de un Dockerfile, en orden, como (imágenes, errores). Una
+    imagen es la referencia con su digest (sin el " AS nombre" final). Es
+    estricto a propósito: la lista blanca compara literales, así que lo que no
+    se puede leer como una referencia fija es un error y no se salta. FROM sin
+    importar mayúsculas; solo se tolera un " AS nombre" final. Son errores
+    cualquier opción (--platform con cualquier valor, que cambia la imagen
+    que se descarga según la máquina), ARG o variables ($X o ${X}, que se
+    resuelven fuera del fichero) y un FROM sin @sha256 (una etiqueta se puede
+    mover)."""
+    imagenes, errores = [], []
+    for linea in lineas_logicas(texto):
+        palabras = linea.split()
+        if not palabras:
+            continue
+        instruccion = palabras[0].upper()
+        if instruccion == "ARG":
+            errores.append(f"ARG no admitido: {linea}")
+            continue
+        if instruccion != "FROM":
+            continue
+        resto = palabras[1:]
+        if "$" in linea:
+            errores.append(f"variable en FROM: {linea}")
+        elif any(x.startswith("--") for x in resto):
+            errores.append(f"opcion de FROM no admitida (--platform u otra): {linea}")
+        else:
+            if len(resto) >= 3 and resto[-2].upper() == "AS":
+                nombre_etapa, resto = resto[-1], resto[:-2]
+                if not re.fullmatch(r"[A-Za-z0-9_.-]+", nombre_etapa):
+                    errores.append(f"nombre de etapa no valido: {linea}")
+                    continue
+            if len(resto) != 1:
+                errores.append(f"FROM con una forma no admitida: {linea}")
+            elif not re.search(r"@sha256:[0-9a-f]{64}$", resto[0]):
+                errores.append(f"FROM sin digest sha256: {linea}")
+            else:
+                imagenes.append(resto[0])
+    return imagenes, errores
+
+
+def froms_validos(texto, esperado):
+    """True solo si no hay errores y los FROM son exactamente la lista
+    esperada: misma longitud, mismo orden. Devuelve (cumple, imágenes, errores)."""
+    imagenes, errores = froms_de(texto)
+    return (not errores and imagenes == esperado), imagenes, errores
 
 
 def usuario_imagen(imagen):
@@ -1287,19 +1537,6 @@ def servicios_api_sin_root(extra=()):
     servicios = configuracion["services"]
     return {s: servicios[s].get("user", USUARIO_API) == USUARIO_API and servicios[s].get("read_only") is True
             for s in SERVICIOS_IMAGEN_API}
-
-
-def metodos_hba(texto):
-    """Los métodos de autenticación de un pg_hba.conf: el cuarto campo en las
-    reglas local y el quinto en las demás."""
-    metodos = set()
-    for linea in texto.splitlines():
-        campos = linea.split("#", 1)[0].split()
-        if campos:
-            indice = 3 if campos[0] == "local" else 4
-            if len(campos) > indice:
-                metodos.add(campos[indice])
-    return metodos
 
 
 # ---------------------------------------------------------------------------
@@ -1326,6 +1563,37 @@ def seccion_g():
         objetivo = f"{nombre}/Dockerfile"
         negativo(f"g) {objetivo if nombre != 'api' else 'Dockerfile'}: ningun fallo {SEVERIDADES}",
                  objetivo in fallos and not fallos[objetivo], control, str(fallos.get(objetivo)))
+
+    # Lista blanca de los FROM: imagen y digest literales, en orden, por
+    # fichero (FROM_ESPERADOS). Trivy config no mira de dónde viene la base, y
+    # un FROM cambiado (o una etapa añadida con otro digest) metería código de
+    # fuera de la cadena de espera de 14 días sin que ningún otro control lo
+    # viera. Controles, con textos sintéticos por el mismo analizador y la
+    # misma comparación: tres tienen que fallar y los correctos tienen que
+    # pasar; si alguno no se comporta así, SIN CONCLUSION.
+    controles_from = [
+        ("multietapa con otro digest en la ultima etapa",
+         f"FROM {IMG_PYTHON} AS construccion\nRUN echo a\nFROM {IMG_PYTHON_OTRO_DIGEST}\n",
+         [IMG_PYTHON, IMG_PYTHON], False),
+        ("FROM con etiqueta y sin digest", "FROM python:3.12-slim\n", [IMG_PYTHON], False),
+        ("FROM --platform=linux/arm64 con el digest correcto", f"FROM --platform=linux/arm64 {IMG_PYTHON}\n",
+         [IMG_PYTHON], False),
+        ("ARG antes de un FROM correcto", f"ARG BASE=python\nFROM {IMG_PYTHON}\n", [IMG_PYTHON], False),
+        ("FROM con variable", "FROM ${IMAGEN}@sha256:" + "0" * 64 + "\n", [IMG_PYTHON], False),
+        ("FROM correcto con AS", f"FROM {IMG_PYTHON} AS construccion\n", [IMG_PYTHON], True),
+        ("from correcto en minusculas con as", f"from {IMG_PYTHON} as construccion\n", [IMG_PYTHON], True),
+    ]
+    control_from = True
+    for descripcion, texto, esperado, debe_pasar in controles_from:
+        se_comporta = froms_validos(texto, esperado)[0] is debe_pasar
+        control_from = control_from and se_comporta
+        pasa(se_comporta, f"g) control: el analizador de FROM {'acepta' if debe_pasar else 'rechaza'} {descripcion}")
+    pasa(set(FROM_ESPERADOS) == {"Dockerfile", "proxy/Dockerfile", "db/Dockerfile"},
+         f"g) la lista blanca de FROM cubre exactamente los tres Dockerfiles ({sorted(FROM_ESPERADOS)})")
+    for fichero, esperado in sorted(FROM_ESPERADOS.items()):
+        cumple, imagenes, errores = froms_validos((RAIZ / fichero).read_text(encoding="utf-8"), esperado)
+        negativo(f"g) {fichero}: sus {len(esperado)} FROM son exactamente la lista blanca (imagen y digest, en orden)",
+                 cumple, control_from, f"FROM leidos {imagenes}; errores {errores}")
 
 
 # ---------------------------------------------------------------------------
