@@ -933,7 +933,7 @@ async def _limite_lecturas(_peticion, error):
 
 async def _limitador_no_disponible(_peticion, error):
     # Falla cerrado, como el middleware (app/limitador.py).
-    registro.error("EVENTO limitador_no_disponible: %s", error.clase)
+    registro.error("%s", limitador.texto_evento(error))
     return _error(503, None, {"Retry-After": REINTENTAR_TRAS})
 
 

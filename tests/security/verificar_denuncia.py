@@ -395,6 +395,25 @@ LIMITES_PRODUCCION = {"denuncia": (10, 3600), "seguimiento": (60, 60), "mensajes
                       "destinatario_dia": (10, 86400)}
 CUERPO_429 = '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode()
 TEXTO_EVENTO_LIMITADOR = "EVENTO limitador_no_disponible: "
+# El evento ENTERO (app/limitador.py, texto_evento): clase, causa y espera de
+# conjuntos cerrados, escritos aquí como literales y no leídos del código. Se
+# aplica a la parte que empieza en el prefijo, sin el "ERROR canario.limitador: "
+# del log. Ninguno de los textos de PROHIBIDO_EN_EVENTO_LIMITADOR puede salir
+# en él: el mensaje de redis-py lleva host:puerto, el usuario de Redis y la
+# clave con la huella del cliente.
+PATRON_EVENTO_LIMITADOR = re.compile(
+    r"EVENTO limitador_no_disponible: [A-Za-z]+ causa=(pool_agotado|permiso|plazo|conexion|otra) "
+    r"espera=(<0\.25|0\.25-0\.5|>0\.5)")
+PROHIBIDO_EN_EVENTO_LIMITADOR = ("6379", "redis:", "aplicacion", "limite:")
+# Lo mismo, sobre TODAS las líneas nuevas del log de la ventana: una traza por
+# algo que lance en el camino de error llevaría host:puerto o la clave fuera de
+# la línea del evento. Sin "aplicacion": en una línea legítima del log de la
+# API puede aparecer el nombre del rol de PostgreSQL (el pool de conexiones
+# registra por logging, app/principal.py:37-41, y un fallo de conexión con la
+# base de datos nombra al rol; una traza imprime líneas de fuente como
+# "aplicacion = FastAPI(", app/principal.py:150). Sobre las líneas del evento
+# sí se mantiene: ahí no tiene motivo para salir.
+PROHIBIDO_EN_TODO_EL_LOG = ("6379", "redis:", "limite:")
 # Clientes de prueba con IP fija en la red edge (fuera del rango automático):
 # llegan a la API a través de Caddy, como un cliente real.
 IP_CLIENTE_A = "10.88.1.3"
@@ -1281,6 +1300,51 @@ def dia_en(zona):
 
 def lineas_log(servicio):
     return dc("logs", "--no-color", "--no-log-prefix", servicio).todo.splitlines()
+
+
+def eventos_limitador(lineas):
+    """De cada línea con el EVENTO limitador_no_disponible, desde su prefijo
+    hasta el final: sin el nivel y el nombre del logger que antepone el log."""
+    return [l[l.index(TEXTO_EVENTO_LIMITADOR):] for l in lineas if TEXTO_EVENTO_LIMITADOR in l]
+
+
+def log_sin_prohibidos(lineas):
+    """Ninguna línea del log lleva nada de PROHIBIDO_EN_TODO_EL_LOG."""
+    return not any(prohibido in l for l in lineas for prohibido in PROHIBIDO_EN_TODO_EL_LOG)
+
+
+def evento_limitador_sano(evento, causa):
+    """El evento casa ENTERO con el patrón, con la causa esperada, y no lleva
+    nada de PROHIBIDO_EN_EVENTO_LIMITADOR."""
+    encaje = PATRON_EVENTO_LIMITADOR.fullmatch(evento)
+    return (encaje is not None and encaje.group(1) == causa
+            and not any(prohibido in evento for prohibido in PROHIBIDO_EN_EVENTO_LIMITADOR))
+
+
+def control_patron_evento_limitador():
+    """Control de las dos comprobaciones: aceptan lo bueno y rechazan lo malo.
+    Del evento: cuatro líneas malas (causa inventada, espera fuera de los
+    tramos, un resto detrás y un puerto dentro) y una que casa con el patrón
+    pero lleva un prohibido ("aplicacion" como clase). De todo el log: una
+    línea que no es el evento y lleva redis:6379, otra con la clave y otra con
+    un puerto. Si falla, los negativos de r9 y r10 no concluyen (SIN CONCLUSION)."""
+    bueno = TEXTO_EVENTO_LIMITADOR + "TimeoutError causa=plazo espera=0.25-0.5"
+    malos = (TEXTO_EVENTO_LIMITADOR + "TimeoutError causa=inventada espera=0.25-0.5",
+             TEXTO_EVENTO_LIMITADOR + "TimeoutError causa=plazo espera=1.5",
+             bueno + " 10.9.8.7",
+             TEXTO_EVENTO_LIMITADOR + "TimeoutError causa=plazo espera=<0.25 redis:6379")
+    con_prohibido = TEXTO_EVENTO_LIMITADOR + "aplicacion causa=plazo espera=<0.25"
+    # Control dentro del control: esta línea SÍ casa con el patrón, así que solo
+    # la rechaza la comprobación de prohibidos.
+    casa_con_el_patron = PATRON_EVENTO_LIMITADOR.fullmatch(con_prohibido) is not None
+    del_evento = (evento_limitador_sano(bueno, "plazo") and not evento_limitador_sano(bueno, "conexion")
+                  and not any(evento_limitador_sano(malo, "plazo") for malo in malos)
+                  and casa_con_el_patron and not evento_limitador_sano(con_prohibido, "plazo"))
+    de_todo_el_log = (log_sin_prohibidos(["INFO canario.arranque: LIMITADOR VERIFICADO", "ERROR otro: rol aplicacion"])
+                      and not log_sin_prohibidos(["ERROR canario.limitador: fallo en redis:6379"])
+                      and not log_sin_prohibidos(["ERROR canario.limitador: clave limite:otras:1:abc"])
+                      and not log_sin_prohibidos(["INFO bien", "WARNING mal 10.9.8.7:6379"]))
+    return del_evento and de_todo_el_log
 
 
 def hmac_de(codigo):
@@ -2584,6 +2648,17 @@ def seccion_r():
     negativo(f"r9) el rechazo registra {TEXTO_EVENTO_LIMITADOR + 'TimeoutError'!r} sin la IP del cliente",
              any(TEXTO_EVENTO_LIMITADOR + "TimeoutError" in l for l in nuevas_lineas)
              and not any(IP_CLIENTE_B in l for l in nuevas_lineas), control, f"lineas nuevas: {nuevas_lineas}")
+    # La causa de un Redis en pausa: acepta la conexión y no contesta, así que
+    # vence la lectura (TimeoutError de redis-py): plazo. Si sale otra cosa
+    # (pool_agotado, conexion...), no se ajusta la prueba: se investiga.
+    eventos = eventos_limitador(nuevas_lineas)
+    pasa(control_patron_evento_limitador(),
+         "r9) control: las comprobaciones del evento y del log aceptan lo bueno y rechazan lo malo")
+    negativo("r9) el evento del limitador casa ENTERO con su patron, con causa=plazo y sin 6379, redis:, aplicacion "
+             f"ni limite:, y ninguna linea nueva del log lleva 6379, redis: ni limite: ({len(eventos)} evento/s)",
+             len(eventos) >= 1 and all(evento_limitador_sano(e, "plazo") for e in eventos)
+             and log_sin_prohibidos(nuevas_lineas),
+             control and control_patron_evento_limitador(), f"eventos: {eventos}")
 
     # r10) Redis parado: las cuatro reglas responden 503 y /salud 200. Al
     # volver, Redis no conserva ningún contador y la primera petición ya se
@@ -2607,6 +2682,16 @@ def seccion_r():
     negativo(f"r10) cada rechazo registra {TEXTO_EVENTO_LIMITADOR!r} sin la IP del cliente",
              sum(TEXTO_EVENTO_LIMITADOR in l for l in nuevas_lineas) >= 4
              and not any(IP_CLIENTE_B in l for l in nuevas_lineas), control, f"lineas nuevas: {nuevas_lineas}")
+    # La causa de un Redis parado: no hay a quién conectar (ConnectionError o
+    # un OSError de red): conexion. Si sale otra cosa (plazo, si el nombre
+    # tarda en resolverse), no se ajusta la prueba: se investiga.
+    eventos = eventos_limitador(nuevas_lineas)
+    negativo("r10) cada evento del limitador casa ENTERO con su patron, con causa=conexion y sin 6379, redis:, "
+             "aplicacion ni limite:, y ninguna linea nueva del log lleva 6379, redis: ni limite: "
+             f"({len(eventos)} evento/s)",
+             len(eventos) >= 4 and all(evento_limitador_sano(e, "conexion") for e in eventos)
+             and log_sin_prohibidos(nuevas_lineas),
+             control and control_patron_evento_limitador(), f"eventos: {eventos}")
     vuelto = esperar(lambda: salud(contenedor("redis")) == "healthy", 60)
     claves_despues = redis_cli("inspector", "DBSIZE").out.strip()
     negativo(f"r10) tras reiniciarse, Redis no conserva ningun contador (DBSIZE {claves_antes} -> {claves_despues})",

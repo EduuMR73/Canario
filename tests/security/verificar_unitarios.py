@@ -73,7 +73,7 @@ PRUEBAS_POR_FICHERO = {
     "test_externo": 16,
     "test_frontera": 12,
     "test_instruccion": 33,
-    "test_limitador": 20,
+    "test_limitador": 36,
     "test_login": 8,
     "test_login_externo": 27,
     "test_personal": 8,
@@ -89,7 +89,7 @@ PRUEBAS_POR_FICHERO = {
 # pruebas que llegan a un hash lo crean con personal.iniciar_ejecutor_hashes
 # y lo instalan con mock.patch.object sobre personal._ejecutor (test_login y
 # test_login_externo.LoQueRevocaLosVinculos.test_cambio_de_contrasena).
-TOTAL_PRUEBAS = 375
+TOTAL_PRUEBAS = 391
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes
@@ -334,6 +334,30 @@ MUTANTES = [
      "la huella de una cuenta externa no lleva la empresa (se cruza entre empresas)"),
     ("limitador.py", "        return resultado[0] == 1\n", "        return resultado[0] >= 1\n",
      "test_limitador.ConsumirUnaVez.test_solo_la_primera_vez", "un ticket de un solo uso vale varias veces"),
+    # Causa y espera del evento limitador_no_disponible (app/limitador.py, _causa y _tramo_espera).
+    ("limitador.py", "if (type(error) is ErrorConexion and isinstance(error.__cause__, TimeoutError)",
+     "if (isinstance(error, ErrorConexion) and isinstance(error.__cause__, TimeoutError)",
+     "test_limitador.CausaDelError.test_pool_agotado_solo_con_la_forma_exacta",
+     "una subclase de ConnectionError (permiso, BusyLoadingError) con ese mensaje cuenta como pool agotado"),
+    ("limitador.py", "                and error.args == (_MENSAJE_POOL_AGOTADO,)):", "                ):",
+     "test_limitador.CausaDelError.test_pool_agotado_solo_con_la_forma_exacta",
+     "cualquier ConnectionError con un TimeoutError detras cuenta como pool agotado"),
+    ("limitador.py", "isinstance(error, (ErrorPlazo, TimeoutError))", "isinstance(error, ErrorPlazo)",
+     "test_limitador.CausaDelError.test_tabla_un_literal_por_fila",
+     "el TimeoutError del lenguaje se cuenta como caida de la conexion y no como plazo"),
+    ("limitador.py", "(AuthenticationError, AuthorizationError, NoPermissionError)):",
+     "(AuthenticationError, AuthorizationError)):",
+     "test_limitador.CausaDelError.test_tabla_un_literal_por_fila",
+     "una ACL que niega la orden (NOPERM) se cuenta como otra causa y no como permiso"),
+    ("limitador.py", "    except Exception:  # noqa: BLE001 - nunca lanza", "    except KeyboardInterrupt:  # noqa: BLE001 - nunca lanza",
+     "test_limitador.CausaDelError.test_robustez_nunca_lanza",
+     "_causa deja de capturar: una excepcion rara convierte el 503 cerrado en un 500 sin evento"),
+    ("limitador.py", "if segundos <= _ESPERA_TRAMO_ALTO:", "if segundos < _ESPERA_TRAMO_ALTO:",
+     "test_limitador.EsperaDelFallo.test_bordes_en_contar_varias",
+     "los 0,5 s exactos caen en el tramo de mas de 0,5 s"),
+    ("limitador.py", "causa={error.causa} espera={error.espera}\"\n", "causa={error.causa} espera={error.espera} {error.args}\"\n",
+     "test_limitador.EventoSinDatos.test_texto_literal_y_formato",
+     "el evento arrastra datos que no son de sus conjuntos cerrados"),
     # Login externo y vínculos en app/personal.py (bloque A1-b2, paso 1b).
     ("personal.py", "i.sub_hmac = %(sub_hmac)s and not i.revocada", "i.sub_hmac = %(sub_hmac)s",
      "test_login_externo.ReservaPorLaCuentaVinculada.test_sentencia",

@@ -320,7 +320,7 @@ def _canjear(peticion, proveedor):
         if not _gastador(estado, "flujo", flujo.jti, flujo)():
             raise _Fallo(FALLIDO, "repetida")
     except limitador.NoDisponible as error_redis:
-        registro.error("EVENTO limitador_no_disponible: %s", error_redis.clase)
+        registro.error("%s", limitador.texto_evento(error_redis))
         raise _Fallo(NO_DISPONIBLE, None) from None
     try:
         sub = cliente_broker.canjear(proveedor, code, flujo.verifier, flujo.nonce)

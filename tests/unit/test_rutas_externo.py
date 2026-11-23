@@ -339,8 +339,9 @@ class Vuelta(unittest.TestCase):
             "canje rechazado": (cliente_broker.CanjeRechazado(), None, "fallido", [evento + "canje"]),
             "broker caido": (cliente_broker.BrokerNoDisponible("red"), None, "no_disponible", []),
             "sin configurar": (cliente_broker.NoConfigurado(), None, "no_disponible", [evento + "no_configurado"]),
-            "redis caido": (None, limitador.NoDisponible("ConnectionError"), "no_disponible",
-                            ["ERROR:canario.externo:EVENTO limitador_no_disponible: ConnectionError"]),
+            "redis caido": (None, limitador.NoDisponible("ConnectionError", "conexion", "0.25-0.5"), "no_disponible",
+                            ["ERROR:canario.externo:EVENTO limitador_no_disponible: "
+                             "ConnectionError causa=conexion espera=0.25-0.5"]),
         }
         for nombre, (error_broker, error_redis, resultado, eventos) in casos.items():
             with self.subTest(nombre):
@@ -381,22 +382,32 @@ class FronteraEnLaVuelta(unittest.TestCase):
 
         async def send(mensaje):
             enviados.append(mensaje)
-        with self.assertLogs("canario.limitador", "ERROR") if fallo else contextlib.nullcontext():
+        registro = self.assertLogs("canario.limitador", "ERROR") if fallo else contextlib.nullcontext()
+        with registro as capturado:
             asyncio.run(limitador.FronteraLimitador(interior)(scope, None, send))
-        return enviados
+        # Sin fallo no se registra nada: un 429 es flujo normal (app/limitador.py).
+        return enviados, (capturado.output if fallo else [])
 
     def test_limitador_responde_303_en_la_vuelta(self):
         # Control: en cualquier otra ruta, el 429 de siempre.
-        otra = self.frontera("/v1/personal/sesiones/externa", resultado=(False, 30))
+        otra, eventos_otra = self.frontera("/v1/personal/sesiones/externa", resultado=(False, 30))
         self.assertEqual((otra[0]["status"], otra[1]["body"]),
                          (429, '{"detalle": "demasiadas peticiones; inténtelo de nuevo más tarde"}'.encode()))
-        for nombre, argumentos in {"429": {"resultado": (False, 30)},
-                                   "503": {"fallo": limitador.NoDisponible("ConnectionError")}}.items():
+        self.assertEqual(eventos_otra, [])
+        # El mismo NoDisponible y el mismo literal que las otras dos rutas que
+        # lo registran (test_errores.py y test_fallos_del_broker_y_de_redis_sin_ticket):
+        # una sola fuente, limitador.texto_evento.
+        casos = {"429": ({"resultado": (False, 30)}, []),
+                 "503": ({"fallo": limitador.NoDisponible("ConnectionError", "conexion", "0.25-0.5")},
+                         ["ERROR:canario.limitador:EVENTO limitador_no_disponible: "
+                          "ConnectionError causa=conexion espera=0.25-0.5"])}
+        for nombre, (argumentos, eventos) in casos.items():
             with self.subTest(nombre):
-                enviados = self.frontera(RUTA_VUELTA, **argumentos)
+                enviados, registrados = self.frontera(RUTA_VUELTA, **argumentos)
                 self.assertEqual(enviados[0], {"type": "http.response.start", "status": 303, "headers": [
                     (b"location", b"/entrar?externo=no_disponible"), (b"content-length", b"0")]})
                 self.assertEqual(enviados[1], {"type": "http.response.body", "body": b""})
+                self.assertEqual(registrados, eventos)
 
     def test_navegacion_son_justo_las_rutas_de_la_vuelta(self):
         self.assertEqual(frontera_http.NAVEGACION, {RUTA_VUELTA: "/entrar?externo=no_disponible"})

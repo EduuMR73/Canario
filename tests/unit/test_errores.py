@@ -97,9 +97,12 @@ class TablaDeErrores(unittest.TestCase):
 
     def test_limitador_no_disponible_falla_cerrado(self):
         with self.assertLogs("canario.personal", "ERROR") as registro:
-            respuesta = responder(aplicacion(), limitador.NoDisponible("ConnectionError"))
+            respuesta = responder(aplicacion(), limitador.NoDisponible("ConnectionError", "conexion", "0.25-0.5"))
         self.assertEqual((respuesta.status_code, respuesta.headers.get("retry-after")), (503, "5"))
-        self.assertEqual(registro.output, ["ERROR:canario.personal:EVENTO limitador_no_disponible: ConnectionError"])
+        # El mismo literal que dejan FronteraLimitador (test_rutas_externo.py) y la
+        # vuelta del login externo: una sola fuente, limitador.texto_evento.
+        self.assertEqual(registro.output, ["ERROR:canario.personal:EVENTO limitador_no_disponible: "
+                                           "ConnectionError causa=conexion espera=0.25-0.5"])
 
     def test_eventos_sin_datos(self):
         app = aplicacion()

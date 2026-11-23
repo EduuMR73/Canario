@@ -87,8 +87,9 @@ from redis.asyncio import BlockingConnectionPool, Redis
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 from redis.credentials import CredentialProvider
-from redis.exceptions import AuthenticationError, NoPermissionError, RedisError
+from redis.exceptions import AuthenticationError, AuthorizationError, NoPermissionError, RedisError
 from redis.exceptions import ConnectionError as ErrorConexion
+from redis.exceptions import TimeoutError as ErrorPlazo
 
 from app.frontera_http import REINTENTAR_TRAS, responder
 
@@ -212,12 +213,112 @@ class ErrorConfiguracion(Exception):
     """La configuración del limitador no es válida: la API no debe arrancar."""
 
 
-class NoDisponible(Exception):
-    """Redis no ha podido contar la petición: se rechaza (falla cerrado)."""
+# Conjuntos cerrados del evento de "Redis no ha podido contar" (texto_evento):
+# nunca texto libre, para que el evento no pueda llevar ni la dirección de
+# Redis ni la clave con la huella del cliente (viven en el mensaje de la
+# excepción de redis-py, no en su clase).
+CAUSAS = ("pool_agotado", "permiso", "plazo", "conexion", "otra")
+# Segundos esperados hasta el fallo, en tramos: "<0.25", "0.25-0.5" (el borde
+# de 0,5 s es de este tramo) y ">0.5". Solo se interpreta junto con la causa
+# pool_agotado: con "<0.25", el pool estaba lleno con el bucle sano (el pool
+# espera PLAZO = 0,2 s); con más, el bucle iba con cola (temporizador tardío o
+# cola del candado del pool: BlockingConnectionPool.get_connection entra en
+# su candado antes de arrancar el temporizador, redis/asyncio/connection.py:3084
+# y :3085). Con plazo o conexion no distingue nada: una conexión nueva que
+# agota connect y luego la lectura llega a ~0,4 s con el bucle sano.
+ESPERAS = ("<0.25", "0.25-0.5", ">0.5")
+_ESPERA_TRAMO_BAJO = 0.25
+_ESPERA_TRAMO_ALTO = 0.5
+# Literal de redis-py 8.1.0 (redis/asyncio/connection.py:3099): el pool
+# bloqueante no tiene un tipo propio para "sin conexión libre en el plazo".
+# Si una versión nueva cambia la cadena, la prueba con el pool real (a, en
+# tests/unit/test_limitador.py) deja de dar pool_agotado y falla: no hace
+# falta una guarda de versión aparte.
+_MENSAJE_POOL_AGOTADO = "No connection available."
 
-    def __init__(self, clase):
-        super().__init__(clase)
+
+class NoDisponible(Exception):
+    """Redis no ha podido contar la petición: se rechaza (falla cerrado).
+
+    Los tres datos son obligatorios y sin valor por defecto: una causa
+    implícita ("otra") ocultaría una llamada que no la calcula. Sin validación
+    en ejecución, a propósito: este constructor corre en el camino de error
+    y no puede lanzar. Los conjuntos válidos son CAUSAS y ESPERAS."""
+
+    def __init__(self, clase, causa, espera):
+        # Los tres en args: así copy y pickle reconstruyen la excepción.
+        super().__init__(clase, causa, espera)
         self.clase = clase
+        self.causa = causa
+        self.espera = espera
+
+
+def _causa(error):
+    """Qué excepción impidió contar, como uno de CAUSAS. Pura y nunca lanza.
+
+    NO atribuye culpa: un bucle de eventos saturado también da "plazo" o
+    "pool_agotado" sin que Redis tenga nada. Lo que informa es la mezcla de
+    causas, cruzada con la sonda de salud y la CPU de Redis. Orden explícito,
+    porque las clases se solapan:
+
+    1. pool_agotado: ConnectionError EXACTO (no una subclase) con
+       TimeoutError como __cause__ y el mensaje literal de redis-py. Se
+       compara args y no str(error): str() podría lanzar en una excepción rara
+       y el mensaje de otras ConnectionError lleva host y puerto.
+    2. permiso: AuthenticationError y AuthorizationError (son ConnectionError
+       en redis-py) y NoPermissionError (ResponseError). Antes que conexion,
+       o una ACL cambiada pasaría por caída de la red.
+    3. plazo: el TimeoutError de redis-py y el del lenguaje (OSError desde
+       Python 3.11). Antes que conexion, que incluye OSError.
+    4. conexion: el resto de ConnectionError (BusyLoadingError y
+       MaxConnectionsError entre ellos) y de OSError.
+    5. otra: cualquier otra cosa, por ejemplo un ResponseError por falta de
+       memoria.
+
+    El try cubre una excepción cuyo comportamiento sea raro (un __class__ o
+    un __cause__ que lancen): _causa corre al fallar, y si lanzara, el
+    rechazo cerrado de la petición (503) acabaría en un 500 sin evento.
+    """
+    try:
+        if (type(error) is ErrorConexion and isinstance(error.__cause__, TimeoutError)
+                and error.args == (_MENSAJE_POOL_AGOTADO,)):
+            return "pool_agotado"
+        if isinstance(error, (AuthenticationError, AuthorizationError, NoPermissionError)):
+            return "permiso"
+        if isinstance(error, (ErrorPlazo, TimeoutError)):
+            return "plazo"
+        if isinstance(error, (ErrorConexion, OSError)):
+            return "conexion"
+    except Exception:  # noqa: BLE001 - nunca lanza: ver la cabecera de la función
+        pass
+    return "otra"
+
+
+def _tramo_espera(segundos):
+    """Tramo de ESPERAS al que pertenecen los segundos esperados."""
+    if segundos < _ESPERA_TRAMO_BAJO:
+        return ESPERAS[0]
+    if segundos <= _ESPERA_TRAMO_ALTO:
+        return ESPERAS[1]
+    return ESPERAS[2]
+
+
+def _no_disponible(error, inicio):
+    """NoDisponible de un fallo de Redis con su clase, su causa y la espera
+    desde inicio (time.monotonic() al entrar). Nunca lanza."""
+    return NoDisponible(type(error).__name__, _causa(error), _tramo_espera(time.monotonic() - inicio))
+
+
+def texto_evento(error):
+    """Línea del evento de un NoDisponible, y única fuente de su texto: el
+    middleware (FronteraLimitador) y los dos manejadores de las rutas la
+    usan, y una prueba exige que el literal no esté en ningún otro sitio de
+    app/. Solo lleva clase, causa y espera (conjuntos cerrados): nunca el
+    mensaje de la excepción de redis-py, que lleva host:puerto y, en un
+    pipeline, la clave con la huella HMAC del cliente (docs/threat-model.md,
+    6.9). El prefijo y la clase se quedan como antes: lanzar.py y las
+    baterías casan por ellos."""
+    return f"EVENTO limitador_no_disponible: {error.clase} causa={error.causa} espera={error.espera}"
 
 
 def regla_de(ruta):
@@ -434,6 +535,9 @@ class Limitador:
         canje más con el mismo flujo, que el proveedor rechaza si el code ya
         se usó.
         """
+        # La espera cuenta desde aquí: incluye el pool, la conexión (con su
+        # reintento) y las lecturas.
+        inicio = time.monotonic()
         if espacio not in ESPACIOS_UNA_VEZ or not PATRON_UNA_VEZ.fullmatch(identificador):
             raise ValueError("espacio o identificador de un solo uso no valido")
         if isinstance(segundos, bool) or not isinstance(segundos, int) or not 1 <= segundos <= SEGUNDOS_UNA_VEZ_MAXIMOS:
@@ -445,7 +549,7 @@ class Limitador:
                 tubo.execute_command("EXPIRE", clave, segundos, "NX")
                 resultado = await tubo.execute()
         except (RedisError, OSError) as error:
-            raise NoDisponible(type(error).__name__) from None
+            raise _no_disponible(error, inicio) from None
         return resultado[0] == 1
 
     async def _contar(self, regla, huella, instante):
@@ -456,6 +560,9 @@ class Limitador:
         """Cuenta la misma huella en varias reglas dentro de un MULTI, que
         Redis ejecuta entero o no ejecuta: nunca queda una contada y otra no.
         Devuelve [(regla, cuenta, límite, segundos hasta el fin de su ventana)]."""
+        # La espera cuenta desde aquí: incluye el pool, la conexión (con su
+        # reintento) y las lecturas.
+        inicio = time.monotonic()
         segundo = int(instante)
         contadas = [(regla, self.limites[regla]) for regla in reglas]
         try:
@@ -468,7 +575,7 @@ class Limitador:
                     tubo.execute_command("EXPIRE", clave, limite.ventana, "NX")
                 resultado = await tubo.execute()
         except (RedisError, OSError) as error:
-            raise NoDisponible(type(error).__name__) from None
+            raise _no_disponible(error, inicio) from None
         # El resultado alterna INCR y EXPIRE: las cuentas son las posiciones pares.
         return [(regla, resultado[2 * i], limite, limite.ventana - segundo % limite.ventana)
                 for i, (regla, limite) in enumerate(contadas)]
@@ -550,7 +657,7 @@ class FronteraLimitador:
                 raise ValueError("sin cliente")
             permitida, segundos = await scope["app"].state.limitador.consumir(regla, cliente[0])
         except NoDisponible as error:
-            registro.error("EVENTO limitador_no_disponible: %s", error.clase)
+            registro.error("%s", texto_evento(error))
             await responder(send, 503, [(b"retry-after", REINTENTAR_TRAS.encode("ascii"))], ruta=scope["path"])
             return
         except ValueError:
