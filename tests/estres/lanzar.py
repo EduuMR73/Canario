@@ -386,6 +386,31 @@ PATRON_INSUFICIENTES = re.compile(r"Insufficient VUs.*?scenario=(\S+)")
 PATRON_CHECKPOINT = re.compile(r"checkpoint starting")
 PATRON_AUTOVACUUM = re.compile(r"automatic (?:vacuum|analyze) of table")
 
+# Evento del limitador (app/limitador.py, texto_evento):
+#   EVENTO limitador_no_disponible: <clase> causa=<causa> espera=<tramo>
+# Los grupos 2 (causa) y 3 (espera) son OPCIONALES: una imagen anterior al
+# cambio solo da la clase, y esa línea se cuenta como "sin_dato" (visible, no
+# descartada). Es la única fuente del patrón: SENALES lo reutiliza.
+# El grupo 4 es lo que queda de línea tras la espera. NO se ancla con $ tras el
+# grupo 3: una línea con texto de más ("espera=<0.25 basura") dejaría de casar
+# y saldría del total sin avisar. Se deja casar y parsear_limitador marca como
+# anómalo cualquier sobrante no vacío.
+PATRON_LIMITADOR = re.compile(r"EVENTO limitador_no_disponible: (\S+)(?: causa=(\S+))?(?: espera=(\S+))?(.*)$")
+# Conjuntos cerrados del evento, escritos aquí como literales y NO importados
+# de app/limitador.py: si la API cambiara sus conjuntos, un valor nuevo debe
+# verse como "fuera_de_conjunto" y no colarse en silencio como válido.
+CAUSAS_LIMITADOR = ("pool_agotado", "permiso", "plazo", "conexion", "otra")
+ESPERAS_LIMITADOR = ("<0.25", "0.25-0.5", ">0.5")
+SIN_DATO = "sin_dato"  # la línea no trae el campo (imagen anterior al evento con causa)
+FUERA_DE_CONJUNTO = "fuera_de_conjunto"  # trae el campo con un valor que no es del conjunto cerrado
+# Ventana tras un evento start de Redis, solo para SEPARAR los errores que
+# siguen a un arranque de Redis de los demás (información; no los presenta
+# como legítimos: en L1 el único start esperado es el de preparar_repeticion,
+# antes del primer escalón, y un start dentro de la medida es un reinicio tras
+# una muerte, o sea un incidente). Semiabierta [start, start + 10 s), como
+# ventana_de.
+VENTANA_ARRANQUE_REDIS_S = 10
+
 # Señales del log de la API (app/frontera_http.py, app/personal.py y
 # app/limitador.py). El grupo 1, si lo hay, es la clase del error.
 SENALES = (
@@ -393,7 +418,7 @@ SENALES = (
     ("sin_conexion_otra", re.compile(r"SIN CONEXION: (?!PoolTimeout\b)(\S+)")),
     ("saturacion", re.compile(r"SATURACION: (\S+)")),
     ("hashes_saturados", re.compile(r"EVENTO hashes_saturados\b")),
-    ("limitador_no_disponible", re.compile(r"EVENTO limitador_no_disponible: (\S+)")),
+    ("limitador_no_disponible", PATRON_LIMITADOR),
     ("error_interno", re.compile(r"ERROR INTERNO: (.+)$")),
     ("login_fallido", re.compile(r"EVENTO login_fallido\b")),
 )
@@ -1993,10 +2018,84 @@ def leer_log(ruta):
     return lineas
 
 
-def senales_escalon(lineas_api, otras, res):
+def _campo_limitador(valor, conjunto):
+    """Valor de un campo del evento: SIN_DATO si la línea no lo trae, el valor
+    si es del conjunto cerrado y FUERA_DE_CONJUNTO si no. Un valor ajeno o
+    ausente tiene columna y dispara el AVISO del resumen (lineas_limitador)."""
+    if valor is None:
+        return SIN_DATO
+    return valor if valor in conjunto else FUERA_DE_CONJUNTO
+
+
+def parsear_limitador(mensaje):
+    """(clase, causa, espera, causa_cruda, espera_cruda) de una línea del
+    evento limitador_no_disponible, o None si la línea no es ese evento. Causa
+    y espera ya normalizadas (conjunto cerrado, SIN_DATO o FUERA_DE_CONJUNTO);
+    las crudas son lo escrito en el log (None si falta), solo para avisar."""
+    encaje = PATRON_LIMITADOR.search(mensaje)
+    if encaje is None:
+        return None
+    clase, causa, espera, sobrante = encaje.groups()
+    espera_normal = _campo_limitador(espera, ESPERAS_LIMITADOR)
+    if sobrante.strip():
+        # Texto de más tras los campos: la línea no es la que escribe la API.
+        espera_normal = FUERA_DE_CONJUNTO
+        espera = f"{espera or ''}{sobrante}".strip()
+    return (clase, _campo_limitador(causa, CAUSAS_LIMITADOR), espera_normal, causa, espera)
+
+
+def resumir_limitador(lineas, arranques_redis):
+    """Mezcla de causas del limitador en un escalón. INFORMACIÓN: no decide
+    ningún veredicto (el criterio de H7 se evalúa a mano, con docs/).
+
+    lineas: [(marca, mensaje)] de la API ya acotadas a la ventana del escalón.
+    arranques_redis: marcas (reloj de la VM) de los eventos start de Redis.
+    Devuelve el recuento por causa, el de espera dentro de pool_agotado (la
+    espera solo se interpreta con esa causa) y el de conexion y permiso dentro
+    y fuera de los VENTANA_ARRANQUE_REDIS_S s siguientes a un start de Redis
+    (información que los separa; no los da por legítimos). espera_anomala
+    cuenta las esperas sin dato o ajenas al conjunto de CUALQUIER causa, sin
+    mezclarlas en esperas_pool (contaminaría el reparto). campos_ajenos es el
+    total de campos (causa o espera) fuera del conjunto; valores_ajenos, una
+    muestra de hasta 5 valores distintos."""
+    causas = {c: 0 for c in (*CAUSAS_LIMITADOR, SIN_DATO, FUERA_DE_CONJUNTO)}
+    espera_anomala = 0
+    campos_ajenos = 0
+    esperas_pool = {e: 0 for e in (*ESPERAS_LIMITADOR, SIN_DATO, FUERA_DE_CONJUNTO)}
+    arranque = {"conexion": {"dentro": 0, "fuera": 0}, "permiso": {"dentro": 0, "fuera": 0}}
+    crudos = set()
+    total = 0
+    for marca, mensaje in lineas:
+        evento = parsear_limitador(mensaje)
+        if evento is None:
+            continue
+        _, causa, espera, causa_cruda, espera_cruda = evento
+        total += 1
+        causas[causa] += 1
+        if espera in (SIN_DATO, FUERA_DE_CONJUNTO):
+            espera_anomala += 1
+        if causa == "pool_agotado":
+            esperas_pool[espera] += 1
+        if causa in arranque:
+            dentro = any(s <= marca < s + VENTANA_ARRANQUE_REDIS_S for s in arranques_redis)
+            arranque[causa]["dentro" if dentro else "fuera"] += 1
+        # Los valores ajenos al conjunto se muestran acotados y con repr: son
+        # texto del log, no se imprimen tal cual.
+        for campo, cruda, normal in (("causa", causa_cruda, causa), ("espera", espera_cruda, espera)):
+            if normal == FUERA_DE_CONJUNTO:
+                campos_ajenos += 1
+                crudos.add(f"{campo}={cruda[:40]!r}")
+    return {"total": total, "causas": causas, "esperas_pool": esperas_pool, "arranque": arranque,
+            "arranques_redis": len(arranques_redis), "espera_anomala": espera_anomala,
+            "campos_ajenos": campos_ajenos, "valores_ajenos": sorted(crudos)[:5]}
+
+
+def senales_escalon(lineas_api, otras, res, arranques_redis):
     """Señales de la API en la ventana del escalón (reloj de la VM, el mismo
     de k6 y de docker logs), con la primera aparición de cada una, y las
-    líneas de PostgreSQL y Redis en esa ventana."""
+    líneas de PostgreSQL y Redis en esa ventana. arranques_redis: marcas de
+    los eventos start de Redis (sin valor por defecto: olvidarlo contaría todo
+    como fuera de la ventana de arranque)."""
     desde, hasta = res.get("principal", {}).get("ventana_ms", [None, None])
     if desde is None:
         return
@@ -2018,6 +2117,7 @@ def senales_escalon(lineas_api, otras, res):
     res["senales"] = {n: {"total": s["total"], "clases": dict(s["clases"]),
                           "primera_s": None if s["primera"] is None else round(s["primera"] - a - 1, 1)}
                       for n, s in senales.items()}
+    res["limitador"] = resumir_limitador([(m, t) for m, t in lineas_api if a <= m <= b], arranques_redis)
     res["lineas_log"] = {servicio: sum(1 for marca, _ in lineas if a <= marca <= b) for servicio, lineas in otras.items()}
     # Checkpoints y autovacuum de PostgreSQL en la ventana (activados solo en
     # el override de estres): explicación candidata de una denuncia no monótona.
@@ -2026,6 +2126,33 @@ def senales_escalon(lineas_api, otras, res):
                            and PATRON_CHECKPOINT.search(m)),
         "autovacuum": sum(1 for marca, m in otras.get("postgres", []) if a <= marca <= b
                           and PATRON_AUTOVACUUM.search(m))}
+
+
+def lineas_limitador(lim):
+    """Líneas legibles del resumen del limitador de un escalón (informativas;
+    la primera lleva el recuento y las siguientes solo salen si hay algo que
+    avisar). No es un veredicto."""
+    if lim["total"] == 0:
+        return ["      limitador (causa): sin eventos"]
+    c, e, a = lim["causas"], lim["esperas_pool"], lim["arranque"]
+    n = VENTANA_ARRANQUE_REDIS_S
+    lineas = [
+        f"      limitador (causa, informacion): n={lim['total']} pool_agotado={c['pool_agotado']} "
+        f"plazo={c['plazo']} conexion={c['conexion']} permiso={c['permiso']} otra={c['otra']} "
+        f"sin_dato={c[SIN_DATO]} fuera_de_conjunto={c[FUERA_DE_CONJUNTO]} espera_anomala={lim['espera_anomala']}; "
+        f"espera de pool_agotado: "
+        f"<0.25={e['<0.25']} 0.25-0.5={e['0.25-0.5']} >0.5={e['>0.5']} sin_dato={e[SIN_DATO]} "
+        f"fuera_de_conjunto={e[FUERA_DE_CONJUNTO]}; conexion fuera/dentro de los {n} s tras el arranque de Redis "
+        f"{a['conexion']['fuera']}/{a['conexion']['dentro']}; permiso fuera/dentro "
+        f"{a['permiso']['fuera']}/{a['permiso']['dentro']}; arranques de Redis vistos {lim['arranques_redis']}"]
+    # Cualquier campo ausente o fuera de su conjunto, en cualquier causa. La
+    # espera anomala incluye la de pool_agotado (e[SIN_DATO], e[FUERA...]).
+    if c[SIN_DATO] or c[FUERA_DE_CONJUNTO] or lim["espera_anomala"] or e[SIN_DATO] or e[FUERA_DE_CONJUNTO]:
+        lineas.append(f"      AVISO limitador: lineas sin causa ({c[SIN_DATO]}), causas fuera del conjunto "
+                      f"({c[FUERA_DE_CONJUNTO]}), esperas sin dato o fuera del conjunto ({lim['espera_anomala']}); "
+                      f"{lim['campos_ajenos']} campos con valor ajeno, muestra {lim['valores_ajenos']}: imagen "
+                      f"distinta de la esperada o log alterado")
+    return lineas
 
 
 def tabla(resultados):
@@ -2059,6 +2186,9 @@ def tabla(resultados):
                 f"{n}={s['total']}" + (f" {s['clases']}" if s["clases"] else "") +
                 (f" (primera a {s['primera_s']} s)" if s["primera_s"] is not None else "")
                 for n, s in senales.items()))
+            if r.get("limitador") is not None:
+                for linea in lineas_limitador(r["limitador"]):
+                    p(linea)
             p(f"      lineas de log en el escalon: {r.get('lineas_log', {})}; PostgreSQL: {r.get('postgres_eventos')}")
             p(f"      cobertura de la puerta: {'cubierto' if r['cubierto'] else 'NO cubierto'} ({r['motivo_cobertura']})"
               + ("; SOLO MEMORIA (no cuenta para el codo ni para H1)" if r["solo_memoria"] else "")
@@ -2121,6 +2251,32 @@ def hipotesis(resultados, t, muerte_en_login=False):
           f"BlockIO de PostgreSQL: {codo.get('blockio_postgres')})")
 
 
+# Columnas del CSV con la mezcla de causas del limitador (información, no
+# oráculo). El orden de valores_limitador es el de esta lista.
+COLUMNAS_LIMITADOR = (
+    "limitador_pool_agotado", "limitador_permiso", "limitador_plazo", "limitador_conexion", "limitador_otra",
+    "limitador_sin_dato", "limitador_fuera_de_conjunto", "limitador_espera_anomala",
+    "pool_espera_menos_025", "pool_espera_025_a_05", "pool_espera_mas_05", "pool_espera_sin_dato",
+    "pool_espera_fuera_de_conjunto",
+    "conexion_fuera_arranque", "conexion_dentro_arranque", "permiso_fuera_arranque", "permiso_dentro_arranque",
+    "arranques_redis_vistos")
+
+
+def valores_limitador(lim):
+    """Valores de COLUMNAS_LIMITADOR de un escalón; None en todas si el
+    escalón no tiene resumen (res sin ventana_ms: no se lanzó), como el resto
+    de columnas. Si la ventana existe pero el log no tiene eventos, salen
+    ceros."""
+    if lim is None:
+        return [None] * len(COLUMNAS_LIMITADOR)
+    c, e, a = lim["causas"], lim["esperas_pool"], lim["arranque"]
+    return [c["pool_agotado"], c["permiso"], c["plazo"], c["conexion"], c["otra"], c[SIN_DATO],
+            c[FUERA_DE_CONJUNTO], lim["espera_anomala"],
+            e["<0.25"], e["0.25-0.5"], e[">0.5"], e[SIN_DATO], e[FUERA_DE_CONJUNTO],
+            a["conexion"]["fuera"], a["conexion"]["dentro"], a["permiso"]["fuera"], a["permiso"]["dentro"],
+            lim["arranques_redis"]]
+
+
 def escribir_resultados(resultados, salida):
     (salida / "resultados.json").write_text(json.dumps(resultados, indent=1, default=str), encoding="utf-8",
                                             newline="\n")
@@ -2129,7 +2285,7 @@ def escribir_resultados(resultados, salida):
                 "tasa_errores", "respuestas_429", "saturado", "fuera", "sonda_salud_p95_ms", "sonda_web_p95_ms",
                 "cpu_api_media", "cpu_postgres_media", "cpu_redis_media", "cpu_caddy_media", "cpu_k6_maxima",
                 "pooltimeout", "saturacion", "hashes_saturados", "limitador_no_disponible", "error_interno",
-                "login_fallido", "sin_conclusion"]
+                "login_fallido", *COLUMNAS_LIMITADOR, "sin_conclusion"]
     with open(salida / "resultados.csv", "w", encoding="utf-8", newline="") as fichero:
         escritor = csv.writer(fichero, lineterminator="\n")
         escritor.writerow(columnas)
@@ -2146,6 +2302,7 @@ def escribir_resultados(resultados, salida):
                 cpu.get("redis", {}).get("media"), cpu.get("caddy", {}).get("media"), cpu.get("k6", {}).get("maxima"),
                 *(sen.get(n, {}).get("total") for n in ("sin_conexion_pooltimeout", "saturacion", "hashes_saturados",
                                                         "limitador_no_disponible", "error_interno", "login_fallido")),
+                *valores_limitador(r.get("limitador")),
                 " | ".join(r["sin_conclusion"])])
 
 
@@ -2660,10 +2817,15 @@ def ejecutar_repeticion(ej, rep, n_reps):
             rutas.append(ejecutar_ruta(ej, rep, ruta, n_ruta, n_ruta == len(ORDEN_RUTAS) - 1, contexto))
         time.sleep(3)
     otras = {s: leer_log(salida_rep / f"log_{s}.txt") for s in ("redis", "postgres")}
+    # Arranques de Redis de esta repetición (mismo reloj de la VM que el log):
+    # la ventana de arranque del resumen del limitador cuenta desde ellos.
+    arranques_redis = [e["t"] for e in ej.eventos.copia()
+                       if e["t"] >= t_ini and e["clase"] == "canario" and e["servicio"] == "redis"
+                       and e["accion"] == "start"]
     for r_ruta in rutas:
         lineas_api = leer_log(salida_rep / f"log_{r_ruta['ruta']}_api.txt")
         for res in r_ruta["resultados"]:
-            senales_escalon(lineas_api, otras, res)
+            senales_escalon(lineas_api, otras, res, arranques_redis)
     datos_rep = evaluar_repeticion(ej, rep, rutas, t_ini, False)
     resultados = [res for r_ruta in rutas for res in r_ruta["resultados"]]
     p(f"=== repeticion {rep} de {n_reps}: reinicios y OOMKilled de los contenedores de Canario (docker inspect)")

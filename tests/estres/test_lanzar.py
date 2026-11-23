@@ -8,6 +8,7 @@ lanzador que se prueba (160 MiB = 167772160, 19456 KiB, 2 hashes, 256 MiB =
 positivo en la misma prueba: si el positivo falla, la prueba falla (el
 resultado sería SIN CONCLUSION, nunca un PASA vacío).
 """
+import csv
 import io
 import json
 import pathlib
@@ -944,6 +945,308 @@ class LiteralesArgon2(unittest.TestCase):
         for viejo, nuevo in (("HASHES_SIMULTANEOS = 2", "HASHES_SIMULTANEOS = 3"),
                              ("MEMORIA_ARGON2_KIB = 19456", "MEMORIA_ARGON2_KIB = 65536")):
             self.assertNotEqual(self.cuenta(base.replace(viejo, nuevo)), [1] * len(L.LITERALES_ARGON2))
+
+
+def evento_lim(causa, espera, clase="ConnectionError"):
+    """Línea del evento tal como la escribe app/limitador.py (texto_evento)."""
+    return f"EVENTO limitador_no_disponible: {clase} causa={causa} espera={espera}"
+
+
+class ParserLimitador(unittest.TestCase):
+    def test_linea_nueva(self):
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: ConnectionError causa=pool_agotado "
+                                             "espera=0.25-0.5"),
+                         ("ConnectionError", "pool_agotado", "0.25-0.5", "pool_agotado", "0.25-0.5"))
+        # Los otros dos tramos y otra clase: el signo < y > no rompe el \S+.
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: TimeoutError causa=plazo espera=<0.25")[:3],
+                         ("TimeoutError", "plazo", "<0.25"))
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: OSError causa=conexion espera=>0.5")[:3],
+                         ("OSError", "conexion", ">0.5"))
+        # Con el prefijo real del logger (formato de app/principal.py:40, "%(levelname)s %(name)s: %(message)s"
+        # y logger canario.limitador), sin prefijo de servicio por --no-log-prefix.
+        self.assertEqual(L.parsear_limitador("ERROR canario.limitador: EVENTO limitador_no_disponible: "
+                                             "ConnectionError causa=otra espera=<0.25")[:3],
+                         ("ConnectionError", "otra", "<0.25"))
+
+    def test_texto_de_mas_tras_los_campos_no_pasa_como_valido(self):
+        # La línea sigue casando (cuenta en el total de SENALES) pero la espera es anómala.
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: ConnectionError causa=plazo "
+                                             "espera=<0.25 basura"),
+                         ("ConnectionError", "plazo", "fuera_de_conjunto", "plazo", "<0.25 basura"))
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: ConnectionError causa=plazo basura"),
+                         ("ConnectionError", "plazo", "fuera_de_conjunto", "plazo", "basura"))
+        # Control positivo: la misma línea sin sobrante, y con espacios finales, es válida.
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: ConnectionError causa=plazo "
+                                             "espera=<0.25")[2], "<0.25")
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: ConnectionError causa=plazo "
+                                             "espera=<0.25  ")[2], "<0.25")
+
+    def test_linea_antigua_da_sin_dato(self):
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: ConnectionError"),
+                         ("ConnectionError", "sin_dato", "sin_dato", None, None))
+        # Control positivo: la clase sale igual en la línea antigua y en la nueva (el grupo 1 no cambia).
+        self.assertEqual(L.parsear_limitador("EVENTO limitador_no_disponible: ConnectionError causa=plazo "
+                                             "espera=<0.25")[0], "ConnectionError")
+
+    def test_valor_fuera_de_conjunto_no_se_acepta_en_silencio(self):
+        casos = (
+            ("EVENTO limitador_no_disponible: ConnectionError causa=redis_caido espera=<0.25",
+             ("ConnectionError", "fuera_de_conjunto", "<0.25", "redis_caido", "<0.25")),
+            ("EVENTO limitador_no_disponible: ConnectionError causa=plazo espera=1.0",
+             ("ConnectionError", "plazo", "fuera_de_conjunto", "plazo", "1.0")),
+            # El centinela de la propia agregación tampoco vale como valor del log.
+            ("EVENTO limitador_no_disponible: ConnectionError causa=sin_dato espera=<0.25",
+             ("ConnectionError", "fuera_de_conjunto", "<0.25", "sin_dato", "<0.25")),
+            # Mayúsculas: el conjunto es exacto.
+            ("EVENTO limitador_no_disponible: ConnectionError causa=PLAZO espera=<0.25",
+             ("ConnectionError", "fuera_de_conjunto", "<0.25", "PLAZO", "<0.25")),
+        )
+        for linea, esperado in casos:
+            with self.subTest(linea=linea):
+                self.assertEqual(L.parsear_limitador(linea), esperado)
+        # Control positivo: cada valor válido literal sí se acepta tal cual.
+        for causa in ("pool_agotado", "permiso", "plazo", "conexion", "otra"):
+            for espera in ("<0.25", "0.25-0.5", ">0.5"):
+                self.assertEqual(L.parsear_limitador(evento_lim(causa, espera))[1:3], (causa, espera))
+
+    def test_otras_lineas_no_son_el_evento(self):
+        self.assertIsNone(L.parsear_limitador("EVENTO hashes_saturados"))
+        self.assertIsNone(L.parsear_limitador("SIN CONEXION: PoolTimeout"))
+
+    def test_senales_sigue_contando_la_clase(self):
+        # El patrón de SENALES es el mismo: el grupo 1 sigue siendo la clase.
+        patron = dict(L.SENALES)["limitador_no_disponible"]
+        self.assertEqual(patron.search(evento_lim("plazo", "<0.25", clase="TimeoutError")).group(1), "TimeoutError")
+        self.assertEqual(patron.search("EVENTO limitador_no_disponible: ConnectionError").group(1), "ConnectionError")
+
+
+class ResumenLimitador(unittest.TestCase):
+    def test_recuento_por_causa_y_espera_de_pool(self):
+        lineas = [(10.0, evento_lim("pool_agotado", "<0.25")), (11.0, evento_lim("pool_agotado", "0.25-0.5")),
+                  (12.0, evento_lim("pool_agotado", "0.25-0.5")), (13.0, evento_lim("pool_agotado", ">0.5")),
+                  (14.0, evento_lim("plazo", ">0.5")), (15.0, evento_lim("otra", "<0.25")),
+                  (16.0, "EVENTO hashes_saturados"), (17.0, "EVENTO limitador_no_disponible: ConnectionError"),
+                  (18.0, evento_lim("rara", "<0.25"))]
+        r = L.resumir_limitador(lineas, [])
+        self.assertEqual(r["total"], 8)
+        self.assertEqual(r["causas"], {"pool_agotado": 4, "permiso": 0, "plazo": 1, "conexion": 0, "otra": 1,
+                                       "sin_dato": 1, "fuera_de_conjunto": 1})
+        # La espera de plazo (">0.5") NO entra en el recuento de pool_agotado.
+        self.assertEqual(r["esperas_pool"], {"<0.25": 1, "0.25-0.5": 2, ">0.5": 1, "sin_dato": 0,
+                                             "fuera_de_conjunto": 0})
+        self.assertEqual(r["valores_ajenos"], ["causa='rara'"])
+        self.assertEqual((r["espera_anomala"], r["campos_ajenos"]), (1, 1))  # la línea antigua; "rara"
+        # Control positivo: sin eventos todo es 0 (el recuento no inventa).
+        vacio = L.resumir_limitador([(1.0, "EVENTO hashes_saturados")], [])
+        self.assertEqual((vacio["total"], sum(vacio["causas"].values()), sum(vacio["esperas_pool"].values())), (0, 0, 0))
+
+    def test_ventana_de_arranque_de_redis_con_sus_bordes(self):
+        # Arranque de Redis en t = 100.0: la ventana es [100.0, 110.0).
+        lineas = [(99.999, evento_lim("conexion", "<0.25")),    # antes del start: fuera
+                  (100.0, evento_lim("conexion", "<0.25")),     # borde inicial: dentro
+                  (109.999, evento_lim("conexion", "<0.25")),   # dentro
+                  (110.0, evento_lim("conexion", "<0.25")),     # borde final: fuera (semiabierta)
+                  (200.0, evento_lim("conexion", "<0.25")),     # lejos: fuera
+                  (105.0, evento_lim("permiso", "<0.25")),      # dentro
+                  (110.001, evento_lim("permiso", "<0.25"))]    # fuera
+        r = L.resumir_limitador(lineas, [100.0])
+        self.assertEqual(r["arranque"], {"conexion": {"dentro": 2, "fuera": 3}, "permiso": {"dentro": 1, "fuera": 1}})
+        self.assertEqual(r["arranques_redis"], 1)
+        # Control positivo: sin ningún start conocido, todo cae fuera (y se ve en arranques_redis = 0).
+        sin = L.resumir_limitador(lineas, [])
+        self.assertEqual(sin["arranque"], {"conexion": {"dentro": 0, "fuera": 5}, "permiso": {"dentro": 0, "fuera": 2}})
+        self.assertEqual(sin["arranques_redis"], 0)
+
+    def test_la_ventana_solo_afecta_a_conexion_y_permiso(self):
+        lineas = [(100.0, evento_lim("plazo", "<0.25")), (100.0, evento_lim("pool_agotado", "<0.25")),
+                  (100.0, evento_lim("otra", "<0.25"))]
+        r = L.resumir_limitador(lineas, [100.0])
+        self.assertEqual(r["arranque"], {"conexion": {"dentro": 0, "fuera": 0}, "permiso": {"dentro": 0, "fuera": 0}})
+        self.assertEqual(r["total"], 3)
+
+    def test_varios_arranques_de_redis(self):
+        # Dos arranques (por ejemplo una repetición y un reinicio): cada uno abre su ventana.
+        lineas = [(105.0, evento_lim("conexion", "<0.25")), (505.0, evento_lim("conexion", "<0.25")),
+                  (300.0, evento_lim("conexion", "<0.25"))]
+        r = L.resumir_limitador(lineas, [100.0, 500.0])
+        self.assertEqual(r["arranque"]["conexion"], {"dentro": 2, "fuera": 1})
+
+
+class SenalesEscalonLimitador(unittest.TestCase):
+    def res(self):
+        # Escalón de 100 s a 200 s (ms); la ventana de senales_escalon es [99, 201] s.
+        return {"principal": {"ventana_ms": [100000, 200000]}}
+
+    def test_solo_cuenta_la_ventana_del_escalon(self):
+        lineas = [(98.9, evento_lim("pool_agotado", "<0.25")),   # fuera de la ventana
+                  (99.0, evento_lim("pool_agotado", "0.25-0.5")),
+                  (150.0, evento_lim("conexion", "<0.25")),
+                  (201.0, evento_lim("permiso", "<0.25")),
+                  (201.1, evento_lim("permiso", "<0.25"))]       # fuera de la ventana
+        res = self.res()
+        L.senales_escalon(lineas, {"redis": [], "postgres": []}, res, [145.0])
+        self.assertEqual(res["limitador"]["total"], 3)
+        self.assertEqual(res["limitador"]["causas"]["pool_agotado"], 1)
+        self.assertEqual(res["limitador"]["arranque"]["conexion"], {"dentro": 1, "fuera": 0})
+        self.assertEqual(res["limitador"]["arranque"]["permiso"], {"dentro": 0, "fuera": 1})
+        # Coherente con el total de siempre de la señal.
+        self.assertEqual(res["senales"]["limitador_no_disponible"]["total"], 3)
+        self.assertEqual(res["senales"]["limitador_no_disponible"]["clases"], {"ConnectionError": 3})
+        # Control positivo: sin la ventana (escalón sin datos) no se inventa el resumen.
+        sin = {"principal": {}}
+        L.senales_escalon(lineas, {}, sin, [])
+        self.assertNotIn("limitador", sin)
+
+
+class SalidaLimitador(unittest.TestCase):
+    def resumen(self, lineas, arranques):
+        return L.resumir_limitador(lineas, arranques)
+
+    def test_columnas_y_valores_literales(self):
+        self.assertEqual(
+            list(L.COLUMNAS_LIMITADOR),
+            ["limitador_pool_agotado", "limitador_permiso", "limitador_plazo", "limitador_conexion",
+             "limitador_otra", "limitador_sin_dato", "limitador_fuera_de_conjunto",
+             "limitador_espera_anomala", "pool_espera_menos_025", "pool_espera_025_a_05", "pool_espera_mas_05", "pool_espera_sin_dato", "pool_espera_fuera_de_conjunto",
+             "conexion_fuera_arranque", "conexion_dentro_arranque", "permiso_fuera_arranque",
+             "permiso_dentro_arranque", "arranques_redis_vistos"])
+        lineas = [(100.0, evento_lim("pool_agotado", ">0.5")), (101.0, evento_lim("pool_agotado", "<0.25")),
+                  (102.0, evento_lim("conexion", "<0.25")), (150.0, evento_lim("conexion", "<0.25")),
+                  (103.0, evento_lim("permiso", "<0.25")), (104.0, evento_lim("otra", "<0.25")),
+                  (105.0, "EVENTO limitador_no_disponible: ConnectionError")]
+        self.assertEqual(L.valores_limitador(self.resumen(lineas, [100.0])),
+                         [2, 1, 0, 2, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1])
+        # Control positivo: un escalón sin resumen da None en cada columna, del mismo ancho.
+        self.assertEqual(L.valores_limitador(None), [None] * 18)
+
+    def test_csv_con_las_columnas_nuevas(self):
+        lineas = [(100.0, evento_lim("pool_agotado", "0.25-0.5")), (150.0, evento_lim("conexion", "<0.25"))]
+        res = {"ruta": "denuncia", "escalon": "e1", "etiqueta": "x", "tasa": 10, "sin_conclusion": [],
+               "limitador": self.resumen(lineas, [145.0])}
+        con_resumen_ausente = {"ruta": "denuncia", "escalon": "e2", "etiqueta": "y", "tasa": 20, "sin_conclusion": []}
+        with tempfile.TemporaryDirectory() as d:
+            L.escribir_resultados([res, con_resumen_ausente], pathlib.Path(d))
+            with open(pathlib.Path(d) / "resultados.csv", encoding="utf-8", newline="") as fichero:
+                filas = list(csv.DictReader(fichero))
+        self.assertEqual(filas[0]["limitador_pool_agotado"], "1")
+        self.assertEqual(filas[0]["pool_espera_025_a_05"], "1")
+        self.assertEqual(filas[0]["conexion_dentro_arranque"], "1")
+        self.assertEqual(filas[0]["conexion_fuera_arranque"], "0")
+        self.assertEqual(filas[0]["arranques_redis_vistos"], "1")
+        # Control positivo: la columna de siempre sigue donde estaba y sin_conclusion sigue al final.
+        self.assertEqual(filas[0]["sin_conclusion"], "")
+        self.assertEqual(list(filas[0])[-1], "sin_conclusion")
+        # Escalón sin resumen: celdas vacías, no ceros inventados.
+        self.assertEqual(filas[1]["limitador_pool_agotado"], "")
+
+    def test_linea_legible(self):
+        lineas = [(100.0, evento_lim("pool_agotado", "0.25-0.5")), (101.0, evento_lim("pool_agotado", "<0.25")),
+                  (102.0, evento_lim("conexion", "<0.25"))]
+        self.assertEqual(
+            L.lineas_limitador(self.resumen(lineas, [100.0])),
+            ["      limitador (causa, informacion): n=3 pool_agotado=2 plazo=0 conexion=1 permiso=0 otra=0 "
+             "sin_dato=0 fuera_de_conjunto=0 espera_anomala=0; espera de pool_agotado: <0.25=1 0.25-0.5=1 >0.5=0 "
+             "sin_dato=0 "
+             "fuera_de_conjunto=0; conexion fuera/dentro de los 10 s tras el arranque de Redis 0/1; permiso "
+             "fuera/dentro 0/0; arranques de Redis vistos 1"])
+        # Sin eventos: una línea que lo dice.
+        self.assertEqual(L.lineas_limitador(self.resumen([], [])), ["      limitador (causa): sin eventos"])
+
+    def test_aviso_si_hay_lineas_sin_causa_o_ajenas(self):
+        lineas = [(1.0, "EVENTO limitador_no_disponible: ConnectionError"), (2.0, evento_lim("rara", "<0.25"))]
+        salida = L.lineas_limitador(self.resumen(lineas, []))
+        self.assertEqual(len(salida), 2)
+        self.assertEqual(salida[1], "      AVISO limitador: lineas sin causa (1), causas fuera del conjunto (1), "
+                                    "esperas sin dato o fuera del conjunto (1); 1 campos con valor ajeno, muestra "
+                                    "[\"causa='rara'\"]: imagen distinta de la esperada o log alterado")
+        # Control positivo: con todo válido no hay aviso.
+        limpio = L.lineas_limitador(self.resumen([(1.0, evento_lim("plazo", "<0.25"))], []))
+        self.assertEqual(len(limpio), 1)
+
+    def test_espera_ajena_con_causa_plazo_avisa_y_no_contamina_el_pool(self):
+        r = self.resumen([(1.0, evento_lim("plazo", "1.0"))], [])
+        self.assertEqual((r["espera_anomala"], r["campos_ajenos"], r["valores_ajenos"]), (1, 1, ["espera='1.0'"]))
+        self.assertEqual(r["esperas_pool"], {"<0.25": 0, "0.25-0.5": 0, ">0.5": 0, "sin_dato": 0,
+                                             "fuera_de_conjunto": 0})
+        self.assertEqual(L.valores_limitador(r)[:8], [0, 0, 1, 0, 0, 0, 0, 1])
+        salida = L.lineas_limitador(r)
+        self.assertEqual(len(salida), 2)
+        self.assertEqual(salida[1], "      AVISO limitador: lineas sin causa (0), causas fuera del conjunto (0), "
+                                    "esperas sin dato o fuera del conjunto (1); 1 campos con valor ajeno, muestra "
+                                    "[\"espera='1.0'\"]: imagen distinta de la esperada o log alterado")
+        # Control positivo: con espera válida, la misma causa no da columna ni aviso.
+        bien = self.resumen([(1.0, evento_lim("plazo", "0.25-0.5"))], [])
+        self.assertEqual(bien["espera_anomala"], 0)
+        self.assertEqual(len(L.lineas_limitador(bien)), 1)
+
+    def test_pool_agotado_sin_espera_avisa(self):
+        r = self.resumen([(1.0, "EVENTO limitador_no_disponible: ConnectionError causa=pool_agotado")], [])
+        self.assertEqual(r["esperas_pool"]["sin_dato"], 1)
+        self.assertEqual((r["espera_anomala"], r["campos_ajenos"]), (1, 0))
+        salida = L.lineas_limitador(r)
+        self.assertEqual(len(salida), 2)
+        self.assertEqual(salida[1], "      AVISO limitador: lineas sin causa (0), causas fuera del conjunto (0), "
+                                    "esperas sin dato o fuera del conjunto (1); 0 campos con valor ajeno, muestra "
+                                    "[]: imagen distinta de la esperada o log alterado")
+        # Control positivo: la misma causa con su espera no avisa.
+        bien = self.resumen([(1.0, evento_lim("pool_agotado", "<0.25"))], [])
+        self.assertEqual((bien["esperas_pool"]["sin_dato"], bien["espera_anomala"]), (0, 0))
+        self.assertEqual(len(L.lineas_limitador(bien)), 1)
+
+    def test_total_de_valores_ajenos_mas_alla_de_la_muestra(self):
+        lineas = [(float(i), evento_lim(f"c{i}", "<0.25")) for i in range(7)]
+        r = self.resumen(lineas, [])
+        self.assertEqual((r["campos_ajenos"], len(r["valores_ajenos"])), (7, 5))
+        self.assertIn("7 campos con valor ajeno", L.lineas_limitador(r)[1])
+
+
+class DeFicheroAResumen(unittest.TestCase):
+    """Punta a punta: una línea con la forma que deja Registro
+    (docker compose logs -f -t --no-color --no-log-prefix) pasa por leer_log
+    y senales_escalon."""
+
+    def test_linea_real_del_log(self):
+        # 2026-11-23T20:00:00Z = 1795464000 (comprobado con date -u -d); formato del mensaje:
+        # "%(levelname)s %(name)s: %(message)s" (app/principal.py:40), logger canario.limitador.
+        contenido = (
+            "2026-11-23T20:00:00.123456789Z ERROR canario.limitador: EVENTO limitador_no_disponible: "
+            "ConnectionError causa=pool_agotado espera=0.25-0.5\n"
+            "2026-11-23T20:00:03.000000000Z ERROR canario.limitador: EVENTO limitador_no_disponible: "
+            "ConnectionError causa=conexion espera=<0.25\n"
+            "2026-11-23T20:00:05.000000000Z ERROR canario.limitador: EVENTO limitador_no_disponible: "
+            "ConnectionError causa=conexion espera=<0.25\n"
+            "2026-11-23T20:00:06.000000000Z INFO canario.arranque: otra linea\n"
+            "linea sin marca de tiempo\n")
+        with tempfile.TemporaryDirectory() as d:
+            ruta = pathlib.Path(d) / "log_denuncia_api.txt"
+            ruta.write_text(contenido, encoding="utf-8", newline="\n")
+            lineas = L.leer_log(ruta)
+        # La línea sin marca se descarta; las otras cuatro dan (epoch, mensaje).
+        self.assertEqual(len(lineas), 4)
+        self.assertAlmostEqual(lineas[0][0], 1795464000.123457, places=5)
+        self.assertEqual(lineas[1][0], 1795464003.0)
+        self.assertEqual(lineas[2][0], 1795464005.0)
+        self.assertEqual(lineas[0][1], "ERROR canario.limitador: EVENTO limitador_no_disponible: ConnectionError "
+                                       "causa=pool_agotado espera=0.25-0.5")
+        res = {"principal": {"ventana_ms": [1795463990000, 1795464010000]}}
+        # Redis arrancó en 1795463995.0: la ventana es [1795463995, 1795464005).
+        L.senales_escalon(lineas, {"redis": [], "postgres": []}, res, [1795463995.0])
+        lim = res["limitador"]
+        self.assertEqual(lim["total"], 3)
+        self.assertEqual((lim["causas"]["pool_agotado"], lim["causas"]["conexion"]), (1, 2))
+        self.assertEqual(lim["esperas_pool"]["0.25-0.5"], 1)
+        self.assertEqual(lim["arranque"]["conexion"], {"dentro": 1, "fuera": 1})
+        self.assertEqual((lim["espera_anomala"], lim["campos_ajenos"]), (0, 0))
+        self.assertEqual(res["senales"]["limitador_no_disponible"]["total"], 3)
+        # Control positivo: una línea antigua (sin causa) sigue contando en SENALES y sale como anomalía.
+        antigua = [(1795464000.0, "ERROR canario.limitador: EVENTO limitador_no_disponible: ConnectionError"),
+                   (1795464001.0, "ERROR canario.limitador: EVENTO limitador_no_disponible: ConnectionError "
+                                  "causa=plazo espera=<0.25 basura")]
+        res2 = {"principal": {"ventana_ms": [1795463990000, 1795464010000]}}
+        L.senales_escalon(antigua, {}, res2, [])
+        self.assertEqual(res2["senales"]["limitador_no_disponible"]["total"], 2)
+        self.assertEqual(res2["senales"]["limitador_no_disponible"]["clases"], {"ConnectionError": 2})
+        self.assertEqual((res2["limitador"]["causas"]["sin_dato"], res2["limitador"]["espera_anomala"]), (1, 2))
 
 
 if __name__ == "__main__":
