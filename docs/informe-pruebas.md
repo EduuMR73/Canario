@@ -305,6 +305,18 @@ Dentro de cada rango, las IPs se reparten de forma circular por iteración, nunc
 
 En el mismo sentido, el literal de FALLA de E15 ("esperada por el diseño") solo se usa cuando la FALLA de L3b-b sale del oráculo de las víctimas (B1). Si muere un servicio de Canario, la línea es "L3b-b: FALLA (murió un servicio de Canario; NO OK)", con sus motivos y sin cifra de coste. ¿Y por qué? Porque el diseño espera que las víctimas se degraden, no que se caiga un servicio.
 
+**E18. L1 construye una sola vez y comprueba que la imagen es la misma en todas las repeticiones (control de validez nuevo; no es una desviación de ningún oráculo).** Lo propusieron los revisores tras un fallo de la ejecución de L1 del 23/11.
+- **Síntoma observado.** Con 3 repeticiones, la 1 se completó. Al empezar la 2, `lanzar.py --l1` dio `PARADA: el lector de cgroup no da su linea de inicio`, y el `.err` del lector decía `No such image: sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671`.
+- **Causa observada.** Cada repetición hacía `up -d --build --wait`. Con el almacén containerd de Docker Desktop, en la comprobación del 23/11 dos builds seguidas, enteras de la caché, dieron ids de imagen distintos: el manifest y el config salieron iguales y el manifest list, distinto (lo cambia el attestation de provenance). El lector y el control usaban el id de la imagen de la API fijado en la repetición 1. No se afirma por qué mecanismo concreto la imagen vieja dejó de estar disponible: no está demostrado.
+- **Qué cambia.**
+  - Solo la repetición 1 construye (`up -d --build --wait api caddy`). Las siguientes usan `--no-build`, y siguen siendo independientes: `down -v`, BD y Redis nuevos.
+  - En cada repetición, tras leer los ids de los contenedores, se lee la imagen de `api` y de `caddy`. La de la repetición 1 es la referencia. Si en otra repetición alguna difiere, o su id está vacío o no es `sha256:<64 hex>`, hay `PARADA` antes de lanzar ningún lector. Si coinciden, se imprime una línea `PASA` por repetición.
+  - El control positivo inicial depende ahora de `rep == 1`, no de que la imagen no estuviera fijada.
+  - La `PARADA` del lector que no da su línea de inicio incluye el código de salida de su proceso y la cola del `.err`. Si el proceso ya terminó, no se esperan los 60 s enteros (el plazo no cambia).
+- **Qué no cambia.** Es un control de validez nuevo. No cambia ninguna tasa, escalera, SLO ni oráculo, ni la regla de H1. Se comprueba con `git show` del commit que añade esta E18, o con `git diff` entre `ef85f28` y ese commit limitado a `tests/estres/lanzar.py` (`lanzar.py` no cambió entre `ef85f28` y este arreglo).
+- **De dónde sale la evidencia de L1 x3.** Del commit de este arreglo, sobre la pila de `70c8bee`. Esa pila lleva otro PostgreSQL que la L1 del 22/11, así que es relevante para H2 y para comparar con E2.
+- **La ejecución del 23/11** (salida `canario_estres_salida_lau1808z`) queda abortada, es solo informativa y no se usa como evidencia.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |

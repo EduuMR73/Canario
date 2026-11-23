@@ -173,8 +173,11 @@ CORTE = 2
 SOBRECOSTE_S = 15
 TIEMPO_MAXIMO_S = 45 * 60
 REPETICIONES_POR_DEFECTO = 3
-# Sobrecoste por repetición (down -v, up --build --wait, alta de la empresa y
-# recreación de la API entre rutas) y de los dos controles en sándwich. Supuesto.
+# Sobrecoste por repetición (down -v, up --wait, alta de la empresa y
+# recreación de la API entre rutas) y de los dos controles en sándwich. Solo la
+# repetición 1 construye la imagen (up --build); las siguientes arrancan con
+# --no-build sobre la misma imagen, y siguen siendo independientes (down -v,
+# BD y Redis nuevos). Supuesto.
 SOBRECOSTE_REPETICION_S = 4 * 60
 SOBRECOSTE_CONTROLES_S = 4 * 60
 
@@ -1331,10 +1334,24 @@ def comprobar_limites_api(ident):
     pasa(reinicios == "0", f"la API recien arrancada tiene RestartCount 0 (vale {reinicios!r})")
 
 
-def arrancar(servicios, cpus_canario):
+def argumentos_arranque(rep, servicios=("api", "caddy")):
+    """Argumentos de `docker compose` para levantar la pila de la repetición
+    `rep`. Solo la repetición 1 construye. ¿Por qué? Con el almacén containerd
+    de Docker Desktop, cada `up --build`, aunque salga entero de la caché,
+    produce otro id de imagen (el attestation de provenance cambia el manifest
+    list), y la imagen de la repetición anterior deja de estar donde la buscan
+    el lector y el control (el 23/11: "No such image" al empezar la repetición
+    2). Con --no-build las repeticiones 2 y siguientes reutilizan la imagen de
+    la 1, y siguen siendo independientes: down -v, BD y Redis nuevos."""
+    construccion = "--build" if rep == 1 else "--no-build"
+    return ["up", "-d", construccion, "--wait", *servicios]
+
+
+def arrancar(servicios, cpus_canario, rep=1):
     p(f"=== arranque de la pila ({', '.join(servicios)})")
-    r = dc("up", "-d", "--build", "--wait", *servicios, timeout=1800)
-    p(f"up -d --build --wait {' '.join(servicios)} -> codigo {r.rc}")
+    argumentos = argumentos_arranque(rep, servicios)
+    r = dc(*argumentos, timeout=1800)
+    p(f"{' '.join(argumentos)} -> codigo {r.rc}")
     if r.rc != 0:
         p(r.todo.strip()[-1500:])
         raise Parada("no arranca la pila")
@@ -1592,6 +1609,7 @@ class Lector:
         self.listo = False
         self.ticks = []
         self.cerrojo = threading.Lock()
+        self.ruta_err = destino_err
         self.err = open(destino_err, "wb")  # noqa: SIM115 - se cierra en parar()
         pares = [f"{n}={i}" for n, i in objetivos.items()]
         self.proceso = subprocess.Popen(
@@ -1622,11 +1640,27 @@ class Lector:
             with self.cerrojo:
                 if getattr(self, atributo):
                     return True
-            if self.proceso.poll() is not None and atributo != "inicio":
+            if self.proceso.poll() is not None:
+                if atributo != "inicio":
+                    break
+                # Para "inicio", un proceso ya terminado no dará nada más:
+                # esperar los 60 s enteros solo retrasa la PARADA y esconde la
+                # causa. Antes de rendirse se deja que el hilo lector vacíe el
+                # pipe (la línea puede estar escrita y aún sin leer).
+                self.hilo.join(timeout=5)
                 break
             time.sleep(0.1)
         with self.cerrojo:
             return bool(getattr(self, atributo))
+
+    def cola_err(self, maximo=300):
+        """Los últimos `maximo` caracteres del .err del lector (la causa de que
+        no arranque: p. ej. "No such image"). Vacío si no se puede leer."""
+        try:
+            with open(self.ruta_err, "rb") as f:
+                return f.read().decode("utf-8", "replace").strip()[-maximo:]
+        except OSError:
+            return ""
 
     def copia_ticks(self):
         with self.cerrojo:
@@ -2162,6 +2196,65 @@ def ids_servicios():
     return ids
 
 
+PATRON_IMAGEN = re.compile(r"sha256:[0-9a-f]{64}")
+SERVICIOS_IMAGEN = ("api", "caddy")
+
+
+def comprobar_misma_imagen(referencia, actual, servicio, rep):
+    """PARADA si la imagen de `servicio` en la repetición `rep` no es la de la
+    repetición 1. Pura. ¿Por qué un control y no fiarse de --no-build? Porque
+    todo lo que se mide (el lector, el control positivo, la API de cada ruta)
+    asume que la pila es la misma en las tres repeticiones; si la imagen
+    cambiara, las repeticiones no serían repeticiones. Un id vacío o que no
+    sea sha256:<64 hex> (docker inspect falló) también es PARADA: un fallo
+    visible, nunca una comparación de dos vacíos que daría PASA."""
+    for ident in (referencia, actual):
+        if not isinstance(ident, str) or not PATRON_IMAGEN.fullmatch(ident):
+            raise Parada(f"no se obtiene un id de imagen sha256:<64 hex> de {servicio} en la repeticion {rep}: "
+                         f"{ident!r}")
+    if actual != referencia:
+        raise Parada(f"la imagen de {servicio} de la repeticion {rep} no es la de la repeticion 1 "
+                     f"({referencia} frente a {actual})")
+
+
+def comprobar_imagenes(ej, rep):
+    """Lee el .Image de los contenedores de api y caddy. En la repetición 1 se
+    guardan como referencia (ej.imagenes) y ej.imagen, la de la API que usan el
+    lector y el control, se fija una sola vez. En las siguientes se comparan con
+    la referencia, ANTES de lanzar ningún lector."""
+    actuales = {s: ejecutar(["docker", "inspect", "--format", "{{.Image}}", ej.ids[s]]).out.strip()
+                for s in SERVICIOS_IMAGEN}
+    if rep == 1:
+        for s in SERVICIOS_IMAGEN:
+            # Con la propia lectura como referencia solo se valida el formato.
+            comprobar_misma_imagen(actuales[s], actuales[s], s, rep)
+        ej.imagenes = actuales
+        ej.imagen = actuales["api"]
+        p(f"   repeticion 1: imagenes de referencia, api {actuales['api']} y caddy {actuales['caddy']}")
+        return
+    if ej.imagenes is None:
+        raise Parada(f"la repeticion {rep} empieza sin la imagen de referencia de la repeticion 1")
+    for s in SERVICIOS_IMAGEN:
+        comprobar_misma_imagen(ej.imagenes[s], actuales[s], s, rep)
+    pasa(True, f"repeticion {rep}: misma imagen que la repeticion 1 en api ({actuales['api']}) y caddy "
+               f"({actuales['caddy']})")
+
+
+def preparar_repeticion(ej, rep):
+    """Todo lo previo al alta de la empresa: down -v (desde la 2), arranque,
+    ids, comprobación de imágenes y control positivo inicial. El control
+    inicial se hace solo en la repetición 1 (rep == 1 explícito, no "ej.imagen
+    es None"): la imagen es la misma en todas por la comprobación de imágenes."""
+    if rep > 1:
+        bajar_pila(ej)
+    arrancar(("api", "caddy"), ej.cpus_canario, rep)
+    ej.ids = ids_servicios()
+    comprobar_imagenes(ej, rep)
+    comprobar_postgres_args(ej)
+    if rep == 1 and not ejecutar_control(ej, "inicial"):
+        raise Parada("el control positivo inicial no se ve completo: el detector no es de fiar")
+
+
 def contenedores_conocidos():
     """{id: {"nombre", "etiquetas"}} de todos los contenedores del motor."""
     r = ejecutar(["docker", "ps", "-a", "--no-trunc", "--format", "{{json .}}"], timeout=120)
@@ -2193,7 +2286,8 @@ class Ejecucion:
         self.eventos = None
         self.mantenimientos = []
         self.ids = {}
-        self.imagen = None
+        self.imagen = None  # .Image de la API (la misma en todas las repeticiones)
+        self.imagenes = None  # {servicio: .Image} de la repetición 1, para compararlas
         self.identificador = None
         self.reinicios = {}
         self.todos = []
@@ -2259,13 +2353,23 @@ def recrear_api(ej):
     comprobar_limites_api(nuevos["api"])
 
 
+def mensaje_lector_sin_inicio(returncode, cola):
+    """Texto de la PARADA cuando el lector no da su línea de inicio. Pura:
+    `returncode` es el del proceso (None si sigue vivo) y `cola` el final de su
+    .err."""
+    estado = "el proceso sigue en marcha" if returncode is None else f"codigo de salida {returncode}"
+    return f"el lector de cgroup no da su linea de inicio ({estado}; cola del .err: {cola!r})"
+
+
 def iniciar_lector(ej, nombre):
     """Lector de los 4 servicios y del padre con los ids actuales."""
     objetivos = {s: ej.ids[s] for s in SERVICIOS_PILA}
     lector = Lector(ej.imagen, objetivos, ej.cpus_k6, 10, ej.salida / f"lector_{nombre}.err")
     try:
         if not lector.esperar("inicio", 60):
-            raise Parada("el lector de cgroup no da su linea de inicio")
+            # La PARADA da la causa: sin el código de salida ni el .err solo se
+            # sabría "no arranca", y la imagen que falta pasó por 60 s de espera.
+            raise Parada(mensaje_lector_sin_inicio(lector.proceso.poll(), lector.cola_err()))
         problemas = problemas_inicio(lector.inicio, list(objetivos))
         if problemas:
             raise Parada("el lector no ve lo que debe: " + "; ".join(problemas))
@@ -2538,17 +2642,7 @@ def ejecutar_repeticion(ej, rep, n_reps):
     salida_rep = ej.salida / f"rep{rep}"
     salida_rep.mkdir()
     t_ini = hora_motor_ahora()
-    if rep > 1:
-        bajar_pila(ej)
-    arrancar(("api", "caddy"), ej.cpus_canario)
-    ej.ids = ids_servicios()
-    comprobar_postgres_args(ej)
-    if ej.imagen is None:
-        ej.imagen = ejecutar(["docker", "inspect", "--format", "{{.Image}}", ej.ids["api"]]).out.strip()
-        if not ej.imagen:
-            raise Parada("no se obtiene la imagen de la API para el lector y el control")
-        if not ejecutar_control(ej, "inicial"):
-            raise Parada("el control positivo inicial no se ve completo: el detector no es de fiar")
+    preparar_repeticion(ej, rep)
     r = dc("run", "--rm", "-T", "gestion", "alta-empresa", "--nombre", "Empresa estres", "--zona", "Europe/Madrid")
     alta = PATRON_ALTA.search(r.out)
     if r.rc != 0 or alta is None:

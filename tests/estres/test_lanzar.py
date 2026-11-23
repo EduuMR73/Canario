@@ -8,9 +8,12 @@ lanzador que se prueba (160 MiB = 167772160, 19456 KiB, 2 hashes, 256 MiB =
 positivo en la misma prueba: si el positivo falla, la prueba falla (el
 resultado sería SIN CONCLUSION, nunca un PASA vacío).
 """
+import io
 import json
 import pathlib
 import sys
+import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -729,6 +732,200 @@ class ControlPositivo(unittest.TestCase):
         self.assertEqual([t for ok, t in resultado if not ok][0][:30], "el contador oom del cgroup pad")
         # Una sola subida tampoco basta.
         self.assertFalse(all(ok for ok, _ in L.evaluar_control(encs, muestras, eventos, limites, 1)))
+
+
+IMAGEN_REF = "sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671"
+IMAGEN_OTRA = "sha256:" + "b" * 64
+IMAGEN_CADDY = "sha256:" + "c" * 64
+ID_CADDY = "e" * 64
+
+
+class ArgumentosArranque(unittest.TestCase):
+    def test_solo_la_repeticion_1_construye(self):
+        self.assertEqual(L.argumentos_arranque(1), ["up", "-d", "--build", "--wait", "api", "caddy"])
+        # Control positivo del negativo: las siguientes NO llevan --build.
+        self.assertEqual(L.argumentos_arranque(2), ["up", "-d", "--no-build", "--wait", "api", "caddy"])
+        self.assertEqual(L.argumentos_arranque(3), ["up", "-d", "--no-build", "--wait", "api", "caddy"])
+
+    def test_servicios_a_medida_para_hash(self):
+        self.assertEqual(L.argumentos_arranque(1, ("api",)), ["up", "-d", "--build", "--wait", "api"])
+
+
+class MismaImagen(unittest.TestCase):
+    def test_imagen_distinta_es_parada_con_el_mensaje_literal(self):
+        with self.assertRaises(L.Parada) as ctx:
+            L.comprobar_misma_imagen(IMAGEN_REF, "sha256:" + "b" * 64, "api", 2)
+        self.assertEqual(str(ctx.exception),
+                         "la imagen de api de la repeticion 2 no es la de la repeticion 1 "
+                         "(sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671 frente a "
+                         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)")
+
+    def test_control_positivo_el_mismo_id_no_para(self):
+        self.assertIsNone(L.comprobar_misma_imagen(IMAGEN_REF, IMAGEN_REF, "api", 2))
+
+    def test_vacio_o_mal_formado_es_parada(self):
+        for malo in ("", "e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671", "sha256:abc",
+                     "sha256:" + "B" * 64, "sha256:" + "b" * 65, None):
+            with self.assertRaises(L.Parada, msg=repr(malo)):
+                L.comprobar_misma_imagen(IMAGEN_REF, malo, "caddy", 3)
+        # Dos vacíos iguales tampoco dan PASA (referencia mal formada).
+        with self.assertRaises(L.Parada):
+            L.comprobar_misma_imagen("", "", "api", 2)
+        # Control: un id bien formado y distinto de ceros pasa su formato.
+        self.assertIsNone(L.comprobar_misma_imagen(IMAGEN_OTRA, IMAGEN_OTRA, "api", 2))
+
+
+class OrquestacionImagen(unittest.TestCase):
+    """preparar_repeticion y iniciar_lector con Docker simulado, sobre dos
+    repeticiones. La parte previa al alta de la empresa se aísla en
+    preparar_repeticion para no montar mocks de todo ejecutar_repeticion."""
+
+    def montar(self, imagen_rep2, contenedor=ID_API):
+        """En la repetición 2, el contenedor `contenedor` (la API por defecto)
+        pasa a tener la imagen `imagen_rep2`."""
+        self.llamadas_control, self.arranques, self.lineas = [], [], []
+        imagen_de = {ID_API: IMAGEN_REF, ID_CADDY: IMAGEN_CADDY}
+
+        def ejecutar_falso(args, timeout=900):
+            return L.R(0, imagen_de[args[-1]] + "\n", "")
+
+        def arrancar_falso(servicios, cpus, rep=1):
+            self.arranques.append(rep)
+            if rep == 2:
+                imagen_de[contenedor] = imagen_rep2
+
+        ids = {"api": ID_API, "caddy": ID_CADDY, "postgres": ID_PG, "redis": "f" * 64}
+        parches = [mock.patch.object(L, "ejecutar", ejecutar_falso), mock.patch.object(L, "arrancar", arrancar_falso),
+                   mock.patch.object(L, "ids_servicios", lambda: dict(ids)),
+                   mock.patch.object(L, "bajar_pila", lambda ej: None),
+                   mock.patch.object(L, "comprobar_postgres_args", lambda ej: None),
+                   mock.patch.object(L, "ejecutar_control",
+                                     lambda ej, etapa: self.llamadas_control.append((etapa, ej.imagen)) or True),
+                   mock.patch.object(L, "p", self.lineas.append),
+                   mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False})]
+        for parche in parches:
+            parche.start()
+            self.addCleanup(parche.stop)
+        return L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {})
+
+    def test_control_inicial_una_sola_vez_y_misma_imagen_pasa(self):
+        ej = self.montar(IMAGEN_REF)
+        L.preparar_repeticion(ej, 1)
+        L.preparar_repeticion(ej, 2)
+        self.assertEqual(self.llamadas_control, [("inicial", IMAGEN_REF)])
+        self.assertEqual(self.arranques, [1, 2])
+        self.assertIn("PASA  repeticion 2: misma imagen que la repeticion 1 en api (" + IMAGEN_REF + ") y caddy ("
+                      + IMAGEN_CADDY + ")", self.lineas)
+        self.assertIn("   repeticion 1: imagenes de referencia, api " + IMAGEN_REF + " y caddy " + IMAGEN_CADDY,
+                      self.lineas)
+        self.assertEqual(ej.imagen, IMAGEN_REF)
+
+    def test_imagen_de_la_api_distinta_en_la_2_da_parada(self):
+        # Que esta PARADA llega antes de cualquier lector lo da el orden de
+        # ejecutar_repeticion (preparar_repeticion va antes de las rutas), no
+        # esta prueba: aquí se comprueba la PARADA y su mensaje.
+        ej = self.montar(IMAGEN_OTRA)
+        L.preparar_repeticion(ej, 1)
+        with self.assertRaises(L.Parada) as ctx:
+            L.preparar_repeticion(ej, 2)
+        self.assertEqual(str(ctx.exception),
+                         "la imagen de api de la repeticion 2 no es la de la repeticion 1 ("
+                         + IMAGEN_REF + " frente a " + IMAGEN_OTRA + ")")
+        self.assertEqual(self.llamadas_control, [("inicial", IMAGEN_REF)])
+        self.assertFalse(L.estado["falla"])
+
+    def test_imagen_de_caddy_distinta_en_la_2_da_parada(self):
+        # Negativo de caddy con la API igual; su control positivo es la
+        # repetición 1 de esta misma prueba, que pasa sin PARADA.
+        ej = self.montar(IMAGEN_OTRA, contenedor=ID_CADDY)
+        L.preparar_repeticion(ej, 1)
+        self.assertEqual(ej.imagenes, {"api": IMAGEN_REF, "caddy": IMAGEN_CADDY})
+        with self.assertRaises(L.Parada) as ctx:
+            L.preparar_repeticion(ej, 2)
+        self.assertEqual(str(ctx.exception),
+                         "la imagen de caddy de la repeticion 2 no es la de la repeticion 1 ("
+                         + IMAGEN_CADDY + " frente a " + IMAGEN_OTRA + ")")
+
+    def test_id_mal_formado_en_la_1_da_parada(self):
+        # Control positivo: test_control_inicial_una_sola_vez_y_misma_imagen_pasa.
+        ej = self.montar(IMAGEN_REF)
+        with mock.patch.object(L, "ejecutar", lambda args, timeout=900: L.R(0, "\n", "")):
+            with self.assertRaises(L.Parada) as ctx:
+                L.preparar_repeticion(ej, 1)
+        self.assertIn("no se obtiene un id de imagen sha256:<64 hex> de api en la repeticion 1", str(ctx.exception))
+        self.assertEqual(self.llamadas_control, [])
+
+    def test_control_con_el_mismo_id_el_lector_recibe_ese_id(self):
+        ej = self.montar(IMAGEN_REF)
+        L.preparar_repeticion(ej, 1)
+        L.preparar_repeticion(ej, 2)
+        with mock.patch.object(L, "Lector", side_effect=RuntimeError("parada del montaje")) as lector:
+            with self.assertRaises(RuntimeError):
+                L.iniciar_lector(ej, "login")
+        self.assertEqual(lector.call_args[0][0], IMAGEN_REF)
+
+
+class FalsoProceso:
+    def __init__(self, codigo, salida=b""):
+        self.returncode = codigo
+        self.stdout = io.BytesIO(salida)
+        self._codigo = codigo
+
+    def poll(self):
+        return self._codigo
+
+
+class LectorSinInicio(unittest.TestCase):
+    """PY-2: la PARADA del lector da su causa y no espera los 60 s."""
+
+    def lanzar(self, proceso, err=b""):
+        def popen_falso(args, stdout, stderr, creationflags):
+            stderr.write(err)
+            stderr.flush()
+            return proceso
+
+        carpeta = tempfile.TemporaryDirectory()
+        self.addCleanup(carpeta.cleanup)
+        parches = [mock.patch.object(L.subprocess, "Popen", popen_falso), mock.patch.object(L, "parar_proceso"),
+                   mock.patch.object(L, "ejecutar")]
+        for parche in parches:
+            parche.start()
+            self.addCleanup(parche.stop)
+        ej = L.Ejecucion(0.05, None, pathlib.Path(carpeta.name), [0], [1], {})
+        ej.imagen = IMAGEN_REF
+        ej.ids = {s: "a" * 64 for s in L.SERVICIOS_PILA}
+        return ej
+
+    def test_proceso_terminado_da_codigo_y_cola_del_err_sin_esperar_60_s(self):
+        err = (b"x" * 500) + b"Unable to find image\nError response from daemon: No such image: " + b"sha256:e830\n"
+        ej = self.lanzar(FalsoProceso(125), err)
+        inicio = time.monotonic()
+        with self.assertRaises(L.Parada) as ctx:
+            L.iniciar_lector(ej, "login")
+        self.assertLess(time.monotonic() - inicio, 10)
+        texto = str(ctx.exception)
+        self.assertIn("125", texto)
+        self.assertIn("No such image", texto)
+        self.assertTrue(texto.startswith("el lector de cgroup no da su linea de inicio"))
+        # La cola son unos 300 caracteres, no el fichero entero.
+        self.assertNotIn("x" * 400, texto)
+
+    def test_control_positivo_proceso_vivo_con_inicio_si_lo_da(self):
+        linea = json.dumps({"tipo": "inicio", "rutas": {}}).encode() + b"\n"
+        proceso = FalsoProceso(None, linea)
+        ej = self.lanzar(proceso)
+        lector = L.Lector(ej.imagen, {"api": ej.ids["api"]}, "1", 10, ej.salida / "ok.err")
+        self.addCleanup(lector.err.close)
+        self.assertTrue(lector.esperar("inicio", 5))
+
+    def test_mensaje_puro(self):
+        self.assertEqual(L.mensaje_lector_sin_inicio(125, "No such image"),
+                         "el lector de cgroup no da su linea de inicio (codigo de salida 125; cola del .err: "
+                         "'No such image')")
+        # Control: con el proceso vivo no inventa un código.
+        self.assertEqual(L.mensaje_lector_sin_inicio(None, ""),
+                         "el lector de cgroup no da su linea de inicio (el proceso sigue en marcha; cola del .err: "
+                         "'')")
 
 
 class LiteralesArgon2(unittest.TestCase):
