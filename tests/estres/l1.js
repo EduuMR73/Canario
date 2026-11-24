@@ -196,8 +196,10 @@ export function denuncia() {
 }
 
 // Sondas de atribución (docs/informe-pruebas.md, "Qué se registra"): /salud
-// no toca la base de datos ni el limitador (exenta) y pasa por el pool de
-// hilos; GET /web/seguimiento es síncrona y barata, sin base de datos.
+// no toca la base de datos ni el limitador (exenta) y NO pasa por el pool de
+// hilos: Starlette resuelve su 405 en Route.handle, con un _http_exception
+// async. Si suben las dos sondas, es CPU, bucle o GIL; si solo sube sonda_web,
+// son los hilos. GET /web/seguimiento es síncrona y barata, sin base de datos.
 export function sonda_salud() {
   http.post(`${API}/salud`, null, parametros('sonda_salud', ESPERADO.sonda_salud));
 }

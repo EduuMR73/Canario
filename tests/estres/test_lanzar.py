@@ -8,10 +8,12 @@ lanzador que se prueba (160 MiB = 167772160, 19456 KiB, 2 hashes, 256 MiB =
 positivo en la misma prueba: si el positivo falla, la prueba falla (el
 resultado sería SIN CONCLUSION, nunca un PASA vacío).
 """
+import contextlib
 import csv
 import io
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +24,7 @@ from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import lanzar as L  # noqa: E402
+import sonda_descartes  # noqa: E402
 
 MIB = 1048576
 ID_API = "a" * 64
@@ -786,13 +789,15 @@ class OrquestacionImagen(unittest.TestCase):
         """En la repetición 2, el contenedor `contenedor` (la API por defecto)
         pasa a tener la imagen `imagen_rep2`."""
         self.llamadas_control, self.arranques, self.lineas = [], [], []
+        self.lineas_arranque = []
         imagen_de = {ID_API: IMAGEN_REF, ID_CADDY: IMAGEN_CADDY}
 
         def ejecutar_falso(args, timeout=900):
             return L.R(0, imagen_de[args[-1]] + "\n", "")
 
-        def arrancar_falso(servicios, cpus, rep=1):
+        def arrancar_falso(servicios, cpus, linea, rep=1):
             self.arranques.append(rep)
+            self.lineas_arranque.append(linea)
             if rep == 2:
                 imagen_de[contenedor] = imagen_rep2
 
@@ -808,7 +813,7 @@ class OrquestacionImagen(unittest.TestCase):
         for parche in parches:
             parche.start()
             self.addCleanup(parche.stop)
-        return L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {})
+        return L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {}, linea_limites=LINEA_PRODUCCION_LITERAL)
 
     def test_control_inicial_una_sola_vez_y_misma_imagen_pasa(self):
         ej = self.montar(IMAGEN_REF)
@@ -816,6 +821,11 @@ class OrquestacionImagen(unittest.TestCase):
         L.preparar_repeticion(ej, 2)
         self.assertEqual(self.llamadas_control, [("inicial", IMAGEN_REF)])
         self.assertEqual(self.arranques, [1, 2])
+        # La línea de límites de la ejecución llega a arrancar en las dos
+        # repeticiones. El oráculo es el literal de producción, no ej.linea_limites
+        # (que saldría del propio objeto) y distinto de L.LINEA_LIMITES.
+        self.assertNotEqual(LINEA_PRODUCCION_LITERAL, L.LINEA_LIMITES)
+        self.assertEqual(self.lineas_arranque, [LINEA_PRODUCCION_LITERAL, LINEA_PRODUCCION_LITERAL])
         self.assertIn("PASA  repeticion 2: misma imagen que la repeticion 1 en api (" + IMAGEN_REF + ") y caddy ("
                       + IMAGEN_CADDY + ")", self.lineas)
         self.assertIn("   repeticion 1: imagenes de referencia, api " + IMAGEN_REF + " y caddy " + IMAGEN_CADDY,
@@ -867,26 +877,71 @@ class OrquestacionImagen(unittest.TestCase):
         self.assertEqual(lector.call_args[0][0], IMAGEN_REF)
 
 
+class PuntosDeArranque(unittest.TestCase):
+    """Que todo punto que arranca la pila de una repetición pasa por
+    preparar_repeticion (y con él por argumentos_arranque y comprobar_imagenes).
+    Es una prueba de texto del código: una estructura nueva que arrancara la
+    pila por su cuenta con --build la haría fallar."""
+
+    def test_l1_y_fases_arrancan_por_preparar_repeticion(self):
+        import inspect
+        for funcion in (L.ejecutar_repeticion, L.ejecutar_repeticion_fases):
+            fuente = inspect.getsource(funcion)
+            self.assertIn("preparar_repeticion(ej, rep)", fuente, funcion.__name__)
+            self.assertNotIn("arrancar(", fuente, funcion.__name__)
+            self.assertNotIn("ej.imagen is None", fuente, funcion.__name__)
+        # Control positivo: preparar_repeticion sí arranca y comprueba imágenes.
+        fuente = inspect.getsource(L.preparar_repeticion)
+        self.assertIn("arrancar((", fuente)
+        self.assertIn("comprobar_imagenes(ej, rep)", fuente)
+
+    def test_recrear_api_no_construye(self):
+        import inspect
+        self.assertNotIn("--build", inspect.getsource(L.recrear_api))
+        # Control positivo: el arranque de la repetición 1 sí construye.
+        self.assertIn("--build", L.argumentos_arranque(1))
+
+
+# Línea de límites de PRODUCCIÓN como literal (la de app/limitador.py por
+# defecto, con el prefijo de la API). Es DISTINTA de L.LINEA_LIMITES: si el
+# código sustituyera la de la ejecución por la constante de estrés, las
+# pruebas que comparan contra este literal lo verían. No se deriva de L.
+LINEA_PRODUCCION_LITERAL = ("INFO canario.arranque: LIMITES (por defecto): acceso=10/300 cuenta=60/60 "
+                            "denuncia=10/3600 destinatario=3/900 destinatario_dia=10/86400 mensajes=30/3600 "
+                            "otras=60/60 registro=10/3600 seguimiento=60/60")
 ARGUMENTOS_INSPECT_API_NUEVO = ["docker", "inspect", "--format", "{{.Image}}", "b" * 64]
 
 
 class ArgumentosRecreacion(unittest.TestCase):
     def test_la_recreacion_no_construye(self):
         self.assertEqual(L.argumentos_recreacion(),
-                         ["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait", "api"])
+                         ["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait",
+                          "--wait-timeout", "90", "api"])
         self.assertNotIn("--build", L.argumentos_recreacion())
         # Control positivo: el arranque de la repetición 1 sí lleva --build,
         # así que el assertNotIn de arriba sabe ver la opción.
         self.assertIn("--build", L.argumentos_arranque(1))
 
+    def test_la_espera_de_salud_cabe_en_el_plazo_con_30_s_de_holgura(self):
+        # Oráculos literales: 90 s de --wait-timeout y 120 s de plazo del
+        # subprocess. Los 30 s de diferencia son los 10 s del stop de la API
+        # vieja y los 20 s de borrarla y crear la nueva, que compose no cronometra.
+        self.assertEqual(L.ESPERA_SALUD_RECREAR_S, 90)
+        self.assertEqual(L.MARGEN_RECREAR_API_S, 120)
+        self.assertTrue(90 <= 120 - 30)
+        # Control: el valor que va en los argumentos es el mismo de la constante
+        # (y no un 90 que se desincronice de ella).
+        argumentos = L.argumentos_recreacion()
+        self.assertEqual(argumentos[argumentos.index("--wait-timeout") + 1], "90")
+
 
 class MismaImagenConRuta(unittest.TestCase):
-    """Los dos mensajes con `ruta`. El control (sin `ruta`, los de siempre)
-    son las pruebas de MismaImagen, que no cambian."""
+    """Los dos mensajes con `etiqueta`. El control (sin `etiqueta`, los de
+    siempre) son las pruebas de MismaImagen, que no cambian."""
 
     def test_imagen_distinta_con_ruta(self):
         with self.assertRaises(L.Parada) as ctx:
-            L.comprobar_misma_imagen(IMAGEN_REF, IMAGEN_OTRA, "api", 2, ruta="login_empresa")
+            L.comprobar_misma_imagen(IMAGEN_REF, IMAGEN_OTRA, "api", 2, etiqueta="login_empresa")
         self.assertEqual(str(ctx.exception),
                          "la imagen de api de la API recreada para login_empresa (repeticion 2) no es la de la "
                          "repeticion 1 (sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671 "
@@ -894,13 +949,13 @@ class MismaImagenConRuta(unittest.TestCase):
 
     def test_formato_con_ruta(self):
         with self.assertRaises(L.Parada) as ctx:
-            L.comprobar_misma_imagen(IMAGEN_REF, "", "api", 3, ruta="denuncia")
+            L.comprobar_misma_imagen(IMAGEN_REF, "", "api", 3, etiqueta="denuncia")
         self.assertEqual(str(ctx.exception),
                          "no se obtiene un id de imagen sha256:<64 hex> de api en la API recreada para denuncia "
                          "(repeticion 3): ''")
 
     def test_control_con_ruta_y_misma_imagen_no_para(self):
-        self.assertIsNone(L.comprobar_misma_imagen(IMAGEN_REF, IMAGEN_REF, "api", 2, ruta="login_empresa"))
+        self.assertIsNone(L.comprobar_misma_imagen(IMAGEN_REF, IMAGEN_REF, "api", 2, etiqueta="login_empresa"))
 
 
 class RecrearApi(unittest.TestCase):
@@ -939,7 +994,8 @@ class RecrearApi(unittest.TestCase):
         self.misma = mock.MagicMock(wraps=L.comprobar_misma_imagen)
         parches = [mock.patch.object(L, "ejecutar", ejecutar_falso), mock.patch.object(L, "dc", dc_falso),
                    mock.patch.object(L, "ids_servicios", lambda: dict(ids)),
-                   mock.patch.object(L, "comprobar_limites_api", self.limites.append),
+                   mock.patch.object(L, "comprobar_limites_api",
+                                     lambda ident, linea: self.limites.append((ident, linea))),
                    mock.patch.object(L, "hora_motor_ahora", hora_falsa),
                    mock.patch.object(L, "comprobar_misma_imagen", self.misma),
                    mock.patch.object(L, "p", self.lineas.append),
@@ -947,35 +1003,41 @@ class RecrearApi(unittest.TestCase):
         for parche in parches:
             parche.start()
             self.addCleanup(parche.stop)
-        ej = L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {})
+        ej = L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {}, linea_limites=LINEA_PRODUCCION_LITERAL)
         ej.ids = {"api": ID_API, "caddy": ID_CADDY, "postgres": ID_PG, "redis": "f" * 64}
         ej.imagenes = {"api": IMAGEN_REF, "caddy": IMAGEN_CADDY}
         return ej
 
     def test_control_misma_imagen(self):
         ej = self.montar()
-        L.recrear_api(ej, 2, "login_empresa")
+        L.recrear_api(ej, 2, etiqueta="login_empresa")
+        # D1: oráculo con literales, plazo de 120 s para el subprocess y
+        # --wait-timeout de 90 s para la espera de salud de compose.
         self.assertEqual(self.llamadas_dc,
-                         [(["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait", "api"], 900)])
-        self.assertIn("up -d --force-recreate --no-deps --no-build --wait api -> codigo 0", self.lineas)
+                         [(["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait",
+                            "--wait-timeout", "90", "api"], 120)])
+        self.assertIn("up -d --force-recreate --no-deps --no-build --wait --wait-timeout 90 api -> codigo 0",
+                      self.lineas)
         self.assertEqual(self.inspecciones, [(ARGUMENTOS_INSPECT_API_NUEVO, 60)])
         self.assertIn("PASA  repeticion 2, login_empresa: la API recreada tiene la imagen de la repeticion 1 "
                       "(sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671)", self.lineas)
         self.assertEqual(ej.ids["api"], ID_API_NUEVO)
-        self.assertEqual(self.limites, [ID_API_NUEVO])
+        # La línea que recibe la comprobación es la de la ejecución (literal de
+        # producción), no la de estrés.
+        self.assertEqual(self.limites, [(ID_API_NUEVO, LINEA_PRODUCCION_LITERAL)])
         self.assertEqual(ej.mantenimientos[-1]["desde"], 100.0)
         self.assertEqual(ej.mantenimientos[-1]["hasta"], 101.0)
         self.assertEqual(ej.mantenimientos[-1]["ids"], frozenset([ID_API]))
         # La ventana se abre antes del up y se cierra después (mata mover
         # "hasta" delante del up, que los valores 100.0 y 101.0 no ven).
         self.assertEqual(self.orden, [("hora", 100.0), ("dc",), ("hora", 101.0)])
-        self.misma.assert_called_once_with(IMAGEN_REF, IMAGEN_REF, "api", 2, ruta="login_empresa")
+        self.misma.assert_called_once_with(IMAGEN_REF, IMAGEN_REF, "api", 2, etiqueta="login_empresa")
         self.assertFalse(L.estado["falla"])
 
     def test_imagen_distinta_da_parada(self):
         ej = self.montar(imagen_nueva=IMAGEN_OTRA)
         with self.assertRaises(L.Parada) as ctx:
-            L.recrear_api(ej, 2, "login_empresa")
+            L.recrear_api(ej, 2, etiqueta="login_empresa")
         self.assertEqual(str(ctx.exception),
                          "la imagen de api de la API recreada para login_empresa (repeticion 2) no es la de la "
                          "repeticion 1 (sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671 "
@@ -990,7 +1052,7 @@ class RecrearApi(unittest.TestCase):
         ej = self.montar()
         ej.imagenes = None
         with self.assertRaises(L.Parada) as ctx:
-            L.recrear_api(ej, 2, "login_empresa")
+            L.recrear_api(ej, 2, etiqueta="login_empresa")
         self.assertEqual(str(ctx.exception), "la API se recrea sin la imagen de referencia de la repeticion 1")
         self.assertEqual(self.llamadas_dc, [])
         self.assertEqual(ej.mantenimientos, [])
@@ -1000,7 +1062,7 @@ class RecrearApi(unittest.TestCase):
         # ÚLTIMOS caracteres tras el strip, que son las "D".
         ej = self.montar(inspect=lambda: L.R(1, "", "C" * 100 + "D" * 300 + "\n"))
         with self.assertRaises(L.Parada) as ctx:
-            L.recrear_api(ej, 2, "login_empresa")
+            L.recrear_api(ej, 2, etiqueta="login_empresa")
         self.assertEqual(str(ctx.exception),
                          "docker inspect de la API recreada para login_empresa (repeticion 2) falla (codigo 1): '"
                          + "D" * 300 + "'")
@@ -1015,7 +1077,7 @@ class RecrearApi(unittest.TestCase):
 
         ej = self.montar(inspect=colgado)
         with self.assertRaises(L.Parada) as ctx:
-            L.recrear_api(ej, 2, "login_empresa")
+            L.recrear_api(ej, 2, etiqueta="login_empresa")
         self.assertEqual(str(ctx.exception),
                          "docker inspect de la API recreada para login_empresa (repeticion 2) no responde en 60 s")
         self.assertEqual(self.inspecciones, [(ARGUMENTOS_INSPECT_API_NUEVO, 60)])
@@ -1063,8 +1125,8 @@ class ComprobarImagenesInspect(unittest.TestCase):
 
 
 class ConexionRecrearApi(unittest.TestCase):
-    """ejecutar_ruta llama a recrear_api con la repetición y la ruta, ANTES
-    del lector de la ruta."""
+    """ejecutar_ruta llama a recrear_api con la repetición y la ruta (como
+    `etiqueta`), ANTES del lector de la ruta."""
 
     def lanzar(self, n_ruta):
         orden = []
@@ -1076,7 +1138,11 @@ class ConexionRecrearApi(unittest.TestCase):
             orden.append(("lector", nombre))
             raise Centinela
 
-        parches = [mock.patch.object(L, "recrear_api", lambda *args: orden.append(("recrear", args))),
+        # create_autospec: el doble tiene la firma REAL de recrear_api
+        # (ej, rep, *, etiqueta). Con un lambda de *args, la firma vieja y la
+        # nueva pasaban igual y la llamada rota de L3 y L3b no se veía.
+        self.recrear = mock.create_autospec(L.recrear_api, side_effect=lambda *args, **kwargs: orden.append("recrear"))
+        parches = [mock.patch.object(L, "recrear_api", self.recrear),
                    mock.patch.object(L, "iniciar_lector", lector_falso),
                    mock.patch.object(L, "p")]
         for parche in parches:
@@ -1089,11 +1155,163 @@ class ConexionRecrearApi(unittest.TestCase):
 
     def test_recrear_api_antes_del_lector(self):
         ej, orden = self.lanzar(1)
-        self.assertEqual(orden, [("recrear", (ej, 2, "login_empresa")), ("lector", "rep2_login_empresa")])
+        self.assertEqual(orden, ["recrear", ("lector", "rep2_login_empresa")])
+        # La llamada literal: repetición 2 y la ruta como `etiqueta`.
+        self.assertEqual(self.recrear.call_args_list, [mock.call(ej, 2, etiqueta="login_empresa")])
 
     def test_control_primera_ruta_no_recrea(self):
         _, orden = self.lanzar(0)
         self.assertEqual(orden, [("lector", "rep2_login_empresa")])
+        self.recrear.assert_not_called()
+
+
+class SandwichJ5ConRecrearApiReal(unittest.TestCase):
+    """sandwich_j5 con la recrear_api REAL y Docker simulado, con `ejecutar`
+    como en RecrearApi.montar. Los dobles de ControlesConMocks y
+    EstimacionDeTiempo sustituyen recrear_api por un autospec y prueban el
+    orden; aquí se prueba que la llamada real desde el sandwich es válida y
+    que sus textos y PARADAS llevan "J5". Cada negativo se compara con el
+    control positivo (`correr()` sin cambios)."""
+    POSITIVO = {"estado": 429, "inicio": 1795342203.0, "fin": 1795342203.1}
+    NEGATIVO = {"estado": 401, "inicio": 1795342213.0, "fin": 1795342213.1}
+    ARGUMENTOS_UP = ["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait",
+                     "--wait-timeout", "90", "api"]
+    LINEA_MEDIDA_OK = "recrear_api: 2.5 s (plazo 120 s, espera de salud 90 s)"
+
+    @contextlib.contextmanager
+    def entorno(self, imagen_nueva=IMAGEN_REF, dc_efecto=None, con_referencia=True, monotonic=(10.0, 12.5)):
+        """`dc_efecto(timeout)` sustituye la respuesta del up (devuelve un L.R
+        o lanza); `monotonic` son los dos instantes (antes y después del up)."""
+        e = types.SimpleNamespace(orden=[], lineas=[], controles=[], llamadas_dc=[], fallos=None, parada=None)
+        horas = iter([100.0, 101.0])
+        instantes = iter(monotonic)
+        imagen_de = {ID_API_NUEVO: imagen_nueva}
+
+        def hora_falsa():
+            hora = next(horas)
+            e.orden.append(("hora", hora))
+            return hora
+
+        def ejecutar_falso(args, timeout=900):
+            # Solo el docker inspect de leer_imagen llega aquí: el up va por dc.
+            return L.R(0, imagen_de[args[-1]] + "\n", "")
+
+        def dc_falso(*args, timeout=900):
+            e.llamadas_dc.append((list(args), timeout))
+            e.orden.append(("dc",))
+            return L.R(0, "", "") if dc_efecto is None else dc_efecto(timeout)
+
+        def cliente_falso(ej, nombre, ip, peticiones):
+            e.orden.append(nombre)
+            return [dict(self.POSITIVO if nombre == "j5pos_r2" else self.NEGATIVO)]
+
+        ids = {"api": ID_API_NUEVO, "caddy": ID_CADDY, "postgres": ID_PG, "redis": "f" * 64}
+        # Los espías se crean ANTES de parchear: envuelven las funciones reales.
+        e.misma = mock.MagicMock(wraps=L.comprobar_misma_imagen)
+        e.leer = mock.MagicMock(wraps=L.leer_imagen)
+        # time solo se sustituye en el espacio de nombres de lanzar: monotonic con
+        # los valores fijos de la prueba y time() constante para la línea del sandwich.
+        reloj = types.SimpleNamespace(time=lambda: 1000.0, monotonic=lambda: next(instantes))
+        parches = [mock.patch.object(L, "ejecutar", ejecutar_falso), mock.patch.object(L, "dc", dc_falso),
+                   mock.patch.object(L, "ids_servicios", lambda: dict(ids)),
+                   mock.patch.object(L, "comprobar_limites_api", lambda ident, linea: None),
+                   mock.patch.object(L, "hora_motor_ahora", hora_falsa),
+                   mock.patch.object(L, "comprobar_misma_imagen", e.misma),
+                   mock.patch.object(L, "leer_imagen", e.leer),
+                   mock.patch.object(L, "cliente_control", cliente_falso),
+                   mock.patch.object(L, "esperar_ventana", lambda *a: None),
+                   mock.patch.object(L, "linea_control", lambda veredicto, texto: e.controles.append((veredicto, texto))),
+                   mock.patch.object(L, "p", e.lineas.append),
+                   mock.patch.object(L, "time", reloj),
+                   mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False})]
+        ej = L.Ejecucion(0.05, None, pathlib.Path("."), [0], [1], {}, linea_limites=LINEA_PRODUCCION_LITERAL)
+        ej.ids = {"api": ID_API, "caddy": ID_CADDY, "postgres": ID_PG, "redis": "f" * 64}
+        ej.imagenes = {"api": IMAGEN_REF, "caddy": IMAGEN_CADDY} if con_referencia else None
+        ej.id_a, ej.contrasena = "a" * 32, "x"
+        e.ej = ej
+        with contextlib.ExitStack() as pila:
+            for parche in parches:
+                pila.enter_context(parche)
+            yield e
+
+    def correr(self, **cambios):
+        """sandwich_j5 (L3, repetición 2) con la recrear_api real. Devuelve el
+        estado del montaje con `fallos` o con el texto de la `parada`."""
+        with self.entorno(**cambios) as e:
+            try:
+                e.fallos = L.sandwich_j5(e.ej, "l3", 2, {})
+            except L.Parada as parada:
+                e.parada = str(parada)
+        return e
+
+    def test_j5_control_positivo_con_la_recrear_api_real(self):
+        e = self.correr()
+        self.assertIsNone(e.parada)
+        self.assertEqual(e.fallos, [])
+        # Orden literal: positivo, ventana abierta, up, ventana cerrada, negativo.
+        self.assertEqual(e.orden, ["j5pos_r2", ("hora", 100.0), ("dc",), ("hora", 101.0), "j5neg_r2"])
+        self.assertEqual(e.llamadas_dc, [(self.ARGUMENTOS_UP, 120)])
+        mantenimiento = e.ej.mantenimientos[-1]
+        self.assertEqual((mantenimiento["desde"], mantenimiento["hasta"], mantenimiento["ids"]),
+                         (100.0, 101.0, frozenset([ID_API])))
+        self.assertEqual(e.ej.ids["api"], ID_API_NUEVO)
+        # Los textos de leer_imagen y de pasa llevan "J5".
+        e.leer.assert_called_once_with(ID_API_NUEVO, "la API recreada para J5 (repeticion 2)")
+        e.misma.assert_called_once_with(IMAGEN_REF, IMAGEN_REF, "api", 2, etiqueta="J5")
+        self.assertIn("PASA  repeticion 2, J5: la API recreada tiene la imagen de la repeticion 1 "
+                      "(sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671)", e.lineas)
+        self.assertIn(self.LINEA_MEDIDA_OK, e.lineas)
+        self.assertEqual(e.controles, [("PASA", "J5: 429 antes de recrear y 401 despues, en la misma ventana")])
+
+    def test_j5_imagen_distinta_es_parada_con_el_mensaje_completo(self):
+        e = self.correr(imagen_nueva=IMAGEN_OTRA)
+        self.assertEqual(e.parada,
+                         "la imagen de api de la API recreada para J5 (repeticion 2) no es la de la "
+                         "repeticion 1 (sha256:e830c91b8c28e06ee560d56d618113a56de4a0fed87c8e8ca02607f1b339c671 "
+                         "frente a sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)")
+        # El negativo no llega a lanzarse con una API de otra imagen.
+        self.assertEqual(e.orden, ["j5pos_r2", ("hora", 100.0), ("dc",), ("hora", 101.0)])
+        # Control: con la misma imagen no hay PARADA (test anterior, repetido aquí
+        # para que esta prueba no dependa del orden de ejecución).
+        self.assertIsNone(self.correr().parada)
+
+    def test_j5_sin_imagen_de_referencia_es_parada_literal(self):
+        e = self.correr(con_referencia=False)
+        self.assertEqual(e.parada, "la API se recrea sin la imagen de referencia de la repeticion 1")
+        # PARADA antes de abrir la ventana y antes del up: ni mantenimiento ni dc ni medida.
+        self.assertEqual(e.orden, ["j5pos_r2"])
+        self.assertEqual(e.ej.mantenimientos, [])
+        self.assertEqual(e.llamadas_dc, [])
+        self.assertEqual([x for x in e.lineas if x.startswith("recrear_api:")], [])
+        # Control: con referencia, la misma ejecución no para.
+        self.assertIsNone(self.correr().parada)
+
+    def test_j5_dc_que_vence_el_plazo_es_parada_y_deja_la_medida(self):
+        def vence(timeout):
+            raise subprocess.TimeoutExpired(["docker", "compose"], timeout)
+
+        # M2: time.monotonic con valores fijos y la línea entera comparada como literal.
+        e = self.correr(dc_efecto=vence, monotonic=(10.0, 130.0))
+        self.assertEqual(e.parada, "la API no se recrea en 120 s (plazo del lanzador)")
+        self.assertEqual(e.llamadas_dc, [(self.ARGUMENTOS_UP, 120)])
+        self.assertIn("recrear_api: 120.0 s (plazo 120 s, espera de salud 90 s)", e.lineas)
+        # No se llama a hora_motor_ahora dentro del finally ni después: una sola
+        # hora (la apertura de la ventana) y ningún negativo.
+        self.assertEqual(e.orden, ["j5pos_r2", ("hora", 100.0), ("dc",)])
+        # Control: con rc=0 y los mismos instantes no hay PARADA; la PARADA viene del plazo.
+        control = self.correr(monotonic=(10.0, 130.0))
+        self.assertIsNone(control.parada)
+        self.assertIn("recrear_api: 120.0 s (plazo 120 s, espera de salud 90 s)", control.lineas)
+
+    def test_j5_dc_con_codigo_1_es_parada_y_deja_la_medida(self):
+        e = self.correr(dc_efecto=lambda timeout: L.R(1, "", "fallo de compose\n"), monotonic=(10.0, 11.5))
+        self.assertEqual(e.parada, "no se recrea la API: 'fallo de compose'")
+        self.assertIn("recrear_api: 1.5 s (plazo 120 s, espera de salud 90 s)", e.lineas)
+        self.assertIn("up -d --force-recreate --no-deps --no-build --wait --wait-timeout 90 api -> codigo 1", e.lineas)
+        # La ventana de mantenimiento se cierra aunque el código no sea 0.
+        self.assertEqual(e.ej.mantenimientos[-1]["hasta"], 101.0)
+        # Control: con rc=0, sin PARADA.
+        self.assertIsNone(self.correr(monotonic=(10.0, 11.5)).parada)
 
 
 class FalsoProceso:
@@ -1175,6 +1393,2399 @@ class LiteralesArgon2(unittest.TestCase):
         for viejo, nuevo in (("HASHES_SIMULTANEOS = 2", "HASHES_SIMULTANEOS = 3"),
                              ("MEMORIA_ARGON2_KIB = 19456", "MEMORIA_ARGON2_KIB = 65536")):
             self.assertNotEqual(self.cuenta(base.replace(viejo, nuevo)), [1] * len(L.LITERALES_ARGON2))
+
+
+# ---------------------------------------------------------------------------
+# L2, L3, L3b y L4. Los oráculos son literales de la segunda congelación
+# (docs/informe-pruebas.md y sus erratas E1-E13), no derivados del código que se
+# prueba. Cada comprobación negativa lleva su control positivo.
+# ---------------------------------------------------------------------------
+import csv as _csv  # noqa: E402
+import tempfile  # noqa: E402
+
+
+class Tasas(unittest.TestCase):
+    def test_tasas_congeladas(self):
+        self.assertEqual(L.tasas_de(0.0196), {"inundacion": 153.06, "login_pico": 102.04, "login_base": 10.2})
+        # Control: otra t da otras tasas (la función no devuelve un literal).
+        self.assertNotEqual(L.tasas_de(0.02)["login_pico"], 102.04)
+
+    def test_n_de_ips_y_rangos_de_victimas(self):
+        self.assertEqual(L.n_ips_ataque(102.04), 3402)
+        self.assertEqual(L.ips_necesarias(5, 570, 10, 3600), 428)
+        self.assertEqual(L.ips_necesarias(5, 570, 60, 60), 8)
+
+    def test_tramo_con_decimales_va_por_100_s(self):
+        self.assertEqual(L.tramo(153.06, 120, 150, 600), {"rate": 15306, "time_unit_s": 100, "duracion_s": 120,
+                                                           "inicio_s": 150, "vus": 600})
+        self.assertEqual(L.tramo(5, 390, 0, 50)["rate"], 5)
+        self.assertEqual(L.tramo(10.2, 30, 0, 32)["rate"], 1020)
+
+    def test_literales_de_produccion(self):
+        self.assertEqual(
+            L.LINEA_LIMITES_PRODUCCION,
+            "INFO canario.arranque: LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 "
+            "destinatario=3/900 destinatario_dia=10/86400 mensajes=30/3600 otras=60/60 registro=10/3600 "
+            "seguimiento=60/60")
+        raiz = pathlib.Path(__file__).resolve().parents[2]
+        texto = (raiz / "tests" / "security" / "verificar_denuncia.py").read_text(encoding="utf-8")
+        self.assertIn("LIMITES (por defecto): acceso=10/300 cuenta=60/60 denuncia=10/3600 destinatario=3/900 ", texto)
+
+    def test_403_literal_esta_en_el_caddy(self):
+        raiz = pathlib.Path(__file__).resolve().parents[2]
+        comun = (raiz / "proxy" / "comun.caddy").read_text(encoding="utf-8")
+        self.assertIn("respond `" + L.CUERPO_403 + "` {err.status_code}", comun)
+        produccion = (raiz / "proxy" / "Caddyfile.produccion").read_text(encoding="utf-8")
+        self.assertIn("not remote_ip 10.88.1.2", produccion)
+        self.assertEqual(L.CUERPO_403, '{"detalle": "petición no válida"}')
+
+
+class Overrides(unittest.TestCase):
+    def preparar(self, **kw):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            ficheros = L.preparar_overrides(d, [2, 4], **kw)
+            return [(f.name, f.read_text(encoding="utf-8")) for f in ficheros]
+
+    def test_estres_por_defecto_como_l1(self):
+        ficheros = self.preparar()
+        self.assertEqual([n for n, _ in ficheros], ["limites_estres.yml", "cpuset_estres.yml"])
+        self.assertIn('CANARIO_LIMITES: "denuncia=1000000/3600', ficheros[0][1])
+
+    def test_produccion_omite_canario_limites_y_no_lo_deja_vacio(self):
+        ficheros = self.preparar(limites=None, caddy_produccion=True)
+        self.assertEqual([n for n, _ in ficheros], ["cpuset_estres.yml", "caddy_produccion.yml"])
+        for _, texto in ficheros:
+            self.assertNotIn("CANARIO_LIMITES", texto)
+        caddy = ficheros[1][1]
+        self.assertIn('command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.produccion", "--adapter", '
+                      '"caddyfile"]', caddy)
+        self.assertIn("ports: !reset []", caddy)
+        self.assertIn("edge:\n    internal: true", caddy)
+        # Control: sin caddy_produccion no hay override de Caddy.
+        self.assertNotIn("caddy_produccion.yml", [n for n, _ in self.preparar(limites=None)])
+
+
+class ComprobarLimites(unittest.TestCase):
+    def comprobar(self, registro, linea=None):
+        def falso(args, timeout=900):
+            return L.R(0, registro if args[1] == "logs" else "0\n", "")
+        with mock.patch.object(L, "ejecutar", falso), mock.patch.object(L, "p", lambda t: None), \
+                mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}):
+            if linea is None:
+                return L.comprobar_limites_api("x")
+            return L.comprobar_limites_api("x", linea)
+
+    def test_linea_de_produccion_y_de_estres_se_distinguen(self):
+        self.assertIsNone(self.comprobar(L.LINEA_LIMITES_PRODUCCION + "\n", L.LINEA_LIMITES_PRODUCCION))
+        self.assertIsNone(self.comprobar(L.LINEA_LIMITES + "\n"))
+        # Negativo: la linea de estres no vale cuando se esperan los de produccion.
+        with self.assertRaises(L.Parada):
+            self.comprobar(L.LINEA_LIMITES + "\n", L.LINEA_LIMITES_PRODUCCION)
+
+
+class Ejecutar_k6(unittest.TestCase):
+    def ejecutar(self, eventos):
+        llamadas = []
+        estado_json = json.dumps({"OOMKilled": False, "StartedAt": "2026-11-22T10:00:00.0Z",
+                                  "FinishedAt": "2026-11-22T10:10:00.0Z"})
+
+        def falso(args, timeout=900):
+            llamadas.append((args, timeout))
+            if args[1] == "run":
+                return L.R(0, "k6id\n", "")
+            if args[1] == "wait":
+                return L.R(0, "0\n", "")
+            if args[1] == "logs":
+                return L.R(0, "T0_MS=1\n", "")
+            if args[1] == "inspect":
+                return L.R(0, estado_json, "")
+            return L.R(0, "", "")
+
+        contexto = {"vigilados": lambda: [], "cpus_k6": "4,6", "datos": pathlib.Path("d"),
+                    "eventos": types.SimpleNamespace(esperar=lambda pred, plazo: any(pred(e) for e in eventos))}
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(L, "ejecutar", falso), mock.patch.object(L, "medir_desfase", lambda: 0.0), \
+                    mock.patch.object(L, "Estadisticas", lambda c, destino: types.SimpleNamespace(parar=lambda: None)), \
+                    mock.patch.object(L, "p", lambda t: None):
+                res = L.ejecutar_k6(contexto, "prueba", "fases.js", ["--network", "none"], 390, pathlib.Path(d))
+        return res, llamadas
+
+    def test_devuelve_sin_conclusion_como_lista_con_el_die_ausente(self):
+        solo_start = [{"id": "k6id", "accion": "start"}]
+        res, _ = self.ejecutar(solo_start)
+        self.assertEqual(len(res["sin_conclusion"]), 1)
+        self.assertIn("die", res["sin_conclusion"][0])
+        # Control positivo: con start y die, la lista esta vacia.
+        res, _ = self.ejecutar(solo_start + [{"id": "k6id", "accion": "die"}])
+        self.assertEqual(res["sin_conclusion"], [])
+
+    def test_plazo_de_wait_es_duracion_mas_graceful_mas_300(self):
+        _, llamadas = self.ejecutar([])
+        esperas = [t for a, t in llamadas if a[1] == "wait"]
+        self.assertEqual(esperas, [390 + 20 + 300])
+
+    def test_script_y_red_van_en_el_run(self):
+        _, llamadas = self.ejecutar([])
+        run = next(a for a, _ in llamadas if a[1] == "run")
+        self.assertIn("/prueba/fases.js", run)
+        self.assertEqual(run[run.index("--network") + 1], "none")
+        self.assertIn("no-new-privileges", run)
+
+
+class Ips(unittest.TestCase):
+    def test_indices_literales(self):
+        self.assertEqual(L.ip_de_indice(0), "198.18.0.1")
+        self.assertEqual(L.ip_de_indice(253), "198.18.0.254")
+        self.assertEqual(L.ip_de_indice(254), "198.18.1.1")
+        self.assertEqual(L.ip_de_indice(130047), "198.19.255.254")
+        self.assertEqual(L.ip_de_indice(130046), "198.19.255.253")
+        with self.assertRaises(ValueError):
+            L.ip_de_indice(130048)
+
+    def test_plan_l3b_no_se_solapa_ni_toca_strict_ni_cambia_entre_repeticiones(self):
+        plan = L.plan_ips("l3b", 3, 3402)
+        todas = []
+        for rep in (1, 2, 3):
+            self.assertEqual({k: len(v) for k, v in plan[rep].items()},
+                             {"ataque": 3402, "control": 10, "denuncia": 428, "seguimiento": 8, "web_seguimiento": 8,
+                              "strict_falsas": 70})
+            for rol, ips in plan[rep].items():
+                if rol != "strict_falsas":
+                    todas += ips
+        self.assertEqual(len(todas), len(set(todas)))
+        for reservada in ("198.19.255.254", "198.19.255.253", "198.19.255.252"):
+            self.assertNotIn(reservada, todas)
+        # El bloque con nombre de las IPs falsas de strict (S9): 70 distintas, el
+        # mismo en las tres repeticiones, entre 198.19.255.182 y 198.19.255.251,
+        # sin tocar ninguna IP de los demas bloques ni las reservadas.
+        falsas = plan[1]["strict_falsas"]
+        self.assertEqual((falsas[0], falsas[-1]), ("198.19.255.182", "198.19.255.251"))
+        self.assertEqual(len(set(falsas)), 70)
+        self.assertEqual(plan[2]["strict_falsas"], falsas)
+        self.assertEqual(plan[3]["strict_falsas"], falsas)
+        self.assertFalse(set(falsas) & set(todas))
+        self.assertNotIn(L.ip_de_indice(130045), falsas)
+        self.assertEqual(L.ip_de_indice(130045), "198.19.255.252")
+        # Cambian en cada repeticion.
+        self.assertNotEqual(plan[1]["ataque"][0], plan[2]["ataque"][0])
+
+    def test_plan_l3_son_200_ips(self):
+        self.assertEqual(len(L.plan_ips("l3", 2)[1]["carga"]), 200)
+
+    def test_solape_se_detecta_y_para(self):
+        # Control positivo: bloques disjuntos, sin problemas.
+        self.assertEqual(L.solapes_de_bloques({"a": (0, 10), "b": (10, 10)}), [])
+        # Negativos: solape y salida del espacio permitido.
+        self.assertTrue(L.solapes_de_bloques({"a": (0, 10), "b": (5, 10)}))
+        self.assertTrue(L.solapes_de_bloques({"a": (130040, 10)}))
+        with self.assertRaises(L.Parada):
+            L.plan_ips("l3b", 40, 3402)
+
+
+class Degradacion(unittest.TestCase):
+    def test_bordes_2x_frente_a_mas_100(self):
+        # base 10 ms: el suelo de +100 manda (110); base 200 ms: manda el doble (400).
+        self.assertFalse(L.degradada(10, 110, 10000))
+        self.assertTrue(L.degradada(10, 110.1, 10000))
+        self.assertFalse(L.degradada(200, 400, 10000))
+        self.assertTrue(L.degradada(200, 400.1, 10000))
+
+    def test_el_slo_tambien_degrada(self):
+        self.assertFalse(L.degradada(400, 500, 500))
+        self.assertTrue(L.degradada(400, 501, 500))
+
+    def test_victima(self):
+        base = 50
+        ok = {"peticiones": 600, "p95_ms": 120, "tasa_errores": 0.0}
+        self.assertEqual(L.veredicto_victima(base, ok, 500, 0), ("PASA", []))
+        self.assertEqual(L.veredicto_victima(base, {**ok, "p95_ms": 151}, 500, 0)[0], "FALLA")
+        self.assertEqual(L.veredicto_victima(base, {**ok, "tasa_errores": 0.01}, 500, 0)[0], "FALLA")
+        self.assertEqual(L.veredicto_victima(base, {**ok, "tasa_errores": 0.0099}, 500, 0)[0], "PASA")
+        self.assertEqual(L.veredicto_victima(base, ok, 500, 1)[0], "FALLA")
+        self.assertEqual(L.veredicto_victima(base, {**ok, "p95_ms": 600}, 500, 0)[0], "FALLA")
+        # Una victima caida es FALLA, no SIN CONCLUSION.
+        self.assertEqual(L.veredicto_victima(base, {"peticiones": 0, "p95_ms": None, "tasa_errores": None}, 500, 0)[0],
+                         "FALLA")
+
+    def test_veredicto_l2_es_el_de_la_peor(self):
+        self.assertEqual(L.veredicto_l2({"a": ("PASA", []), "b": ("PASA", [])}), "PASA")
+        self.assertEqual(L.veredicto_l2({"a": ("PASA", []), "b": ("FALLA", ["x"])}), "FALLA")
+
+    def test_errores_del_login_no_cuentan_503(self):
+        self.assertFalse(L.es_error_login(503))
+        self.assertFalse(L.es_error_login(401))
+        self.assertTrue(L.es_error_login(0))
+        self.assertTrue(L.es_error_login(500))
+        self.assertTrue(L.es_error_login(502))
+        # B2: control positivo (1 % o mas de errores, p95 alto, descartes) y negativo.
+        self.assertTrue(L.ataque_efectivo(1501, 0.0, 0))
+        self.assertFalse(L.ataque_efectivo(1500, 0.0, 0))
+        self.assertTrue(L.ataque_efectivo(100, 0.01, 0))
+        self.assertTrue(L.ataque_efectivo(100, 0.0, 3))
+        self.assertFalse(L.ataque_efectivo(100, 0.0099, 0))
+
+    def test_mediana_con_none_como_infinito(self):
+        inf = float("inf")
+        # H5: un p95 sin respuestas (la victima cayo) cuenta como infinito: 100, 200, 300, inf -> (200 + 300) / 2.
+        self.assertEqual(L.mediana_p95([100, None, 300, 200]), 250.0)
+        # Con dos de tres sin respuestas, la mediana es infinita (no 100).
+        self.assertEqual(L.mediana_p95([None, None, 100]), inf)
+        # Control positivo: sin ningun None, la mediana de siempre.
+        self.assertEqual(L.mediana_p95([100, 300, 200]), 200)
+        self.assertEqual(L.mediana_p95([None]), inf)
+        self.assertIsNone(L.mediana_p95([]))
+
+
+class ValidezYControles(unittest.TestCase):
+    def f(self, motivo="m"):
+        return {"motivo": motivo}
+
+    def test_control_positivo_sin_fallos_deja_pasar(self):
+        self.assertEqual(L.veredicto_con_validez("PASA", [], True), ("PASA", []))
+        self.assertEqual(L.veredicto_con_validez("FALLA", [], True), ("FALLA", []))
+
+    def test_la_validez_gana_a_falla(self):
+        v, _ = L.veredicto_con_validez("FALLA", [self.f("cpu de k6")], True)
+        self.assertEqual(v, "SIN CONCLUSION")
+        # peor_estado NO sirve: daria FALLA.
+        self.assertEqual(L.peor_estado(["FALLA", "SIN CONCLUSION"]), "FALLA")
+
+    def test_control_del_ataque_solo_rebaja_un_pasa(self):
+        self.assertEqual(L.veredicto_con_validez("PASA", [], False)[0], "SIN CONCLUSION")
+        self.assertEqual(L.veredicto_con_validez("FALLA", [], False)[0], "FALLA")
+        # None = no aplica.
+        self.assertEqual(L.veredicto_con_validez("PASA", [], None)[0], "PASA")
+
+    def test_la_muerte_de_canario_es_falla_y_la_validez_no_la_rebaja(self):
+        # H2 y H10: la muerte (FALLA de veredicto_muerte) gana a cualquier fallo de validez.
+        v = L.veredicto_con_validez("PASA", [self.f("cpu de k6")], False, muertes=["FALLA"])
+        self.assertEqual(v[0], "FALLA")
+        v = L.veredicto_con_validez("SIN CONCLUSION", [self.f("cpu de k6")], None, muertes=["SIN CONCLUSION", "FALLA"])
+        self.assertEqual(v[0], "FALLA")
+        # Solo el OOM global de la VM (SIN CONCLUSION) no es una muerte de Canario.
+        v = L.veredicto_con_validez("PASA", [], True, muertes=["SIN CONCLUSION"])
+        self.assertEqual(v[0], "SIN CONCLUSION")
+        # Control positivo: sin muertes ni fallos, el resultado de los oraculos.
+        self.assertEqual(L.veredicto_con_validez("PASA", [], True, muertes=[])[0], "PASA")
+        self.assertEqual(L.veredicto_con_validez("PASA", [], True, muertes=())[0], "PASA")
+
+    def test_combinar_resultados_con_peor_estado(self):
+        # H3: FALLA > SIN CONCLUSION > PASA; la validez entra aparte.
+        self.assertEqual(L.combinar_resultados(["PASA", "SIN CONCLUSION", "FALLA"]), "FALLA")
+        self.assertEqual(L.combinar_resultados(["PASA", "SIN CONCLUSION", "PASA"]), "SIN CONCLUSION")
+        self.assertEqual(L.combinar_resultados(["PASA", "PASA", "PASA"]), "PASA")
+
+
+class AgregarFases(unittest.TestCase):
+    """agregar_fases: los veredictos finales de cada parte (A1, E9, H1-H4, E15)."""
+
+    def setUp(self):
+        self.parche = mock.patch.object(L, "p", lambda *a, **k: None)
+        self.parche.start()
+        self.addCleanup(self.parche.stop)
+
+    def victimas(self, carga_p95, base_p95=50):
+        return {ruta: {"base": {"p95_ms": base_p95},
+                       "carga": {"peticiones": 600, "p95_ms": carga_p95, "tasa_errores": 0.0},
+                       "descartes_aviso": 0} for ruta in L.SLO_VICTIMAS_MS}
+
+    def login(self, p95):
+        return {"p95_ms": p95, "tasa_errores": 0.0, "descartes_aviso": 0}
+
+    def repeticion(self, numero, partes, muertes=(), comun=()):
+        return {"modo": "x", "repeticion": numero, "muertes": list(muertes), "reinicios": 0, "comun": list(comun),
+                "partes": partes, "veredictos": {n: ("PASA", []) for n in partes}}
+
+    def parte(self, resultado, validez=(), control=None, detalle=None):
+        return {"resultado": resultado, "validez": list(validez), "control_ataque": control, "detalle": detalle or {}}
+
+    def l3(self, resultados, **extra):
+        return [self.repeticion(i + 1, {"l3": self.parte(r)}, **extra) for i, r in enumerate(resultados)]
+
+    def test_l3_combina_con_peor_estado(self):
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA", "PASA", "PASA"]), 3)["l3"][0], "PASA")
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA", "FALLA", "PASA"]), 3)["l3"][0], "FALLA")
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA", "SIN CONCLUSION", "PASA"]), 3)["l3"][0], "SIN CONCLUSION")
+
+    def test_a1_exige_tres_repeticiones(self):
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA", "PASA"]), 2)["l3"][0], "SIN CONCLUSION")
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA", "PASA", "PASA"]), 2)["l3"][0], "SIN CONCLUSION")
+
+    def test_la_validez_de_una_repeticion_gana_a_la_falla_de_otra(self):
+        repeticiones = [self.repeticion(1, {"l3": self.parte("FALLA")}),
+                        self.repeticion(2, {"l3": self.parte("PASA", validez=[{"motivo": "J2"}])}),
+                        self.repeticion(3, {"l3": self.parte("PASA")})]
+        self.assertEqual(L.agregar_fases("l3", repeticiones, 3)["l3"][0], "SIN CONCLUSION")
+
+    def test_los_fallos_globales_dan_sin_conclusion_y_la_muerte_los_supera(self):
+        globales = [{"motivo": "anti-fuga"}]
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA"] * 3), 3, globales)["l3"][0], "SIN CONCLUSION")
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA"] * 3, muertes=["FALLA"]), 3, globales)["l3"][0], "FALLA")
+        # Control positivo: sin globales, PASA.
+        self.assertEqual(L.agregar_fases("l3", self.l3(["PASA"] * 3), 3, [])["l3"][0], "PASA")
+
+    def l3b(self, carga_victimas, p95_login, resultado_a="PASA"):
+        detalle = {"victimas": self.victimas(carga_victimas), "login": self.login(p95_login)}
+        return [self.repeticion(i, {"l3b-a": self.parte(resultado_a),
+                                    "l3b-b": self.parte("PASA", detalle=detalle)}) for i in (1, 2, 3)]
+
+    def test_l3b_da_dos_veredictos_independientes(self):
+        # Victimas a 400 ms con base 50 (limite max(100, 150)) y login a 2000 ms (> 1500: el ataque existe, B2).
+        finales = L.agregar_fases("l3b", self.l3b(400, 2000), 3)
+        self.assertEqual(sorted(finales), ["l3b-a", "l3b-b"])
+        self.assertEqual(finales["l3b-a"][0], "PASA")
+        self.assertEqual(finales["l3b-b"][0], "FALLA")
+        # Control positivo: victimas a 60 ms con el ataque existente: l3b-b PASA.
+        self.assertEqual(L.agregar_fases("l3b", self.l3b(60, 2000), 3)["l3b-b"][0], "PASA")
+        # Una FALLA de l3b-a no se mezcla con l3b-b.
+        finales = L.agregar_fases("l3b", self.l3b(60, 2000, resultado_a="FALLA"), 3)
+        self.assertEqual((finales["l3b-a"][0], finales["l3b-b"][0]), ("FALLA", "PASA"))
+
+    def test_b2_solo_actua_sobre_l3b_b_y_solo_rebaja_un_pasa(self):
+        # Ataque inexistente (login a 100 ms, sin errores ni descartes) con victimas sanas: SIN CONCLUSION en l3b-b
+        # y no toca a l3b-a.
+        finales = L.agregar_fases("l3b", self.l3b(60, 100), 3)
+        self.assertEqual((finales["l3b-a"][0], finales["l3b-b"][0]), ("PASA", "SIN CONCLUSION"))
+        # Con las victimas caidas y el ataque inexistente sigue siendo FALLA: B2 no rebaja una FALLA.
+        self.assertEqual(L.agregar_fases("l3b", self.l3b(400, 100), 3)["l3b-b"][0], "FALLA")
+
+    def test_la_linea_de_l3b_b_es_la_literal_de_e15_y_no_hay_punto_de_politica(self):
+        self.assertEqual(L.LINEA_L3B_B_FALLA, "L3b-b: FALLA (esperada por el diseño; NO OK; misma amenaza que L2, "
+                                              "threat-model §8, ABIERTA)")
+        fuente = pathlib.Path(L.__file__).read_text(encoding="utf-8")
+        # E15: L3b-b entra en el resultado global como cualquier otra parte; no hay interruptor.
+        self.assertNotIn("L3B_B_CUENTA_PARA_GLOBAL", fuente)
+        self.assertEqual(L.PARTES["l3b"], ("l3b-a", "l3b-b"))
+
+    def test_la_cota_del_coste_solo_con_falla_de_l3b_b_y_b2(self):
+        self.assertEqual(L.texto_cota_ataque("FALLA", True, 3402),
+                         "cota superior del coste a esta tasa y duracion, IPv4: 3402 IPs sostenidas")
+        # Cada una de las otras combinaciones: nada.
+        self.assertEqual(L.texto_cota_ataque("FALLA", False, 3402), "")
+        self.assertEqual(L.texto_cota_ataque("PASA", True, 3402), "")
+        self.assertEqual(L.texto_cota_ataque("SIN CONCLUSION", True, 3402), "")
+
+
+class DescartesE14(unittest.TestCase):
+    """E14: los descartes de k6 en L4 invalidan ventanas por ruta."""
+
+    def csv(self):
+        return {"denuncia__base": [1000.5, 1010.5], "denuncia__carga": [1200.0],
+                "seguimiento__recup": [1500.0], "web_seguimiento__base": [1020.0],
+                "login_email__carga": [1190.0], "sonda_salud": [1005.0, 1006.0]}
+
+    def test_cuatro_rutas_en_cualquier_fase_y_sin_la_sonda_de_salud(self):
+        d = L.descartes_de_rutas(self.csv(), 1000.0)
+        self.assertEqual(d, {"denuncia": [0.5, 10.5, 200.0], "seguimiento": [500.0], "web_seguimiento": [20.0],
+                             "login_email": [190.0]})
+        # Control: sin descartes, listas vacias en las cuatro rutas.
+        self.assertEqual(L.descartes_de_rutas({}, 1000.0),
+                         {"denuncia": [], "seguimiento": [], "web_seguimiento": [], "login_email": []})
+        # seguimiento no recoge los de web_seguimiento (prefijo distinto).
+        self.assertNotIn(20.0, d["seguimiento"])
+
+    def test_descartes_en_tramo_es_semiabierto(self):
+        self.assertEqual(L.descartes_en_tramo([0.5, 10.5, 30.0], 0, 30), 2)
+        self.assertEqual(L.descartes_en_tramo([0.5, 10.5, 30.0], 30, 60), 1)
+        self.assertEqual(L.descartes_en_tramo([], 0, 30), 0)
+
+    def test_un_descarte_invalida_las_diez_ventanas_que_lo_contienen(self):
+        # Descarte en 15,5: afecta a las ventanas de inicio 6 a 15 y a ninguna mas (E9, E14).
+        ventanas = [(s, 10.0, 50) for s in range(0, 30)]
+        serie = L.serie_cumple(ventanas, 10.0, 500, [15.5])
+        malas = [s for s, ok in serie if not ok]
+        self.assertEqual(malas, list(range(6, 16)))
+        # Con o sin aviso es lo mismo: serie_cumple no mira el aviso. Control: sin descartes, todas cumplen.
+        self.assertTrue(all(ok for _, ok in L.serie_cumple(ventanas, 10.0, 500, [])))
+
+    def test_la_recuperacion_no_se_da_con_un_descarte_dentro_de_la_ventana(self):
+        # Fin del pico 180. Todo bien salvo un descarte en 200,5: las ventanas 191 a 200 no cumplen,
+        # asi que s0 = 201 -> 21 s (y no 0).
+        ventanas = [(s, 10.0, 50) for s in range(180, 350)]
+        serie = L.serie_cumple(ventanas, 10.0, 500, [200.5])
+        self.assertEqual(L.segundos_hasta_recuperar({"a": serie}, 180), 21)
+        # Control positivo: sin el descarte, 0 s.
+        self.assertEqual(L.segundos_hasta_recuperar({"a": L.serie_cumple(ventanas, 10.0, 500, [])}, 180), 0)
+
+
+class VentanasLimitador(unittest.TestCase):
+    def filas(self, ip, inicios, estado, dur=0.05):
+        return [{"ip": ip, "inicio": t, "fin": t + dur, "estado": estado} for t in inicios]
+
+    def test_ambigua_si_cruza_la_frontera(self):
+        self.assertEqual(L.ventana_de_peticion(119.99, 120.05, 60), (1, True))
+        self.assertEqual(L.ventana_de_peticion(100.0, 100.05, 60), (1, False))
+        self.assertEqual(L.ventana_de_peticion(60.0, 60.05, 60), (1, False))
+
+    def test_61_aceptadas_no_ambiguas_es_falla_y_60_pasa(self):
+        # Control positivo: 60 aceptadas y el resto 429 pasa.
+        ok = self.filas("a", [60 + i * 0.5 for i in range(60)], 404) + self.filas("a", [95 + i * 0.1 for i in range(5)], 429)
+        v, _ = L.veredicto_l3(L.contar_por_ip_ventana(ok, 60, 404), 60)
+        self.assertEqual(v, "PASA")
+        malo = self.filas("a", [60 + i * 0.4 for i in range(61)], 404)
+        v, _ = L.veredicto_l3(L.contar_por_ip_ventana(malo, 60, 404), 60)
+        self.assertEqual(v, "FALLA")
+
+    def test_solo_pasa_contando_ambiguas_es_sin_conclusion(self):
+        filas = self.filas("a", [60 + i * 0.4 for i in range(60)], 404)
+        filas += [{"ip": "a", "inicio": 119.99, "fin": 120.05, "estado": 404}]
+        v, _ = L.veredicto_l3(L.contar_por_ip_ventana(filas, 60, 404), 60)
+        self.assertEqual(v, "SIN CONCLUSION")
+
+    def test_solo_cuenta_el_estado_aceptado_y_los_503_van_aparte(self):
+        filas = self.filas("a", [60 + i * 0.4 for i in range(60)], 404) + self.filas("a", [90, 91, 92], 503)
+        pares = L.contar_por_ip_ventana(filas, 60, 404)
+        self.assertEqual(L.veredicto_l3(pares, 60)[0], "PASA")
+        self.assertEqual(pares[("a", 1)]["n503"], 3)
+        # En L3b el aceptado es 401: los 404 no cuentan.
+        self.assertEqual(L.contar_por_ip_ventana(filas, 60, 401)[("a", 1)]["aceptadas"], 0)
+
+    def test_retry_after_fuera_de_rango_es_falla_con_control(self):
+        pares = L.contar_por_ip_ventana(self.filas("a", [60 + i for i in range(10)], 404), 60, 404)
+        self.assertEqual(L.veredicto_l3(pares, 60, 0)[0], "PASA")
+        self.assertEqual(L.veredicto_l3(pares, 60, 1)[0], "FALLA")
+        self.assertTrue(L.retry_after_valido(1, 60))
+        self.assertTrue(L.retry_after_valido(60, 60))
+        self.assertFalse(L.retry_after_valido(61, 60))
+        self.assertTrue(L.retry_after_valido(61, 300))
+        self.assertFalse(L.retry_after_valido(301, 300))
+        self.assertFalse(L.retry_after_valido(0, 60))
+        self.assertFalse(L.retry_after_valido(-1, 60))
+        # Un 429 sin fila de Retry-After tambien cuenta como no valido.
+        self.assertEqual(L.retry_after_invalidos([30, 61, -1], 5, 60), 2 + 2)
+        self.assertEqual(L.retry_after_invalidos([30, 31], 2, 60), 0)
+
+    def test_control_positivo_j2(self):
+        # 60 aceptadas y luego 429: control bien.
+        buenos = self.filas("a", [60 + i * 0.5 for i in range(60)], 404) + self.filas("a", [91 + i * 0.1 for i in range(3)], 429)
+        self.assertTrue(L.control_l3(L.contar_por_ip_ventana(buenos, 60, 404), 60)[0])
+        # Un 429 en la peticion 10: el limite no es el esperado, SIN CONCLUSION.
+        malos = self.filas("a", [60 + i * 0.5 for i in range(9)], 404) + self.filas("a", [65], 429)
+        self.assertFalse(L.control_l3(L.contar_por_ip_ventana(malos, 60, 404), 60)[0])
+        # Con 3 peticiones previas con estado 503 y 0, 429 en la 58.a ya no es de las protegidas (60 - 2 = 58).
+        previas = self.filas("a", [60, 61], 503) + self.filas("a", [62 + i * 0.2 for i in range(56)], 404) \
+            + self.filas("a", [80], 429)
+        self.assertTrue(L.control_l3(L.contar_por_ip_ventana(previas, 60, 404), 60)[0])
+        # Control del control: el mismo 429 sin las previas si es una violacion.
+        sin_previas = self.filas("a", [62 + i * 0.2 for i in range(56)], 404) + self.filas("a", [80], 429)
+        self.assertFalse(L.control_l3(L.contar_por_ip_ventana(sin_previas, 60, 404), 60)[0])
+
+    def test_ambiguas_al_inicio_relajan_el_control(self):
+        # Una peticion de 'a' cruza la frontera de las 60: puede haber gastado 1 del contador de la ventana 1.
+        filas = [{"ip": "a", "inicio": 59.99, "fin": 60.05, "estado": 404}]
+        filas += self.filas("a", [61 + i * 0.5 for i in range(59)], 404) + self.filas("a", [95], 429)
+        pares = L.contar_por_ip_ventana(filas, 60, 404)
+        self.assertEqual(pares[("a", 1)]["ambiguas_inicio"], 1)
+        self.assertTrue(L.control_l3(pares, 60)[0])
+        # Control: sin la ambigua, un 429 tras 59 aceptadas viola el control.
+        self.assertFalse(L.control_l3(L.contar_por_ip_ventana(filas[1:], 60, 404), 60)[0])
+
+    def test_maximo_deslizante(self):
+        # 60 en el final de una ventana y 60 en el principio de la siguiente: 120 en un tramo de 60 s.
+        inicios = [30 + i * 0.4 for i in range(60)] + [60 + i * 0.4 for i in range(60)]
+        self.assertEqual(L.maximo_deslizante({"a": inicios}, 60)[0], 120)
+        self.assertEqual(L.maximo_deslizante({"a": [0.0, 1.0, 61.0]}, 60)[0], 2)
+
+
+class ControlesDeConfiguracion(unittest.TestCase):
+    def peticiones(self, estados, ini=0.0):
+        return [{"inicio": ini + i * 0.01, "fin": ini + i * 0.01 + 0.005, "estado": e} for i, e in enumerate(estados)]
+
+    def test_d3_pasa_y_cada_motivo_da_sin_conclusion(self):
+        bien = {"1.1.1.1": self.peticiones([401] * 10 + [429], 310.0)}
+        self.assertEqual(L.evaluar_d3(bien), ("PASA", []))
+        # la 11.a no es 429: el limite no esta activo.
+        self.assertEqual(L.evaluar_d3({"1.1.1.1": self.peticiones([401] * 11, 310.0)})[0], "SIN CONCLUSION")
+        # una de las 10 primeras no es 401 (E6).
+        self.assertEqual(L.evaluar_d3({"1.1.1.1": self.peticiones([401] * 4 + [503] + [401] * 5 + [429], 310.0)})[0],
+                         "SIN CONCLUSION")
+        # alguna ambigua: cruza la frontera de 300 s.
+        cruza = self.peticiones([401] * 10 + [429], 599.99)
+        self.assertEqual(L.evaluar_d3({"1.1.1.1": cruza})[0], "SIN CONCLUSION")
+        # faltan peticiones.
+        self.assertEqual(L.evaluar_d3({"1.1.1.1": self.peticiones([401] * 5, 310.0)})[0], "SIN CONCLUSION")
+
+    def test_strict_diferencial(self):
+        bien = [404] * 60 + [429] * 10 + [404]
+        self.assertEqual(L.evaluar_control_strict(bien, False)[0], "PASA")
+        # Sin strict, Caddy toma la IP de la izquierda: las 70 cuentan para las IPs falsas, una vez cada una, y la
+        # 71.a (con 198.19.255.254 a la izquierda) cuenta para esa IP, que nunca se contó: las 71 dan 404.
+        v, t = L.evaluar_control_strict([404] * 71, False)
+        self.assertEqual(v, "PARADA")
+        self.assertIn("sin strict", t)
+        # Sin confianza en 10.88.1.2: todo cuenta para la IP de la conexion, la 71.a da 429.
+        v, t = L.evaluar_control_strict([404] * 60 + [429] * 11, False)
+        self.assertEqual(v, "PARADA")
+        self.assertIn("sin confianza", t)
+        # El patron antiguo de 70 sin la 71.a ya no vale.
+        self.assertEqual(L.evaluar_control_strict([404] * 60 + [429] * 10, False)[0], "PARADA")
+        # Si cruzan la frontera de minuto, SIN CONCLUSION (no PARADA).
+        self.assertEqual(L.evaluar_control_strict(bien, True)[0], "SIN CONCLUSION")
+        self.assertTrue(L.cruza_frontera(119.9, 120.1, 60))
+        self.assertFalse(L.cruza_frontera(120.0, 179.9, 60))
+
+    def test_403_compara_estado_y_cuerpo(self):
+        self.assertEqual(L.evaluar_control_403(403, '{"detalle": "petición no válida"}')[0], "PASA")
+        self.assertEqual(L.evaluar_control_403(403, '{"detalle": "host no válido"}')[0], "PARADA")
+        self.assertEqual(L.evaluar_control_403(421, '{"detalle": "petición no válida"}')[0], "PARADA")
+
+    def test_421_es_parada(self):
+        self.assertEqual(L.evaluar_control_421(405)[0], "PASA")
+        self.assertEqual(L.evaluar_control_421(421)[0], "PARADA")
+        self.assertEqual(L.evaluar_control_421(0)[0], "PARADA")
+
+    def test_fronteras(self):
+        # 2026-11-22 10:07:13 UTC = 1795342033: la siguiente de 5 minutos con 120 s de margen es 10:10:00.
+        self.assertEqual(L.proxima_frontera(1795342033, 300, 120), 1795342200)
+        # Si justo cabe, no espera una mas.
+        self.assertEqual(L.proxima_frontera(1795342080, 300, 120), 1795342200)
+        self.assertEqual(L.proxima_frontera(1795342081, 300, 120), 1795342500)
+        self.assertTrue(L.cruza_frontera(1795391999.5, 1795392000.5, 86400))
+        self.assertFalse(L.cruza_frontera(1795300000, 1795300500, 86400))
+
+    def test_alineacion(self):
+        self.assertTrue(L.evaluar_alineacion(1795342200.4, 1795342200)[0])
+        self.assertTrue(L.evaluar_alineacion(1795342199.97, 1795342200)[0])
+        self.assertFalse(L.evaluar_alineacion(1795342199.5, 1795342200)[0])
+        self.assertFalse(L.evaluar_alineacion(1795342204.0, 1795342200)[0])
+        self.assertFalse(L.evaluar_alineacion(None, 1795342200)[0])
+
+
+class Recuperacion(unittest.TestCase):
+    def test_cada_peticion_cuenta_en_todas_las_ventanas_que_contienen_su_inicio(self):
+        # Una peticion en t = 15,5 cae en las ventanas de inicio 6 a 15 (10 ventanas), no en las demas.
+        v = L.ventanas_p95([(15.5, 7.0)], 0, 30)
+        con = [s for s, p95, n in v if n]
+        self.assertEqual(con, list(range(6, 16)))
+        self.assertEqual({p95 for _, p95, n in v if n}, {7.0})
+        # Las ventanas llegan hasta s + 10 <= hasta.
+        self.assertEqual(v[-1][0], 20)
+
+    def serie(self, desde, hasta, malos=()):
+        return [(s, s not in malos) for s in range(desde, hasta)]
+
+    def test_30_ventanas_consecutivas_y_tiempo_desde_el_fin_del_pico(self):
+        # fin del pico 180: ventanas 180-199 malas, desde la 200 todas bien: s0 = 200 -> 20 s.
+        s = self.serie(180, 350, malos=set(range(180, 200)))
+        self.assertEqual(L.segundos_hasta_recuperar({"a": s, "b": s}, 180), 20)
+        # Exactamente 30 ventanas buenas al final (inicios 320..349): se recupera en 140 s.
+        s = self.serie(180, 350, malos=set(range(180, 320)))
+        self.assertEqual(L.segundos_hasta_recuperar({"a": s}, 180), 140)
+        # 29 ventanas buenas: no se recupera (control del borde).
+        s = self.serie(180, 350, malos=set(range(180, 321)))
+        self.assertIsNone(L.segundos_hasta_recuperar({"a": s}, 180))
+
+    def test_todas_las_rutas_deben_cumplir(self):
+        a = self.serie(180, 350)
+        b = self.serie(180, 350, malos={200})
+        # b tiene una mala en 200: s0 = 201 -> 21 s.
+        self.assertEqual(L.segundos_hasta_recuperar({"a": a, "b": b}, 180), 21)
+        # Control: sin la mala, 0 s.
+        self.assertEqual(L.segundos_hasta_recuperar({"a": a, "b": a}, 180), 0)
+
+    def test_control_de_la_base(self):
+        base = self.serie(30, 141)
+        ok, fraccion, _ = L.control_base_f2({"a": base})
+        self.assertTrue(ok)
+        self.assertEqual(fraccion, 1.0)
+        # El 94 % no basta aunque encadene 30 seguidas: 111 ventanas, 7 malas = 93,7 %.
+        malas = set(range(100, 107))
+        ok, fraccion, motivo = L.control_base_f2({"a": self.serie(30, 141, malos=malas)})
+        self.assertFalse(ok)
+        self.assertLess(fraccion, 0.95)
+        self.assertIn("solo el", motivo)
+        # Con 5 malas (95,5 %) y un tramo de 54 seguidas: pasa. Control del umbral.
+        ok, _, _ = L.control_base_f2({"a": self.serie(30, 141, malos={45, 100, 101, 102, 103})})
+        self.assertTrue(ok)
+        # Si no encadena 30 seguidas, falla aunque supere el 95 %.
+        ok, _, motivo = L.control_base_f2({"a": self.serie(30, 141, malos=set(range(35, 140, 20)))})
+        self.assertFalse(ok)
+
+    def test_descartes_hacen_no_cumplir_la_ventana(self):
+        v = [(0, 10.0, 50), (1, 10.0, 50)]
+        self.assertEqual(L.serie_cumple(v, 10.0, 500, []), [(0, True), (1, True)])
+        # un descarte en t = 0,5 cae en la ventana [0,10) pero tambien en [1, 11)? No: 0,5 < 1.
+        self.assertEqual(L.serie_cumple(v, 10.0, 500, [0.5]), [(0, False), (1, True)])
+        # degradada: 111 > max(20, 110)
+        self.assertEqual(L.serie_cumple([(0, 111.0, 50)], 10.0, 500, []), [(0, False)])
+        # sin p95: no cumple.
+        self.assertEqual(L.serie_cumple([(0, None, 0)], 10.0, 500, []), [(0, False)])
+
+    def test_mediana_con_infinito_y_f3(self):
+        inf = float("inf")
+        self.assertEqual(L.mediana_recuperacion([10, 20, None]), 20)
+        self.assertEqual(L.mediana_recuperacion([10, None, None]), inf)
+        self.assertEqual(L.veredicto_recuperacion(59, 0, True)[0], "PASA")
+        self.assertEqual(L.veredicto_recuperacion(60, 0, True)[0], "FALLA")
+        self.assertEqual(L.veredicto_recuperacion(inf, 0, True)[0], "FALLA")
+        self.assertEqual(L.veredicto_recuperacion(10, 1, True)[0], "FALLA")
+        self.assertEqual(L.veredicto_recuperacion(10, 0, False)[0], "FALLA")
+
+    def test_humo(self):
+        bien = [("humo_previo: a", 1.0), ("humo_previo: b", 1.0), ("humo_previo: c", 1.0), ("humo_previo: d", 1.0)]
+        self.assertTrue(L.humo_ok(bien, "humo_previo"))
+        self.assertFalse(L.humo_ok(bien[:3], "humo_previo"))
+        self.assertFalse(L.humo_ok(bien[:3] + [("humo_previo: d", 0.0)], "humo_previo"))
+        # Las de la otra etapa no cuentan.
+        self.assertFalse(L.humo_ok(bien, "humo_posterior"))
+
+
+class Escenarios(unittest.TestCase):
+    def test_fases_literales(self):
+        self.assertEqual(L.fases_de("pico"), [{"nombre": "cal", "desde_s": 0, "hasta_s": 30},
+                                              {"nombre": "base", "desde_s": 30, "hasta_s": 150},
+                                              {"nombre": "carga", "desde_s": 150, "hasta_s": 180},
+                                              {"nombre": "recup", "desde_s": 180, "hasta_s": 360}])
+        self.assertEqual([f["hasta_s"] for f in L.fases_de("l2")], [30, 150, 270, 390])
+        self.assertEqual([f["hasta_s"] for f in L.fases_de("l3b")], [30, 150, 450, 570])
+        # el humo posterior es 120 s despues del fin programado del pico (E10).
+        self.assertEqual(L.HUMO_POSTERIOR_S, 180 + 120)
+
+    def test_l2(self):
+        esc = {e["nombre"]: e for e in L.escenarios_l2(L.tasas_de(0.0196))}
+        self.assertEqual(esc["login_email"]["rate"], 15306)
+        self.assertEqual((esc["login_email"]["inicio_s"], esc["login_email"]["duracion_s"], esc["login_email"]["vus"]),
+                         (150, 120, 600))
+        for ruta in ("denuncia", "seguimiento", "web_seguimiento"):
+            self.assertEqual((esc[ruta]["rate"], esc[ruta]["inicio_s"], esc[ruta]["duracion_s"], esc[ruta]["vus"]),
+                             (5, 0, 390, 50))
+        self.assertEqual(esc["sonda_salud"]["rate"], 1)
+        self.assertEqual(L.presupuesto_k6_mib(list(esc.values())), 765 * 5)
+        self.assertEqual(L.comprobar_presupuesto(list(esc.values())), 3825)
+
+    def test_pico(self):
+        esc = {e["nombre"]: e for e in L.escenarios_pico(L.tasas_de(0.0196))}
+        self.assertEqual(esc["login_email__base"]["rate"], 1020)
+        self.assertEqual(esc["login_email__base"]["time_unit_s"], 100)
+        self.assertEqual(esc["login_email__carga"]["rate"], 10204)
+        self.assertEqual(esc["denuncia__base"]["rate"], 5)
+        self.assertEqual(esc["denuncia__carga"]["rate"], 50)
+        self.assertEqual((esc["denuncia__carga"]["inicio_s"], esc["denuncia__carga"]["duracion_s"]), (150, 30))
+        self.assertEqual((esc["web_seguimiento__recup"]["inicio_s"], esc["web_seguimiento__recup"]["duracion_s"]),
+                         (180, 180))
+        # Todo x 10 en el pico, el login a 2/t.
+        for ruta in ("denuncia", "seguimiento", "web_seguimiento"):
+            self.assertEqual(esc[f"{ruta}__carga"]["rate"], 10 * esc[f"{ruta}__base"]["rate"])
+        lista = list(esc.values())
+        self.assertEqual(L.holgura_insuficiente(lista), [])
+        self.assertLessEqual(L.comprobar_presupuesto(lista, 2), 4096)
+        self.assertEqual(L.presupuesto_k6_mib(lista, 2), 747 * 5)
+
+    def test_presupuesto_pasa_de_4_gib_es_parada_con_su_control(self):
+        # Control positivo: 819 VUs caben (4095 MiB).
+        self.assertEqual(L.comprobar_presupuesto([{"vus": 819}]), 4095)
+        with self.assertRaises(L.Parada):
+            L.comprobar_presupuesto([{"vus": 820}])
+        with self.assertRaises(L.Parada):
+            L.comprobar_presupuesto([{"vus": 819}], humos=1)
+
+    def test_holgura(self):
+        # 16 VUs a 5/s son 3,2 s (> 1 s de la denuncia): bien. 4 VUs son 0,8 s: no basta.
+        bien = {"nombre": "a", "ruta": "denuncia", "vus": 16, "rate": 5, "time_unit_s": 1}
+        mal = {"nombre": "b", "ruta": "denuncia", "vus": 4, "rate": 5, "time_unit_s": 1}
+        self.assertEqual(L.holgura_insuficiente([bien, mal]), ["b"])
+        # tasa con time_unit 100: 1020 por 100 s son 10,2/s: 32 VUs son 3,1 s (> 1,5 s).
+        self.assertEqual(L.holgura_insuficiente([{"nombre": "l", "ruta": "login_email", "vus": 32, "rate": 1020,
+                                                  "time_unit_s": 100}]), [])
+
+    def test_l3(self):
+        plan = L.plan_ips("l3", 1)
+        esc = {e["nombre"]: e for e in L.escenarios_l3(plan[1])}
+        self.assertEqual((esc["seguimiento_ips"]["rate"], esc["seguimiento_ips"]["duracion_s"],
+                          esc["seguimiento_ips"]["vus"]), (300, 300, 600))
+        self.assertEqual(len(esc["seguimiento_ips"]["ips"]), 200)
+        self.assertTrue(esc["seguimiento_ips"]["etiquetar_ip"])
+        self.assertEqual(L.comprobar_presupuesto(list(esc.values())), 615 * 5)
+
+    def test_l3b(self):
+        plan = L.plan_ips("l3b", 1, 3402)
+        esc = {e["nombre"]: e for e in L.escenarios_l3b(L.tasas_de(0.0196), plan[1])}
+        ataque = esc["login_ataque"]
+        self.assertEqual((ataque["rate"], ataque["time_unit_s"], ataque["inicio_s"], ataque["duracion_s"]),
+                         (10204, 100, 150, 300))
+        self.assertEqual(len(ataque["ips"]), 3402)
+        self.assertEqual([len(esc[r]["ips"]) for r in ("denuncia", "seguimiento", "web_seguimiento")], [428, 8, 8])
+        self.assertEqual(esc["denuncia"]["duracion_s"], 570)
+        self.assertEqual(L.comprobar_presupuesto(list(esc.values())), 765 * 5)
+        # 300 s x 102,04/s = 30612 peticiones entre 3402 IPs: 8,9988 por IP, por debajo de 10 (D2).
+        self.assertLess(30612 / 3402, 9.0)
+
+
+import collections  # noqa: E402
+
+
+class CsvFases(unittest.TestCase):
+    def test_lee_filas_descartes_retry_y_checks(self):
+        columnas = ["metric_name", "timestamp", "metric_value", "check", "error", "error_code", "expected_response",
+                    "method", "name", "proto", "scenario", "status", "extra_tags"]
+        filas = [
+            ["http_req_duration", "1795342200500", "500.0", "", "", "", "true", "POST", "seguimiento", "HTTP/1.1",
+             "seguimiento_ips", "404", "fase=carga&ip=198.18.0.1&ruta=seguimiento"],
+            ["http_reqs", "1795342200500", "1", "", "", "", "true", "POST", "seguimiento", "HTTP/1.1",
+             "seguimiento_ips", "404", "ip=198.18.0.9"],
+            ["dropped_iterations", "1795342201000", "1", "", "", "", "", "", "", "", "seguimiento_ips", "", ""],
+            ["retry_after_s", "1795342202000", "33", "", "", "", "", "", "seguimiento", "", "seguimiento_ips", "",
+             "ip=198.18.0.1"],
+            ["checks", "1795342203000", "1", "humo_previo: denuncia 201 con codigo", "", "", "", "", "", "", "", "", ""],
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            ruta = pathlib.Path(d) / "k6.csv"
+            with open(ruta, "w", encoding="utf-8", newline="") as f:
+                w = _csv.writer(f, lineterminator="\n")
+                w.writerow(columnas)
+                w.writerows(filas)
+            datos = L.leer_csv_fases(ruta)
+        self.assertEqual(len(datos["filas"]), 1)
+        fila = datos["filas"][0]
+        # La marca es el FIN: inicio = marca - duracion (500 ms).
+        self.assertEqual(fila["fin"], 1795342200.5)
+        self.assertAlmostEqual(fila["inicio"], 1795342200.0)
+        self.assertEqual((fila["estado"], fila["nombre"], fila["ip"], fila["fase"]), (404, "seguimiento",
+                                                                                   "198.18.0.1", "carga"))
+        self.assertEqual(datos["descartes"], {"seguimiento_ips": [1795342201.0]})
+        self.assertEqual(datos["retry"], [33.0])
+        self.assertEqual(datos["checks"], [("humo_previo: denuncia 201 con codigo", 1.0)])
+
+    def test_t0(self):
+        self.assertEqual(L.leer_t0('time="x" level=info msg="T0_MS=1795342200123" source=console'), 1795342200.123)
+        self.assertIsNone(L.leer_t0("sin marca"))
+        # dos marcas: no concluye.
+        self.assertIsNone(L.leer_t0("T0_MS=1\nT0_MS=2"))
+
+    def test_resumen_filas(self):
+        filas = [{"dur": d, "estado": e} for d, e in ((10, 404), (20, 404), (30, 404), (40, 503), (1000, 0))]
+        r = L.resumen_filas(filas, 404)
+        self.assertEqual((r["peticiones"], r["errores"], r["n503"]), (5, 2, 1))
+        self.assertEqual(r["p95_ms"], 1000)
+        # Con la definicion del login, el 503 no es error.
+        r = L.resumen_filas(filas, 401, L.es_error_login)
+        self.assertEqual(r["errores"], 1)
+
+
+class EscanerAntiFuga(unittest.TestCase):
+    def test_formas_codificadas(self):
+        formas = L.formas_codificadas("Humo de recuperación 1")
+        self.assertIn("Humo%20de%20recuperaci%C3%B3n%201", formas)
+        self.assertIn("Humo+de+recuperaci%C3%B3n+1", formas)
+        self.assertIn("Humo de recuperaci\\u00f3n 1", formas)
+        self.assertIn("Humo de recuperación 1", formas)
+
+    def test_busca_tal_cual_y_codificado_con_su_control(self):
+        literales = {"texto": "Humo de recuperación 1"}
+        for contenido in (b"xx Humo de recuperaci\xc3\xb3n 1 yy", b"Humo%20de%20recuperaci%C3%B3n%201",
+                          b'{"t": "Humo de recuperaci\\u00f3n 1"}'):
+            self.assertEqual(L.buscar_en_bytes(contenido, literales), ["texto"])
+        # Control negativo: otro contenido no lo encuentra.
+        self.assertEqual(L.buscar_en_bytes(b"nada que ver", literales), [])
+
+    def test_patron_de_codigo(self):
+        patrones = [("codigo", L.PATRON_CODIGO)]
+        self.assertEqual(L.buscar_en_bytes(b"x ABCD-EFGH-IJKL-MNOP-QRST-UVWX-2345-6723 y", {}, patrones), ["codigo"])
+        self.assertEqual(L.buscar_en_bytes(b"ABCD-EFGH-IJKL", {}, patrones), [])
+
+    def test_directorio_ids_solo_en_los_ficheros_que_no_los_necesitan(self):
+        ident = "0123456789abcdef0123456789abcdef"
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "k6.csv").write_text("x " + ident, encoding="utf-8")
+            (d / "log_api.txt").write_text("empresa " + ident, encoding="utf-8")
+            (d / "k6_salida.txt").write_text("limpio", encoding="utf-8")
+            (d / "otro.txt").write_text("clave Estres-abc", encoding="utf-8")
+            hallazgos = L.escanear_directorio(d, {"contrasena": "Estres-abc"}, {"empresa0": ident}, [])
+        self.assertEqual(hallazgos, {"k6.csv": ["empresa0"], "otro.txt": ["contrasena"]})
+
+    def test_escaneo_por_trozos_con_solape(self):
+        with tempfile.TemporaryDirectory() as d:
+            ruta = pathlib.Path(d) / "grande.txt"
+            ruta.write_bytes(b"a" * 1000 + b"SECRETO-XYZ" + b"b" * 1000)
+            # Trozo de 1005 bytes: el literal cae partido entre dos trozos.
+            self.assertEqual(L.escanear_fichero(ruta, {"s": "SECRETO-XYZ"}, trozo=1005, solape=64), ["s"])
+
+    def test_centinela_es_el_control_del_escaner(self):
+        self.assertEqual(L.veredicto_fuga({}, True)[0], "PASA")
+        self.assertEqual(L.veredicto_fuga({"a": ["x"]}, True)[0], "SIN CONCLUSION")
+        # Si no ve su centinela, no es de fiar aunque no encuentre nada.
+        self.assertEqual(L.veredicto_fuga({}, False)[0], "SIN CONCLUSION")
+
+    def ejecucion(self, literales=None, ids=()):
+        return types.SimpleNamespace(salida=pathlib.Path(tempfile.mkdtemp()), ids_empresas=list(ids),
+                                     literales=literales or {"contrasena": "Estres-abc"})
+
+    def test_escanear_salida_pasa_con_su_control_y_sin_ficheros_con_fugas(self):
+        ej = self.ejecucion()
+        try:
+            (ej.salida / "k6_salida.txt").write_text("todo limpio", encoding="utf-8")
+            self.assertEqual(L.escanear_salida(ej)[0], "PASA")
+            # El centinela se borra al terminar.
+            self.assertFalse((ej.salida / L.CARPETA_CENTINELA).exists())
+        finally:
+            shutil.rmtree(ej.salida, ignore_errors=True)
+
+    def test_un_escaner_ciego_da_sin_conclusion(self):
+        ej = self.ejecucion()
+        try:
+            # El escaner no encuentra nada, ni su propio centinela: no es de fiar.
+            with mock.patch.object(L, "escanear_fichero", lambda *a, **k: []):
+                v, t = L.escanear_salida(ej)
+            self.assertEqual(v, "SIN CONCLUSION")
+            self.assertIn("centinela", t)
+        finally:
+            shutil.rmtree(ej.salida, ignore_errors=True)
+
+    def test_una_fuga_real_da_sin_conclusion_y_el_centinela_no_la_tapa(self):
+        ej = self.ejecucion()
+        try:
+            (ej.salida / "k6_salida.txt").write_text("la clave es Estres-abc", encoding="utf-8")
+            v, t = L.escanear_salida(ej)
+            self.assertEqual(v, "SIN CONCLUSION")
+            self.assertIn("k6_salida.txt", t)
+            self.assertNotIn(L.CARPETA_CENTINELA, t)
+        finally:
+            shutil.rmtree(ej.salida, ignore_errors=True)
+
+    def test_un_codigo_de_seguimiento_en_cualquier_fichero_es_fuga(self):
+        ej = self.ejecucion()
+        try:
+            (ej.salida / "log_api.txt").write_text("codigo ABCD-EFGH-IJKL-MNOP-QRST-UVWX-2345-6723", encoding="utf-8")
+            self.assertEqual(L.escanear_salida(ej)[0], "SIN CONCLUSION")
+        finally:
+            shutil.rmtree(ej.salida, ignore_errors=True)
+
+    def test_patron_de_codigo_minusculas_y_32_seguidos(self):
+        patrones = [("codigo", L.PATRON_CODIGO)]
+        self.assertEqual(L.buscar_en_bytes(b"abcd-efgh-ijkl-mnop-qrst-uvwx-2345-6723", {}, patrones), ["codigo"])
+        self.assertEqual(L.buscar_en_bytes(b"x ABCDEFGHIJKLMNOPQRSTUVWX23456723 y", {}, patrones), ["codigo"])
+        # Control negativo: 31 caracteres seguidos o 7 grupos no son un codigo.
+        self.assertEqual(L.buscar_en_bytes(b"ABCDEFGHIJKLMNOPQRSTUVWX2345672", {}, patrones), [])
+        self.assertEqual(L.buscar_en_bytes(b"ABCD-EFGH-IJKL-MNOP-QRST-UVWX-2345", {}, patrones), [])
+
+    def test_el_centinela_va_dentro_del_texto_real_que_se_escanea(self):
+        ej = self.ejecucion()
+        vistos = []
+        real = L.buscar_en_bytes
+
+        def espia(contenido, literales, patrones=()):
+            vistos.append((contenido, literales))
+            return real(contenido, literales, patrones)
+        try:
+            with mock.patch.object(L, "lineas_salida", ["linea uno", "linea dos"]), \
+                    mock.patch.object(L, "buscar_en_bytes", espia), mock.patch.object(L, "sinc", lambda t: None):
+                L.escanear_texto_final(ej)
+        finally:
+            shutil.rmtree(ej.salida, ignore_errors=True)
+        self.assertEqual(len(vistos), 1)
+        contenido, literales = vistos[0]
+        texto = contenido.decode("utf-8")
+        # Es UNA sola busqueda sobre el texto de la salida mas el centinela, que va al final.
+        self.assertTrue(texto.startswith("linea uno" + chr(10) + "linea dos" + chr(10)))
+        self.assertTrue(texto.endswith(literales["centinela"]))
+
+    def test_escanear_texto_final_con_su_control(self):
+        ej = self.ejecucion(ids=["0123456789abcdef0123456789abcdef"])
+        avisos = []
+        with mock.patch.object(L, "sinc", lambda t: avisos.append(t)):
+            # Texto limpio: sin avisos.
+            with mock.patch.object(L, "lineas_salida", ["todo bien"]):
+                L.escanear_texto_final(ej)
+            self.assertEqual(avisos, [])
+            # La contrasena sembrada en una linea: aviso, y no repite el valor.
+            with mock.patch.object(L, "lineas_salida", ["fallo con Estres-abc en el texto"]):
+                L.escanear_texto_final(ej)
+            self.assertEqual(len(avisos), 1)
+            self.assertNotIn("Estres-abc", avisos[0])
+            # Un escaner de texto ciego no es de fiar: aviso por su centinela.
+            avisos.clear()
+            with mock.patch.object(L, "lineas_salida", ["todo bien"]), \
+                    mock.patch.object(L, "buscar_en_bytes", lambda *a, **k: []):
+                L.escanear_texto_final(ej)
+            self.assertEqual(len(avisos), 1)
+            self.assertIn("centinela", avisos[0])
+
+
+class ControlesPuros(unittest.TestCase):
+    """Funciones puras de la ronda de correcciones, con oraculos literales y su control positivo."""
+
+    def test_ips_vistas_son_exactamente_las_del_plan(self):
+        esperadas = ["198.18.0.1", "198.18.0.2"]
+        filas = [{"escenario": "seguimiento_ips", "ip": "198.18.0.1"}, {"escenario": "seguimiento_ips", "ip": "198.18.0.2"}]
+        # Control positivo: coinciden y ninguna fila sin ip.
+        self.assertEqual(L.validar_ips_vistas(filas, "seguimiento_ips", esperadas), [])
+        # Falta una IP del plan.
+        self.assertEqual(len(L.validar_ips_vistas(filas[:1], "seguimiento_ips", esperadas)), 1)
+        # Sobra una IP que no es del plan.
+        extra = filas + [{"escenario": "seguimiento_ips", "ip": "198.18.0.9"}]
+        self.assertEqual(len(L.validar_ips_vistas(extra, "seguimiento_ips", esperadas)), 1)
+        # Una fila sin etiqueta ip es un motivo propio (y deja el conjunto igual).
+        sin_ip = filas + [{"escenario": "seguimiento_ips", "ip": None}]
+        self.assertEqual(len(L.validar_ips_vistas(sin_ip, "seguimiento_ips", esperadas)), 1)
+        # Las filas de otro escenario no cuentan.
+        otras = filas + [{"escenario": "sonda_salud", "ip": None}]
+        self.assertEqual(L.validar_ips_vistas(otras, "seguimiento_ips", esperadas), [])
+
+    def test_conciliar_503_uno_a_uno_por_hora(self):
+        c = L.conciliar_503([(100.0, 100.5), (200.0, 200.4)], [100.2, 200.2])
+        self.assertEqual(c, {"emparejados": 2, "sin_evento": 0, "eventos_sin_503": 0})
+        c = L.conciliar_503([(100.0, 100.5), (200.0, 200.4)], [100.2, 150.0])
+        self.assertEqual(c, {"emparejados": 1, "sin_evento": 1, "eventos_sin_503": 1})
+        # Un evento se empareja con un solo 503: dos 503 y una linea dejan uno sin linea.
+        c = L.conciliar_503([(100.0, 100.5), (100.1, 100.6)], [100.3])
+        self.assertEqual((c["emparejados"], c["sin_evento"]), (1, 1))
+        # Tolerancia de 2 s: 1,9 s despues del fin empareja y 2,6 s no.
+        self.assertEqual(L.conciliar_503([(100.0, 100.5)], [102.4])["emparejados"], 1)
+        self.assertEqual(L.conciliar_503([(100.0, 100.5)], [103.1])["emparejados"], 0)
+
+    def test_cifras_congeladas_como_literales(self):
+        tasas = L.tasas_de(0.0196)
+        # Control positivo: las cifras derivadas de t = 0,0196 son las de la segunda congelacion.
+        L.comprobar_cifras_congeladas(tasas, 3402, 428, 8)
+        self.assertEqual((tasas["inundacion"], tasas["login_pico"], tasas["login_base"]), (153.06, 102.04, 10.20))
+        # Cada cifra que no coincide para la ejecucion.
+        with self.assertRaises(L.Parada):
+            L.comprobar_cifras_congeladas(tasas, 3401, 428, 8)
+        with self.assertRaises(L.Parada):
+            L.comprobar_cifras_congeladas(tasas, 3402, 427, 8)
+        with self.assertRaises(L.Parada):
+            L.comprobar_cifras_congeladas(tasas, 3402, 428, 9)
+        with self.assertRaises(L.Parada):
+            L.comprobar_cifras_congeladas({**tasas, "inundacion": 153.07}, 3402, 428, 8)
+
+    def test_espera_por_medianoche(self):
+        medianoche = 1795392000
+        # No cruza: 0.
+        self.assertEqual(L.espera_por_medianoche(medianoche - 1000, 500), 0.0)
+        # Cruza: espera hasta las 00:00 mas 5 s de margen.
+        self.assertEqual(L.espera_por_medianoche(medianoche - 1000, 1500), 1005.0)
+        # Esperar mas de 1800 s es PARADA, no una espera.
+        with self.assertRaises(L.Parada):
+            L.espera_por_medianoche(medianoche - 2000, 2500)
+
+    def test_j5_el_sandwich_necesita_el_positivo_y_la_misma_ventana(self):
+        def pet(estado, inicio):
+            return {"estado": estado, "inicio": inicio, "fin": inicio + 0.1}
+        base = 1795342203.0
+        # Control positivo: 429 antes y 404 despues, en la misma ventana de 60 s.
+        self.assertEqual(L.evaluar_j5(pet(429, base), pet(404, base + 10), 60, 404)[0], "PASA")
+        # El positivo no da 429: el control no discrimina.
+        self.assertEqual(L.evaluar_j5(pet(404, base), pet(404, base + 10), 60, 404)[0], "SIN CONCLUSION")
+        # El negativo sigue dando 429: el contador sobrevivio a la recreacion.
+        self.assertEqual(L.evaluar_j5(pet(429, base), pet(429, base + 10), 60, 404)[0], "SIN CONCLUSION")
+        # Otra ventana: el negativo no discrimina.
+        self.assertEqual(L.evaluar_j5(pet(429, base), pet(404, base + 60), 60, 404)[0], "SIN CONCLUSION")
+        # Un estado distinto del aceptado tras recrear.
+        self.assertEqual(L.evaluar_j5(pet(429, base), pet(500, base + 10), 60, 404)[0], "SIN CONCLUSION")
+        # Peticion ambigua (cruza la frontera de ventana): no discrimina.
+        cruza = {"estado": 429, "inicio": 1795342259.95, "fin": 1795342260.05}
+        self.assertEqual(L.evaluar_j5(cruza, pet(404, 1795342265.0), 60, 404)[0], "SIN CONCLUSION")
+
+    def test_rutas_sucias(self):
+        self.assertEqual(L.rutas_sucias(""), [])
+        self.assertEqual(L.rutas_sucias(None), [])
+        self.assertEqual(L.rutas_sucias(" M proxy/comun.caddy\n?? proxy/nuevo.caddy\n"),
+                         [" M proxy/comun.caddy", "?? proxy/nuevo.caddy"])
+
+    def test_diferencias_del_caddy_de_produccion(self):
+        produccion = {"services": {"caddy": {"command": ["caddy", "run", "--config", "/etc/caddy/Caddyfile.produccion"]}},
+                      "networks": {"edge": {"internal": True}}}
+        # Control positivo: iguales, sin diferencias.
+        self.assertEqual(L.diferencias_caddy_produccion(produccion, json.loads(json.dumps(produccion))), [])
+        distinto = json.loads(json.dumps(produccion))
+        distinto["services"]["caddy"]["command"] = ["caddy", "run"]
+        self.assertEqual(len(L.diferencias_caddy_produccion(produccion, distinto)), 1)
+        abierta = json.loads(json.dumps(produccion))
+        abierta["networks"]["edge"]["internal"] = False
+        self.assertEqual(len(L.diferencias_caddy_produccion(produccion, abierta)), 1)
+        # Un JSON sin la clave es una diferencia visible, no un error.
+        self.assertEqual(len(L.diferencias_caddy_produccion(produccion, {"services": {}, "networks": {}})), 3)
+        # Seguridad 8: los ports de caddy tambien se comparan (vacios en los dos = sin diferencia).
+        con_puertos = json.loads(json.dumps(produccion))
+        con_puertos["services"]["caddy"]["ports"] = [{"published": "8443"}]
+        self.assertEqual(len(L.diferencias_caddy_produccion(produccion, con_puertos)), 1)
+
+    def test_presupuesto_con_el_tamano_del_json(self):
+        escenarios = [{"vus": 100}]
+        self.assertEqual(L.presupuesto_k6_mib(escenarios, 0, 0), 500)
+        # 1 MiB de ejecucion.json x 4 copias por VU: 100 x (5 + 4) MiB.
+        self.assertEqual(L.presupuesto_k6_mib(escenarios, 0, 1048576), 900)
+        self.assertEqual(L.comprobar_presupuesto(escenarios, 0, 1048576), 900)
+        with self.assertRaises(L.Parada):
+            L.comprobar_presupuesto([{"vus": 1000}], 0, 1048576)
+
+    def test_csv_con_filas_ilegibles_las_cuenta(self):
+        columnas = ["metric_name", "timestamp", "metric_value", "check", "error", "error_code", "expected_response",
+                    "method", "name", "proto", "scenario", "status", "extra_tags"]
+        buena = ["http_req_duration", "1795342200500", "500.0", "", "", "", "true", "POST", "seguimiento", "HTTP/1.1",
+                 "seguimiento_ips", "404", "ip=198.18.0.1"]
+        mala = list(buena)
+        mala[1] = "no-es-un-numero"
+        with tempfile.TemporaryDirectory() as d:
+            ruta = pathlib.Path(d) / "k6.csv"
+            with open(ruta, "w", encoding="utf-8", newline="") as f:
+                w = _csv.writer(f, lineterminator="\n")
+                w.writerow(columnas)
+                w.writerows([buena, mala])
+            datos = L.leer_csv_fases(ruta)
+        self.assertEqual((len(datos["filas"]), datos["ilegibles"]), (1, 1))
+
+    def test_victimas_medianas_con_una_ruta_caida(self):
+        def rep(base, carga):
+            return {ruta: {"base": {"p95_ms": base}, "carga": {"peticiones": 10, "p95_ms": carga, "tasa_errores": 0.0},
+                           "descartes_aviso": 0} for ruta in L.SLO_VICTIMAS_MS}
+        # Dos repeticiones sin respuestas en la carga (p95 None = infinito): la mediana es infinita y la victima FALLA.
+        medianas = L.victimas_medianas([rep(50, 60), rep(50, None), rep(50, None)])
+        ruta = next(iter(L.SLO_VICTIMAS_MS))
+        self.assertEqual(medianas[ruta]["carga"]["p95_ms"], float("inf"))
+        self.assertEqual(L.veredictos_victimas(medianas)[ruta][0], "FALLA")
+        # Control positivo: tres repeticiones sanas, PASA.
+        sanas = L.victimas_medianas([rep(50, 60), rep(50, 70), rep(50, 80)])
+        self.assertEqual(sanas[ruta]["carga"]["p95_ms"], 70)
+        self.assertEqual(L.veredictos_victimas(sanas)[ruta][0], "PASA")
+        # Una BASE sin respuestas deja la mediana de la BASE sin valor y el veredicto en SIN CONCLUSION.
+        sin_base = L.victimas_medianas([rep(None, 60), rep(50, 60), rep(50, 60)])
+        self.assertIsNone(sin_base[ruta]["base"]["p95_ms"])
+        self.assertEqual(L.veredictos_victimas(sin_base)[ruta][0], "SIN CONCLUSION")
+
+
+class ValidezDelGenerador(unittest.TestCase):
+    def k6(self, **cambios):
+        base = {"codigo": 0, "oom": False, "sin_conclusion": [], "registro": "T0_MS=1795342200123\n",
+                "desfase": 0.0, "motivo_desfase": None}
+        return {**base, **cambios}
+
+    def csv(self, **cambios):
+        base = {"filas": [{"proto": "HTTP/1.1", "estado": 200}], "descartes": {}, "ilegibles": 0}
+        return {**base, **cambios}
+
+    def fallos(self, k6=None, t0=1795342200.1, csv=None, insuficientes=(), cpu=None, es_http=False):
+        return L.validez_generador(k6 or self.k6(), t0, csv or self.csv(), set(insuficientes),
+                                   cpu if cpu is not None else {"k6": {"maxima": 100.0}}, es_http)
+
+    def test_sin_fallos_es_la_lista_vacia(self):
+        self.assertEqual(self.fallos(), [])
+
+    def test_cada_causa_da_un_fallo(self):
+        casos = {
+            "codigo de k6": dict(k6=self.k6(codigo=1)),
+            "oom de k6": dict(k6=self.k6(oom=True)),
+            "sin T0": dict(t0=None),
+            "alineacion perdida": dict(k6=self.k6(registro="ALINEACION_PERDIDA tarde_ms=9000")),
+            "cpu sin medir": dict(k6=self.k6(desfase=None, motivo_desfase="reloj")),
+            "cpu de k6 alta": dict(cpu={"k6": {"maxima": 321.0}}),
+            "sin muestras de cpu": dict(cpu={"k6": None}),
+            "descartes sin aviso": dict(csv=self.csv(descartes={"seguimiento__base": [1.0]})),
+            "filas ilegibles": dict(csv=self.csv(ilegibles=2)),
+            "protocolo": dict(csv=self.csv(filas=[{"proto": "HTTP/2.0", "estado": 200}])),
+            "sin peticiones": dict(csv=self.csv(filas=[])),
+            "sin conclusion de ejecutar_k6": dict(k6=self.k6(sin_conclusion=["start sin ver"])),
+        }
+        for nombre, argumentos in casos.items():
+            with self.subTest(nombre):
+                self.assertEqual(len(self.fallos(**argumentos)), 1, nombre)
+
+    def test_descartes_con_el_aviso_no_son_fallo_de_validez(self):
+        csv = self.csv(descartes={"seguimiento__base": [1.0]})
+        self.assertEqual(self.fallos(csv=csv, insuficientes={"seguimiento__base"}), [])
+
+    def test_los_421_solo_cuentan_en_http(self):
+        csv = self.csv(filas=[{"proto": "HTTP/1.1", "estado": 421}])
+        self.assertEqual(self.fallos(csv=csv, es_http=False), [])
+        self.assertEqual(len(self.fallos(csv=csv, es_http=True)), 1)
+
+
+class ControlesConMocks(unittest.TestCase):
+    """E/S con Docker sustituida por mocks: el orden de las llamadas y las PARADAS."""
+
+    def resultado(self, rc=0, out="", err=""):
+        return types.SimpleNamespace(rc=rc, out=out, err=err, todo=out + err)
+
+    def ejecucion(self, directorio):
+        return types.SimpleNamespace(datos=pathlib.Path(directorio), imagen="imagen", cpus_k6="2,3",
+                                     id_a="a" * 32, contrasena="Estres-x", linea_limites="x")
+
+    def test_cliente_de_control_con_plazo_y_limpieza(self):
+        with tempfile.TemporaryDirectory() as d:
+            ej = self.ejecucion(d)
+            llamadas = []
+
+            def vencido(args, timeout=900):
+                llamadas.append((args, timeout))
+                if args[:2] == ["docker", "run"]:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                return self.resultado()
+            with mock.patch.object(L, "ejecutar", vencido):
+                with self.assertRaises(L.Parada):
+                    L.cliente_control(ej, "x", "10.88.1.2", [L.peticion_control("POST", "/salud", "h")])
+            # PY-5: 1 peticion x 15 s + 60 s de margen, y el contenedor se borra a la fuerza.
+            self.assertEqual(llamadas[0][1], 75)
+            self.assertEqual(llamadas[1][0][:3], ["docker", "rm", "-f"])
+            # Control positivo: con respuesta, devuelve los resultados.
+            salida = '[{"estado": 405, "cuerpo": "", "inicio": 1.0, "fin": 2.0}]'
+            with mock.patch.object(L, "ejecutar", lambda args, timeout=900: self.resultado(out=salida)):
+                r = L.cliente_control(ej, "x", "10.88.1.2", [L.peticion_control("POST", "/salud", "h")])
+            self.assertEqual(r[0]["estado"], 405)
+            # Y un numero de resultados distinto del de peticiones es PARADA.
+            with mock.patch.object(L, "ejecutar", lambda args, timeout=900: self.resultado(out="[]")):
+                with self.assertRaises(L.Parada):
+                    L.cliente_control(ej, "x", "10.88.1.2", [L.peticion_control("POST", "/salud", "h")])
+
+    def sandwich(self, positivo, negativo, modo="l3"):
+        orden = []
+        respuestas = {"j5pos_r2": [positivo], "j5neg_r2": [negativo]}
+
+        def cliente(ej, nombre, ip, peticiones):
+            orden.append(nombre)
+            return respuestas[nombre]
+
+        # create_autospec: el doble lleva la firma REAL (ej, rep, *, etiqueta).
+        # El `def recrear(ej)` de antes aceptaba la llamada vieja `recrear_api(ej)`
+        # que fallaba de verdad en la repetición 2.
+        recrear = mock.create_autospec(L.recrear_api, side_effect=lambda *args, **kwargs: orden.append("recrear_api"))
+        ips_previas = {"control": ["198.18.9.9"]}
+        pet = lambda estado, inicio: {"estado": estado, "inicio": inicio, "fin": inicio + 0.1}  # noqa: E731
+        respuestas["j5pos_r2"] = [pet(*positivo)]
+        respuestas["j5neg_r2"] = [pet(*negativo)]
+        ej = types.SimpleNamespace(id_a="a" * 32, contrasena="x")
+        with mock.patch.object(L, "cliente_control", cliente), mock.patch.object(L, "recrear_api", recrear), \
+                mock.patch.object(L, "esperar_ventana", lambda *a: None), mock.patch.object(L, "p", lambda *a: None), \
+                mock.patch.object(L, "linea_control", lambda *a: None):
+            fallos = L.sandwich_j5(ej, modo, 2, ips_previas)
+        self.assertEqual(recrear.call_args_list, [mock.call(ej, 2, etiqueta="J5")])
+        return orden, fallos
+
+    def test_j5_recrea_la_api_entre_el_positivo_y_el_negativo(self):
+        base = 1795342203.0
+        # PY-12: en L3 y en L3b el sandwich usa la regla acceso: el aceptado es 401, no 404.
+        for modo in ("l3", "l3b"):
+            orden, fallos = self.sandwich((429, base), (401, base + 10), modo=modo)
+            self.assertEqual(orden, ["j5pos_r2", "recrear_api", "j5neg_r2"], modo)
+            self.assertEqual(fallos, [], modo)
+            # H6: J5 da SIN CONCLUSION, no FALLA: si el contador sobrevive a la recreacion, hay un fallo de validez.
+            self.assertEqual(len(self.sandwich((429, base), (429, base + 10), modo=modo)[1]), 1, modo)
+            # Sin positivo (la IP no estaba saturada) tampoco se da por bueno.
+            self.assertEqual(len(self.sandwich((401, base), (401, base + 10), modo=modo)[1]), 1, modo)
+            # Un 404 (la regla de seguimiento) ya no es el aceptado.
+            self.assertEqual(len(self.sandwich((429, base), (404, base + 10), modo=modo)[1]), 1, modo)
+
+    def test_el_login_de_l3_usa_una_empresa_inexistente_de_32_hex(self):
+        cuerpo = json.loads(L.cuerpo_login(types.SimpleNamespace(id_a=None, contrasena="Estres-x")))
+        self.assertRegex(cuerpo["empresa"], "^[0-9a-f]{32}$")
+        # Control: con empresa de la ejecucion, es esa.
+        self.assertEqual(json.loads(L.cuerpo_login(types.SimpleNamespace(id_a="a" * 32, contrasena="x")))["empresa"],
+                         "a" * 32)
+
+    def test_s8_falla_si_un_compose_config_falla_y_muestra_su_error(self):
+        config = json.dumps({"services": {"caddy": {"command": ["caddy"]}}, "networks": {"edge": {"internal": True}}})
+
+        def ejecutar(args, timeout=900):
+            if "rev-parse" in args:
+                return self.resultado(out="abc123\n")
+            if "status" in args:
+                return self.resultado(out="")
+            return self.resultado(rc=1, err="error de compose visible")
+        with mock.patch.object(L, "p", lambda *a: None), mock.patch.object(L, "ejecutar", ejecutar), \
+                mock.patch.object(L, "dc", lambda *a, **k: self.resultado(out=config)):
+            with self.assertRaises(L.Parada) as contexto:
+                L.comprobar_origen_produccion()
+        self.assertIn("error de compose visible", str(contexto.exception))
+
+    def test_origen_de_produccion(self):
+        config = json.dumps({"services": {"caddy": {"command": ["caddy"]}}, "networks": {"edge": {"internal": True}}})
+
+        def ejecutar(sucio, config_prod):
+            def f(args, timeout=900):
+                if "rev-parse" in args:
+                    return self.resultado(out="abc123\n")
+                if "status" in args:
+                    return self.resultado(out=sucio)
+                return self.resultado(out=config_prod)
+            return f
+        with mock.patch.object(L, "p", lambda *a: None), mock.patch.object(L, "dc", lambda *a, **k: self.resultado(out=config)):
+            # Control positivo: limpio y con el mismo config.
+            with mock.patch.object(L, "ejecutar", ejecutar("", config)):
+                L.comprobar_origen_produccion()
+            # Cambios sin commitear en proxy/: PARADA.
+            with mock.patch.object(L, "ejecutar", ejecutar(" M proxy/comun.caddy\n", config)):
+                with self.assertRaises(L.Parada):
+                    L.comprobar_origen_produccion()
+            # El override difiere de compose.produccion.yaml: PARADA.
+            otro = json.dumps({"services": {"caddy": {"command": ["otro"]}}, "networks": {"edge": {"internal": True}}})
+            with mock.patch.object(L, "ejecutar", ejecutar("", otro)):
+                with self.assertRaises(L.Parada):
+                    L.comprobar_origen_produccion()
+
+
+class SondaDeDescartes(unittest.TestCase):
+    """E16: las seis condiciones de la sonda de E14, con el patron REAL de k6."""
+    T0 = 1795342200.0
+    # Patron real: descarta 0,5 a 2,0, lanza la de 2,5, descarta 3,0 a 4,5, lanza la de 5,0, y asi hasta 12,0.
+    REAL = [0.5, 1.0, 1.5, 2.0, 3.0, 3.5, 4.0, 4.5, 5.5, 6.0, 6.5, 7.0, 8.0, 8.5, 9.0, 9.5, 10.5, 11.0, 11.5, 12.0]
+
+    def evaluar(self, relativas, iteraciones=5):
+        return sonda_descartes.evaluar_marcas([self.T0 + r for r in relativas], self.T0, iteraciones)
+
+    def test_patron_real_pasa(self):
+        v, t = self.evaluar(self.REAL)
+        self.assertEqual(v, "PASA", t)
+        # 24 o 25 llegadas programadas (la de 12,0 s compite con el fin del plazo): el +-1 lo cubre.
+        self.assertEqual(self.evaluar(self.REAL, 4)[0], "PASA")
+        self.assertEqual(self.evaluar(self.REAL, 3)[0], "PASA")
+
+    def test_la_primera_marca_puede_tener_k_0_por_la_carrera_de_arranque(self):
+        # La llegada de 0 s se descarta si el VU aun no esta esperando: marcas en 0,0, 0,5, 1,0, 1,5, 2,0, 3,0...
+        marcas = [0.0] + self.REAL
+        self.assertEqual(marcas[:6], [0.0, 0.5, 1.0, 1.5, 2.0, 3.0])
+        v, t = self.evaluar(marcas, 4)
+        self.assertEqual(v, "PASA", t)
+        # Con k = 2 como primera marca sigue siendo PARADA (se cubre mas abajo): aqui, k = 0 y k = 1 son los unicos.
+        self.assertEqual(self.evaluar(self.REAL[1:], 5)[0], "PARADA")
+
+    def test_cada_condicion_incumplida_da_parada(self):
+        casos = {
+            "(1) menos de 5 marcas": (self.REAL[:4], 5),
+            "(1) sin marcas": ([], 5),
+            "(2) una marca fuera de +-0,2 s": ([0.5, 1.0, 1.5, 2.0, 3.0, 3.74], 5),
+            "(2) una marca antes de T0 (k negativo)": ([-0.5, 0.0, 0.5, 1.0, 1.5, 2.0], 5),
+            "(3) k repetido (marcas al quedar libre el VU)": ([0.5, 1.0, 1.5, 2.0, 2.1, 3.0, 3.5], 5),
+            "(4) todas al final": ([9.0, 9.5, 10.0, 10.5, 11.0, 11.5], 5),
+            "(4) primera con k = 2": ([1.0, 1.5, 2.0, 3.0, 3.5, 4.0], 5),
+            "(5) salto de k de 3": ([0.5, 1.0, 1.5, 3.0, 3.5, 4.0], 5),
+            "(6) la conciliacion no cuadra": (self.REAL, 0),
+            "(6) y sobran iteraciones": (self.REAL, 9),
+        }
+        for nombre, (relativas, iteraciones) in casos.items():
+            with self.subTest(nombre):
+                v, t = self.evaluar(relativas, iteraciones)
+                self.assertEqual(v, "PARADA", nombre)
+                self.assertIn(nombre[:3], t)
+
+    def test_sin_t0_es_parada(self):
+        self.assertEqual(sonda_descartes.evaluar_marcas([self.T0 + 0.5], None, 5)[0], "PARADA")
+
+    def test_cada_condicion_es_una_funcion_con_nombre(self):
+        ks = [1, 2, 3, 4, 6]
+        self.assertTrue(sonda_descartes.condicion_1_minimo([0] * 5))
+        self.assertFalse(sonda_descartes.condicion_1_minimo([0] * 4))
+        self.assertTrue(sonda_descartes.condicion_3_sin_repetidos(ks))
+        self.assertFalse(sonda_descartes.condicion_3_sin_repetidos([1, 1]))
+        self.assertTrue(sonda_descartes.condicion_4_primera([0, 1]))
+        self.assertTrue(sonda_descartes.condicion_4_primera([1, 2]))
+        self.assertFalse(sonda_descartes.condicion_4_primera([2, 3]))
+        self.assertTrue(sonda_descartes.condicion_5_saltos(ks))
+        self.assertFalse(sonda_descartes.condicion_5_saltos([1, 4]))
+        self.assertTrue(sonda_descartes.condicion_6_conciliacion(20, 5))
+        self.assertFalse(sonda_descartes.condicion_6_conciliacion(20, 2))
+
+    def test_los_parametros_congelados_coinciden_en_el_js_y_en_el_py(self):
+        # E16: 12 s, 2/s, 1 VU, gracefulStop de 5 s, endpoint de 2 s y 24 llegadas programadas.
+        import re
+        carpeta = pathlib.Path(__file__).resolve().parent
+        js = (carpeta / "sonda_descartes.js").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"rate: (\d+),", js), ["2"])
+        self.assertEqual(re.findall(r"duration: '(\d+)s'", js), ["12"])
+        self.assertEqual(re.findall(r"preAllocatedVUs: (\d+),", js), ["1"])
+        self.assertEqual(re.findall(r"maxVUs: (\d+),", js), ["1"])
+        self.assertEqual(re.findall(r"gracefulStop: '(\d+)s'", js), ["5"])
+        self.assertEqual((sonda_descartes.TASA_LLEGADAS, sonda_descartes.DURACION_ESCENARIO_S), (2, 12))
+        self.assertEqual(sonda_descartes.LLEGADAS_PROGRAMADAS, 24)
+        self.assertIn("time.sleep(2)", sonda_descartes.CODIGO_SERVIDOR)
+
+    def test_servidor_lento_compila_y_no_lleva_comillas_dobles_ni_barras(self):
+        import ast
+        ast.parse(sonda_descartes.CODIGO_SERVIDOR)
+        self.assertNotIn('"', sonda_descartes.CODIGO_SERVIDOR)
+        self.assertNotIn(chr(92), sonda_descartes.CODIGO_SERVIDOR)
+
+    def test_leer_marcas_del_csv_cuenta_marcas_e_iteraciones(self):
+        with tempfile.TemporaryDirectory() as d:
+            ruta = pathlib.Path(d) / "sonda.csv"
+            ruta.write_text("metric_name,timestamp,metric_value,scenario\n"
+                            "dropped_iterations,1795342200500,1,sonda\n"
+                            "http_reqs,1795342200600,1,sonda\n"
+                            "iterations,1795342200700,1,sonda\n"
+                            "dropped_iterations,1795342201000,1,sonda\n", encoding="utf-8", newline="")
+            self.assertEqual(sonda_descartes.leer_marcas(ruta), ([1795342200.5, 1795342201.0], 1))
+            # Una ultima linea sin salto final es un error visible, no una fila menos.
+            ruta.write_text("metric_name,timestamp,metric_value,scenario\n"
+                            "dropped_iterations,1795342200500,1,sonda", encoding="utf-8", newline="")
+            with self.assertRaises(ValueError):
+                sonda_descartes.leer_marcas(ruta)
+
+    def test_la_sonda_se_ejecuta_con_el_cpuset_de_k6_y_captura_el_plazo(self):
+        llamadas = []
+
+        def vencido(args, timeout=900):
+            llamadas.append(args)
+            if args[:2] == ["docker", "run"] and "--rm" in args:
+                raise subprocess.TimeoutExpired(args, timeout)
+            return types.SimpleNamespace(rc=0, out="", err="", todo="")
+        constantes = {"prefijo": "p_", "usuario_api": "1:1", "usuario_k6": "2:2", "memoria_k6": "1g"}
+        avisos = []
+        marcas, iteraciones, inicio, motivo = sonda_descartes.ejecutar_sonda(
+            vencido, "img", "k6", "2,3", pathlib.Path("."), constantes, avisar=avisos.append)
+        self.assertEqual((marcas, iteraciones, inicio), ([], 0, None))
+        self.assertIn("plazo", motivo)
+        # Las limpiezas responden rc=0 y los listados salen vacíos: ningún aviso.
+        self.assertEqual(avisos, [])
+        # Los dos contenedores van en el cpuset de k6 y la red se borra explicitamente.
+        corridas = [a for a in llamadas if a[:2] == ["docker", "run"]]
+        self.assertEqual(len(corridas), 2)
+        for a in corridas:
+            self.assertEqual(a[a.index("--cpuset-cpus") + 1], "2,3")
+        self.assertIn(["docker", "network", "rm", "p_sonda_red"], llamadas)
+
+    def test_lanzar_no_importa_la_sonda_al_cargarse(self):
+        fuente = pathlib.Path(L.__file__).read_text(encoding="utf-8")
+        for linea in fuente.splitlines():
+            if linea.startswith(("import sonda_descartes", "from sonda_descartes")):
+                self.fail("lanzar.py importa sonda_descartes en el nivel del modulo: debe cargarse solo en --pico")
+        self.assertIn("    import sonda_descartes\n", fuente)
+
+
+class CondicionDeLaSonda(unittest.TestCase):
+    """La sonda de descartes (E14) corre solo en la repetición 1 de --pico.
+    Se ejecuta ejecutar_repeticion_fases de verdad, con todo lo de Docker
+    simulado, y se corta con una excepción centinela justo después del punto
+    donde se decide la sonda (la primera llamada a fases_de). Los oráculos son
+    literales: las ocho combinaciones modo x repetición y cuáles llaman."""
+
+    class Corte(Exception):
+        pass
+
+    def correr(self, modo, rep):
+        """Devuelve la lista de llamadas a la sonda de esa combinación."""
+        llamadas = []
+
+        def corte(*_):
+            raise self.Corte()
+
+        with tempfile.TemporaryDirectory() as d:
+            ej = L.Ejecucion(0.05, None, pathlib.Path(d), [0], [1], {})
+            ej.plan_ips = {1: ["10.0.0.1"], 2: ["10.0.0.2"]}
+            ej.ids_empresas = []
+            parches = [mock.patch.object(L, "hora_motor_ahora", lambda: 100.0),
+                       mock.patch.object(L, "espera_por_medianoche", lambda *a: 0),
+                       mock.patch.object(L, "preparar_repeticion", lambda *a: None),
+                       mock.patch.object(L, "sandwich_j5", lambda *a: []),
+                       mock.patch.object(L, "alta_empresa", lambda nombre: "e" * 32),
+                       mock.patch.object(L, "comprobar_sonda_descartes", lambda e: llamadas.append((modo, rep))),
+                       mock.patch.object(L, "fases_de", corte),
+                       mock.patch.object(L, "p", lambda *a, **k: None)]
+            for parche in parches:
+                parche.start()
+                self.addCleanup(parche.stop)
+            with self.assertRaises(self.Corte):
+                L.ejecutar_repeticion_fases(ej, modo, rep, 2)
+        return llamadas
+
+    def test_solo_pico_en_la_repeticion_1(self):
+        esperado = {("l2", 1): [], ("l2", 2): [], ("pico", 1): [("pico", 1)], ("pico", 2): [],
+                    ("l3", 1): [], ("l3", 2): [], ("l3b", 1): [], ("l3b", 2): []}
+        obtenido = {(m, r): self.correr(m, r) for m in ("l2", "pico", "l3", "l3b") for r in (1, 2)}
+        self.assertEqual(obtenido, esperado)
+
+    def test_control_positivo_la_sonda_si_se_llama(self):
+        # Si el montaje no llegara al punto de decisión, todo sería [] y la
+        # prueba anterior pasaría en vacío: aquí se exige al menos una llamada.
+        self.assertEqual(self.correr("pico", 1), [("pico", 1)])
+
+
+class ConexionDelSandwichEnLasRepeticiones(unittest.TestCase):
+    """ejecutar_repeticion_fases de verdad (como CondicionDeLaSonda: Docker
+    simulado y corte en la primera llamada a fases_de), con sandwich_j5 y
+    preparar_repeticion en autospec y el plan de IPs en literales. La medianoche
+    se prueba SIN parchear espera_por_medianoche (D4): solo la hora del motor y
+    time.sleep. Sin esto, nada ejercitaba la rama del sandwich de la repetición 2
+    de L3 y L3b."""
+
+    class Corte(Exception):
+        pass
+
+    PLAN = {1: ["10.0.0.1"], 2: ["10.0.0.2"], 3: ["10.0.0.3"]}
+    # 2026-11-22 23:43:20 UTC: a 1000 s de las 00:00 UTC (1795392000).
+    HORA_CERCA = 1795391000.0
+    # A 50 000 s de las 00:00 UTC: ninguna repetición (1306 s o 1816 s) la cruza.
+    HORA_LEJOS = 1795342000.0
+
+    def correr(self, modo, rep, hora=HORA_LEJOS):
+        """Ejecuta la repetición `rep` de `modo` con la hora del motor `hora`.
+        Devuelve el montaje con los espías (sandwich, preparar, dormir) y `ej`."""
+        r = types.SimpleNamespace(sandwich=mock.create_autospec(L.sandwich_j5, return_value=[]),
+                                  preparar=mock.create_autospec(L.preparar_repeticion, return_value=None),
+                                  dormir=mock.MagicMock())
+
+        def corte(*_):
+            raise self.Corte()
+
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            r.ej = L.Ejecucion(0.05, None, pathlib.Path(d), [0], [1], {})
+            r.ej.plan_ips = {numero: list(ips) for numero, ips in self.PLAN.items()}
+            r.ej.ids_empresas = []
+            for parche in (mock.patch.object(L, "hora_motor_ahora", lambda: hora),
+                           mock.patch.object(L, "preparar_repeticion", r.preparar),
+                           mock.patch.object(L, "sandwich_j5", r.sandwich),
+                           mock.patch.object(L, "alta_empresa", lambda nombre: "e" * 32),
+                           mock.patch.object(L, "comprobar_sonda_descartes", lambda e: None),
+                           mock.patch.object(L, "fases_de", corte),
+                           mock.patch.object(L, "p", lambda *a, **k: None),
+                           mock.patch.object(L.time, "sleep", r.dormir)):
+                pila.enter_context(parche)
+            with self.assertRaises(self.Corte):
+                L.ejecutar_repeticion_fases(r.ej, modo, rep, 3)
+        return r
+
+    def test_l3_y_l3b_en_las_repeticiones_2_y_3_llaman_al_sandwich_sin_preparar(self):
+        # La IP previa de la repetición n es la del plan de la n - 1 (literales).
+        previas = {2: ["10.0.0.1"], 3: ["10.0.0.2"]}
+        for modo in ("l3", "l3b"):
+            for rep in (2, 3):
+                with self.subTest(modo=modo, rep=rep):
+                    r = self.correr(modo, rep)
+                    r.sandwich.assert_called_once_with(r.ej, modo, rep, previas[rep])
+                    r.preparar.assert_not_called()
+        # Control: L2 en la repetición 2 prepara la pila y no llama al sandwich.
+        r = self.correr("l2", 2)
+        r.preparar.assert_called_once_with(r.ej, 2)
+        r.sandwich.assert_not_called()
+        # Control: la repetición 1 de L3 también prepara la pila (el sandwich es de la 2 en adelante).
+        r = self.correr("l3", 1)
+        r.preparar.assert_called_once_with(r.ej, 1)
+        r.sandwich.assert_not_called()
+
+    def test_lejos_de_la_medianoche_no_se_espera(self):
+        for modo in ("l3", "l3b"):
+            with self.subTest(modo=modo):
+                r = self.correr(modo, 2, hora=self.HORA_LEJOS)
+                r.dormir.assert_not_called()
+                # El montaje llegó al sandwich: el "no se espera" no es vacío.
+                r.sandwich.assert_called_once()
+
+    def test_cerca_de_la_medianoche_se_espera_la_cantidad_exacta(self):
+        # 1000 s hasta las 00:00 UTC + 5 s de margen = 1005 s, y 1005 <= 1800
+        # (el máximo de espera_por_medianoche): se espera, no hay PARADA.
+        for modo in ("l3", "l3b"):
+            with self.subTest(modo=modo):
+                r = self.correr(modo, 2, hora=self.HORA_CERCA)
+                r.dormir.assert_called_once_with(1005.0)
+                r.sandwich.assert_called_once()
+
+
+class LimpiezaDeLaSonda(unittest.TestCase):
+    """v3.4: la limpieza de la sonda decide por POSTCONDICION (los listados por
+    etiqueta), nunca por el texto del stderr de los borrados, y avisa por el
+    callback `avisar` (con nombre y obligatorio). Contrato de 4 valores:
+    (marcas, iteraciones, inicio, motivo). k6 vence su plazo en casi todas las
+    pruebas, así que el motivo es el mismo literal y solo cambia lo que
+    responden los borrados y los listados.
+
+    Procedencia de las medidas (Docker 29.5.3, PowerShell 5, 24/11/2026):
+    `docker rm -f` de un contenedor inexistente da rc 0 con "No such container"
+    en stderr; `docker network rm` de una red inexistente da rc 1 con "network
+    ... not found"; los listados por etiqueta salen por stdout con rc 0 y quedan
+    vacíos cuando el recurso no existe. NO se midió un contenedor en marcha que
+    pase por "removing". Los textos de Docker que solo hacen de relleno llevan
+    el comentario "ilustrativo: el código no lo interpreta"."""
+    CONSTANTES = {"prefijo": "p_", "usuario_api": "1:1", "usuario_k6": "2:2", "memoria_k6": "1g"}
+    MOTIVO_K6 = "la sonda supera el plazo de 300 s: ['docker', 'run', '--rm']"
+    # Llamadas de limpieza, literales completos (argumentos y plazo).
+    RM_LENTO = (["docker", "rm", "-f", "p_sonda_lento"], 120)
+    RM_K6 = (["docker", "rm", "-f", "p_sonda_k6"], 120)
+    RM_RED = (["docker", "network", "rm", "p_sonda_red"], 120)
+    LS_PS = (["docker", "ps", "-a", "--filter", "label=canario.estres=sonda", "--format", "{{.Names}}"], 60)
+    LS_RED = (["docker", "network", "ls", "--filter", "label=canario.estres=sonda", "--format", "{{.Name}}"], 60)
+    CINCO = [RM_LENTO, RM_K6, RM_RED, LS_PS, LS_RED]
+    CREAR_RED = (["docker", "network", "create", "--internal", "--label", "canario.estres=sonda", "p_sonda_red"], 120)
+    # Los tres avisos de "sigue existiendo" con todo en rc 0 y sin stderr.
+    SIGUE_LENTO = "contenedor p_sonda_lento sigue existiendo tras el borrado (docker rm -f: codigo 0)"
+    SIGUE_K6 = "contenedor p_sonda_k6 sigue existiendo tras el borrado (docker rm -f: codigo 0)"
+    SIGUE_RED = "red p_sonda_red sigue existiendo tras el borrado (docker network rm: codigo 0)"
+
+    @staticmethod
+    def respuesta(rc=0, out="", err=""):
+        return types.SimpleNamespace(rc=rc, out=out, err=err, todo=out + err)
+
+    def sonda(self, reglas=None, ps="", red="", crear=None, en_k6=None, avisar_lanza=None, tmp_falso=None,
+              rmtree_lanza=None):
+        """Ejecuta ejecutar_sonda con un `ejecutar` falso y devuelve un
+        SimpleNamespace con: resultado (los 4 valores o None), excepcion (la que
+        salió de ejecutar_sonda o None), avisos (los que recibió `avisar`),
+        llamadas (las de limpieza: borrados y listados), todas (también las
+        creaciones) y rmtree (las rutas con que se llamó a shutil.rmtree).
+        `reglas` mapea tuple(args) a una respuesta o a una excepción que se
+        lanza; `ps` y `red` son el stdout de los dos listados; `crear` es la
+        respuesta de network create; `en_k6` es la excepción del docker run --rm
+        de k6 (por defecto TimeoutExpired); `avisar_lanza` se lanza en la primera
+        llamada a avisar; `tmp_falso` sustituye a mkdtemp; `rmtree_lanza` es lo
+        que lanza shutil.rmtree (después de borrar el temporal real, si lo es)."""
+        reglas = dict(reglas or {})
+        reglas.setdefault(tuple(self.LS_PS[0]), self.respuesta(out=ps))
+        reglas.setdefault(tuple(self.LS_RED[0]), self.respuesta(out=red))
+        avisos, llamadas, todas, rutas = [], [], [], []
+
+        def ejecutar(args, timeout=900):
+            todas.append((list(args), timeout))
+            if args[:2] != ["docker", "run"] and args[:3] != ["docker", "network", "create"]:
+                llamadas.append((list(args), timeout))
+            if args[:3] == ["docker", "network", "create"] and crear is not None:
+                return crear
+            if args[:2] == ["docker", "run"] and "--rm" in args:
+                raise en_k6 if en_k6 is not None else subprocess.TimeoutExpired(args, timeout)
+            regla = reglas.get(tuple(args))
+            if isinstance(regla, BaseException):
+                raise regla
+            return regla if regla is not None else self.respuesta()
+
+        def avisar(texto):
+            avisos.append(texto)
+            if avisar_lanza is not None and len(avisos) == 1:
+                raise avisar_lanza
+
+        real_rmtree = shutil.rmtree
+
+        def espia_rmtree(ruta, *args, **kwargs):
+            rutas.append(ruta)
+            if tmp_falso is None:
+                real_rmtree(ruta)
+            if rmtree_lanza is not None:
+                raise rmtree_lanza
+
+        r = types.SimpleNamespace(resultado=None, excepcion=None, avisos=avisos, llamadas=llamadas, todas=todas,
+                                  rmtree=rutas)
+        with contextlib.ExitStack() as pila:
+            pila.enter_context(mock.patch.object(sonda_descartes.shutil, "rmtree", espia_rmtree))
+            if tmp_falso is not None:
+                pila.enter_context(mock.patch.object(sonda_descartes.tempfile, "mkdtemp", return_value=tmp_falso))
+            try:
+                r.resultado = sonda_descartes.ejecutar_sonda(
+                    ejecutar, "img", "k6", "2,3", pathlib.Path("."), self.CONSTANTES, avisar=avisar)
+            except BaseException as error:  # noqa: BLE001 - la prueba mira qué excepción salió
+                r.excepcion = error
+        return r
+
+    def test_p1_las_tres_creaciones_llevan_la_etiqueta_y_los_listados_la_filtran(self):
+        # QA H1: si una creación pierde la etiqueta, el listado no la ve y todo parece limpio.
+        r = self.sonda(crear=self.respuesta())
+        creaciones = [a for a, _ in r.todas if a[:2] == ["docker", "run"] or a[:3] == ["docker", "network", "create"]]
+        # Control: de verdad se hicieron las tres creaciones (network create, run -d, run --rm).
+        self.assertEqual(len(creaciones), 3)
+        self.assertEqual(creaciones[0][:3], ["docker", "network", "create"])
+        self.assertEqual(creaciones[1][:3], ["docker", "run", "-d"])
+        self.assertEqual(creaciones[2][:3], ["docker", "run", "--rm"])
+        for argumentos in creaciones:
+            with self.subTest(creacion=argumentos[:3]):
+                self.assertEqual(argumentos.count("--label"), 1)
+                self.assertEqual(argumentos[argumentos.index("--label") + 1], "canario.estres=sonda")
+        # Control: el filtro de los dos listados lleva la misma etiqueta, escrita a mano.
+        filtros = [a[a.index("--filter") + 1] for a, _ in r.llamadas if "--filter" in a]
+        self.assertEqual(filtros, ["label=canario.estres=sonda", "label=canario.estres=sonda"])
+
+    def test_a_control_positivo_todo_limpio(self):
+        r = self.sonda()
+        self.assertIsNone(r.excepcion)
+        self.assertEqual(r.resultado, ([], 0, None, self.MOTIVO_K6))
+        self.assertEqual(r.avisos, [])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_b_lo_medido_ausente_con_los_textos_de_docker_no_da_aviso(self):
+        # Medido en Docker 29.5.3: rm -f de un inexistente da rc 0 con stderr; network rm da rc 1.
+        reglas = {
+            tuple(self.RM_LENTO[0]): self.respuesta(0, "", "Error response from daemon: No such container: p_sonda_lento\n"),
+            tuple(self.RM_K6[0]): self.respuesta(0, "", "Error response from daemon: No such container: p_sonda_k6\n"),
+            tuple(self.RM_RED[0]): self.respuesta(1, "", "Error response from daemon: network p_sonda_red not found\n"),
+        }
+        r = self.sonda(reglas)
+        self.assertEqual(r.resultado, ([], 0, None, self.MOTIVO_K6))
+        self.assertEqual(r.avisos, [])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_b2_network_create_fallido_con_listados_vacios_no_da_aviso(self):
+        # ilustrativo: el código no lo interpreta (el texto de Pool overlaps).
+        crear = self.respuesta(1, "", "Error response from daemon: Pool overlaps with other one on this address space\n")
+        reglas = {
+            tuple(self.RM_LENTO[0]): self.respuesta(0, "", "Error response from daemon: No such container: p_sonda_lento\n"),
+            tuple(self.RM_K6[0]): self.respuesta(0, "", "Error response from daemon: No such container: p_sonda_k6\n"),
+            tuple(self.RM_RED[0]): self.respuesta(1, "", "Error response from daemon: network p_sonda_red not found\n"),
+        }
+        r = self.sonda(reglas, crear=crear)
+        self.assertEqual(r.resultado, ([], 0, None, "no se crea la red de la sonda: "
+                                       "'Error response from daemon: Pool overlaps with other one on this address space'"))
+        self.assertEqual(r.avisos, [])
+        self.assertEqual(r.todas, [self.CREAR_RED] + self.CINCO)
+
+    def test_c_sigue_el_contenedor_tras_un_rm_con_rc_0(self):
+        r = self.sonda(ps="p_sonda_k6\n")
+        self.assertEqual(r.avisos, ["contenedor p_sonda_k6 sigue existiendo tras el borrado (docker rm -f: codigo 0)"])
+        self.assertEqual(r.llamadas, self.CINCO)
+        # Control: test_a, con el listado vacío, no da aviso.
+
+    def test_c2_sigue_el_contenedor_tras_un_rm_con_rc_1(self):
+        # ilustrativo: el código no lo interpreta (el "x" del stderr).
+        r = self.sonda({tuple(self.RM_K6[0]): self.respuesta(1, "", "x\n")}, ps="p_sonda_k6\n")
+        self.assertEqual(r.avisos, ["contenedor p_sonda_k6 sigue existiendo tras el borrado (docker rm -f: codigo 1: 'x')"])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_d_sigue_la_red(self):
+        # ilustrativo: el código no lo interpreta (el "y" del stderr).
+        r = self.sonda({tuple(self.RM_RED[0]): self.respuesta(1, "", "y\n")}, red="p_sonda_red\n")
+        self.assertEqual(r.avisos, ["red p_sonda_red sigue existiendo tras el borrado (docker network rm: codigo 1: 'y')"])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_d2_siguen_los_tres_en_orden_servidor_k6_y_red(self):
+        r = self.sonda(ps="p_sonda_k6\np_sonda_lento\n", red="p_sonda_red\n")
+        self.assertEqual(r.avisos, [
+            "contenedor p_sonda_lento sigue existiendo tras el borrado (docker rm -f: codigo 0)",
+            "contenedor p_sonda_k6 sigue existiendo tras el borrado (docker rm -f: codigo 0)",
+            "red p_sonda_red sigue existiendo tras el borrado (docker network rm: codigo 0)"])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_e_nombres_parecidos_no_cuentan(self):
+        r = self.sonda(ps="p_sonda_k6x\nxp_sonda_lento\n", red="otro_p_sonda_red\n")
+        self.assertEqual(r.avisos, [])
+        self.assertEqual(r.llamadas, self.CINCO)
+        # Control: test_c, con el nombre exacto, sí avisa.
+
+    def test_e2_varias_lineas_solo_cuenta_la_exacta(self):
+        r = self.sonda(ps="p_sonda_k6x\np_sonda_k6\notro\n")
+        self.assertEqual(r.avisos, ["contenedor p_sonda_k6 sigue existiendo tras el borrado (docker rm -f: codigo 0)"])
+
+    def test_e3_el_listado_se_lee_con_strip_y_sin_lineas_vacias(self):
+        r = self.sonda(ps="  p_sonda_k6 \r\n\r\n")
+        self.assertEqual(r.avisos, ["contenedor p_sonda_k6 sigue existiendo tras el borrado (docker rm -f: codigo 0)"])
+
+    def test_e4_lo_que_sale_por_stderr_del_listado_no_cuenta(self):
+        r = self.sonda({tuple(self.LS_PS[0]): self.respuesta(0, "", "p_sonda_k6\n")})
+        self.assertEqual(r.avisos, [])
+        self.assertEqual(r.llamadas, self.CINCO)
+        # Control: test_c, con el mismo nombre en stdout, sí avisa.
+
+    def test_f_el_listado_de_contenedores_que_falla_avisa_y_el_de_la_red_se_ejecuta(self):
+        casos = [
+            ("rc 1", self.respuesta(1, "", "z\n"),
+             "no se puede comprobar si quedan contenedores de la sonda: docker ps codigo 1: 'z'"),
+            ("plazo", subprocess.TimeoutExpired(self.LS_PS[0], 60),
+             "no se puede comprobar si quedan contenedores de la sonda: docker ps no responde en 60 s"),
+            ("OSError", OSError("w"),
+             "no se puede comprobar si quedan contenedores de la sonda: no se puede lanzar docker (OSError: w)"),
+        ]
+        for nombre, regla, esperado in casos:
+            with self.subTest(fallo=nombre):
+                r = self.sonda({tuple(self.LS_PS[0]): regla})
+                self.assertEqual(r.avisos, [esperado])
+                self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_f2_el_listado_de_la_red_que_falla_avisa(self):
+        casos = [
+            ("rc 1", self.respuesta(1, "", "z\n"),
+             "no se puede comprobar si queda la red de la sonda: docker network ls codigo 1: 'z'"),
+            ("plazo", subprocess.TimeoutExpired(self.LS_RED[0], 60),
+             "no se puede comprobar si queda la red de la sonda: docker network ls no responde en 60 s"),
+            ("OSError", OSError("w"),
+             "no se puede comprobar si queda la red de la sonda: no se puede lanzar docker (OSError: w)"),
+        ]
+        for nombre, regla, esperado in casos:
+            with self.subTest(fallo=nombre):
+                r = self.sonda({tuple(self.LS_RED[0]): regla})
+                self.assertEqual(r.avisos, [esperado])
+                self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_f3_los_dos_listados_fallan_a_la_vez(self):
+        r = self.sonda({tuple(self.LS_PS[0]): self.respuesta(1, "", "z\n"), tuple(self.LS_RED[0]): OSError("w")})
+        self.assertEqual(r.avisos, [
+            "no se puede comprobar si quedan contenedores de la sonda: docker ps codigo 1: 'z'",
+            "no se puede comprobar si queda la red de la sonda: no se puede lanzar docker (OSError: w)"])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_g_el_rm_del_servidor_vence_el_plazo_y_el_recurso_ausente_no_avisa(self):
+        r = self.sonda({tuple(self.RM_LENTO[0]): subprocess.TimeoutExpired(self.RM_LENTO[0], 120)})
+        self.assertEqual(r.resultado, ([], 0, None, self.MOTIVO_K6))
+        self.assertEqual(r.avisos, [])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_g2_el_rm_del_servidor_vence_el_plazo_y_el_recurso_presente_avisa(self):
+        r = self.sonda({tuple(self.RM_LENTO[0]): subprocess.TimeoutExpired(self.RM_LENTO[0], 120)},
+                       ps="p_sonda_lento\n")
+        self.assertEqual(r.avisos, [
+            "contenedor p_sonda_lento sigue existiendo tras el borrado (docker rm -f: no responde en 120 s)"])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_g3_el_rm_del_servidor_con_oserror_ausente_y_presente(self):
+        regla = {tuple(self.RM_LENTO[0]): OSError("v")}
+        ausente = self.sonda(regla)
+        self.assertEqual(ausente.avisos, [])
+        self.assertEqual(ausente.llamadas, self.CINCO)
+        presente = self.sonda(regla, ps="p_sonda_lento\n")
+        self.assertEqual(presente.avisos, [
+            "contenedor p_sonda_lento sigue existiendo tras el borrado "
+            "(docker rm -f: no se puede lanzar docker (OSError: v))"])
+        self.assertEqual(presente.llamadas, self.CINCO)
+
+    def test_h_una_excepcion_durante_la_medida_se_relanza_tras_limpiar_y_avisar(self):
+        for nombre, excepcion in (("KeyboardInterrupt", KeyboardInterrupt()), ("RuntimeError", RuntimeError("r"))):
+            with self.subTest(excepcion=nombre):
+                r = self.sonda(en_k6=excepcion, ps="p_sonda_k6\n")
+                self.assertIs(r.excepcion, excepcion)
+                self.assertIsNone(r.resultado)
+                self.assertEqual(r.avisos, [self.SIGUE_K6])
+                self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_h2_control_el_plazo_de_k6_devuelve_el_motivo_y_el_mismo_aviso(self):
+        r = self.sonda(ps="p_sonda_k6\n")
+        self.assertIsNone(r.excepcion)
+        self.assertEqual(r.resultado, ([], 0, None, self.MOTIVO_K6))
+        self.assertEqual(r.avisos, [self.SIGUE_K6])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_i_segundo_ctrl_c_en_cada_paso_de_docker(self):
+        todos = ("limpieza interrumpida con Ctrl+C: pueden quedar contenedor p_sonda_lento, contenedor p_sonda_k6, "
+                 "red p_sonda_red; la red se borra a mano con: docker network rm p_sonda_red")
+        solo_red = ("limpieza interrumpida con Ctrl+C: pueden quedar red p_sonda_red; "
+                    "la red se borra a mano con: docker network rm p_sonda_red")
+        casos = [
+            ("paso 1", self.RM_LENTO, self.CINCO[:1], todos),
+            ("paso 2", self.RM_K6, self.CINCO[:2], todos),
+            ("paso 3", self.RM_RED, self.CINCO[:3], todos),
+            ("paso 4", self.LS_PS, self.CINCO[:4], todos),
+            ("paso 5", self.LS_RED, self.CINCO, solo_red),
+        ]
+        for nombre, paso, llamadas_esperadas, aviso in casos:
+            with self.subTest(paso=nombre):
+                interrupcion = KeyboardInterrupt()
+                r = self.sonda({tuple(paso[0]): interrupcion})
+                self.assertIs(r.excepcion, interrupcion)
+                # Ni una llamada de Docker después del paso interrumpido.
+                self.assertEqual(r.llamadas, llamadas_esperadas)
+                # El rmtree se intentó igualmente (es local).
+                self.assertEqual(len(r.rmtree), 1)
+                self.assertEqual(r.avisos, [aviso])
+
+    def test_i2_ctrl_c_en_el_rmtree_solo_avisa_de_lo_que_no_confirmo_ningun_listado(self):
+        # Con los listados vacíos no queda nada de Docker pendiente: se relanza y no hay aviso.
+        interrupcion = KeyboardInterrupt()
+        r = self.sonda(rmtree_lanza=interrupcion)
+        self.assertIs(r.excepcion, interrupcion)
+        self.assertEqual(r.llamadas, self.CINCO)
+        self.assertEqual(r.avisos, [])
+        # Control: con k6 presente en el listado sí queda algo pendiente, y sin orden manual
+        # para la red porque el listado de la red la confirmó ausente.
+        interrupcion = KeyboardInterrupt()
+        r = self.sonda(rmtree_lanza=interrupcion, ps="p_sonda_k6\n")
+        self.assertIs(r.excepcion, interrupcion)
+        self.assertEqual(r.avisos, [
+            "contenedor p_sonda_k6 sigue existiendo tras el borrado (docker rm -f: codigo 0)",
+            "limpieza interrumpida con Ctrl+C: pueden quedar contenedor p_sonda_k6"])
+
+    def test_j_el_temporal_que_no_se_borra_avisa_y_los_pasos_de_docker_ya_se_hicieron(self):
+        # Elección: la ruta literal con barra, que Path de Windows muestra con barra invertida.
+        # En otro sistema el texto sería distinto, así que la prueba solo vale en Windows.
+        if sys.platform != "win32":
+            self.skipTest("el literal del oráculo es el de Windows (C:\\tmp_prueba_sonda)")
+        r = self.sonda(tmp_falso="C:/tmp_prueba_sonda", rmtree_lanza=OSError("t"))
+        self.assertEqual(r.avisos, ["no se borra el temporal C:\\tmp_prueba_sonda: OSError: t"])
+        self.assertEqual(r.llamadas, self.CINCO)
+        self.assertEqual(r.rmtree, [pathlib.Path("C:/tmp_prueba_sonda")])
+        # Control: test_a, con el temporal borrado, no da aviso.
+
+    def test_k_si_avisar_falla_se_siguen_emitiendo_los_demas_y_se_relanza_la_primera(self):
+        fallo = RuntimeError("consola")
+        r = self.sonda(ps="p_sonda_k6\np_sonda_lento\n", avisar_lanza=fallo)
+        # Sin otra excepción en curso, ejecutar_sonda lanza la de avisar.
+        self.assertIs(r.excepcion, fallo)
+        self.assertEqual(r.avisos, [self.SIGUE_LENTO, self.SIGUE_K6])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_k2_con_ctrl_c_en_k6_un_avisar_que_falla_no_tapa_la_interrupcion(self):
+        interrupcion = KeyboardInterrupt()
+        r = self.sonda(en_k6=interrupcion, ps="p_sonda_k6\n", avisar_lanza=RuntimeError("consola"))
+        self.assertIs(r.excepcion, interrupcion)
+        self.assertEqual(r.avisos, [self.SIGUE_K6])
+        self.assertEqual(r.llamadas, self.CINCO)
+
+    def test_l_avisar_es_obligatorio(self):
+        with self.assertRaises(TypeError):
+            sonda_descartes.ejecutar_sonda(lambda *a, **k: self.respuesta(), "img", "k6", "2,3",
+                                           pathlib.Path("."), self.CONSTANTES)
+        # Control: con avisar= funciona (test_a).
+        self.assertEqual(self.sonda().resultado, ([], 0, None, self.MOTIVO_K6))
+
+    def comprobar(self, avisos_del_doble=("texto de prueba",), resultado_sonda=None):
+        """comprobar_sonda_descartes con ejecutar_sonda sustituida por un doble
+        que llama por sí mismo a kwargs["avisar"] y devuelve 4 valores. Devuelve
+        (texto de la PARADA o None, líneas impresas, estado de sin_conclusion,
+        llamadas del doble)."""
+        lineas, recibidas = [], []
+
+        def doble(*args, **kwargs):
+            recibidas.append((args, kwargs))
+            for texto in avisos_del_doble:
+                kwargs["avisar"](texto)
+            return resultado_sonda
+
+        ej = types.SimpleNamespace(imagen="img", cpus_k6="2,3", salida=pathlib.Path("."))
+        with mock.patch.object(sonda_descartes, "ejecutar_sonda", doble), \
+                mock.patch.object(L, "p", lineas.append), \
+                mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}):
+            try:
+                L.comprobar_sonda_descartes(ej)
+                parada = None
+            except L.Parada as error:
+                parada = str(error)
+            sin_conclusion = L.estado["sin_conclusion"]
+        return parada, lineas, sin_conclusion, recibidas
+
+    def test_m_lanzar_pasa_avisar_por_nombre_y_el_aviso_con_motivo_da_parada_y_sin_conclusion(self):
+        parada, lineas, sin_conclusion, recibidas = self.comprobar(
+            resultado_sonda=([], 0, None, "k6 termina con codigo 1: 'x'"))
+        # Un solo intento, con avisar por nombre y los siete argumentos posicionales de antes.
+        self.assertEqual(len(recibidas), 1)
+        args, kwargs = recibidas[0]
+        self.assertEqual(list(kwargs), ["avisar"])
+        self.assertTrue(callable(kwargs["avisar"]))
+        self.assertEqual(len(args), 7)
+        self.assertEqual(parada, "sonda de descartes de k6 (E14): k6 termina con codigo 1: 'x'")
+        self.assertEqual(lineas, ["SIN CONCLUSION limpieza de la sonda de descartes: texto de prueba"])
+        self.assertTrue(sin_conclusion)
+
+    def test_m2_el_aviso_sin_marcas_da_la_segunda_parada(self):
+        # Sin marcas la sonda es PARADA (condición 1): la segunda PARADA de la función.
+        parada, lineas, sin_conclusion, _ = self.comprobar(resultado_sonda=([], 0, 1795342200.0, None))
+        self.assertTrue(parada.startswith("las marcas de dropped_iterations de k6 no son las que supone E14: "))
+        self.assertEqual(lineas[0], "SIN CONCLUSION limpieza de la sonda de descartes: texto de prueba")
+        self.assertIn("sonda de descartes de k6 (E14): ", lineas[1])
+        self.assertEqual(len(lineas), 2)
+        self.assertTrue(sin_conclusion)
+
+    def test_m3_control_sin_avisos_ni_motivo_no_para(self):
+        t0 = 1795342200.0
+        marcas = [t0 + r for r in SondaDeDescartes.REAL]
+        parada, lineas, sin_conclusion, _ = self.comprobar(avisos_del_doble=(), resultado_sonda=(marcas, 5, t0, None))
+        self.assertIsNone(parada)
+        # Una sola línea, la del veredicto PASA de la sonda, y ninguna de limpieza.
+        self.assertEqual(len(lineas), 1)
+        self.assertIn("PASA", lineas[0])
+        self.assertFalse(sin_conclusion)
+
+    def test_n_integracion_la_red_que_sigue_sale_como_sin_conclusion_y_despues_la_parada(self):
+        # comprobar_sonda_descartes con la ejecutar_sonda REAL y L.ejecutar simulado. El prefijo
+        # real es PREFIJO_EFIMEROS ("canario_estres_"), así que la red se llama
+        # canario_estres_sonda_red (escrito a mano).
+        lineas = []
+
+        def ejecutar_falso(args, timeout=900):
+            if args[:2] == ["docker", "run"] and "--rm" in args:
+                raise subprocess.TimeoutExpired(args, 300)
+            if args[:3] == ["docker", "network", "ls"]:
+                return self.respuesta(out="canario_estres_sonda_red\n")
+            return self.respuesta()
+
+        ej = types.SimpleNamespace(imagen="img", cpus_k6="2,3", salida=pathlib.Path("."))
+        with mock.patch.object(L, "ejecutar", ejecutar_falso), \
+                mock.patch.object(L, "p", lineas.append), \
+                mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}):
+            with self.assertRaises(L.Parada) as contexto:
+                L.comprobar_sonda_descartes(ej)
+            sin_conclusion = L.estado["sin_conclusion"]
+        self.assertEqual(lineas, [
+            "SIN CONCLUSION limpieza de la sonda de descartes: red canario_estres_sonda_red sigue existiendo "
+            "tras el borrado (docker network rm: codigo 0)"])
+        self.assertEqual(str(contexto.exception),
+                         "sonda de descartes de k6 (E14): la sonda supera el plazo de 300 s: ['docker', 'run', '--rm']")
+        self.assertTrue(sin_conclusion)
+
+
+class LectorCsvRoto(unittest.TestCase):
+    COLUMNAS = "metric_name,timestamp,metric_value,check,error,error_code,expected_response,method,name,proto,scenario,status,extra_tags"
+    BUENA = "http_req_duration,1795342200500,500.0,,,,true,POST,seguimiento,HTTP/1.1,seguimiento_ips,404,ip=198.18.0.1"
+
+    def leer(self, contenido):
+        with tempfile.TemporaryDirectory() as d:
+            ruta = pathlib.Path(d) / "k6.csv"
+            ruta.write_text(contenido, encoding="utf-8", newline="")
+            return L.leer_csv_fases(ruta)
+
+    def test_control_positivo_un_csv_sano_no_tiene_ilegibles(self):
+        datos = self.leer(self.COLUMNAS + chr(10) + self.BUENA + chr(10))
+        self.assertEqual((len(datos["filas"]), datos["ilegibles"]), (1, 0))
+
+    def test_una_ultima_linea_sin_salto_final_cuenta_como_ilegible(self):
+        datos = self.leer(self.COLUMNAS + chr(10) + self.BUENA + chr(10) + self.BUENA)
+        self.assertEqual(datos["ilegibles"], 1)
+
+    def test_csv_error_se_cuenta_y_deja_de_leer(self):
+        # Un campo de mas de 131072 caracteres hace que el modulo csv lance csv.Error.
+        rota = "http_req_duration,1795342200500,500.0,," + "x" * 200000 + chr(10)
+        datos = self.leer(self.COLUMNAS + chr(10) + self.BUENA + chr(10) + rota + self.BUENA + chr(10))
+        self.assertEqual(len(datos["filas"]), 1)
+        self.assertEqual(datos["ilegibles"], 1)
+
+
+class MemoriaSinVentana(unittest.TestCase):
+    def test_sin_inicio_o_fin_de_k6_se_dice_y_se_vuelve(self):
+        lineas = []
+        vig = {"etiquetados": {"api": ([{"t": 1.0, "enc": 0}], None)}}
+        with mock.patch.object(L, "p", lineas.append):
+            L.memoria_informativa(vig, {"inicio_vm": None, "fin_vm": 5.0}, True, 9.0)
+            L.memoria_informativa(vig, {"inicio_vm": 1.0, "fin_vm": None}, True, 9.0)
+        self.assertEqual(lineas, ["   memoria sin ventana de k6"] * 2)
+        # Control positivo: con ventana, la linea es otra (sin muestras utiles en la ventana).
+        lineas.clear()
+        with mock.patch.object(L, "p", lineas.append):
+            L.memoria_informativa({"etiquetados": {"api": ([], None)}}, {"inicio_vm": 1.0, "fin_vm": 5.0}, True, 9.0)
+        self.assertNotIn("   memoria sin ventana de k6", lineas)
+        self.assertEqual(len(lineas), 1)
+
+
+class AnalisisSintetico(unittest.TestCase):
+    """analizar_pico, analizar_l2, analizar_l3b, analizar_victimas y evaluar_vigilancia con filas
+    sinteticas y oraculos literales (QA R3): fallan si se revierte H8, E14, H15 o se mezclan validez_a y validez_b."""
+    T0 = 1795342200.0
+
+    def setUp(self):
+        self.parche = mock.patch.object(L, "p", lambda *a, **k: None)
+        self.parche.start()
+        self.addCleanup(self.parche.stop)
+
+    def fila(self, inicio, dur, nombre, estado, escenario=None, fase=None, ip=None):
+        return {"inicio": inicio, "fin": inicio + dur / 1000, "dur": dur, "estado": estado, "nombre": nombre,
+                "escenario": escenario or nombre, "proto": "HTTP/1.1", "error_code": "", "ip": ip, "fase": fase,
+                "etapa": None}
+
+    def humo(self):
+        return [(f"{etapa}: {x}", 1.0) for etapa in ("humo_previo", "humo_posterior") for x in "abcd"]
+
+    def filas_pico(self, login_503_en_base=0, login_carga_desfase=0.0):
+        fases = L.fases_de("pico")
+        filas = []
+        for f in fases:
+            if f["nombre"] == "cal":
+                continue
+            carga = f["nombre"] == "carga"
+            for ruta in L.RUTAS_FASES:
+                tasa = (102 if carga else 10) if ruta == "login_email" else (50 if carga else 5)
+                n = int(tasa * (f["hasta_s"] - f["desde_s"]))
+                for i in range(n):
+                    inicio = self.T0 + f["desde_s"] + i / tasa
+                    estado = L.ESTADO_RUTAS[ruta]
+                    if ruta == "login_email" and f["nombre"] == "base" and i < login_503_en_base:
+                        estado = 503
+                    if ruta == "login_email" and carga:
+                        inicio += login_carga_desfase
+                    filas.append(self.fila(inicio, 30, ruta, estado, f"{ruta}__{f['nombre']}", f["nombre"]))
+        return filas, fases
+
+    def pico(self, descartes=None, reinicios=0, **cambios):
+        filas, fases = self.filas_pico(**cambios)
+        datos = {"descartes": descartes or {}, "checks": self.humo()}
+        return L.analizar_pico(filas, datos, self.T0, fases, set(), reinicios)
+
+    def motivos(self, parte):
+        return [f["motivo"] for f in parte["validez"]]
+
+    def test_pico_sano_pasa_sin_fallos(self):
+        partes, comun = self.pico()
+        self.assertEqual(partes["pico"]["resultado"], "PASA")
+        self.assertEqual((partes["pico"]["validez"], comun), ([], []))
+
+    def test_h8_el_503_del_login_de_l4_cuenta_como_error_de_la_base(self):
+        # 3 % de 503 en la BASE del login: con la definicion por defecto es error (y no solo "esperado").
+        partes, _ = self.pico(login_503_en_base=36)
+        self.assertTrue(any("de errores" in m for m in self.motivos(partes["pico"])), self.motivos(partes["pico"]))
+
+    def test_e14_un_descarte_en_la_base_es_validez_y_en_el_pico_solo_se_informa(self):
+        partes, _ = self.pico(descartes={"login_email__base": [self.T0 + 40.0]})
+        self.assertTrue(any(m.startswith("E14") for m in self.motivos(partes["pico"])))
+        # Control: el mismo descarte en el PICO no invalida la BASE.
+        partes, _ = self.pico(descartes={"login_email__carga": [self.T0 + 160.0]})
+        self.assertFalse(any(m.startswith("E14") for m in self.motivos(partes["pico"])))
+        # La sonda de salud no cuenta.
+        partes, _ = self.pico(descartes={"sonda_salud": [self.T0 + 40.0]})
+        self.assertFalse(any(m.startswith("E14") for m in self.motivos(partes["pico"])))
+
+    def test_h15_el_reloj_de_fases_del_pico(self):
+        _, comun = self.pico(login_carga_desfase=5.0)
+        self.assertEqual(len(comun), 1)
+        self.assertIn("reloj de fases", comun[0]["motivo"])
+        self.assertEqual(self.pico(login_carga_desfase=1.0)[1], [])
+
+    def test_qa_r4_los_reinicios_llegan_al_veredicto_de_l4(self):
+        self.assertEqual(self.pico(reinicios=1)[0]["pico"]["resultado"], "FALLA")
+        self.assertEqual(self.pico(reinicios=0)[0]["pico"]["resultado"], "PASA")
+
+    def filas_victimas(self, fases, dur_carga=30, dur_base=30, login=True, desfase_login=0.0):
+        filas = []
+        for f in fases:
+            if f["nombre"] == "cal":
+                continue
+            for ruta in ("denuncia", "seguimiento", "web_seguimiento"):
+                dur = dur_carga if f["nombre"] == "carga" else (dur_base if f["nombre"] == "base" else 30)
+                for i in range(int(5 * (f["hasta_s"] - f["desde_s"]))):
+                    filas.append(self.fila(self.T0 + f["desde_s"] + i / 5, dur, ruta, L.ESTADO_RUTAS[ruta], ruta,
+                                           f["nombre"]))
+        return filas
+
+    def test_analizar_victimas_la_base_es_el_control(self):
+        fases = L.fases_de("l2")
+        sanas, f_sanas = L.analizar_victimas(self.filas_victimas(fases), self.T0, fases, set(), {})
+        self.assertEqual(f_sanas, [])
+        self.assertEqual(L.veredictos_victimas(sanas)["denuncia"][0], "PASA")
+        # BASE de la denuncia a 1200 ms (SLO 1000): fallo de validez.
+        _, fallos = L.analizar_victimas(self.filas_victimas(fases, dur_base=1200), self.T0, fases, set(), {})
+        self.assertTrue(any("la BASE no cumple el SLO" in f["motivo"] for f in fallos))
+        # Un descarte en la BASE tambien.
+        _, fallos = L.analizar_victimas(self.filas_victimas(fases), self.T0, fases, set(),
+                                        {"denuncia": [self.T0 + 40.0]})
+        self.assertTrue(any("descartes en la BASE" in f["motivo"] for f in fallos))
+
+    def analizar_l2(self, desfase_login=0.0, dur_carga=30):
+        fases = L.fases_de("l2")
+        filas = self.filas_victimas(fases, dur_carga=dur_carga)
+        for i in range(300):
+            filas.append(self.fila(self.T0 + 150 + desfase_login + i * 0.4, 2000, "login_email", 401, "login_email", "carga"))
+        datos = {"descartes": {}, "checks": [], "retry": []}
+        k6 = {"inicio_vm": self.T0 - 30, "fin_vm": self.T0 + 400}
+        vig = {"etiquetados": {"api": ([], None)}}
+        with tempfile.TemporaryDirectory() as d:
+            return L.analizar_l2(filas, datos, self.T0, fases, set(), pathlib.Path(d), vig, k6, True, self.T0 + 500, [])
+
+    def test_analizar_l2_sano_y_con_victimas_degradadas(self):
+        partes, comun = self.analizar_l2()
+        self.assertEqual(partes["l2"]["resultado"], "PASA")
+        self.assertEqual((partes["l2"]["validez"], comun), ([], []))
+        self.assertTrue(partes["l2"]["control_ataque"])
+        # Victimas a 4000 ms en la inundacion: FALLA del oraculo, no de validez.
+        partes, _ = self.analizar_l2(dur_carga=4000)
+        self.assertEqual(partes["l2"]["resultado"], "FALLA")
+        self.assertEqual(partes["l2"]["validez"], [])
+
+    def test_h15_el_reloj_de_fases_de_l2(self):
+        self.assertEqual(self.analizar_l2()[1], [])
+        _, comun = self.analizar_l2(desfase_login=5.0)
+        self.assertEqual(len(comun), 1)
+        self.assertIn("reloj de fases", comun[0]["motivo"])
+
+    def analizar_l3b(self, previos=(), dur_base=30):
+        fases = L.fases_de("l3b")
+        filas = self.filas_victimas(fases, dur_base=dur_base)
+        ips = ["198.18.0.1", "198.18.0.2"]
+        for i in range(18):
+            filas.append(self.fila(self.T0 + 150 + i * 0.5, 100, "login_email", 401, "login_ataque", "carga", ips[i % 2]))
+        datos = {"descartes": {}, "checks": [], "retry": []}
+        with tempfile.TemporaryDirectory() as d:
+            return L.analizar_l3b(filas, datos, self.T0, self.T0 + 150, fases, set(), list(previos), pathlib.Path(d),
+                                  {"ataque": ips})
+
+    def test_l3b_no_mezcla_la_validez_de_a_y_de_b(self):
+        previo = {"motivo": "J5 de prueba"}
+        partes = self.analizar_l3b(previos=[previo])
+        self.assertIn("J5 de prueba", self.motivos(partes["l3b-a"]))
+        self.assertNotIn("J5 de prueba", self.motivos(partes["l3b-b"]))
+        # Control positivo: sin previos, ninguno lo lleva.
+        sin = self.analizar_l3b()
+        self.assertNotIn("J5 de prueba", self.motivos(sin["l3b-a"]) + self.motivos(sin["l3b-b"]))
+        # Una BASE fuera del SLO es de l3b-b y no de l3b-a.
+        base_mala = self.analizar_l3b(dur_base=1200)
+        self.assertTrue(any("la BASE no cumple el SLO" in m for m in self.motivos(base_mala["l3b-b"])))
+        self.assertFalse(any("la BASE" in m for m in self.motivos(base_mala["l3b-a"])))
+
+    def ticks(self, hasta=1010.0):
+        return [{"t": 1000.0 + k * 0.25, "c": {s: cg(anon=1) for s in L.SERVICIOS_PILA}, "padre": None, "hijos": {}}
+                for k in range(int((hasta - 1000.0) * 4) + 1)]
+
+    def vigilar(self, eventos=(), muertos=(), reinicios=None):
+        ej = types.SimpleNamespace(eventos=types.SimpleNamespace(copia=lambda: list(eventos)), mantenimientos=[],
+                                   reinicios=reinicios or {})
+        return L.evaluar_vigilancia(ej, 1, self.ticks(), 0.0, {ID_K6}, list(muertos), 1000.0, 1010.0)
+
+    def test_evaluar_vigilancia(self):
+        vig = self.vigilar()
+        self.assertEqual((vig["fallos"], vig["muertes"], vig["reinicios"]), ([], [], 0))
+        # Streamers muertos en el reposo: fallo de validez.
+        self.assertEqual(len(self.vigilar(muertos=["log_api"])["fallos"]), 1)
+        # Un die no esperado de la API: la muerte es FALLA (sin padre que atribuya un OOM global).
+        vig = self.vigilar(eventos=[ev("die", ID_API, 1005.0, codigo="137")])
+        self.assertEqual(vig["muertes"], ["FALLA"])
+        # Los reinicios por politica salen en vig (QA R4).
+        vig = self.vigilar(eventos=[ev("start", ID_API, 1001.0), ev("start", ID_API, 1002.0)], reinicios={ID_API: 1})
+        self.assertEqual(vig["reinicios"], 1)
+
+
+class LineasDeL3bB(unittest.TestCase):
+    def test_pasa_con_b2_es_el_literal_de_e17_sin_cifra_de_ips(self):
+        esperado = ("L3b-b: PASA con B2 cumplido: en este montaje (IPv4, 102,04/s, 300 s) las víctimas no se degradaron; "
+                    "no se da cifra de coste (E15); no cierra threat-model §8 l.760-764, que sigue ABIERTA; la "
+                    "diferencia con L2 se explica en el informe")
+        self.assertEqual(L.linea_l3b_b("PASA", [], True), esperado)
+        self.assertEqual(L.LINEA_L3B_B_PASA, esperado)
+        self.assertNotIn("3402", esperado)
+        docs = pathlib.Path(__file__).resolve().parents[2] / "docs" / "informe-pruebas.md"
+        # La copia puede traer un docs/ anterior a E17: solo se compara si el texto ya la tiene.
+        if docs.is_file() and "**E17." in docs.read_text(encoding="utf-8"):
+            self.assertIn(esperado, docs.read_text(encoding="utf-8"))
+        # Con SIN CONCLUSION, o con PASA sin B2, no hay linea propia.
+        self.assertIsNone(L.linea_l3b_b("SIN CONCLUSION", ["x"], True))
+        self.assertIsNone(L.linea_l3b_b("PASA", [], False))
+        self.assertIsNone(L.linea_l3b_b("PASA", [], None))
+
+    def test_falla_del_oraculo_y_falla_por_muerte(self):
+        self.assertEqual(L.linea_l3b_b("FALLA", ["p95 degradado"], True), L.LINEA_L3B_B_FALLA)
+        self.assertIn("esperada por el diseño", L.LINEA_L3B_B_FALLA)
+        muerte = L.linea_l3b_b("FALLA", [L.MOTIVO_MUERTE, "CPU de k6 alta"], True)
+        self.assertTrue(muerte.startswith("L3b-b: FALLA (murió un servicio de Canario; NO OK)"))
+        self.assertIn("CPU de k6 alta", muerte)
+        self.assertNotIn("esperada por el diseño", muerte)
+
+    def test_la_muerte_da_esa_linea_y_ninguna_cota_de_coste(self):
+        def repeticion(n, muertes):
+            detalle = {"victimas": {r: {"base": {"p95_ms": 50}, "carga": {"peticiones": 600, "p95_ms": 60, "tasa_errores": 0.0},
+                                        "descartes_aviso": 0} for r in L.SLO_VICTIMAS_MS},
+                       "login": {"p95_ms": 2000, "tasa_errores": 0.0, "descartes_aviso": 0}}
+            return {"modo": "l3b", "repeticion": n, "muertes": list(muertes), "reinicios": 0, "comun": [],
+                    "partes": {"l3b-a": {"resultado": "PASA", "validez": [], "control_ataque": None, "detalle": {}},
+                               "l3b-b": {"resultado": "PASA", "validez": [], "control_ataque": None, "detalle": detalle}},
+                    "veredictos": {"l3b-a": ("PASA", []), "l3b-b": ("PASA", [])}}
+        for muertes, hay_cota, linea in (([], False, L.LINEA_L3B_B_PASA), (["FALLA"], False, None)):
+            lineas, controles = [], {}
+            with mock.patch.object(L, "p", lineas.append):
+                finales = L.agregar_fases("l3b", [repeticion(i, muertes if i == 1 else []) for i in (1, 2, 3)], 3, (),
+                                          controles)
+            v, motivos = finales["l3b-b"]
+            self.assertEqual(any("coste del ataque" in x for x in lineas), hay_cota)
+            if muertes:
+                self.assertEqual(v, "FALLA")
+                self.assertIn(L.MOTIVO_MUERTE, motivos)
+                self.assertIn("murió un servicio", L.linea_l3b_b(v, motivos, controles["l3b-b"]))
+            else:
+                self.assertEqual(L.linea_l3b_b(v, motivos, controles["l3b-b"]), linea)
+
+
+class EstimacionDeTiempo(unittest.TestCase):
+    def test_el_sandwich_de_j5_son_541_s_de_peor_caso(self):
+        # 121 s de espera maxima + 120 s para recrear la API + 225 s (11 peticiones x 15 s + 60 s) + 75 s (1 x 15 + 60).
+        self.assertEqual(L.MARGEN_SANDWICH_J5_S, 120)
+        self.assertEqual(L.sandwich_j5_maximo_s(), 541)
+
+    def test_repeticion_1_frente_a_repeticion_2_en_l3_y_l3b(self):
+        # L3: 300 + 30 + 15 + 240 + (120 + 60) = 765 s; L3b: 570 + 30 + 15 + 240 + (120 + 300) = 1275 s.
+        self.assertEqual(L.estimar_repeticion_s("l3", 1), 765)
+        self.assertEqual(L.estimar_repeticion_s("l3", 2), 765 + 541)
+        self.assertEqual(L.estimar_repeticion_s("l3b", 1), 1275)
+        self.assertEqual(L.estimar_repeticion_s("l3b", 2), 1275 + 541)
+        self.assertEqual(L.estimar_repeticion_s("l3", 3), L.estimar_repeticion_s("l3", 2))
+        # Control: L2 y L4 no tienen sandwich, ninguna repeticion cambia.
+        for modo, esperado in (("l2", 675), ("pico", 645)):
+            self.assertEqual((L.estimar_repeticion_s(modo, 1), L.estimar_repeticion_s(modo, 2)), (esperado, esperado))
+
+    def test_totales_con_tres_repeticiones(self):
+        self.assertEqual(L.estimar_total_s("l3", 3), 765 + 2 * 1306 + 240)
+        self.assertEqual(L.estimar_total_s("l3b", 3), 1275 + 2 * 1816 + 240)
+        self.assertEqual(L.estimar_total_s("l2", 3), 3 * 675 + 240)
+
+    def test_la_medianoche_usa_la_estimacion_de_la_repeticion_concreta(self):
+        # Con 1000 s hasta las 00:00 UTC, la repeticion 1 de L3 (765 s) cabe y la 2 (1306 s) no.
+        medianoche = 1795392000
+        ahora = medianoche - 1000
+        self.assertEqual(L.espera_por_medianoche(ahora, L.estimar_repeticion_s("l3", 1)), 0.0)
+        self.assertEqual(L.espera_por_medianoche(ahora, L.estimar_repeticion_s("l3", 2)), 1005.0)
+
+    def test_el_sandwich_espera_a_la_ventana_con_120_s_de_margen(self):
+        pedidos = []
+        base = 1795342203.0
+        pet = lambda e, t: {"estado": e, "inicio": t, "fin": t + 0.1}  # noqa: E731
+        respuestas = {"j5pos_r2": [pet(429, base)], "j5neg_r2": [pet(401, base + 10)]}
+        # create_autospec con la firma real (ej, rep, *, etiqueta): el doble
+        # anterior, `lambda ej: None`, aceptaba la llamada vieja y rota.
+        recrear = mock.create_autospec(L.recrear_api, return_value=None)
+        ej = types.SimpleNamespace(id_a="a" * 32, contrasena="x")
+        with mock.patch.object(L, "esperar_ventana", lambda periodo, minimo: pedidos.append((periodo, minimo))), \
+                mock.patch.object(L, "cliente_control", lambda ej, n, ip, p_: respuestas[n]), \
+                mock.patch.object(L, "recrear_api", recrear), mock.patch.object(L, "p", lambda *a: None), \
+                mock.patch.object(L, "linea_control", lambda *a: None):
+            L.sandwich_j5(ej, "l3", 2, {})
+        self.assertEqual(pedidos, [(300, 120)])
+        self.assertEqual(recrear.call_args_list, [mock.call(ej, 2, etiqueta="J5")])
+
+
+class ScriptsDeK6(unittest.TestCase):
+    def test_cliente_de_control_compila_y_no_lleva_comillas_dobles(self):
+        import ast
+        ast.parse(L.CODIGO_CLIENTE)
+        self.assertNotIn('"', L.CODIGO_CLIENTE)
+
+    def test_los_scripts_estan_en_utf8_sin_bom_ni_crlf(self):
+        for nombre in ("fases.js", "l3.js", "sonda_descartes.js", "sonda_descartes.py"):
+            crudo = (pathlib.Path(__file__).resolve().parent / nombre).read_bytes()
+            self.assertFalse(crudo.startswith(b"\xef\xbb\xbf"), nombre)
+            self.assertNotIn(b"\r\n", crudo, nombre)
+            crudo.decode("utf-8")
+
+    def test_l3_js_guarda_las_ips_en_un_sharedarray_y_aborta_con_421(self):
+        js = (pathlib.Path(__file__).resolve().parent / "l3.js").read_text(encoding="utf-8")
+        self.assertIn("import { SharedArray } from 'k6/data';", js)
+        self.assertIn("open('/datos/ips.json')", js)
+        # S10: el control del 421 en setup() y la salida literal que el lanzador convierte en PARADA.
+        self.assertIn("console.error('CONTROL_421');", js)
+        self.assertIn("exec.test.abort(", js)
+        # Seguridad 4: POST /salud tiene que dar 405 (no solo no dar 421) y, en L3b, GET /seguimiento 200.
+        self.assertIn("control.status !== 405", js)
+        self.assertIn("datos.modo === 'l3b'", js)
+        self.assertIn("web.status !== 200", js)
+        self.assertIn("CONTROL_SETUP", js)
+        # Las IPs ya no viajan dentro de ejecucion.json (e.ips): solo su numero.
+        self.assertNotIn("e.ips", js)
+        self.assertIn("e.n_ips", js)
+
+    def test_preparar_datos_k6_separa_las_ips(self):
+        ej = types.SimpleNamespace(id_a="a" * 32, id_b="b" * 32, contrasena="Estres-x", texto_humo="Humo")
+        escenarios = [{"nombre": "login_ataque", "ips": ["198.18.0.1", "198.18.0.2"], "rate": 1}, {"nombre": "s", "rate": 1}]
+        texto, ips = L.preparar_datos_k6(ej, "l3b", escenarios, [], [], 0)
+        datos = json.loads(texto)
+        self.assertEqual(ips, {"login_ataque": ["198.18.0.1", "198.18.0.2"]})
+        self.assertEqual(datos["escenarios"][0], {"nombre": "login_ataque", "rate": 1, "n_ips": 2})
+        self.assertNotIn("198.18.0.1", texto)
+        # Control: un escenario sin ips queda igual.
+        self.assertEqual(datos["escenarios"][1], {"nombre": "s", "rate": 1})
+
+    def test_fases_js_usa_los_campos_de_rutas_web(self):
+        # H-web: campo codigo y Origin del sitio, como exige app/rutas_web.py.
+        raiz = pathlib.Path(__file__).resolve().parents[2]
+        web = (raiz / "app" / "rutas_web.py").read_text(encoding="utf-8")
+        self.assertIn('FormularioCodigo = Annotated[dict, Depends(formulario("codigo"))]', web)
+        self.assertIn('ORIGEN_POR_DEFECTO = "https://localhost:8444"', web)
+        js = (pathlib.Path(__file__).resolve().parent / "fases.js").read_text(encoding="utf-8")
+        self.assertIn("const ORIGEN_WEB = 'https://localhost:8444';", js)
+        self.assertIn("`codigo=${codigo}`", js)
+        self.assertIn("/seguimiento/consulta", js)
+
+
+class ParadaEnCurso(unittest.TestCase):
+    """D2 y M1: en --l2, --pico, --l3 y --l3b la línea "PARADA: <texto>" sale en
+    cuanto se produce, antes de los callbacks de la pila (limpiar_efimeros,
+    eventos.parar) y del escaneo del finally, para que un segundo Ctrl+C
+    durante ellos no deje la causa sin decir. Se ejecutan ejecutar_modo y main de
+    verdad con todo lo de Docker simulado; el orden de todo va en `e.orden`."""
+    CAUSA = "causa literal de la parada"
+    LINEA = "PARADA: causa literal de la parada"
+
+    class Fin(Exception):
+        pass
+
+    @staticmethod
+    def ctrl_c():
+        raise KeyboardInterrupt
+
+    def montar(self, pila, e, escanear, limpiar):
+        """Sustituye lo de Docker bajo ejecutar_modo (L2, repetición 1 que da
+        PARADA). `escanear()` y `limpiar()` son lo que hacen esas dos llamadas."""
+        e.orden = []
+
+        def repeticion_falsa(ej, modo, rep, n_reps):
+            raise L.Parada(self.CAUSA)
+
+        def escanear_falso(ej):
+            e.orden.append("<escanear_salida>")
+            return escanear()
+
+        def limpiar_falso():
+            e.orden.append("<limpiar_efimeros>")
+            limpiar()
+
+        eventos = types.SimpleNamespace(parar=lambda: e.orden.append("<eventos.parar>"), ilegibles=0)
+        for parche in (mock.patch.object(L, "p", e.orden.append),
+                       mock.patch.object(L, "comprobar_cifras_congeladas", lambda *a: None),
+                       mock.patch.object(L, "comprobar_literales_argon2", lambda: None),
+                       mock.patch.object(L, "EventosDocker", lambda inicio, ruta: eventos),
+                       mock.patch.object(L, "hora_motor_ahora", lambda: 100.0),
+                       mock.patch.object(L, "ejecutar_repeticion_fases", repeticion_falsa),
+                       mock.patch.object(L, "escanear_salida", escanear_falso),
+                       mock.patch.object(L, "limpiar_efimeros", limpiar_falso),
+                       mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}),
+                       mock.patch.dict(L.ACTUAL, {"ej": None})):
+            pila.enter_context(parche)
+
+    def montar_main(self, pila, e, argv, ejecutar_l1=None):
+        """Lo que main necesita además: argumentos, precondiciones, topología de
+        CPU, directorios temporales dentro de `e.raiz`, overrides, limpieza y el
+        final (terminar lanza Fin en vez de salir del proceso)."""
+        def terminar_falso():
+            raise self.Fin()
+
+        parches = [mock.patch.object(sys, "argv", argv),
+                   mock.patch.object(L, "estado_git", lambda: []),
+                   mock.patch.object(L, "comprobaciones_previas", lambda: None),
+                   mock.patch.object(L, "leer_topologia", lambda: [(0, 1)]),
+                   mock.patch.object(L, "elegir_cpus", lambda hermanas: ([0], [1], "texto", False)),
+                   mock.patch.object(L, "ejecutar", lambda args, timeout=900: L.R(0, "1\n", "")),
+                   mock.patch.object(L, "tempfile", types.SimpleNamespace(
+                       mkdtemp=lambda prefix="": tempfile.mkdtemp(prefix=prefix, dir=str(e.raiz)))),
+                   mock.patch.object(L, "preparar_overrides", lambda *a, **k: []),
+                   mock.patch.object(L, "preparar_override_postgres", lambda temporal: None),
+                   mock.patch.object(L, "dc", lambda *a, **k: L.R(0, "", "")),
+                   mock.patch.object(L, "recursos_previos", lambda: []),
+                   mock.patch.object(L, "escanear_texto_final", lambda ej: None),
+                   mock.patch.object(L, "terminar", terminar_falso)]
+        if ejecutar_l1 is not None:
+            parches.append(mock.patch.object(L, "ejecutar_l1", ejecutar_l1))
+        for parche in parches:
+            pila.enter_context(parche)
+
+    def ejecutar_modo(self, e):
+        L.ejecutar_modo("l2", 0.0196, e.raiz, e.raiz, [0], [1], 1)
+
+    def lineas_parada(self, e):
+        return [linea for linea in e.orden if linea.startswith("PARADA")]
+
+    def test_parada_mas_ctrl_c_en_el_escaner_deja_la_linea_ya_impresa(self):
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            e = types.SimpleNamespace(raiz=pathlib.Path(d))
+            self.montar(pila, e, escanear=self.ctrl_c, limpiar=lambda: None)
+            with self.assertRaises(KeyboardInterrupt):
+                self.ejecutar_modo(e)
+        # La línea está, una sola vez, y salió ANTES de la limpieza y del escaneo
+        # que recibió el Ctrl+C.
+        self.assertEqual(self.lineas_parada(e), [self.LINEA])
+        self.assertLess(e.orden.index(self.LINEA), e.orden.index("<eventos.parar>"))
+        self.assertLess(e.orden.index(self.LINEA), e.orden.index("<limpiar_efimeros>"))
+        self.assertLess(e.orden.index(self.LINEA), e.orden.index("<escanear_salida>"))
+
+    def test_parada_mas_ctrl_c_en_limpiar_efimeros_deja_la_linea_ya_impresa(self):
+        # M1: limpiar_efimeros es un callback del ExitStack y corre antes que el
+        # finally de ejecutar_modo. Un Ctrl+C ahí ya encuentra la línea impresa.
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            e = types.SimpleNamespace(raiz=pathlib.Path(d))
+            self.montar(pila, e, escanear=lambda: ("PASA", "anti-fuga sin hallazgos"), limpiar=self.ctrl_c)
+            with self.assertRaises(KeyboardInterrupt):
+                self.ejecutar_modo(e)
+        self.assertEqual(self.lineas_parada(e), [self.LINEA])
+        self.assertLess(e.orden.index(self.LINEA), e.orden.index("<limpiar_efimeros>"))
+
+    def test_control_sin_ctrl_c_una_sola_linea_parada_tambien_con_main(self):
+        # 1. ejecutar_modo solo: la PARADA sale con `impresa` y una sola línea.
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            e = types.SimpleNamespace(raiz=pathlib.Path(d))
+            self.montar(pila, e, escanear=lambda: ("PASA", "anti-fuga sin hallazgos"), limpiar=lambda: None)
+            with self.assertRaises(L.Parada) as ctx:
+                self.ejecutar_modo(e)
+        self.assertIs(ctx.exception.impresa, True)
+        self.assertEqual(self.lineas_parada(e), [self.LINEA])
+        # 2. main con ejecutar_modo real (--l2): main no la imprime otra vez.
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            e = types.SimpleNamespace(raiz=pathlib.Path(d))
+            self.montar(pila, e, escanear=lambda: ("PASA", "anti-fuga sin hallazgos"), limpiar=lambda: None)
+            self.montar_main(pila, e, ["lanzar.py", "--l2", "--t", "0.0196", "--repeticiones", "1"])
+            with self.assertRaises(self.Fin):
+                L.main()
+        self.assertEqual(self.lineas_parada(e), [self.LINEA])
+        # 3. Control del control: una PARADA que NO viene de ejecutar_modo (L1) la
+        # sigue imprimiendo main, una vez. Si main no imprimiera nada, el punto 2
+        # pasaría en vacío.
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            e = types.SimpleNamespace(raiz=pathlib.Path(d))
+            self.montar(pila, e, escanear=lambda: ("PASA", "anti-fuga sin hallazgos"), limpiar=lambda: None)
+
+            def l1_falso(t, datos, salida, cpus_canario, cpus_k6, repeticiones):
+                raise L.Parada("causa literal de L1")
+            self.montar_main(pila, e, ["lanzar.py", "--l1", "--t", "0.0196", "--repeticiones", "1"], l1_falso)
+            with self.assertRaises(self.Fin):
+                L.main()
+        self.assertEqual(self.lineas_parada(e), ["PARADA: causa literal de L1"])
 
 
 def evento_lim(causa, espera, clase="ConnectionError"):
@@ -1477,6 +4088,43 @@ class DeFicheroAResumen(unittest.TestCase):
         self.assertEqual(res2["senales"]["limitador_no_disponible"]["total"], 2)
         self.assertEqual(res2["senales"]["limitador_no_disponible"]["clases"], {"ConnectionError": 2})
         self.assertEqual((res2["limitador"]["causas"]["sin_dato"], res2["limitador"]["espera_anomala"]), (1, 2))
+
+
+class ArranquesDeRedisYSenalesPorFase(unittest.TestCase):
+    """Condición 4 de QA: senales_por_fase (L2 y L3) llama a senales_escalon
+    con la firma de cuatro argumentos y le pasa los arranques de Redis de la
+    repetición, sacados de ej.eventos desde t_ini."""
+
+    def falso_ej(self, eventos):
+        return types.SimpleNamespace(eventos=types.SimpleNamespace(copia=lambda: list(eventos)))
+
+    def test_arranques_redis_desde_filtra_por_tiempo_clase_servicio_y_accion(self):
+        eventos = [
+            {"t": 100.0, "clase": "canario", "servicio": "redis", "accion": "start"},     # entra
+            {"t": 50.0, "clase": "canario", "servicio": "redis", "accion": "start"},      # antes de t_ini
+            {"t": 120.0, "clase": "canario", "servicio": "redis", "accion": "die"},       # otra acción
+            {"t": 130.0, "clase": "canario", "servicio": "postgres", "accion": "start"},  # otro servicio
+            {"t": 140.0, "clase": "k6", "servicio": "redis", "accion": "start"},          # otra clase
+            {"t": 90.0, "clase": "canario", "servicio": "redis", "accion": "start"}]      # borde: t == t_ini entra
+        self.assertEqual(L.arranques_redis_desde(self.falso_ej(eventos), 90.0), [100.0, 90.0])
+        # Control positivo: sin eventos del tipo pedido la lista es vacía (no inventa).
+        self.assertEqual(L.arranques_redis_desde(self.falso_ej(eventos[1:5]), 90.0), [])
+
+    def test_senales_por_fase_pasa_los_arranques_y_no_da_typeerror(self):
+        # 2026-11-23T20:00:00Z = 1795464000. Fase de 0 a 10 s: ventana [t0-1, t0+11].
+        contenido = ("2026-11-23T20:00:02.000000000Z ERROR canario.limitador: EVENTO limitador_no_disponible: "
+                     "ConnectionError causa=conexion espera=<0.25\n")
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "log_api.txt").write_text(contenido, encoding="utf-8", newline="\n")
+            fases = [{"nombre": "carga", "desde_s": 0, "hasta_s": 10}]
+            con = L.senales_por_fase(pathlib.Path(d), fases, 1795464000.0, [1795464001.0])
+            sin = L.senales_por_fase(pathlib.Path(d), fases, 1795464000.0, [])
+        self.assertEqual(con["carga"]["limitador"]["arranque"]["conexion"], {"dentro": 1, "fuera": 0})
+        self.assertEqual(con["carga"]["limitador"]["arranques_redis"], 1)
+        self.assertEqual(con["carga"]["senales"]["limitador_no_disponible"]["total"], 1)
+        # Control positivo: sin arranques conocidos la misma línea cae fuera.
+        self.assertEqual(sin["carga"]["limitador"]["arranque"]["conexion"], {"dentro": 0, "fuera": 1})
+        self.assertEqual(sin["carga"]["limitador"]["arranques_redis"], 0)
 
 
 if __name__ == "__main__":

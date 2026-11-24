@@ -5,8 +5,17 @@ local parada:
 
     python tests\\estres\\lanzar.py --hash [--conservar]
     python tests\\estres\\lanzar.py --l1 --t <segundos> [--conservar]
+    python tests\\estres\\lanzar.py --l2|--pico|--l3|--l3b --t 0.0196 [--repeticiones N] [--conservar]
 
-Las dos modalidades comparten:
+--l2 (aislamiento: inundacion del login y tres victimas), --pico (L4: pico de
+10 veces y recuperacion), --l3 (200 IPs con los limites de produccion) y
+--l3b (el coste del ataque de L2 con esos limites) usan k6 con fases.js o
+l3.js, tres repeticiones y las cifras de la segunda congelacion (docs/
+informe-pruebas.md): por eso --t debe ser 0.0196. Sus oraculos, controles de
+validez y el escaner anti-fuga estan en las funciones puras de la seccion "L2,
+L3, L3b y L4", con sus pruebas en tests/estres/test_lanzar.py.
+
+Las modalidades de L1 comparten:
 * comprobaciones previas: Docker en marcha, ningún recurso con el prefijo
   canario_estres, las subredes fijas del compose libres, los puertos 8443 a
   8445 libres y docker compose config sin errores. Si algo falla, PARADA sin
@@ -58,6 +67,8 @@ orden exacta para borrarlos. La evidencia sale de una ejecución sin él.
 Solo biblioteca estándar.
 """
 import argparse
+import base64
+import bisect
 import collections
 import contextlib
 import csv
@@ -67,6 +78,7 @@ import json
 import math
 import pathlib
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -77,6 +89,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 
 RAIZ = pathlib.Path(__file__).resolve().parent.parent.parent
 DIR_ESTRES = RAIZ / "tests" / "estres"
@@ -105,6 +118,24 @@ LIMITES_ESTRES = ("denuncia=1000000/3600,seguimiento=1000000/60,mensajes=1000000
 LINEA_LIMITES = ("INFO canario.arranque: LIMITES (configurados): acceso=1000000/300 cuenta=1000000/60 "
                  "denuncia=1000000/3600 destinatario=1000000/900 destinatario_dia=1000000/86400 "
                  "mensajes=1000000/3600 otras=1000000/60 registro=1000000/3600 seguimiento=1000000/60")
+
+# Limites de PRODUCCION (L3 y L3b): LIMITES_POR_DEFECTO de app/limitador.py. La
+# linea es TEXTO_LIMITES_PRODUCCION de tests/security/verificar_denuncia.py:386
+# con el prefijo con el que la API la registra (app/principal.py:94, origen
+# "por defecto" al no haber CANARIO_LIMITES).
+LINEA_LIMITES_PRODUCCION = ("INFO canario.arranque: LIMITES (por defecto): acceso=10/300 cuenta=60/60 "
+                            "denuncia=10/3600 destinatario=3/900 destinatario_dia=10/86400 mensajes=30/3600 "
+                            "otras=60/60 registro=10/3600 seguimiento=60/60")
+# Override de Caddy de produccion (compose.produccion.yaml:75-96). Sin
+# build/image/pull_policy: la imagen es la que construye el compose local.
+YAML_CADDY_PRODUCCION = (
+    "services:\n"
+    "  caddy:\n"
+    '    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.produccion", "--adapter", "caddyfile"]\n'
+    "    ports: !reset []\n"
+    "networks:\n"
+    "  edge:\n"
+    "    internal: true\n")
 
 PUERTOS = (8443, 8444, 8445)
 # Las subredes fijas de las redes que crean los servicios que se levantan
@@ -136,6 +167,11 @@ TOPE_VUS = 600
 # peticiones agoten el plazo.
 SEGUNDOS_PLAZO = 15
 VUS_SONDA = 15
+# gracefulStop de todos los escenarios de k6 (l1.js, fases.js, l3.js) y
+# segundos que se conceden a k6 para inicializar los VUs (J13; el plazo de
+# lanzar_escalon ya incluia los 300).
+GRACEFUL_STOP_S = 20
+INICIALIZACION_S = 300
 
 # Protocolo que debe negociar k6 con Caddy (proxy/servidor.caddy: protocols
 # h1). Literal: si apareciera otro, se estaría midiendo otra pila.
@@ -1262,12 +1298,23 @@ def elegir_cpus(hermanas):
     return canario, sorted(k6), texto, sin_smt
 
 
-def preparar_overrides(temporal, cpus_canario):
+def preparar_overrides(temporal, cpus_canario, limites=LIMITES_ESTRES, caddy_produccion=False):
     """Los ficheros de compose adicionales, en el directorio temporal: el
-    docker-compose.yml del repo no cambia."""
-    limites = temporal / "limites_estres.yml"
-    limites.write_text(f"services:\n  api:\n    environment:\n      CANARIO_LIMITES: \"{LIMITES_ESTRES}\"\n",
-                       encoding="utf-8", newline="\n")
+    docker-compose.yml del repo no cambia.
+
+    limites: la cadena de CANARIO_LIMITES (por defecto, los de estres). Con
+    None NO se escribe el override: CANARIO_LIMITES se OMITE del entorno y la
+    API usa LIMITES_POR_DEFECTO (los de produccion). Una cadena vacia no
+    serviria: "" es un ErrorConfiguracion (app/limitador.py, cargar_limites).
+    caddy_produccion: Caddy con proxy/Caddyfile.produccion, como en
+    compose.produccion.yaml, pero SIN usar ese fichero entero (exige imagenes
+    canario-api con pull_policy never)."""
+    ficheros = []
+    if limites is not None:
+        fichero_limites = temporal / "limites_estres.yml"
+        fichero_limites.write_text(f"services:\n  api:\n    environment:\n      CANARIO_LIMITES: \"{limites}\"\n",
+                                   encoding="utf-8", newline="\n")
+        ficheros.append(fichero_limites)
     # cpuset y no cpus: con cpus (cuota de CFS) el planificador reparte la
     # pila por las 16 CPU de la VM y solo limita el tiempo total; con cpuset
     # todos los servicios compiten por los mismos 2 núcleos, como en el VPS.
@@ -1277,7 +1324,16 @@ def preparar_overrides(temporal, cpus_canario):
         lineas += [f"  {servicio}:", f"    cpuset: \"{lista}\""]
     cpuset = temporal / "cpuset_estres.yml"
     cpuset.write_text("\n".join(lineas) + "\n", encoding="utf-8", newline="\n")
-    return [limites, cpuset]
+    ficheros.append(cpuset)
+    if caddy_produccion:
+        # Los mismos tres cambios de compose.produccion.yaml sobre caddy: la
+        # orden con el Caddyfile de produccion, sin puertos publicados y la
+        # red edge interna (C5). Una red interna no puede publicar puertos, y
+        # en produccion Traefik llega a Caddy por esa red.
+        fichero_caddy = temporal / "caddy_produccion.yml"
+        fichero_caddy.write_text(YAML_CADDY_PRODUCCION, encoding="utf-8", newline="\n")
+        ficheros.append(fichero_caddy)
+    return ficheros
 
 
 def comando_postgres_resuelto():
@@ -1347,14 +1403,15 @@ def comprobar_literales_argon2():
                "HASHES_SIMULTANEOS = 2 (literales)")
 
 
-def comprobar_limites_api(ident):
-    """La línea entera de límites de estrés en el log de ESTA API (por id: la
-    API se recrea entre rutas) y RestartCount 0 recién arrancada."""
+def comprobar_limites_api(ident, linea=LINEA_LIMITES):
+    """La línea entera de límites (por defecto, la de estrés) en el log de ESTA
+    API (por id: la API se recrea entre rutas) y RestartCount 0 recién
+    arrancada. L3 y L3b pasan la de producción."""
     registro = ejecutar(["docker", "logs", ident]).todo
-    limites_ok = LINEA_LIMITES in [linea.rstrip("\r") for linea in registro.splitlines()]
-    pasa(limites_ok, f"la API usa los limites de estres y el log lo dice con la linea entera ({LINEA_LIMITES!r})")
+    limites_ok = linea in [linea_log.rstrip("\r") for linea_log in registro.splitlines()]
+    pasa(limites_ok, f"la API usa los limites esperados y el log lo dice con la linea entera ({linea!r})")
     if not limites_ok:
-        raise Parada("la API no anuncia los limites de estres: se mediria el limitador")
+        raise Parada("la API no anuncia los limites esperados: se mediria otra configuracion")
     reinicios = ejecutar(["docker", "inspect", "--format", "{{.RestartCount}}", ident]).out.strip()
     pasa(reinicios == "0", f"la API recien arrancada tiene RestartCount 0 (vale {reinicios!r})")
 
@@ -1372,7 +1429,7 @@ def argumentos_arranque(rep, servicios=("api", "caddy")):
     return ["up", "-d", construccion, "--wait", *servicios]
 
 
-def arrancar(servicios, cpus_canario, rep=1):
+def arrancar(servicios, cpus_canario, linea=LINEA_LIMITES, rep=1):
     p(f"=== arranque de la pila ({', '.join(servicios)})")
     argumentos = argumentos_arranque(rep, servicios)
     r = dc(*argumentos, timeout=1800)
@@ -1380,7 +1437,7 @@ def arrancar(servicios, cpus_canario, rep=1):
     if r.rc != 0:
         p(r.todo.strip()[-1500:])
         raise Parada("no arranca la pila")
-    comprobar_limites_api(dc("ps", "-q", "api").out.strip())
+    comprobar_limites_api(dc("ps", "-q", "api").out.strip(), linea)
     esperado = ",".join(str(c) for c in cpus_canario)
     vistos = {}
     # postgres y redis arrancan siempre (dependencias de la API); caddy, solo
@@ -1816,19 +1873,43 @@ def lanzar_escalon(ruta, paso, primero, control_tasa, identificador, contexto):
     (contexto["datos"] / "ejecucion.json").write_text(json.dumps(datos, indent=1), encoding="utf-8", newline="\n")
     salida = contexto["salida"] / nombre
     salida.mkdir()
+    # En el espacio de red de Caddy: localhost:8443 y :8444 son Caddy, con el
+    # mismo Host y SNI que desde el host, sin pasar por el proxy de puertos de
+    # Docker Desktop (que se mediría también).
+    k6 = ejecutar_k6(contexto, nombre, "l1.js", ["--network", f"container:{contexto['caddy']}"],
+                     inicio + paso["duracion_s"], salida)
+    res = analizar_escalon(ruta, paso, salida, k6["codigo"], k6["oom"], k6["registro"], k6["desfase"],
+                           contexto["stats_ruta"], k6["motivo_desfase"])
+    res["k6_id"] = k6["k6_id"]
+    res["inicio_vm"], res["fin_vm"] = k6["inicio_vm"], k6["fin_vm"]
+    # Los SIN CONCLUSION de la ejecución de k6 (A4) se fusionan en el resultado.
+    res["sin_conclusion"].extend(k6["sin_conclusion"])
+    return res
+
+
+def ejecutar_k6(contexto, nombre, script, args_red, duracion_s, salida):
+    """Una ejecución de k6 endurecida (A4). script: fichero de tests/estres
+    (montado de solo lectura en /prueba); args_red: los argumentos de red de
+    docker run (el espacio de red de Caddy en L1, L2 y L4; la red edge con IP
+    fija en L3 y L3b); duracion_s: lo que dura el escenario más largo contando
+    sus arranques con startTime; salida: carpeta de la ejecución.
+
+    El plazo de docker wait es duracion_s + GRACEFUL_STOP_S + INICIALIZACION_S
+    (J13). Devuelve un dict con el resultado de la ejecución y la LISTA de sus
+    SIN CONCLUSION ("sin_conclusion"): el start y el die de k6 que no llegan al
+    stream de eventos, los streamers muertos y la falta de StartedAt o
+    FinishedAt. Quien llama los fusiona en su resultado."""
     contenedor = f"{PREFIJO_EFIMEROS}k6_{nombre}"
+    sin_conclusion = []
     muertos_antes = comprobar_vida(contexto["vigilados"](), f"antes de {nombre}")
     desfase_inicio = medir_desfase()
     # Endurecido como el contenedor de Playwright de las funcionales: usuario
     # de la imagen, raíz de solo lectura, sin capacidades ni nuevos
     # privilegios, el script y los datos de solo lectura y solo /salida con
-    # escritura. En el espacio de red de Caddy: localhost:8443 y :8444 son
-    # Caddy, con el mismo Host y SNI que desde el host, sin pasar por el
-    # proxy de puertos de Docker Desktop (que se mediría también). cpuset
-    # aparte del de Canario. Sin --rm: docker inspect y docker logs se leen
-    # antes de borrarlo.
+    # escritura. cpuset aparte del de Canario. Sin --rm: docker inspect y
+    # docker logs se leen antes de borrarlo.
     r = ejecutar(["docker", "run", "-d", "--name", contenedor, "--label", "canario.estres=k6",
-                  "--network", f"container:{contexto['caddy']}",
+                  *args_red,
                   "--user", USUARIO_K6, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                   "--pids-limit", "1024", "--memory", MEMORIA_K6, "--cpuset-cpus", contexto["cpus_k6"],
                   "--tmpfs", "/tmp:size=64m", "-e", "HOME=/tmp", "-e", "K6_NO_USAGE_REPORT=true",
@@ -1837,16 +1918,16 @@ def lanzar_escalon(ruta, paso, primero, control_tasa, identificador, contexto):
                   "--mount", f"type=bind,src={DIR_ESTRES},dst=/prueba,readonly",
                   "--mount", f"type=bind,src={contexto['datos']},dst=/datos,readonly",
                   "--mount", f"type=bind,src={salida},dst=/salida",
-                  IMG_K6, "run", "--no-usage-report", "--out", "csv=/salida/k6.csv", "/prueba/l1.js"], timeout=900)
+                  IMG_K6, "run", "--no-usage-report", "--out", "csv=/salida/k6.csv", f"/prueba/{script}"],
+                 timeout=900)
     if r.rc != 0:
         raise Parada(f"no arranca el contenedor de k6: {r.err.strip()[-500:]!r}")
     k6_id = r.out.strip()
     # docker stats usa la hora del host y k6, docker events y el lector la de
-    # la VM: el desfase se mide al inicio y al final del escalón. Si no se
-    # puede medir o difiere en más de 1 s, la CPU del escalón es SIN
-    # CONCLUSION (antes se forzaba a 0 en silencio).
+    # la VM: el desfase se mide al inicio y al final. Si no se puede medir o
+    # difiere en más de 1 s, la CPU es SIN CONCLUSION (nunca se fuerza a 0).
     estadisticas = Estadisticas([contenedor], salida / "stats.txt")
-    plazo = inicio + paso["duracion_s"] + 300
+    plazo = duracion_s + GRACEFUL_STOP_S + INICIALIZACION_S
     try:
         r = ejecutar(["docker", "wait", contenedor], timeout=plazo)
         codigo = int(r.out.strip()) if r.rc == 0 and r.out.strip().lstrip("-").isdigit() else None
@@ -1863,23 +1944,21 @@ def lanzar_escalon(ruta, paso, primero, control_tasa, identificador, contexto):
     with contextlib.suppress(ValueError):
         estado_k6 = json.loads(ejecutar(["docker", "inspect", "--format", "{{json .State}}", contenedor]).out)
     ejecutar(["docker", "rm", "-f", contenedor])
-    res = analizar_escalon(ruta, paso, salida, codigo, bool(estado_k6.get("OOMKilled")), registro_k6, desfase,
-                           contexto["stats_ruta"], motivo_desfase)
-    res["k6_id"] = k6_id
-    res["inicio_vm"] = a_epoch(estado_k6.get("StartedAt", ""))
-    res["fin_vm"] = a_epoch(estado_k6.get("FinishedAt", ""))
-    if res["inicio_vm"] is None or res["fin_vm"] is None:
-        res["sin_conclusion"].append("no se pudo leer StartedAt/FinishedAt de k6: no hay ventana del escalon")
+    inicio_vm, fin_vm = a_epoch(estado_k6.get("StartedAt", "")), a_epoch(estado_k6.get("FinishedAt", ""))
+    if inicio_vm is None or fin_vm is None:
+        sin_conclusion.append("no se pudo leer StartedAt/FinishedAt de k6: no hay ventana del escalon")
     # Vida del detector: el start y el die de k6 deben estar en el stream (un
-    # control positivo gratuito en cada escalón) y todos los streamers vivos.
+    # control positivo gratuito en cada ejecución) y todos los streamers vivos.
     for accion in ("start", "die"):
         if not contexto["eventos"].esperar(lambda e, a=accion: e["id"] == k6_id and e["accion"] == a, CENTINELA_S):
-            res["sin_conclusion"].append(f"el stream de docker events no trajo el {accion} de k6: el detector no vio "
-                                         "el escalon")
+            sin_conclusion.append(f"el stream de docker events no trajo el {accion} de k6: el detector no vio "
+                                  "la ejecucion")
     muertos = muertos_antes + comprobar_vida(contexto["vigilados"](), f"despues de {nombre}")
     if muertos:
-        res["sin_conclusion"].append(f"streamers muertos durante el escalon: {sorted(set(muertos))}")
-    return res
+        sin_conclusion.append(f"streamers muertos durante la ejecucion: {sorted(set(muertos))}")
+    return {"k6_id": k6_id, "codigo": codigo, "oom": bool(estado_k6.get("OOMKilled")), "registro": registro_k6,
+            "desfase": desfase, "motivo_desfase": motivo_desfase, "inicio_vm": inicio_vm, "fin_vm": fin_vm,
+            "sin_conclusion": sin_conclusion}
 
 
 def analizar_escalon(ruta, paso, salida, codigo, oom, registro_k6, desfase, stats_ruta=None, motivo_desfase=None):
@@ -2088,6 +2167,15 @@ def resumir_limitador(lineas, arranques_redis):
     return {"total": total, "causas": causas, "esperas_pool": esperas_pool, "arranque": arranque,
             "arranques_redis": len(arranques_redis), "espera_anomala": espera_anomala,
             "campos_ajenos": campos_ajenos, "valores_ajenos": sorted(crudos)[:5]}
+
+
+def arranques_redis_desde(ej, t_ini):
+    """Marcas (reloj de la VM) de los eventos start de Redis desde t_ini. La
+    ventana de arranque del resumen del limitador cuenta desde ellas. Pura
+    salvo por la lectura de ej.eventos."""
+    return [e["t"] for e in ej.eventos.copia()
+            if e["t"] >= t_ini and e["clase"] == "canario" and e["servicio"] == "redis"
+            and e["accion"] == "start"]
 
 
 def senales_escalon(lineas_api, otras, res, arranques_redis):
@@ -2357,7 +2445,7 @@ PATRON_IMAGEN = re.compile(r"sha256:[0-9a-f]{64}")
 SERVICIOS_IMAGEN = ("api", "caddy")
 
 
-def comprobar_misma_imagen(referencia, actual, servicio, rep, *, ruta=None):
+def comprobar_misma_imagen(referencia, actual, servicio, rep, *, etiqueta=None):
     """PARADA si la imagen de `servicio` en la repetición `rep` no es la de la
     repetición 1. Pura. ¿Por qué un control y no fiarse de --no-build? Porque
     todo lo que se mide (el lector, el control positivo, la API de cada ruta)
@@ -2366,11 +2454,12 @@ def comprobar_misma_imagen(referencia, actual, servicio, rep, *, ruta=None):
     sea sha256:<64 hex> (docker inspect falló) también es PARADA: un fallo
     visible, nunca una comparación de dos vacíos que daría PASA.
 
-    Con `ruta`, la comparación es la de la API recreada para esa ruta: el
+    Con `etiqueta`, la comparación es la de la API recreada para esa ruta o
+    para ese sandwich de J5 (la `etiqueta` es el nombre de ruta o "J5"): el
     mensaje lo dice, para que la PARADA no se confunda con la del arranque de
-    la repetición. El mismo `donde` sirve a los dos mensajes, y sin `ruta` son
-    los de siempre."""
-    donde = f"la repeticion {rep}" if ruta is None else f"la API recreada para {ruta} (repeticion {rep})"
+    la repetición. El mismo `donde` sirve a los dos mensajes, y sin `etiqueta`
+    son los de siempre."""
+    donde = f"la repeticion {rep}" if etiqueta is None else f"la API recreada para {etiqueta} (repeticion {rep})"
     for ident in (referencia, actual):
         if not isinstance(ident, str) or not PATRON_IMAGEN.fullmatch(ident):
             raise Parada(f"no se obtiene un id de imagen sha256:<64 hex> de {servicio} en {donde}: "
@@ -2400,8 +2489,9 @@ def leer_imagen(ident, donde):
 def comprobar_imagenes(ej, rep):
     """Lee el .Image de los contenedores de api y caddy. En la repetición 1 se
     guardan como referencia (ej.imagenes) y ej.imagen, la de la API que usan el
-    lector y el control, se fija una sola vez. En las siguientes se comparan con
-    la referencia, ANTES de lanzar ningún lector."""
+    lector, el control, el cliente de control y la sonda de descartes, se fija
+    una sola vez. En las siguientes se comparan con la referencia, ANTES de
+    lanzar ningún lector."""
     actuales = {s: leer_imagen(ej.ids[s], f"{s} en la repeticion {rep}") for s in SERVICIOS_IMAGEN}
     if rep == 1:
         for s in SERVICIOS_IMAGEN:
@@ -2423,10 +2513,12 @@ def preparar_repeticion(ej, rep):
     """Todo lo previo al alta de la empresa: down -v (desde la 2), arranque,
     ids, comprobación de imágenes y control positivo inicial. El control
     inicial se hace solo en la repetición 1 (rep == 1 explícito, no "ej.imagen
-    es None"): la imagen es la misma en todas por la comprobación de imágenes."""
+    es None"): la imagen es la misma en todas por la comprobación de imágenes.
+    La usan ejecutar_repeticion (L1) y la rama de pila nueva de
+    ejecutar_repeticion_fases (L2, pico y la repetición 1 de L3 y L3b)."""
     if rep > 1:
         bajar_pila(ej)
-    arrancar(("api", "caddy"), ej.cpus_canario, rep)
+    arrancar(("api", "caddy"), ej.cpus_canario, ej.linea_limites, rep)
     ej.ids = ids_servicios()
     comprobar_imagenes(ej, rep)
     comprobar_postgres_args(ej)
@@ -2458,8 +2550,10 @@ def limpiar_efimeros():
 class Ejecucion:
     """Estado compartido de una ejecución de --l1."""
 
-    def __init__(self, t, datos, salida, cpus_canario, cpus_k6, escalera):
+    def __init__(self, t, datos, salida, cpus_canario, cpus_k6, escalera, linea_limites=LINEA_LIMITES):
         self.t, self.datos, self.salida, self.escalera = t, datos, salida, escalera
+        # La línea literal de límites vive aquí (A4): arrancar y recrear_api la usan.
+        self.linea_limites = linea_limites
         self.cpus_canario = cpus_canario
         self.cpus_k6 = ",".join(str(c) for c in cpus_k6)
         self.eventos = None
@@ -2509,20 +2603,43 @@ def bajar_pila(ej):
         raise Parada(f"down -v falla: {r.todo.strip()[-300:]!r}")
 
 
+# Plazos de recrear_api. MARGEN_RECREAR_API_S es el del subprocess (lo que el
+# lanzador espera a `docker compose up` entera) y ESPERA_SALUD_RECREAR_S es el
+# --wait-timeout de compose. ¿Por qué 30 s de diferencia? --wait-timeout solo
+# cronometra la espera de salud (compose v5.1.4, pkg/compose/start.go): no
+# cubre el stop de la API vieja (10 s por defecto, sin stop_grace_period) ni el
+# borrado de la vieja y la creación y arranque de la nueva (unos 20 s, que
+# compose no cronometra). Sin esa holgura, el plazo del subprocess vencería
+# antes que el de compose y la causa sería un TimeoutExpired mudo en vez de un
+# error de compose con su texto. Las dos cifras salen de una estimación (de 15 a
+# 25 s en total, sin medir): la línea `recrear_api:` que imprime la función las
+# contrasta con la medida real.
+MARGEN_RECREAR_API_S = 120
+ESPERA_SALUD_RECREAR_S = 90
+
+
 def argumentos_recreacion():
     """Argumentos de `docker compose` para recrear la API entre rutas. Pura.
     ¿Por qué --no-build? El servicio api tiene `build:` sin `image:` ni
     `pull_policy`, y sin --no-build compose construye si falta la imagen: la
     API de la ruta podría ser otra imagen que la medida en la repetición 1.
-    Con --no-build, si falta, el up falla y hay PARADA visible."""
-    return ["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait", "api"]
+    Con --no-build, si falta, el up falla y hay PARADA visible. ¿Por qué
+    --wait-timeout? Sin él, la espera de salud de compose no tiene más tope que
+    el plazo del subprocess y un healthcheck que nunca llega daría un
+    TimeoutExpired sin causa."""
+    return ["up", "-d", "--force-recreate", "--no-deps", "--no-build", "--wait",
+            "--wait-timeout", str(ESPERA_SALUD_RECREAR_S), "api"]
 
 
-def recrear_api(ej, rep, ruta):
-    """API nueva entre rutas (cada ruta parte de una API recién arrancada). El
-    die del id viejo es esperado; PostgreSQL, Redis y Caddy no deben cambiar de
-    id (k6 usa el espacio de red de Caddy por id). La imagen de la API recreada
-    se compara con la de la repetición 1, antes de lanzar el lector de la ruta."""
+def recrear_api(ej, rep, *, etiqueta):
+    """API nueva entre rutas o dentro del sandwich de J5 (cada ruta parte de
+    una API recién arrancada). `etiqueta` es el nombre de la ruta o "J5": solo
+    sirve para que los textos digan para qué se recrea, y va como argumento
+    con nombre para que una llamada vieja con dos o tres posicionales falle en
+    vez de mezclar los argumentos en silencio. El die del id viejo es esperado;
+    PostgreSQL, Redis y Caddy no deben cambiar de id (k6 usa el espacio de red
+    de Caddy por id). La imagen de la API recreada se compara con la de la
+    repetición 1, antes de lanzar el lector de la ruta."""
     # Sin la referencia no hay con qué comparar: PARADA antes de abrir la
     # ventana de mantenimiento, para no dejar una ventana sin recreación.
     if ej.imagenes is None:
@@ -2532,7 +2649,19 @@ def recrear_api(ej, rep, ruta):
                      "motivo": "recreacion de la API"}
     ej.mantenimientos.append(mantenimiento)
     argumentos = argumentos_recreacion()
-    r = dc(*argumentos, timeout=900)
+    # El try/finally envuelve SOLO a dc: la medida se imprime también si vence el
+    # plazo o si el código no es 0, y antes de la PARADA, que imprime quien la
+    # recoge. Dentro del finally no se llama a hora_motor_ahora (podría colgarse
+    # y esconder la causa). Si vence el plazo, "hasta" queda en None: la
+    # ejecución termina con PARADA y no hay veredicto que ese hueco pueda falsear.
+    inicio = time.monotonic()
+    try:
+        r = dc(*argumentos, timeout=MARGEN_RECREAR_API_S)
+    except subprocess.TimeoutExpired:
+        raise Parada(f"la API no se recrea en {MARGEN_RECREAR_API_S} s (plazo del lanzador)") from None
+    finally:
+        p(f"recrear_api: {time.monotonic() - inicio:.1f} s (plazo {MARGEN_RECREAR_API_S} s, "
+          f"espera de salud {ESPERA_SALUD_RECREAR_S} s)")
     mantenimiento["hasta"] = hora_motor_ahora()
     p(f"{' '.join(argumentos)} -> codigo {r.rc}")
     if r.rc != 0:
@@ -2548,10 +2677,10 @@ def recrear_api(ej, rep, ruta):
     ej.ids = nuevos
     # Siempre contra la referencia de la repetición 1, nunca contra la API
     # anterior: comparar en cadena dejaría pasar una deriva ya aceptada.
-    actual = leer_imagen(nuevos["api"], f"la API recreada para {ruta} (repeticion {rep})")
-    comprobar_misma_imagen(ej.imagenes["api"], actual, "api", rep, ruta=ruta)
-    pasa(True, f"repeticion {rep}, {ruta}: la API recreada tiene la imagen de la repeticion 1 ({actual})")
-    comprobar_limites_api(nuevos["api"])
+    actual = leer_imagen(nuevos["api"], f"la API recreada para {etiqueta} (repeticion {rep})")
+    comprobar_misma_imagen(ej.imagenes["api"], actual, "api", rep, etiqueta=etiqueta)
+    pasa(True, f"repeticion {rep}, {etiqueta}: la API recreada tiene la imagen de la repeticion 1 ({actual})")
+    comprobar_limites_api(nuevos["api"], ej.linea_limites)
 
 
 def mensaje_lector_sin_inicio(returncode, cola):
@@ -2653,7 +2782,7 @@ def ejecutar_ruta(ej, rep, ruta, n_ruta, ultima, contexto_rep):
     la ruta entera (calentamiento y reposos incluidos), y sus escalones."""
     pasos = ej.escalera[ruta]
     if n_ruta:
-        recrear_api(ej, rep, ruta)
+        recrear_api(ej, rep, etiqueta=ruta)
     p(f"=== repeticion {rep}, {ruta}")
     salida_rep = contexto_rep["salida"]
     with contextlib.ExitStack() as pila:
@@ -2852,9 +2981,13 @@ def ejecutar_repeticion(ej, rep, n_reps):
     p(f"   empresa de prueba de la repeticion {rep}: {ej.identificador}")
     rutas = []
     with contextlib.ExitStack() as pila:
-        registros = [Registro(s, salida_rep / f"log_{s}.txt") for s in ("redis", "postgres")]
-        for registro in registros:
+        # Cada Registro entra en la pila justo al crearse (PY-8): si el segundo
+        # falla al arrancar, el primero se para y no queda un docker logs huerfano.
+        registros = []
+        for servicio in ("redis", "postgres"):
+            registro = Registro(servicio, salida_rep / f"log_{servicio}.txt")
             pila.callback(registro.parar)
+            registros.append(registro)
         contexto = {"t": ej.t, "escalera": ej.escalera, "datos": ej.datos, "salida": salida_rep,
                     "caddy": ej.ids["caddy"], "cpus_k6": ej.cpus_k6, "registros": registros}
         for n_ruta, ruta in enumerate(ORDEN_RUTAS):
@@ -2863,9 +2996,7 @@ def ejecutar_repeticion(ej, rep, n_reps):
     otras = {s: leer_log(salida_rep / f"log_{s}.txt") for s in ("redis", "postgres")}
     # Arranques de Redis de esta repetición (mismo reloj de la VM que el log):
     # la ventana de arranque del resumen del limitador cuenta desde ellos.
-    arranques_redis = [e["t"] for e in ej.eventos.copia()
-                       if e["t"] >= t_ini and e["clase"] == "canario" and e["servicio"] == "redis"
-                       and e["accion"] == "start"]
+    arranques_redis = arranques_redis_desde(ej, t_ini)
     for r_ruta in rutas:
         lineas_api = leer_log(salida_rep / f"log_{r_ruta['ruta']}_api.txt")
         for res in r_ruta["resultados"]:
@@ -2967,26 +3098,2226 @@ def ejecutar_l1(t, datos, salida, cpus_canario, cpus_k6, repeticiones):
         p(f"   resultados: {salida / 'resultados.json'} y {salida / 'resultados.csv'}")
 
 
+# ---------------------------------------------------------------------------
+# L2, L3, L3b y L4: cifras congeladas y análisis puro, sin Docker (sus
+# pruebas: tests/estres/test_lanzar.py). Las cifras salen de la subsección
+# "Segunda congelación (22/11/2026)" de docs/informe-pruebas.md y de sus
+# erratas E1-E13. Todo veredicto vive aquí, separado de la E/S.
+# ---------------------------------------------------------------------------
+# t congelada: el valor que se pasa con --t. Con otra, las tasas ya no serían
+# las congeladas y el lanzador se detiene (PARADA).
+T_CONGELADA = 0.0196
+# Víctimas a tasa constante, en peticiones por segundo (L2, L3b y L4 en la BASE).
+TASA_VICTIMA = 5
+# N de L3b congelado (ceil(102,04 x 300 / 9)): si la derivación de las tasas
+# diera otro, PARADA. Es un literal, no se deriva del código que se prueba.
+N_IPS_ATAQUE_CONGELADO = 3402
+# 200 IPs de L3 a 1,5 peticiones por segundo cada una: 300/s.
+IPS_L3 = 200
+TASA_POR_IP_L3 = 1.5
+IPS_CONTROL_L3B = 10
+# Peticiones por IP y ventana de 300 s del ataque de L3b (límite de acceso: 10).
+PETICIONES_POR_IP_L3B = 9
+MARGEN_IPS = 1.5
+# Ventanas y límites de producción de las reglas que miden L3 y L3b.
+LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S = 60, 60
+LIMITE_ACCESO, VENTANA_ACCESO_S = 10, 300
+LIMITE_DENUNCIA, VENTANA_DENUNCIA_S = 10, 3600
+# Cifras congeladas como LITERALES (informe-pruebas.md, segunda congelacion). El
+# lanzador las deriva de t y de las reglas (tasas_de, n_ips_ataque,
+# ips_necesarias) y al arrancar las compara con estas: si no coinciden, PARADA
+# (comprobar_cifras_congeladas).
+TASA_INUNDACION_CONGELADA = 153.06
+TASA_LOGIN_PICO_CONGELADA = 102.04
+TASA_LOGIN_BASE_CONGELADA = 10.20
+IPS_DENUNCIA_CONGELADAS = 428
+IPS_SEGUIMIENTO_CONGELADAS = 8
+# Esquema de IPs simuladas: 198.18.0.0/15 (RFC 2544), sin las direcciones .0 y
+# .255 de cada /24. Al final del espacio quedan reservadas, fuera de todos los
+# rangos de L3 y L3b: 198.19.255.254 (control de strict, J6), 198.19.255.253
+# (sonda de salud), 198.19.255.252 (la otra IP del 71.o del control de strict,
+# S1) y el bloque con nombre "strict_falsas" de las 70 IPs falsas que rotan.
+INDICE_IP_STRICT = 130047
+INDICE_IP_SONDA = 130046
+INDICE_IP_S1 = 130045
+PETICIONES_STRICT = 70
+INICIO_STRICT_FALSAS = INDICE_IP_S1 - PETICIONES_STRICT
+IP_STRICT = "198.19.255.254"
+TAM_BLOQUE_REPETICION = 4096
+# Hosts de producción (proxy/Caddyfile.produccion). La API y el sitio del
+# denunciante son dos nombres; la SPA no interviene.
+HOST_API = "canario-api.eduumr.dev"
+HOST_WEB = "canario.eduumr.dev"
+IP_TRAEFIK = "10.88.1.2"
+IP_AJENA_EDGE = "10.88.1.3"
+RED_EDGE = PROYECTO + "_edge"
+# El 403 de solo_traefik (proxy/Caddyfile.produccion:42-46): lo pinta el
+# handle_errors de sitio_api (proxy/comun.caddy:221, el último respond) con el
+# estado 403. Literales, copiados de ahí.
+ESTADO_403 = 403
+CUERPO_403 = '{"detalle": "petición no válida"}'
+# Control de trusted_proxies_strict: 70 peticiones, las 60 primeras aceptadas
+# (404, seguimiento inexistente) y las 10 últimas 429 (límite seguimiento 60/60).
+# La 71.a (S1, diferencial) lleva "198.19.255.254, <otra IP reservada>": con
+# strict cuenta para la otra IP y da 404; sin strict, las 71 dan 404 (cuentan
+# para IPs distintas); sin confianza, todo cuenta para la IP de la conexion (429).
+ESTADOS_STRICT = [404] * 60 + [429] * 10 + [404]
+# Memoria de k6 por VU (L1, supuesto sin medir) y tope de MEMORIA_K6 (J12).
+MIB_POR_VU = 5
+# Cada VU de k6 interpreta /datos/ejecucion.json al inicializarse y guarda su
+# copia: MiB extra por VU = FACTOR_COPIAS_JSON x tamano del fichero en MiB. SIN
+# MEDIR; se fija con la sonda antes de L3b. Las listas de IPs van aparte, en
+# ips.json y en SharedArray de k6/data, y no cuentan aqui.
+FACTOR_COPIAS_JSON = 4
+MEMORIA_K6_MIB = 4096
+# Segundos que se descartan al principio de la RECUPERACIÓN (E11, B4):
+# gracefulStop de 20 s y plazo de 15 s de las peticiones en vuelo.
+EXCLUSION_RECUP_S = 20
+# Recuperación de L4 (F2, F3, E9).
+VENTANA_P95_S = 10
+SOSTENIDO_S = 30
+UMBRAL_RECUPERACION_S = 60
+MINIMO_BASE_OK = 0.95
+# Humo de L4: 120 s después del fin PROGRAMADO del pico (E10) y 10 s antes de
+# que empiece (el humo previo, justo antes del pico).
+HUMO_PREVIO_S, HUMO_POSTERIOR_S = 140, 300
+SLO_VICTIMAS_MS = {"denuncia": 1000, "seguimiento": 500, "web_seguimiento": 300}
+SLO_RUTAS_MS = {**SLO_VICTIMAS_MS, "login_email": 1500}
+ESTADO_RUTAS = {"denuncia": 201, "seguimiento": 404, "web_seguimiento": 200, "login_email": 401,
+                "sonda_salud": 405}
+RUTAS_FASES = ("denuncia", "seguimiento", "web_seguimiento", "login_email")
+# Todas las rutas con la misma función de k6 salvo estas.
+FUNCION_K6 = {"denuncia": "denuncia", "seguimiento": "seguimiento", "web_seguimiento": "web_seguimiento",
+              "login_email": "login_email", "sonda_salud": "sonda_salud"}
+PATRON_T0 = re.compile(r"T0_MS=(\d+)")
+PATRON_ALINEACION_PERDIDA = re.compile(r"ALINEACION_PERDIDA")
+# Cualquier código de seguimiento: el escáner anti-fuga busca este patrón
+# porque el código del humo solo existe dentro de k6. La API acepta
+# minúsculas, guiones y espacios (app/cripto.py, leer_codigo): se buscan los
+# 8 grupos de 4 separados por guiones en cualquier caso y los 32 caracteres
+# seguidos en mayúsculas. No se busca la variante con espacios ni la de 32
+# minúsculas seguidas: darian falsos positivos en logs en prosa y en
+# identificadores hexadecimales, y ninguna herramienta de esta bateria las
+# produce.
+PATRON_CODIGO = re.compile(rb"(?i:[A-Z2-7]{4}(?:-[A-Z2-7]{4}){7})|[A-Z2-7]{32}")
+
+
+def tasas_de(t):
+    """Las tasas que salen de t (docs/informe-pruebas.md, regla de las tasas):
+    la inundación de L2 (1,5 x 2/t), el login del pico de L4 y de L3b (2/t) y
+    el de la base de L4 (0,1 x 2/t), con dos decimales."""
+    return {"inundacion": round(1.5 * 2 / t, 2), "login_pico": round(2 / t, 2), "login_base": round(0.1 * 2 / t, 2)}
+
+
+def n_ips_ataque(tasa_login):
+    """IPs del ataque de L3b: 9 peticiones por IP en cada ventana de 300 s."""
+    return math.ceil(tasa_login * VENTANA_ACCESO_S / PETICIONES_POR_IP_L3B)
+
+
+def ips_necesarias(tasa, duracion_s, limite, ventana_s, margen=MARGEN_IPS):
+    """IPs que necesita una víctima (E4): peticiones en la parte de su
+    duración que cabe en una ventana, divididas entre el límite y por el
+    margen, redondeando hacia arriba. Denuncia: 5/s x 570 s / 10 x 1,5 = 428.
+    Seguimiento: 5/s x 60 s / 60 x 1,5 = 8."""
+    return math.ceil(tasa * min(duracion_s, ventana_s) / limite * margen)
+
+
+def ip_de_indice(i):
+    """IPv4 simulada número i de 198.18.0.0/15, sin .0 ni .255 de cada /24."""
+    if not 0 <= i <= INDICE_IP_STRICT:
+        raise ValueError(f"indice de IP fuera de rango: {i}")
+    bloque, resto = divmod(i, 254)
+    return f"198.{18 + bloque // 256}.{bloque % 256}.{resto + 1}"
+
+
+def bloques_ips(repeticion, roles):
+    """Bloques de índices de IP de una repetición: {rol: (inicio, n)}, en el
+    orden de roles ([(rol, n)]), consecutivos dentro del bloque de la
+    repetición. Cada repetición usa otro bloque (defensa en profundidad, J5)."""
+    base = (repeticion - 1) * TAM_BLOQUE_REPETICION
+    bloques, cursor = {}, base
+    for rol, n in roles:
+        bloques[rol] = (cursor, n)
+        cursor += n
+    return bloques
+
+
+def solapes_de_bloques(bloques):
+    """Pares de bloques que se solapan o que se salen del espacio permitido
+    (hasta el principio de las IPs reservadas, sin incluirlo). bloques:
+    {clave: (inicio, n)}."""
+    problemas = []
+    claves = sorted(bloques, key=lambda k: bloques[k][0])
+    for clave in claves:
+        inicio, n = bloques[clave]
+        if inicio < 0 or inicio + n > INDICE_IP_S1:
+            problemas.append(f"{clave}: [{inicio}, {inicio + n}) se sale del espacio de IPs permitido")
+    for a, b in itertools.pairwise(claves):
+        if bloques[a][0] + bloques[a][1] > bloques[b][0]:
+            problemas.append(f"{a} y {b} se solapan")
+    return problemas
+
+
+def plan_ips(modo, repeticiones, n_ataque=None):
+    """Bloques de IPs de todas las repeticiones, comprobados (E4): si se
+    solapan o no caben, PARADA. Devuelve {repeticion: {rol: [IPs]}}. L3: un
+    rol "carga" de 200 IPs. L3b: ataque, control y las tres víctimas."""
+    if modo == "l3":
+        roles = [("carga", IPS_L3)]
+    else:
+        roles = [("ataque", n_ataque), ("control", IPS_CONTROL_L3B),
+                 ("denuncia", ips_necesarias(TASA_VICTIMA, 570, LIMITE_DENUNCIA, VENTANA_DENUNCIA_S)),
+                 ("seguimiento", ips_necesarias(TASA_VICTIMA, 570, LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S)),
+                 ("web_seguimiento", ips_necesarias(TASA_VICTIMA, 570, LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S))]
+    if sum(n for _, n in roles) > TAM_BLOQUE_REPETICION:
+        raise Parada(f"los rangos de IPs de una repeticion ({sum(n for _, n in roles)}) no caben en "
+                     f"{TAM_BLOQUE_REPETICION}")
+    # El bloque con nombre de las IPs falsas de strict (S9) es el mismo en todas
+    # las repeticiones: entra una sola vez en la comprobacion de solapes.
+    todos = {("global", "strict_falsas"): (INICIO_STRICT_FALSAS, PETICIONES_STRICT)}
+    por_repeticion = {}
+    for rep in range(1, repeticiones + 1):
+        bloques = bloques_ips(rep, roles)
+        por_repeticion[rep] = bloques
+        todos.update({(rep, rol): b for rol, b in bloques.items()})
+    problemas = solapes_de_bloques(todos)
+    if problemas:
+        raise Parada(f"los rangos de IPs se solapan o no caben: {problemas}")
+    falsas = [ip_de_indice(i) for i in range(INICIO_STRICT_FALSAS, INICIO_STRICT_FALSAS + PETICIONES_STRICT)]
+    return {rep: {**{rol: [ip_de_indice(i) for i in range(inicio, inicio + n)] for rol, (inicio, n) in bloques.items()},
+                  "strict_falsas": list(falsas)}
+            for rep, bloques in por_repeticion.items()}
+
+
+# --- ventanas del limitador -------------------------------------------------
+def ventana_de_peticion(inicio_s, fin_s, ventana_s):
+    """(índice de ventana por la hora de INICIO, ambigua). Una petición es
+    ambigua si el intervalo [inicio, fin] cruza una frontera de ventana (C1):
+    no se sabe en qué contador cayó. El intervalo es [marca - duración, marca]
+    de la fila http_req_duration; no incluye el tiempo de conexión (en HTTP
+    con conexiones reutilizadas es despreciable)."""
+    a, b = math.floor(inicio_s / ventana_s), math.floor(fin_s / ventana_s)
+    return a, a != b
+
+
+def contar_por_ip_ventana(filas, ventana_s, aceptado):
+    """Recuento por (IP, ventana). filas: dicts con ip, inicio, fin (segundos
+    desde 1970) y estado. Solo cuenta el estado ACEPTADO (J3: 404 en L3, 401 en
+    L3b); los 503 van aparte y todo lo demás en "otros". Cada par lleva sus
+    peticiones ordenadas por inicio, para el control positivo (J2), y las
+    ambiguas que cruzan su frontera inicial ("ambiguas_inicio")."""
+    pares = {}
+
+    def par(clave):
+        return pares.setdefault(clave, {"aceptadas": 0, "aceptadas_ambiguas": 0, "aceptadas_ambiguas_inicio": 0,
+                                        "n429": 0, "n503": 0, "otros": 0, "ambiguas": 0, "ambiguas_inicio": 0,
+                                        "peticiones": []})
+
+    for f in filas:
+        ventana, ambigua = ventana_de_peticion(f["inicio"], f["fin"], ventana_s)
+        p_ = par((f["ip"], ventana))
+        p_["peticiones"].append((f["inicio"], f["estado"], ambigua))
+        if ambigua:
+            p_["ambiguas"] += 1
+            siguiente = par((f["ip"], ventana + 1))
+            siguiente["ambiguas_inicio"] += 1
+            if f["estado"] == aceptado:
+                siguiente["aceptadas_ambiguas_inicio"] += 1
+        if f["estado"] == aceptado:
+            p_["aceptadas_ambiguas" if ambigua else "aceptadas"] += 1
+        elif f["estado"] == 429:
+            p_["n429"] += 1
+        elif f["estado"] == 503:
+            p_["n503"] += 1
+        else:
+            p_["otros"] += 1
+    for p_ in pares.values():
+        p_["peticiones"].sort()
+    return pares
+
+
+def retry_after_valido(valor, ventana_s):
+    """Retry-After de un 429 (E7): un entero entre 1 y la ventana (60 en L3,
+    300 en L3b). El -1 que anota l3.js cuando falta o no son dígitos no vale."""
+    return (isinstance(valor, (int, float)) and not isinstance(valor, bool) and float(valor).is_integer()
+            and 1 <= valor <= ventana_s)
+
+
+def retry_after_invalidos(valores, n429, ventana_s):
+    """Cuántos 429 no tienen un Retry-After válido: los valores fuera de rango
+    más los 429 que no dejaron ninguna fila de la métrica retry_after_s."""
+    return sum(1 for v in valores if not retry_after_valido(v, ventana_s)) + max(0, n429 - len(valores))
+
+
+def veredicto_l3(pares, limite, retry_invalidos=0):
+    """Oráculo por IP y ventana (C1, E7). Devuelve (veredicto, texto).
+    FALLA: algún par con más de `limite` aceptadas NO ambiguas, o algún 429
+    sin Retry-After válido. SIN CONCLUSION: solo se pasa de `limite` contando
+    las ambiguas. PASA en otro caso."""
+    pasan = sorted(((c, p_["aceptadas"]) for c, p_ in pares.items() if p_["aceptadas"] > limite))
+    if pasan:
+        return "FALLA", f"{len(pasan)} pares IP-ventana con mas de {limite} aceptadas no ambiguas (ejemplo {pasan[0]})"
+    if retry_invalidos:
+        return "FALLA", f"{retry_invalidos} respuestas 429 sin Retry-After valido"
+    # Cuentan tambien las aceptadas ambiguas de la ventana anterior, que pudieron
+    # caer en esta (H11), igual que control_l3 con ambiguas_inicio.
+    dudosos = [c for c, p_ in pares.items()
+               if p_["aceptadas"] + p_["aceptadas_ambiguas"] + p_["aceptadas_ambiguas_inicio"] > limite]
+    if dudosos:
+        return "SIN CONCLUSION", f"{len(dudosos)} pares solo pasan de {limite} contando peticiones ambiguas"
+    return "PASA", f"ningun par IP-ventana pasa de {limite} aceptadas ({sum(1 for x in pares.values() if x["peticiones"])} pares con peticiones)"
+
+
+def control_l3(pares, limite):
+    """Control positivo de L3 y L3b (J2, validez, E5): en cada par no son 429
+    las primeras (limite - ambiguas al inicio del par - peticiones previas del
+    par con estado 0 o 503) peticiones NO ambiguas. Devuelve (ok, motivos)."""
+    motivos = []
+    for clave, p_ in sorted(pares.items()):
+        previas, j = 0, 0
+        for _, estado, ambigua in p_["peticiones"]:
+            if ambigua:
+                continue
+            if estado == 429 and j < limite - p_["ambiguas_inicio"] - previas:
+                motivos.append(f"{clave}: 429 en la peticion no ambigua {j + 1} (protegidas "
+                               f"{limite - p_['ambiguas_inicio'] - previas})")
+                break
+            if estado in (0, 503):
+                previas += 1
+            j += 1
+    return not motivos, motivos[:5]
+
+
+def maximo_deslizante(inicios_por_ip, tramo_s=60):
+    """Máximo de peticiones aceptadas por una IP en cualquier tramo de tramo_s
+    segundos (el defecto de la ventana fija, l.695: se espera como mucho el
+    doble del límite). inicios_por_ip: {ip: [inicio, ...]}. Devuelve (máximo, ip)."""
+    mejor = (0, None)
+    for ip, inicios in inicios_por_ip.items():
+        inicios = sorted(inicios)
+        izquierda = 0
+        for derecha, t in enumerate(inicios):
+            while t - inicios[izquierda] >= tramo_s:
+                izquierda += 1
+            if derecha - izquierda + 1 > mejor[0]:
+                mejor = (derecha - izquierda + 1, ip)
+    return mejor
+
+
+def evaluar_d3(por_ip, ventana_s=VENTANA_ACCESO_S, limite=LIMITE_ACCESO):
+    """Control de que el límite está activo en L3b (D3, E6, validez). por_ip:
+    {ip: [{"inicio","fin","estado"} x (limite + 1), en orden]}. Las 11
+    peticiones deben caer en la misma ventana y ninguna ser ambigua; las 10
+    primeras, 401; solo entonces la 11.ª debe ser 429. Cualquier otra cosa es
+    SIN CONCLUSION (nunca FALLA). Devuelve (veredicto, motivos)."""
+    motivos = []
+    for ip, peticiones in sorted(por_ip.items()):
+        if len(peticiones) != limite + 1:
+            motivos.append(f"{ip}: {len(peticiones)} peticiones, se esperaban {limite + 1}")
+            continue
+        ventanas = [ventana_de_peticion(x["inicio"], x["fin"], ventana_s) for x in peticiones]
+        if any(a for _, a in ventanas) or len({v for v, _ in ventanas}) != 1:
+            motivos.append(f"{ip}: las peticiones no caen todas en la misma ventana o alguna es ambigua")
+            continue
+        if any(x["estado"] != 401 for x in peticiones[:limite]):
+            motivos.append(f"{ip}: alguna de las {limite} primeras no es 401 ({[x['estado'] for x in peticiones]})")
+            continue
+        if peticiones[limite]["estado"] != 429:
+            motivos.append(f"{ip}: la peticion {limite + 1} da {peticiones[limite]['estado']}, no 429")
+    return ("SIN CONCLUSION", motivos) if motivos else ("PASA", [])
+
+
+# --- relojes y fronteras ----------------------------------------------------
+def proxima_frontera(ahora, periodo_s, margen_s):
+    """Primer múltiplo de periodo_s (frontera de minuto o de 5 minutos UTC)
+    que queda al menos margen_s después de ahora."""
+    return math.ceil((ahora + margen_s) / periodo_s) * periodo_s
+
+
+def cruza_frontera(inicio, fin, periodo_s):
+    """Si el intervalo [inicio, fin] cruza una frontera de periodo_s segundos
+    (minuto UTC en el control de strict, 00:00 UTC con 86400)."""
+    return math.floor(inicio / periodo_s) != math.floor(fin / periodo_s)
+
+
+def evaluar_control_strict(estados, cruza):
+    """Control de trusted_proxies_strict (C2, J6, S1): 70 peticiones con
+    X-Forwarded-For "<IP falsa que rota>, 198.19.255.254" deben contar todas
+    para 198.19.255.254 (60 aceptadas y 10 429) y una 71.a con "198.19.255.254,
+    <otra IP reservada>" debe dar 404: cuenta para la IP de la derecha, que no
+    esta saturada. El diferencial distingue los tres fallos de configuracion:
+    sin strict (Caddy toma la IP de la izquierda: las 70 cuentan para las IPs
+    falsas, una vez cada una, y la 71.a, con 198.19.255.254 a la izquierda, cuenta
+    para esa IP, que nunca se contó: las 71 dan 404), sin confianza en 10.88.1.2
+    (todo cuenta para la IP de la conexion y la 71.a da 429) y strict activo. Si cruzan la
+    frontera de minuto, SIN CONCLUSION; si el patron no es el esperado, PARADA."""
+    if cruza:
+        return "SIN CONCLUSION", "las 71 peticiones cruzan una frontera de minuto UTC"
+    estados = list(estados)
+    if estados == ESTADOS_STRICT:
+        return "PASA", "60 aceptadas, 10 429 para 198.19.255.254 y la 71.a cuenta para la otra IP: strict lee de derecha a izquierda"
+    if estados[:70] == [404] * 70:
+        causa = "sin strict: Caddy toma la IP de la izquierda y ninguna cuenta para 198.19.255.254"
+    elif estados[:60] == [404] * 60 and estados[60:] == [429] * (len(estados) - 60):
+        causa = "sin confianza en 10.88.1.2: todo cuenta para la IP de la conexion"
+    else:
+        causa = "patron inesperado"
+    return "PARADA", f"estados {estados} distintos de 60 x 404, 10 x 429 y 404 ({causa}): trusted_proxies_strict no actua"
+
+
+def evaluar_control_403(estado, cuerpo):
+    """El 403 de solo_traefik (C3, E11): el estado Y el cuerpo JSON literal del
+    handle_errors. Con otro Host que el de produccion daria 421."""
+    if estado == ESTADO_403 and cuerpo == CUERPO_403:
+        return "PASA", "403 con el cuerpo literal de handle_errors"
+    return "PARADA", f"estado {estado} y cuerpo {cuerpo!r}, se esperaba {ESTADO_403} y {CUERPO_403!r}"
+
+
+def evaluar_control_421(estado):
+    """Una petición con el Host de produccion desde 10.88.1.2 llega a la API
+    (POST /salud da 405). Un 421 es el sitio por defecto: el Host no llega
+    (E11: PARADA)."""
+    if estado == 405:
+        return "PASA", "el Host de produccion llega a la API (405)"
+    return "PARADA", f"estado {estado} con el Host de produccion, se esperaba 405 (421 = sitio por defecto)"
+
+
+# --- L2 y L3b: víctimas -----------------------------------------------------
+def degradada(p95_base, p95_carga, slo):
+    """Criterio de degradación (informe-pruebas.md, sección 3): el p95 supera
+    max(2 x base, base + 100 ms), o supera el SLO de la ruta."""
+    return p95_carga > max(2 * p95_base, p95_base + 100) or p95_carga > slo
+
+
+def veredicto_victima(p95_base, carga, slo, descartes_con_aviso):
+    """B1: una víctima en la inundación o el ataque. carga: {"peticiones",
+    "p95_ms", "tasa_errores"} (error = estado distinto del esperado, plazos y
+    conexiones cortadas incluidos). FALLA si está degradada, supera el SLO,
+    tiene un 1 % o más de errores o tiene descartes con el aviso; una víctima
+    sin respuestas (caída) es FALLA. Devuelve (veredicto, motivos)."""
+    if not carga.get("peticiones") or carga.get("p95_ms") is None:
+        return "FALLA", ["sin respuestas durante la carga (victima caida)"]
+    motivos = []
+    if degradada(p95_base, carga["p95_ms"], slo):
+        motivos.append(f"p95 {carga['p95_ms']:.0f} ms degradado frente a {p95_base:.0f} ms o por encima del SLO de "
+                       f"{slo} ms")
+    if carga["tasa_errores"] >= 0.01:
+        motivos.append(f"errores {carga['tasa_errores']:.2%}")
+    if descartes_con_aviso > 0:
+        motivos.append(f"{descartes_con_aviso} descartes con Insufficient VUs")
+    return ("FALLA", motivos) if motivos else ("PASA", [])
+
+
+def veredicto_l2(victimas):
+    """El de la peor víctima (FALLA si alguna lo es). victimas:
+    {ruta: (veredicto, motivos)}. El control de que el ataque existe (B2) no
+    entra aquí: lo aplica veredicto_con_validez, que es el único sitio donde
+    se combinan los controles con el resultado (J1)."""
+    return peor_estado([v for v, _ in victimas.values()])
+
+
+def es_error_login(estado):
+    """Error del login en B2 (E8): conexión cortada (0) o 5xx que no sea 503.
+    Los 503 del login inundado son el diseño y se informan aparte."""
+    return estado == 0 or (500 <= estado <= 599 and estado != 503)
+
+
+def ataque_efectivo(p95_ms, tasa_errores, descartes_con_aviso):
+    """B2, control de que el ataque existe: solo métricas del login (p95 por
+    encima de 1500 ms, 1 % o más de errores según es_error_login o descartes
+    con el aviso). La CPU de la API y la tasa servida solo se informan."""
+    return ((p95_ms is not None and p95_ms > 1500) or (tasa_errores is not None and tasa_errores >= 0.01)
+            or descartes_con_aviso > 0)
+
+
+def mediana_p95(valores):
+    """Mediana de los p95 de las repeticiones (A1). Un p95 None (sin
+    respuestas: la victima cayo) cuenta como infinito (H5): ignorarlo haria
+    parecer sana a una ruta que no contesto. None si no hay ninguna repeticion."""
+    return statistics.median(math.inf if v is None else v for v in valores) if valores else None
+
+
+# Motivo con el que veredicto_con_validez da FALLA por la muerte de un servicio de
+# Canario: linea_l3b_b lo usa para distinguir esa FALLA de la de las victimas.
+MOTIVO_MUERTE = "murio un servicio de Canario"
+
+
+def veredicto_con_validez(resultado, fallos_validez, control_ataque, muertes=()):
+    """Combina el resultado de los oraculos con los controles (J1, E5, H2).
+
+    resultado: "PASA", "FALLA" o "SIN CONCLUSION". fallos_validez: lista de
+    {"motivo"}; la validez gana a FALLA (peor_estado NO se usa aqui: daria
+    FALLA sobre SIN CONCLUSION). control_ataque: True, False o None (no
+    aplica); es el UNICO control que solo rebaja un PASA, nunca una FALLA.
+    muertes: lista de los veredictos de veredicto_muerte de cada servicio de
+    Canario que murio. Si alguna es FALLA, el resultado es FALLA y no lo
+    rebaja ningun fallo de validez (H10: la muerte gana a todo); solo si TODAS
+    son el OOM global de la VM, SIN CONCLUSION, como en L1. Devuelve
+    (veredicto, motivos)."""
+    if muertes:
+        if "FALLA" in muertes:
+            return "FALLA", [MOTIVO_MUERTE] + [f["motivo"] for f in fallos_validez]
+        return "SIN CONCLUSION", ["OOM global de la VM: la muerte de un servicio no se atribuye a Canario"]
+    if fallos_validez:
+        return "SIN CONCLUSION", [f["motivo"] for f in fallos_validez]
+    if resultado == "SIN CONCLUSION":
+        return "SIN CONCLUSION", ["los oraculos no concluyen"]
+    if resultado == "PASA" and control_ataque is False:
+        return "SIN CONCLUSION", ["el control de que el ataque existe no se cumple: no hubo ataque que aislar"]
+    return resultado, []
+
+
+def combinar_resultados(resultados):
+    """Los resultados de los oraculos de las repeticiones se combinan con
+    peor_estado (FALLA > SIN CONCLUSION > PASA, H3); la validez entra aparte,
+    por fallos, en veredicto_con_validez. Asi L3 y L3b se combinan igual."""
+    return peor_estado(resultados)
+
+
+# --- estadística de filas de k6 ---------------------------------------------
+def resumen_filas(filas, esperado, es_error=None):
+    """Resumen de filas de una ruta y fase: peticiones, p50/p95/p99,
+    recuento de estados, errores y su tasa. es_error: función estado -> bool;
+    por defecto, estado distinto del esperado (B1)."""
+    if es_error is None:
+        def es_error(estado):
+            return estado != esperado
+    duraciones = sorted(f["dur"] for f in filas)
+    errores = sum(1 for f in filas if es_error(f["estado"]))
+    estados = collections.Counter(f["estado"] for f in filas)
+    n = len(filas)
+    return {"peticiones": n, "p50_ms": percentil(duraciones, 50), "p95_ms": percentil(duraciones, 95),
+            "p99_ms": percentil(duraciones, 99), "errores": errores, "tasa_errores": errores / n if n else None,
+            "estados": dict(sorted(estados.items())), "n503": estados.get(503, 0), "n429": estados.get(429, 0),
+            "proporcion_esperado": estados.get(esperado, 0) / n if n else None}
+
+
+def ventanas_p95(muestras, desde_s, hasta_s, ancho_s=VENTANA_P95_S, paso_s=1):
+    """p95 en ventanas [s, s + ancho) que avanzan de paso_s en paso_s desde
+    desde_s mientras s + ancho <= hasta_s (E9: cada petición cuenta en TODAS
+    las ventanas que contienen su inicio). muestras: [(inicio_s, duracion_ms)].
+    Devuelve [(s, p95 o None, n)]."""
+    ordenadas = sorted(muestras)
+    inicios = [m[0] for m in ordenadas]
+    salida, s = [], desde_s
+    while s + ancho_s <= hasta_s:
+        lo, hi = bisect.bisect_left(inicios, s), bisect.bisect_left(inicios, s + ancho_s)
+        duraciones = sorted(d for _, d in ordenadas[lo:hi])
+        salida.append((s, percentil(duraciones, 95), len(duraciones)))
+        s += paso_s
+    return salida
+
+
+def serie_cumple(ventanas, p95_base, slo, descartes, ancho_s=VENTANA_P95_S):
+    """[(s, cumple)] de una ruta: la ventana cumple si tiene p95, no está
+    degradada frente a su BASE (degradada incluye el SLO) y no contiene ningún
+    descarte de k6 (un descarte es saturación: sin él, las peticiones perdidas
+    harían ver la recuperación antes de tiempo). descartes: marcas en segundos."""
+    return [(s, p95 is not None and not degradada(p95_base, p95, slo)
+             and not any(s <= d < s + ancho_s for d in descartes)) for s, p95, _ in ventanas]
+
+
+def segundos_hasta_recuperar(series_por_ruta, fin_pico_s, sostenido=SOSTENIDO_S):
+    """Tiempo de recuperación (F2, E9): s0 menos el fin programado del pico,
+    con s0 el primer inicio de ventana a partir del cual TODAS las rutas
+    cumplen en `sostenido` ventanas consecutivas (inicios s0..s0+sostenido-1).
+    Solo cuentan ventanas que empiezan después del fin del pico. None si no
+    se recupera. series_por_ruta: {ruta: [(s, cumple)]} con paso de 1 s."""
+    mapas = [dict(serie) for serie in series_por_ruta.values()]
+    if not mapas:
+        return None
+    comunes = sorted(s for s in set.intersection(*(set(m) for m in mapas)) if s >= fin_pico_s)
+    for s0 in comunes:
+        if all(all(m.get(s0 + k) for m in mapas) for k in range(sostenido)):
+            return s0 - fin_pico_s
+    return None
+
+
+def control_base_f2(series_por_ruta, sostenido=SOSTENIDO_S, minimo=MINIMO_BASE_OK):
+    """Control de F2 sobre la propia BASE (E5, validez): el mismo cálculo debe
+    encadenar `sostenido` ventanas seguidas dentro del criterio y al menos el
+    95 % de sus ventanas debe cumplirlo. Devuelve (ok, fraccion, motivo)."""
+    mapas = [dict(serie) for serie in series_por_ruta.values()]
+    comunes = sorted(set.intersection(*(set(m) for m in mapas))) if mapas else []
+    if not comunes:
+        return False, 0.0, "la BASE no tiene ventanas"
+    cumplen = [all(m[s] for m in mapas) for s in comunes]
+    fraccion = sum(cumplen) / len(cumplen)
+    encadena = segundos_hasta_recuperar(series_por_ruta, comunes[0], sostenido) is not None
+    if not encadena:
+        return False, fraccion, f"la BASE no encadena {sostenido} ventanas seguidas dentro del criterio"
+    if fraccion < minimo:
+        return False, fraccion, f"solo el {fraccion:.1%} de las ventanas de la BASE cumple (minimo {minimo:.0%})"
+    return True, fraccion, f"el {fraccion:.1%} de las ventanas de la BASE cumple"
+
+
+def mediana_recuperacion(tiempos):
+    """Mediana de los tiempos de recuperación de las repeticiones; una que no
+    se recupera (None) cuenta como infinito (E9)."""
+    return statistics.median(math.inf if t is None else t for t in tiempos)
+
+
+def veredicto_recuperacion(mediana, reinicios, humo_ok):
+    """F3: PASA si la mediana es menor de 60 s, sin reinicios y con el humo
+    posterior correcto; si no, FALLA (H6 refutada). El humo previo y el
+    control de la BASE son de validez y no entran aquí."""
+    motivos = []
+    if not mediana < UMBRAL_RECUPERACION_S:
+        motivos.append("no se recupera en los 180 s" if mediana == math.inf
+                       else f"recuperacion en {mediana:.0f} s (60 s o mas)")
+    if reinicios:
+        motivos.append(f"{reinicios} reinicios de contenedores")
+    if not humo_ok:
+        motivos.append("el humo posterior falla")
+    return ("FALLA", motivos) if motivos else ("PASA", [])
+
+
+# --- presupuesto de memoria de k6 (J12) -------------------------------------
+def presupuesto_k6_mib(escenarios, humos=0, bytes_json=0):
+    """Memoria estimada de k6 por VUs preasignados: MIB_POR_VU por VU (el
+    supuesto sin medir de L1) mas FACTOR_COPIAS_JSON veces el tamano de
+    ejecucion.json por VU (PY-1; sin medir). Cada escenario reserva sus VUs al
+    empezar, aunque su startTime sea posterior."""
+    vus = sum(e["vus"] for e in escenarios) + humos
+    return math.ceil(vus * (MIB_POR_VU + FACTOR_COPIAS_JSON * bytes_json / 1048576))
+
+
+def comprobar_presupuesto(escenarios, humos=0, bytes_json=0):
+    """J12: si la estimación pasa de 4 GiB (MEMORIA_K6), PARADA."""
+    mib = presupuesto_k6_mib(escenarios, humos, bytes_json)
+    if mib > MEMORIA_K6_MIB:
+        raise Parada(f"k6 necesitaria unos {mib} MiB por {sum(e['vus'] for e in escenarios) + humos} VUs preasignados, "
+                     f"mas de los {MEMORIA_K6_MIB} MiB de MEMORIA_K6 (J12)")
+    return mib
+
+
+def holgura_insuficiente(escenarios):
+    """Escenarios cuyos VUs no superan, en segundos de tasa, el SLO de su ruta:
+    un descarte con aviso no probaria que Canario se saturó sino que el
+    generador se quedó corto (comprobación de lanzar_escalon). Devuelve nombres."""
+    return [e["nombre"] for e in escenarios
+            if e["ruta"] in SLO_RUTAS_MS and e["vus"] / (e["rate"] / e["time_unit_s"]) <= SLO_RUTAS_MS[e["ruta"]] / 1000]
+
+
+# --- construcción de los escenarios (el lanzador calcula, k6 transcribe) -----
+def fases_de(modo):
+    """Fases de cada prueba como [{"nombre","desde_s","hasta_s"}]. "carga" es
+    la inundación (L2), el pico (L4) o el ataque (L3b)."""
+    duraciones = {"l2": (30, 120, 120, 120), "pico": (30, 120, 30, 180), "l3b": (30, 120, 300, 120)}[modo]
+    nombres, desde, resultado = ("cal", "base", "carga", "recup"), 0, []
+    for nombre, d in zip(nombres, duraciones, strict=True):
+        resultado.append({"nombre": nombre, "desde_s": desde, "hasta_s": desde + d})
+        desde += d
+    return resultado
+
+
+def fase_por_nombre(fases, nombre):
+    return next(f for f in fases if f["nombre"] == nombre)
+
+
+def escenarios_l2(tasas):
+    """L2: una víctima por ruta durante toda la ejecución (50 VUs, 10 s de
+    holgura a 5/s), la sonda de salud y la inundación del login contra la
+    empresa A en su fase, con 600 VUs (TOPE_VUS)."""
+    fases = fases_de("l2")
+    total = fases[-1]["hasta_s"]
+    carga = fase_por_nombre(fases, "carga")
+    esc = [{"nombre": ruta, "funcion": FUNCION_K6[ruta], "ruta": ruta, **tramo(TASA_VICTIMA, total, 0, 50)}
+           for ruta in SLO_VICTIMAS_MS]
+    esc.append({"nombre": "sonda_salud", "funcion": "sonda_salud", "ruta": "sonda_salud",
+                **tramo(1, total, 0, VUS_SONDA)})
+    esc.append({"nombre": "login_email", "funcion": "login_email", "ruta": "login_email",
+                **tramo(tasas["inundacion"], carga["hasta_s"] - carga["desde_s"], carga["desde_s"], TOPE_VUS)})
+    return esc
+
+
+# VUs de L4 por ruta y fase (J12): base (calentamiento, BASE y RECUPERACION) y
+# pico. Suman 747 con la sonda y los dos humos (unos 3,6 GiB). Todos dan una
+# holgura mayor que el SLO de su ruta (holgura_insuficiente lo comprueba).
+VUS_PICO = {"base": {"denuncia": 16, "seguimiento": 16, "web_seguimiento": 16, "login_email": 32},
+            "pico": {"denuncia": 80, "seguimiento": 80, "web_seguimiento": 80, "login_email": 250}}
+
+
+def escenarios_pico(tasas):
+    """L4 (F1): un escenario constant-arrival-rate por ruta y fase, con
+    startTime, para atribuir los descartes a su ruta. Base: 5/s por víctima y
+    el login a 0,1 x 2/t; pico, x 10 (el login, 2/t)."""
+    fases = fases_de("pico")
+    esc = []
+    for ruta in RUTAS_FASES:
+        base = tasas["login_base"] if ruta == "login_email" else TASA_VICTIMA
+        for fase in fases:
+            pico = fase["nombre"] == "carga"
+            tasa = tasas["login_pico"] if pico and ruta == "login_email" else (base * 10 if pico else base)
+            vus = VUS_PICO["pico" if pico else "base"][ruta]
+            esc.append({"nombre": f"{ruta}__{fase['nombre']}", "funcion": FUNCION_K6[ruta], "ruta": ruta,
+                        **tramo(tasa, fase["hasta_s"] - fase["desde_s"], fase["desde_s"], vus)})
+    esc.append({"nombre": "sonda_salud", "funcion": "sonda_salud", "ruta": "sonda_salud",
+                **tramo(1, fases[-1]["hasta_s"], 0, VUS_SONDA)})
+    return esc
+
+
+def escenarios_l3(ips):
+    """L3: 200 IPs a 1,5/s cada una, 300 s, seguimiento inexistente, con 600
+    VUs (2 s de holgura, mayor que el SLO de 0,5 s) y la sonda de salud."""
+    return [{"nombre": "seguimiento_ips", "funcion": "seguimiento_ip", "ruta": "seguimiento", "ips": ips["carga"],
+             "etiquetar_ip": True, **tramo(len(ips["carga"]) * TASA_POR_IP_L3, 300, 0, TOPE_VUS)},
+            {"nombre": "sonda_salud", "funcion": "sonda_salud", "ruta": "sonda_salud",
+             "ips": [ip_de_indice(INDICE_IP_SONDA)], "etiquetar_ip": False, **tramo(1, 300, 0, VUS_SONDA)}]
+
+
+def escenarios_l3b(tasas, ips):
+    """L3b: el ataque de L2 (login contra la empresa A, 2/t desde N IPs) con
+    las víctimas de L2, cada una desde su propio rango de IPs, y la sonda."""
+    fases = fases_de("l3b")
+    total = fases[-1]["hasta_s"]
+    carga = fase_por_nombre(fases, "carga")
+    esc = [{"nombre": "login_ataque", "funcion": "login_ataque", "ruta": "login_email", "ips": ips["ataque"],
+            "etiquetar_ip": True, **tramo(tasas["login_pico"], carga["hasta_s"] - carga["desde_s"], carga["desde_s"],
+                                          TOPE_VUS)}]
+    funciones = {"denuncia": "denuncia_ip", "seguimiento": "seguimiento_ip", "web_seguimiento": "web_ip"}
+    for ruta in SLO_VICTIMAS_MS:
+        esc.append({"nombre": ruta, "funcion": funciones[ruta], "ruta": ruta, "ips": ips[ruta], "etiquetar_ip": False,
+                    **tramo(TASA_VICTIMA, total, 0, 50)})
+    esc.append({"nombre": "sonda_salud", "funcion": "sonda_salud", "ruta": "sonda_salud",
+                "ips": [ip_de_indice(INDICE_IP_SONDA)], "etiquetar_ip": False, **tramo(1, total, 0, VUS_SONDA)})
+    return esc
+
+
+def duracion_total(escenarios, humos=()):
+    """Segundos hasta el fin del último escenario (con sus arranques)."""
+    fines = [e["inicio_s"] + e["duracion_s"] for e in escenarios] + [h["inicio_s"] + 60 for h in humos]
+    return max(fines)
+
+
+# --- lectura del CSV de k6 para las pruebas de fases --------------------------
+def etiquetas_extra(texto):
+    """Las etiquetas propias de la columna extra_tags del CSV de k6 (k=v&k=v)."""
+    etiquetas = {}
+    for par in (texto or "").split("&"):
+        clave, igual, valor = par.partition("=")
+        if igual:
+            etiquetas[clave] = valor
+    return etiquetas
+
+
+def leer_csv_fases(ruta):
+    """Lee el CSV de k6 una vez. Devuelve un dict con las peticiones
+    ("filas", solo las filas http_req_duration, que traen estado, name, proto y
+    etiquetas; inicio = marca - duración porque la marca es el FIN de la
+    petición, H-k6d), los descartes por escenario con su marca, los Retry-After
+    de los 429 (métrica retry_after_s), los resultados de los check y el
+    número de filas ILEGIBLES ("ilegibles": campos ausentes o que no se pueden
+    convertir; validez_generador lo convierte en fallo). Solo se capturan los
+    errores de conversion de cada fila, nunca el analisis entero."""
+    filas, descartes, retry, checks = [], collections.defaultdict(list), [], []
+    ilegibles = 0
+    # Una ultima linea sin salto final puede estar cortada (k6 muerto a medias): cuenta
+    # como ilegible, aunque se lea lo que haya.
+    with open(ruta, "rb") as binario:
+        binario.seek(0, 2)
+        if binario.tell() > 0:
+            binario.seek(-1, 2)
+            if binario.read(1) != b"\n":
+                ilegibles += 1
+    with open(ruta, encoding="utf-8", newline="") as fichero:
+        lector = csv.DictReader(fichero)
+        while True:
+            try:
+                fila = next(lector)
+            except StopIteration:
+                break
+            except csv.Error:
+                # PY-13: un CSV roto deja de leerse (no se sabe donde seguir) y cuenta
+                # como fila ilegible: validez_generador da SIN CONCLUSION.
+                ilegibles += 1
+                break
+            metrica = fila.get("metric_name")
+            try:
+                if metrica == "http_req_duration":
+                    fin, dur = int(fila["timestamp"]) / 1000, float(fila["metric_value"])
+                    tags = etiquetas_extra(fila.get("extra_tags"))
+                    filas.append({"inicio": fin - dur / 1000, "fin": fin, "dur": dur,
+                                  "estado": int(fila.get("status") or 0), "nombre": fila.get("name") or "",
+                                  "escenario": fila.get("scenario") or "", "proto": fila.get("proto") or "",
+                                  "error_code": fila.get("error_code") or "", "ip": tags.get("ip"),
+                                  "fase": tags.get("fase"), "etapa": tags.get("etapa")})
+                elif metrica == "dropped_iterations":
+                    descartes[fila.get("scenario") or ""].append(int(fila["timestamp"]) / 1000)
+                elif metrica == "retry_after_s":
+                    retry.append(float(fila["metric_value"]))
+                elif metrica == "checks":
+                    checks.append((fila.get("check") or "", float(fila["metric_value"])))
+            except (ValueError, TypeError, KeyError):
+                ilegibles += 1
+    return {"filas": filas, "descartes": dict(descartes), "retry": retry, "checks": checks, "ilegibles": ilegibles}
+
+
+def leer_t0(registro_k6):
+    """Instante (segundos desde 1970) en que acabó setup() y empezaron las
+    fases, de la línea T0_MS=... de la salida de k6. None si no hay exactamente
+    una."""
+    valores = PATRON_T0.findall(registro_k6)
+    return int(valores[0]) / 1000 if len(valores) == 1 else None
+
+
+# --- escáner anti-fuga (A3, J7) ---------------------------------------------
+def formas_codificadas(valor):
+    """Un literal sembrado tal cual y en sus formas codificadas (J7): URL
+    (%XX y con + por espacio) y JSON escapado (\\uXXXX para lo que no es ASCII).
+    Sin duplicados."""
+    formas = {valor, urllib.parse.quote(valor, safe=""), urllib.parse.quote_plus(valor),
+              json.dumps(valor)[1:-1], json.dumps(valor, ensure_ascii=False)[1:-1]}
+    return sorted(formas)
+
+
+def buscar_en_bytes(contenido, literales, patrones=()):
+    """Literales (str, con sus formas codificadas) y patrones (regex de bytes)
+    que aparecen en contenido (bytes). Devuelve la lista de nombres de lo que
+    se ha encontrado, sin repetir. literales: {nombre: valor}."""
+    encontrados = []
+    for nombre, valor in literales.items():
+        if any(forma.encode("utf-8") in contenido for forma in formas_codificadas(valor)):
+            encontrados.append(nombre)
+    for nombre, patron in patrones:
+        if patron.search(contenido):
+            encontrados.append(nombre)
+    return encontrados
+
+
+def escanear_fichero(ruta, literales, patrones=(), trozo=8 * 1024 * 1024, solape=512):
+    """Como buscar_en_bytes sobre un fichero grande, por trozos con solape
+    (los CSV de k6 pesan cientos de MB)."""
+    encontrados = set()
+    cola = b""
+    with open(ruta, "rb") as fichero:
+        while True:
+            datos = fichero.read(trozo)
+            if not datos:
+                break
+            bloque = cola + datos
+            encontrados.update(buscar_en_bytes(bloque, literales, patrones))
+            cola = bloque[-solape:]
+    return sorted(encontrados)
+
+
+# Ficheros en los que NO debe aparecer el identificador de una empresa (no los
+# necesitan: los logs de la API y de PostgreSQL sí los llevan, y k6_salida.txt
+# puede citar una URL en un mensaje de error de Go).
+FICHEROS_SIN_IDENTIFICADORES = ("k6.csv", "resumen.json", "resultados.json", "resultados.csv")
+
+
+def escanear_directorio(directorio, literales, ids, patrones=()):
+    """Busca los literales sembrados (contraseña sintética, texto del humo, ...)
+    y el patrón de un código de seguimiento en TODOS los ficheros de
+    directorio, y los identificadores de empresa solo en los que no los
+    necesitan. Devuelve {ruta relativa: [nombres encontrados]} solo con los
+    ficheros que tienen algo."""
+    hallazgos = {}
+    for ruta in sorted(directorio.rglob("*")):
+        if not ruta.is_file():
+            continue
+        encontrados = set(escanear_fichero(ruta, literales, patrones))
+        if ruta.name in FICHEROS_SIN_IDENTIFICADORES or ruta.name.startswith("stats"):
+            encontrados.update(escanear_fichero(ruta, ids))
+        if encontrados:
+            hallazgos[str(ruta.relative_to(directorio))] = sorted(encontrados)
+    return hallazgos
+
+
+def veredicto_fuga(hallazgos, centinela_visto):
+    """Control del escáner: si no encuentra su centinela, no es de fiar (SIN
+    CONCLUSION); si encuentra algún literal, SIN CONCLUSION; si no, PASA."""
+    if not centinela_visto:
+        return "SIN CONCLUSION", "el escaner no encontro su centinela: no es de fiar"
+    if hallazgos:
+        return "SIN CONCLUSION", f"valores sembrados en ficheros guardados: {hallazgos}"
+    return "PASA", "ningun valor sembrado en los ficheros guardados"
+
+
+# Subcarpeta de la salida donde se planta el centinela (S6, PY-4, H13): el
+# MISMO recorrido que escanea los artefactos reales tiene que encontrarlo.
+CARPETA_CENTINELA = "_control_antifuga"
+
+
+def plantar_centinela(salida):
+    """Planta en salida/_control_antifuga los valores que el escaner DEBE
+    encontrar: un literal con acento y espacios tal cual, en forma de URL y en
+    JSON escapado; un codigo de seguimiento con el formato; y un identificador
+    de empresa dentro de un fichero llamado k6.csv (donde el escaner busca
+    identificadores). Devuelve (literales, ids, esperados) con
+    esperados = {fichero: nombre que debe salir}."""
+    valor = "Centinela ó " + secrets.token_hex(6)
+    ident = secrets.token_hex(16)
+    carpeta = salida / CARPETA_CENTINELA
+    carpeta.mkdir(exist_ok=True)
+    ficheros = {"centinela_literal.txt": ("centinela", valor),
+                "centinela_url.txt": ("centinela", urllib.parse.quote(valor)),
+                "centinela_json.txt": ("centinela", json.dumps({"t": valor})),
+                "centinela_codigo.txt": ("codigo", "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG-HHHH"),
+                "k6.csv": ("centinela_id", "x " + ident)}
+    for nombre, (_, contenido) in ficheros.items():
+        (carpeta / nombre).write_text(contenido, encoding="utf-8", newline="\n")
+    esperados = {f"{CARPETA_CENTINELA}/{nombre}": clave for nombre, (clave, _) in ficheros.items()}
+    return {"centinela": valor}, {"centinela_id": ident}, esperados
+
+
+def escanear_con_centinela(salida, literales, ids, patrones):
+    """Planta el centinela, recorre TODA la salida con el mismo escaner y lo
+    separa: devuelve (hallazgos reales, ficheros del centinela que el escaner
+    NO encontro). El centinela se excluye de los hallazgos y la carpeta se
+    borra al terminar."""
+    lit_c, ids_c, esperados = plantar_centinela(salida)
+    try:
+        todo = escanear_directorio(salida, {**literales, **lit_c}, {**ids, **ids_c}, patrones)
+    finally:
+        shutil.rmtree(salida / CARPETA_CENTINELA, ignore_errors=True)
+    claves = {pathlib.PurePath(k).as_posix(): v for k, v in todo.items()}
+    reales = {k: v for k, v in claves.items() if not k.startswith(CARPETA_CENTINELA + "/")}
+    faltan = [f for f, nombre in esperados.items() if nombre not in claves.get(f, [])]
+    return reales, faltan
+
+
+# --- controles de datos, de entorno y de relojes (puros) -----------------------
+def validar_ips_vistas(filas, escenario, esperadas):
+    """PY-3: de la ruta medida (las filas del escenario), ninguna fila sin ip y el
+    conjunto de IPs vistas es EXACTAMENTE el del plan (200 en L3, 3402 en el
+    ataque de L3b). Devuelve la lista de motivos (vacia si todo bien)."""
+    propias = [f for f in filas if f["escenario"] == escenario]
+    motivos = []
+    sin_ip = sum(1 for f in propias if f["ip"] is None)
+    if sin_ip:
+        motivos.append(f"{sin_ip} filas de {escenario} sin etiqueta ip")
+    vistas = {f["ip"] for f in propias if f["ip"] is not None}
+    esperadas = set(esperadas)
+    if vistas != esperadas:
+        motivos.append(f"{escenario}: {len(vistas)} IPs vistas frente a las {len(esperadas)} del plan "
+                       f"({len(esperadas - vistas)} sin ver, {len(vistas - esperadas)} de mas)")
+    return motivos
+
+
+def conciliar_503(intervalos_503, marcas_eventos, tolerancia_s=2.0):
+    """H14 (informativo): empareja uno a uno cada 503 de k6 con una linea EVENTO
+    del log de la API por hora. Un EVENTO se empareja con el primer 503 todavia
+    libre cuyo intervalo [inicio, fin] lo contiene con tolerancia_s de margen.
+    intervalos_503: [(inicio, fin)]. Devuelve {"emparejados", "sin_evento"
+    (503 sin linea), "eventos_sin_503"}."""
+    libres = sorted(intervalos_503)
+    usados, emparejados = set(), 0
+    for t in sorted(marcas_eventos):
+        for i, (inicio, fin) in enumerate(libres):
+            if i not in usados and inicio - tolerancia_s <= t <= fin + tolerancia_s:
+                usados.add(i)
+                emparejados += 1
+                break
+    return {"emparejados": emparejados, "sin_evento": len(libres) - len(usados),
+            "eventos_sin_503": len(marcas_eventos) - emparejados}
+
+
+def comprobar_cifras_congeladas(tasas, n_ataque, ips_denuncia, ips_seguimiento):
+    """Las cifras derivadas de t y de las reglas coinciden con los literales de
+    la segunda congelacion; si no, PARADA (README: todas las cifras son
+    literales)."""
+    problemas = [f"{nombre}: {visto} frente a {literal} congelado" for nombre, visto, literal in (
+        ("inundacion de L2", tasas["inundacion"], TASA_INUNDACION_CONGELADA),
+        ("login del pico", tasas["login_pico"], TASA_LOGIN_PICO_CONGELADA),
+        ("login de la base", tasas["login_base"], TASA_LOGIN_BASE_CONGELADA),
+        ("IPs del ataque de L3b", n_ataque, N_IPS_ATAQUE_CONGELADO),
+        ("IPs de la victima denuncia", ips_denuncia, IPS_DENUNCIA_CONGELADAS),
+        ("IPs de las victimas de seguimiento", ips_seguimiento, IPS_SEGUIMIENTO_CONGELADAS)) if visto != literal]
+    if problemas:
+        raise Parada("las cifras derivadas no son las congeladas: " + "; ".join(problemas))
+
+
+def espera_por_medianoche(ahora, duracion_s, maximo_s=1800, margen_s=5):
+    """PY-9: segundos que hay que esperar para que una repeticion de duracion_s
+    no cruce las 00:00 UTC (la sal del limitador cambia y los contadores
+    empiezan de cero). 0 si no cruza. Si hay que esperar mas de maximo_s,
+    PARADA."""
+    medianoche = (math.floor(ahora / 86400) + 1) * 86400
+    if ahora + duracion_s < medianoche:
+        return 0.0
+    espera = medianoche - ahora + margen_s
+    if espera > maximo_s:
+        raise Parada(f"la repeticion ({duracion_s:.0f} s) cruzaria las 00:00 UTC y habria que esperar {espera:.0f} s "
+                     f"(mas de {maximo_s} s)")
+    return espera
+
+
+def evaluar_j5(positivo, negativo, ventana_s, aceptado):
+    """J5 como sandwich (H6, validez): justo antes de recrear la API, una IP
+    saturada en una ventana TODAVIA VIVA tiene que dar 429 (control positivo);
+    despues de recrearla (sal nueva), esa misma IP NO puede dar 429 y tiene que
+    dar el estado aceptado. Los dos en la misma ventana: si la ventana expiro
+    entre medias, el negativo no discrimina. positivo y negativo:
+    {"estado","inicio","fin"}. Devuelve (veredicto, texto)."""
+    if positivo["estado"] != 429:
+        return "SIN CONCLUSION", f"la IP saturada da {positivo['estado']} y no 429: el control no discrimina"
+    ventana_p, ambigua_p = ventana_de_peticion(positivo["inicio"], positivo["fin"], ventana_s)
+    ventana_n, ambigua_n = ventana_de_peticion(negativo["inicio"], negativo["fin"], ventana_s)
+    if ambigua_p or ambigua_n or ventana_p != ventana_n:
+        return "SIN CONCLUSION", "la ventana expiro entre el positivo y el negativo: no discrimina"
+    if negativo["estado"] == 429:
+        return "SIN CONCLUSION", "429 tras recrear la API: el contador de la repeticion anterior sigue vivo"
+    if negativo["estado"] != aceptado:
+        return "SIN CONCLUSION", f"estado {negativo['estado']} tras recrear la API, se esperaba {aceptado}"
+    return "PASA", f"429 antes de recrear y {negativo['estado']} despues, en la misma ventana"
+
+
+def rutas_sucias(salida_git):
+    """S8: lineas de git status --short -- proxy/ compose.produccion.yaml
+    docker-compose.yml. Vacia si el montaje es el del commit."""
+    return [linea.rstrip() for linea in (salida_git or "").splitlines() if linea.strip()]
+
+
+def diferencias_caddy_produccion(produccion, nuestro):
+    """S8: el command de caddy y networks.edge.internal del override de la
+    bateria frente a lo que resuelve docker compose con
+    docker-compose.yml + compose.produccion.yaml (los dos JSON de config).
+    Devuelve las diferencias (vacia si coinciden)."""
+    dif = []
+    for nombre, ruta in (("command de caddy", lambda c: c["services"]["caddy"].get("command")),
+                         ("ports de caddy", lambda c: c["services"]["caddy"].get("ports")),
+                         ("networks.edge.internal", lambda c: c["networks"]["edge"].get("internal"))):
+        try:
+            esperado, visto = ruta(produccion), ruta(nuestro)
+        except (KeyError, TypeError, AttributeError):
+            dif.append(f"{nombre}: no se puede leer en uno de los JSON de config")
+            continue
+        if esperado != visto:
+            dif.append(f"{nombre}: produccion {esperado!r}, override {visto!r}")
+    return dif
+
+
+def texto_cota_ataque(veredicto_b, control_ataque, n_ips):
+    """E15: la cifra del coste del ataque se da SOLO si L3b-b es FALLA y B2 se
+    cumple (el ataque existe): es una cota superior, no el minimo, a esta tasa y
+    duracion, IPv4. Con PASA no se da ninguna cifra (la diferencia con L2 se
+    explica en el informe y no cierra la amenaza); con SIN CONCLUSION, nada."""
+    if veredicto_b == "FALLA" and control_ataque:
+        return f"cota superior del coste a esta tasa y duracion, IPv4: {n_ips} IPs sostenidas"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# L2, L3, L3b y L4: análisis de una repetición (funciones puras sobre las filas
+# del CSV, sin Docker) y E/S con Docker de la ejecución
+# ---------------------------------------------------------------------------
+# Partes de cada prueba, cada una con su veredicto y su validez propia: L3b da
+# dos, L3b-a (oraculo por IP y ventana) y L3b-b (victimas), nunca uno conjunto
+# (H4, E15).
+PARTES = {"l2": ("l2",), "pico": ("pico",), "l3": ("l3",), "l3b": ("l3b-a", "l3b-b")}
+# Lo que dice la salida cuando L3b-b da FALLA por el oraculo de las victimas (B1)
+# (E15): cuenta para el RESULTADO GLOBAL como cualquier otra prueba, aunque el
+# diseño la espere. Si la FALLA sale de la muerte de un servicio de Canario, el
+# diseño NO la esperaba (E17): linea_l3b_b da otra linea.
+LINEA_L3B_B_FALLA = "L3b-b: FALLA (esperada por el diseño; NO OK; misma amenaza que L2, threat-model §8, ABIERTA)"
+# Con PASA y B2 cumplido (E17): literal, sin ninguna cifra de IPs para que no se
+# lea como una cota del coste.
+LINEA_L3B_B_PASA = ("L3b-b: PASA con B2 cumplido: en este montaje (IPv4, 102,04/s, 300 s) las víctimas no se degradaron; "
+                    "no se da cifra de coste (E15); no cierra threat-model §8 l.760-764, que sigue ABIERTA; la "
+                    "diferencia con L2 se explica en el informe")
+
+
+def linea_l3b_b(veredicto, motivos, control_ataque):
+    """Texto de la linea de L3b-b (E15, E17) o None si no hay linea propia:
+    FALLA del oraculo de las victimas = literal de E15; FALLA por la muerte de un
+    servicio de Canario = su propia linea con los motivos y sin cifra de coste;
+    PASA con B2 cumplido = el literal de E17; con SIN CONCLUSION (o con PASA sin
+    B2, que veredicto_con_validez ya rebaja) no se imprime ninguna linea propia."""
+    if veredicto == "FALLA":
+        if MOTIVO_MUERTE in motivos:
+            return "L3b-b: FALLA (murió un servicio de Canario; NO OK); motivos: " + "; ".join(motivos)
+        return LINEA_L3B_B_FALLA
+    if veredicto == "PASA" and control_ataque is True:
+        return LINEA_L3B_B_PASA
+    return None
+PATRON_EVENTO_503 = re.compile(r"EVENTO (?:limitador_no_disponible|hashes_saturados|limitador_cliente_invalido)")
+# Estado de la ejecucion en curso, para el escaneo final de main (S7).
+ACTUAL = {"ej": None}
+
+
+def fallo(motivo):
+    """Un fallo de VALIDEZ (J1): da SIN CONCLUSION y gana a FALLA."""
+    return {"motivo": motivo}
+
+
+def humo_ok(checks, etapa):
+    """El humo de una etapa (humo_previo o humo_posterior) pasa si sus cuatro
+    check (denuncia 201 con código, seguimiento 200 con el texto sembrado,
+    formulario 200 y consulta web 200 con el texto) existen y valen todos 1.
+    Un paso que falla corta el humo y deja menos de cuatro: también falla."""
+    propios = [valor for nombre, valor in checks if nombre.startswith(etapa + ":")]
+    return len(propios) == 4 and all(valor == 1 for valor in propios)
+
+
+def evaluar_alineacion(primer_inicio, frontera_s, tolerancia_s=3.0):
+    """Control de que la carga empezó donde debía (validez): el inicio de la
+    primera petición cae entre el instante programado (una frontera de ventana
+    en L3 y L3b; t0 más el inicio del escenario en L2 y L4, H15) y
+    tolerancia_s después. -0,05 s de holgura por el redondeo al ms de la marca."""
+    if primer_inicio is None:
+        return False, "no hay peticiones de la carga"
+    desfase = primer_inicio - frontera_s
+    if -0.05 <= desfase <= tolerancia_s:
+        return True, f"la carga empieza {desfase:.2f} s despues de lo programado"
+    return False, f"la carga empieza {desfase:.2f} s respecto a lo programado (debe estar entre 0 y {tolerancia_s} s)"
+
+
+def validez_generador(k6, t0, datos_csv, insuficientes, cpu, es_http=False):
+    """Fallos de validez del generador y de la ejecución de k6 (J1, A1): código
+    de k6 u OOM, los SIN CONCLUSION de ejecutar_k6, falta de T0 o alineación
+    perdida, CPU de k6 sobre el umbral o sin medir, descartes sin el aviso
+    Insufficient VUs, filas ilegibles del CSV (PY-2), protocolo distinto de
+    HTTP/1.1 y respuestas 421."""
+    fallos = []
+    if k6["codigo"] != 0 or k6["oom"]:
+        fallos.append(fallo(f"k6 termina con codigo {k6['codigo']} (OOMKilled {k6['oom']})"))
+    fallos += [fallo(m) for m in k6["sin_conclusion"]]
+    if t0 is None:
+        fallos.append(fallo("la salida de k6 no trae exactamente una linea T0_MS: no hay reloj de fases"))
+    if PATRON_ALINEACION_PERDIDA.search(k6["registro"]):
+        fallos.append(fallo("k6 llego tarde al instante de alineacion (ALINEACION_PERDIDA)"))
+    if k6["desfase"] is None:
+        fallos.append(fallo(f"CPU sin evaluar: {k6['motivo_desfase']}"))
+    elif cpu.get("k6") is None:
+        fallos.append(fallo("sin muestras de docker stats de k6: no se sabe si el generador se saturo"))
+    elif cpu["k6"]["maxima"] > UMBRAL_CPU_K6:
+        fallos.append(fallo(f"CPU de k6 {cpu['k6']['maxima']:.0f} % supera el {UMBRAL_CPU_K6:.0f} %: generador saturado"))
+    for escenario, marcas in sorted(datos_csv["descartes"].items()):
+        if marcas and escenario not in insuficientes:
+            fallos.append(fallo(f"{escenario}: {len(marcas)} iteraciones descartadas sin el aviso de VUs insuficientes"))
+    if datos_csv.get("ilegibles"):
+        fallos.append(fallo(f"{datos_csv['ilegibles']} filas ilegibles en el CSV de k6"))
+    filas = datos_csv["filas"]
+    if not filas:
+        fallos.append(fallo("el CSV de k6 no tiene peticiones"))
+    else:
+        veredicto, texto = evaluar_protocolo(collections.Counter(f["proto"] for f in filas if f["estado"] != 0))
+        if veredicto != "PASA":
+            fallos.append(fallo(texto))
+    if es_http and any(f["estado"] == 421 for f in filas):
+        fallos.append(fallo("respuestas 421: el Host de produccion no llego al sitio (sitio por defecto)"))
+    return fallos
+
+
+def cpu_en_ventana(rutas_stats, desfase, desde, hasta):
+    """CPU de cada contenedor en [desde, hasta] (reloj de la VM) a partir de los
+    ficheros de docker stats (reloj del host, corregido con desfase)."""
+    por_contenedor = collections.defaultdict(list)
+    for ruta in rutas_stats:
+        for marca, objeto in leer_estadisticas(ruta):
+            if desde + desfase <= marca <= hasta + desfase:
+                valor = porcentaje(objeto.get("CPUPerc", ""))
+                if valor is not None:
+                    nombre = objeto.get("Name", "")
+                    corto = "k6" if f"{PREFIJO_EFIMEROS}k6_" in nombre else nombre.removeprefix(f"{PROYECTO}-").removesuffix("-1")
+                    por_contenedor[corto].append(valor)
+    return {n: {"media": statistics.fmean(v), "maxima": max(v), "muestras": len(v)} for n, v in por_contenedor.items()}
+
+
+def analizar_victimas(filas, t0, fases, insuficientes, descartes):
+    """Las tres víctimas de L2 y L3b por fase (BASE, carga y RECUPERACIÓN sin
+    sus primeros 20 s). Devuelve ({ruta: {"base","carga","recup",
+    "descartes_aviso"}}, fallos de validez de la BASE). La BASE es el control
+    positivo: fuera del SLO, con un 1 % o más de errores, con menos del 99 %
+    del estado esperado o con descartes, es SIN CONCLUSION (B1)."""
+    base_f, carga_f, recup_f = (fase_por_nombre(fases, n) for n in ("base", "carga", "recup"))
+    victimas, fallos = {}, []
+    for ruta, slo in SLO_VICTIMAS_MS.items():
+        esperado = ESTADO_RUTAS[ruta]
+        propias = [f for f in filas if f["nombre"] == ruta]
+        base = resumen_filas([f for f in propias if f["fase"] == "base"], esperado)
+        carga = resumen_filas([f for f in propias if f["fase"] == "carga"], esperado)
+        recup = resumen_filas([f for f in propias if f["fase"] == "recup"
+                               and f["inicio"] >= t0 + recup_f["desde_s"] + EXCLUSION_RECUP_S], esperado)
+        marcas = descartes.get(ruta, [])
+        en_base = sum(1 for d in marcas if t0 + base_f["desde_s"] <= d < t0 + base_f["hasta_s"])
+        con_aviso = sum(1 for d in marcas if t0 + carga_f["desde_s"] <= d < t0 + carga_f["hasta_s"]) \
+            if ruta in insuficientes else 0
+        if not base["peticiones"]:
+            fallos.append(fallo(f"{ruta}: la BASE no tiene peticiones"))
+        else:
+            if base["p95_ms"] > slo:
+                fallos.append(fallo(f"{ruta}: la BASE no cumple el SLO (p95 {base['p95_ms']:.0f} ms > {slo} ms)"))
+            if base["tasa_errores"] >= UMBRAL_ERRORES:
+                fallos.append(fallo(f"{ruta}: la BASE tiene {base['tasa_errores']:.2%} de errores"))
+            if base["proporcion_esperado"] < UMBRAL_ESPERADO:
+                fallos.append(fallo(f"{ruta}: la BASE tiene solo el {base['proporcion_esperado']:.2%} con el estado "
+                                    f"esperado {esperado} ({base['estados']})"))
+        if en_base:
+            fallos.append(fallo(f"{ruta}: {en_base} descartes en la BASE"))
+        victimas[ruta] = {"base": base, "carga": carga, "recup": recup, "descartes_aviso": con_aviso}
+    return victimas, fallos
+
+
+def veredictos_victimas(victimas):
+    """{ruta: (veredicto, motivos)} con B1. Sin p95 de BASE no hay con qué
+    comparar: SIN CONCLUSION (la BASE ya figura como fallo de validez)."""
+    resultado = {}
+    for ruta, v in victimas.items():
+        if v["base"]["p95_ms"] is None:
+            resultado[ruta] = ("SIN CONCLUSION", ["sin BASE"])
+        else:
+            resultado[ruta] = veredicto_victima(v["base"]["p95_ms"], v["carga"], SLO_VICTIMAS_MS[ruta],
+                                                v["descartes_aviso"])
+    return resultado
+
+
+def victimas_medianas(repeticiones):
+    """Las víctimas con la MEDIANA de los p95 y de las tasas de error de las
+    repeticiones (A1) y la suma de los descartes con aviso. El p95 de la carga
+    None (sin respuestas) cuenta como infinito (H5); el de la BASE None deja la
+    mediana sin valor (la BASE ya es un fallo de validez)."""
+    medianas = {}
+    for ruta in SLO_VICTIMAS_MS:
+        bases = [r[ruta]["base"]["p95_ms"] for r in repeticiones]
+        cargas = [r[ruta]["carga"]["p95_ms"] for r in repeticiones]
+        errores = [r[ruta]["carga"]["tasa_errores"] for r in repeticiones if r[ruta]["carga"]["tasa_errores"] is not None]
+        medianas[ruta] = {
+            "base": {"p95_ms": None if not bases or any(b is None for b in bases) else statistics.median(bases)},
+            "carga": {"peticiones": sum(r[ruta]["carga"]["peticiones"] for r in repeticiones),
+                      "p95_ms": mediana_p95(cargas), "tasa_errores": statistics.median(errores) if errores else 0.0},
+            "descartes_aviso": sum(r[ruta]["descartes_aviso"] for r in repeticiones)}
+    return medianas
+
+
+def analizar_login(filas, t0, fases, insuficientes, descartes, escenario):
+    """El login atacado (L2 y L3b) en su fase de carga: p95, errores con la
+    definición de B2 (E8: los 503 no cuentan), 503 aparte, tasa servida y
+    descartes con aviso. Devuelve el dict y el valor de ataque_efectivo."""
+    carga_f = fase_por_nombre(fases, "carga")
+    filas_carga = [f for f in filas if f["nombre"] == "login_email" and f["fase"] == "carga"]
+    resumen = resumen_filas(filas_carga, ESTADO_RUTAS["login_email"], es_error_login)
+    marcas = descartes.get(escenario, [])
+    con_aviso = sum(1 for d in marcas if t0 + carga_f["desde_s"] <= d < t0 + carga_f["hasta_s"]) \
+        if escenario in insuficientes else 0
+    resumen["descartes_aviso"] = con_aviso
+    resumen["servida_por_s"] = resumen["peticiones"] / (carga_f["hasta_s"] - carga_f["desde_s"])
+    return resumen, ataque_efectivo(resumen["p95_ms"], resumen["tasa_errores"], con_aviso)
+
+
+def esperas_predichas():
+    """B3 y J8, informativo: la espera de las víctimas ~ (TOPE_VUS - 40) / tasa
+    de login servida. La magnitud la fija TOPE_VUS, no la tasa del ataque."""
+    return (f"espera prevista de las victimas: {TOPE_VUS - 40} / 102,04 = {(TOPE_VUS - 40) / 102.04:.1f} s y "
+            f"{TOPE_VUS - 40} / 73 (servida en L1) = {(TOPE_VUS - 40) / 73:.1f} s")
+
+
+def lineas_fase(titulo, resumen):
+    """Una línea de texto de un resumen de filas."""
+    return (f"{titulo}: n={resumen['peticiones']} p50/p95/p99 {ms(resumen['p50_ms'])}/{ms(resumen['p95_ms'])}/"
+            f"{ms(resumen['p99_ms'])} ms errores={resumen['errores']} estados={resumen['estados']}")
+
+
+def senales_por_fase(salida_rep, fases, t0, arranques_redis):
+    """Señales del log de la API por fase (H3 predice ninguna línea de las
+    víctimas; la inundación sí deja login_fallido): {fase: res con senales}.
+    arranques_redis es obligatorio (sin valor por defecto): olvidarlo contaría
+    todo el resumen del limitador como fuera de la ventana de arranque."""
+    lineas_api = leer_log(salida_rep / "log_api.txt")
+    otras = {s: leer_log(salida_rep / f"log_{s}.txt") for s in ("redis", "postgres")}
+    por_fase = {}
+    for f in fases:
+        pseudo = {"principal": {"ventana_ms": [(t0 + f["desde_s"]) * 1000, (t0 + f["hasta_s"]) * 1000]}}
+        senales_escalon(lineas_api, otras, pseudo, arranques_redis)
+        por_fase[f["nombre"]] = pseudo
+    return por_fase
+
+
+def texto_senales(pseudo):
+    return ", ".join(f"{n}={s['total']}" + (f" {s['clases']}" if s["clases"] else "")
+                     for n, s in pseudo.get("senales", {}).items() if s["total"])
+
+
+# --- E/S con Docker ---------------------------------------------------------
+# Segundos de margen entre ahora y la frontera a la que se alinea la carga de
+# L3 y L3b: k6 tiene que arrancar y inicializar hasta 765 VUs antes de que
+# setup() espere. Si no llega, k6 avisa (ALINEACION_PERDIDA) y SIN CONCLUSION.
+MARGEN_ARRANQUE_S = 120
+# Plazo de cada peticion del cliente de control y margen del contenedor (PY-5).
+PLAZO_PETICION_CONTROL_S = 15
+MARGEN_CLIENTE_S = 60
+
+# Cliente de los controles de configuración: corre en un contenedor de la
+# imagen de la API (python, sin red hacia fuera) en la red edge con una IP
+# fija. Lee las peticiones de /datos/<fichero>.json y devuelve una línea JSON
+# por petición, con la hora de inicio y fin (reloj de la VM). Sin comillas
+# dobles ni acentos: se pasa por lista de argumentos con -c.
+CODIGO_CLIENTE = (
+    "import http.client, json, sys, time\n"
+    "peticiones = json.load(open(sys.argv[1], encoding='utf-8'))\n"
+    "salida = []\n"
+    "for x in peticiones:\n"
+    "    cabeceras = {'Host': x['host']}\n"
+    "    if x.get('xff'):\n"
+    "        cabeceras['X-Forwarded-For'] = x['xff']\n"
+    "    cuerpo = x.get('cuerpo')\n"
+    "    if cuerpo is not None:\n"
+    "        cabeceras['Content-Type'] = 'application/json'\n"
+    "    inicio = time.time()\n"
+    "    try:\n"
+    "        c = http.client.HTTPConnection('caddy', 8080, timeout=15)\n"
+    "        c.request(x['metodo'], x['ruta'], body=None if cuerpo is None else cuerpo.encode('utf-8'), headers=cabeceras)\n"
+    "        r = c.getresponse()\n"
+    "        texto = r.read(2000).decode('utf-8', 'replace')\n"
+    "        salida.append({'estado': r.status, 'cuerpo': texto, 'inicio': inicio, 'fin': time.time()})\n"
+    "        c.close()\n"
+    "    except Exception as e:\n"
+    "        salida.append({'estado': 0, 'cuerpo': type(e).__name__, 'inicio': inicio, 'fin': time.time()})\n"
+    "print(json.dumps(salida))\n"
+)
+
+
+def peticion_control(metodo, ruta, host, xff=None, cuerpo=None):
+    return {"metodo": metodo, "ruta": ruta, "host": host, "xff": xff, "cuerpo": cuerpo}
+
+
+def cliente_control(ej, nombre, ip, peticiones):
+    """Peticiones en orden desde un contenedor efímero con IP fija en la red
+    edge (10.88.1.2 hace de Traefik; 10.88.1.3, de ajeno). Endurecido, con el
+    prefijo canario_estres_ y la etiqueta canario.estres, que el detector
+    clasifica. El plazo es n x 15 s mas un margen; si vence, docker rm -f y
+    PARADA con la causa (PY-5). Devuelve la lista de resultados."""
+    (ej.datos / f"{nombre}.json").write_text(json.dumps(peticiones), encoding="utf-8", newline="\n")
+    contenedor = f"{PREFIJO_EFIMEROS}cliente_{nombre}"
+    plazo = len(peticiones) * PLAZO_PETICION_CONTROL_S + MARGEN_CLIENTE_S
+    try:
+        r = ejecutar(["docker", "run", "--rm", "--name", contenedor, "--label", "canario.estres=control",
+                      "--network", RED_EDGE, "--ip", ip, "--read-only", "--cap-drop", "ALL", "--security-opt",
+                      "no-new-privileges", "--pids-limit", "64", "--memory", "64m", "--user", USUARIO_API,
+                      "--cpuset-cpus", ej.cpus_k6, "--mount", f"type=bind,src={ej.datos},dst=/datos,readonly",
+                      "--entrypoint", "python", ej.imagen, "-I", "-c", CODIGO_CLIENTE, f"/datos/{nombre}.json"],
+                     timeout=plazo)
+    except subprocess.TimeoutExpired:
+        ejecutar(["docker", "rm", "-f", contenedor], timeout=120)
+        raise Parada(f"el cliente de control {nombre} supera {plazo} s ({len(peticiones)} peticiones): se detiene") from None
+    try:
+        resultados = json.loads(r.out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Parada(f"el cliente de control {nombre} no devuelve JSON (codigo {r.rc}): {r.err.strip()[-300:]!r}") from None
+    if len(resultados) != len(peticiones):
+        raise Parada(f"el cliente de control {nombre} devuelve {len(resultados)} resultados de {len(peticiones)}")
+    return resultados
+
+
+def esperar_ventana(periodo_s, minimo_s):
+    """Si quedan menos de minimo_s segundos para que acabe la ventana actual
+    (de periodo_s, alineada con el reloj UTC), espera a la siguiente. Reloj de
+    la VM (hora_motor_ahora), el mismo que usa la API para sus contadores."""
+    resto = periodo_s - hora_motor_ahora() % periodo_s
+    if resto < minimo_s:
+        p(f"   espera de {resto + 1:.0f} s a la ventana siguiente ({periodo_s} s)")
+        time.sleep(resto + 1)
+
+
+def codigo_inexistente():
+    """Código de seguimiento con el formato válido que no existe (8 grupos de
+    4 en base32): llega al HMAC y al SELECT."""
+    crudo = base64.b32encode(secrets.token_bytes(20)).decode("ascii")
+    return "-".join(crudo[i:i + 4] for i in range(0, 32, 4))
+
+
+def cuerpo_login(ej):
+    # L3 no da de alta ninguna empresa: un identificador aleatorio de 32 hex que no
+    # existe (el login lo trata como cualquier otro fallo: 401, y cuenta en acceso).
+    return json.dumps({"empresa": ej.id_a or secrets.token_hex(16), "email": f"estres-{secrets.token_hex(8)}@estres.invalid",
+                       "contrasena": ej.contrasena, "codigo_totp": "000000"})
+
+
+def peticion_seguimiento(xff):
+    return peticion_control("POST", "/v1/seguimiento", HOST_API, xff, json.dumps({"codigo": codigo_inexistente()}))
+
+
+def linea_control(veredicto, texto):
+    p(f"   {veredicto:<14} {texto}")
+
+
+def controles_configuracion(ej, modo, rep, ips):
+    """Los controles de configuración de L3 y L3b antes de medir. PARADA si la
+    pila no es la de producción (421, 403, strict). Devuelve los fallos de
+    VALIDEZ (cruce de minuto de strict, D3). J5 va aparte (sandwich_j5)."""
+    p(f"=== controles de configuracion, repeticion {rep}")
+    fallos = []
+    # E11: con el Host de produccion, desde 10.88.1.2, la petición llega a la API.
+    r = cliente_control(ej, f"c421_r{rep}", IP_TRAEFIK, [peticion_control("POST", "/salud", HOST_API)])
+    v, t = evaluar_control_421(r[0]["estado"])
+    linea_control(v, "sin 421: " + t)
+    if v == "PARADA":
+        raise Parada("el Host de produccion no llega a la API: " + t)
+    # C3: desde 10.88.1.3 (no es Traefik), el 403 literal de solo_traefik. Sin
+    # el Host de produccion daria 421 y el control no probaria nada.
+    r = cliente_control(ej, f"c403_r{rep}", IP_AJENA_EDGE, [peticion_control("POST", "/salud", HOST_API)])
+    v, t = evaluar_control_403(r[0]["estado"], r[0]["cuerpo"])
+    linea_control(v, "403 desde 10.88.1.3: " + t)
+    if v == "PARADA":
+        raise Parada("Caddyfile.produccion no esta activo para ajenos: " + t)
+    # C2/J6/S1: strict, diferencial. 70 peticiones con XFF "<IP falsa que rota>,
+    # 198.19.255.254" desde 10.88.1.2 contra seguimiento inexistente cuentan todas
+    # para la IP de la derecha; una 71.a con "198.19.255.254, <otra IP
+    # reservada>" cuenta para la otra y da 404. Han de caber en un mismo minuto
+    # UTC: se empieza siempre al principio de uno (tambien aleja estas
+    # peticiones de las de J5 de la repeticion anterior).
+    esperar_ventana(60, 60)
+    peticiones = [peticion_seguimiento(f"{falsa}, {IP_STRICT}") for falsa in ips["strict_falsas"]]
+    peticiones.append(peticion_seguimiento(f"{IP_STRICT}, {ip_de_indice(INDICE_IP_S1)}"))
+    r = cliente_control(ej, f"strict_r{rep}", IP_TRAEFIK, peticiones)
+    v, t = evaluar_control_strict([x["estado"] for x in r], cruza_frontera(r[0]["inicio"], r[-1]["fin"], 60))
+    linea_control(v, "trusted_proxies_strict: " + t)
+    if v == "PARADA":
+        raise Parada("trusted_proxies_strict no actua: " + t)
+    if v != "PASA":
+        fallos.append(fallo("control de strict: " + t))
+    # D3 (solo L3b): 11 peticiones de login desde cada una de las 10 IPs de control.
+    if modo == "l3b":
+        esperar_ventana(VENTANA_ACCESO_S, 40)
+        peticiones, dueno = [], []
+        for ip in ips["control"]:
+            for _ in range(LIMITE_ACCESO + 1):
+                peticiones.append(peticion_control("POST", "/v1/personal/sesiones", HOST_API, ip, cuerpo_login(ej)))
+                dueno.append(ip)
+        r = cliente_control(ej, f"d3_r{rep}", IP_TRAEFIK, peticiones)
+        por_ip = collections.defaultdict(list)
+        for ip, x in zip(dueno, r, strict=True):
+            por_ip[ip].append({"inicio": x["inicio"], "fin": x["fin"], "estado": x["estado"]})
+        v, motivos = evaluar_d3(por_ip)
+        linea_control(v, "D3, 11 peticiones por IP de control en la misma ventana: " + ("; ".join(motivos) or "la 11.a es 429"))
+        if v != "PASA":
+            fallos.append(fallo("D3: " + "; ".join(motivos)))
+    return fallos
+
+
+# Segundos que tienen que quedar de la ventana de 300 s para empezar el sandwich de
+# J5: el positivo, recrear_api (up --wait, acotado por MARGEN_RECREAR_API_S) y el
+# negativo tienen que caer en la MISMA ventana, y con 60 s no hay holgura. Si no
+# caben, esperar_ventana espera a la siguiente.
+MARGEN_SANDWICH_J5_S = 120
+# El plazo de recrear_api (MARGEN_RECREAR_API_S, 120 s) se define junto a la
+# función, que es quien lo aplica. Aquí solo se suma como peor caso. Sigue SIN
+# MEDIR: se contrasta con la línea `recrear_api:` de la primera ejecución.
+
+
+def sandwich_j5_maximo_s():
+    """Peor caso del sandwich de J5: la espera maxima a la ventana
+    (MARGEN_SANDWICH_J5_S + 1), recrear_api y los dos clientes de control con su
+    plazo (n x PLAZO_PETICION_CONTROL_S + MARGEN_CLIENTE_S): 11 peticiones el
+    positivo y 1 el negativo."""
+    clientes = sum(n * PLAZO_PETICION_CONTROL_S + MARGEN_CLIENTE_S for n in (LIMITE_ACCESO + 1, 1))
+    return MARGEN_SANDWICH_J5_S + 1 + MARGEN_RECREAR_API_S + clientes
+
+
+def sandwich_j5(ej, modo, rep, ips_previas):
+    """J5 como sandwich (H6): entre dos repeticiones se RECREA la API (sal nueva,
+    contadores de la API a cero aunque Redis siga vivo) y se comprueba, con la
+    misma IP y en la misma ventana, que antes de recrear daba 429 (control
+    positivo: una IP saturada en una ventana todavia viva) y despues no. En L3 y
+    en L3b es la regla acceso (login con 401, ventana de 300 s): el login con una
+    empresa inexistente la consume igual, porque FronteraLimitador cuenta por
+    ruta antes de leer el cuerpo (app/limitador.py) y L3 no tiene ninguna empresa.
+    La IP es la del control de strict en L3 y una de las del control D3 de la
+    repeticion anterior en L3b. Si el positivo no da 429, SIN CONCLUSION: el
+    control no puede fallar en vacio. Imprime cuanto tarda (esperar la ventana de
+    300 s es lo que mas cuesta). Devuelve los fallos de VALIDEZ."""
+    inicio = time.time()
+    p(f"=== J5, repeticion {rep}: sandwich alrededor de recrear la API (regla acceso)")
+    ip = IP_STRICT if modo == "l3" else ips_previas["control"][0]
+    esperar_ventana(VENTANA_ACCESO_S, MARGEN_SANDWICH_J5_S)
+    saturar = [peticion_control("POST", "/v1/personal/sesiones", HOST_API, ip, cuerpo_login(ej))
+               for _ in range(LIMITE_ACCESO + 1)]
+    despues = peticion_control("POST", "/v1/personal/sesiones", HOST_API, ip, cuerpo_login(ej))
+    positivo = cliente_control(ej, f"j5pos_r{rep}", IP_TRAEFIK, saturar)[-1]
+    recrear_api(ej, rep, etiqueta="J5")
+    negativo = cliente_control(ej, f"j5neg_r{rep}", IP_TRAEFIK, [despues])[0]
+    v, t = evaluar_j5(positivo, negativo, VENTANA_ACCESO_S, 401)
+    linea_control(v, "J5: " + t)
+    p(f"   el sandwich de J5 de la repeticion {rep} ha tardado {time.time() - inicio:.0f} s")
+    return [] if v == "PASA" else [fallo("J5: " + t)]
+
+
+def alta_empresa(nombre):
+    r = dc("run", "--rm", "-T", "gestion", "alta-empresa", "--nombre", nombre, "--zona", "Europe/Madrid")
+    alta = PATRON_ALTA.search(r.out)
+    if r.rc != 0 or alta is None:
+        raise Parada(f"no se pudo dar de alta la empresa de prueba: {r.err.strip()[-300:]!r}")
+    return alta.group(2)
+
+
+def evaluar_vigilancia(ej, rep, ticks, t_ini, k6_ids, muertos_al_final, desde, hasta):
+    """Muertes, huecos del lector, streamers y conciliación de una repetición
+    (como evaluar_repeticion de L1, pero devolviendo fallos de validez en vez de
+    emitir). "muertes" es la lista de veredictos de veredicto_muerte (FALLA, u
+    OOM global de la VM = SIN CONCLUSION): veredicto_con_validez decide (H2). Los
+    huecos del lector se acotan a [desde, hasta]: un lector que se corta antes
+    del fin del reposo deja hueco (PY-7)."""
+    eventos = [e for e in ej.eventos.copia() if e["t"] >= t_ini]
+    muertes_ev = muertes_no_esperadas(eventos, ej.mantenimientos)
+    fallos, muertes = [], []
+    for ev in muertes_ev:
+        a, b = ev["t"] - VENTANA_MUERTE_S, ev["t"] + VENTANA_MUERTE_S
+        d_oom = delta_serie([(tk["t"], None if tk["padre"] is None else tk["padre"][0]) for tk in ticks], a, b)
+        d_kill = delta_serie([(tk["t"], None if tk["padre"] is None else tk["padre"][1]) for tk in ticks], a, b)
+        sube_k6 = any(delta_serie([(tk["t"], next((v[0] for h, v in tk["hijos"].items() if k6 in h), None))
+                                  for tk in ticks], a, b) > 0 for k6 in k6_ids)
+        veredicto, causa = veredicto_muerte(d_oom > 0, d_kill > 0, otro_murio(eventos, ev["id"], a, b,
+                                                                            ej.mantenimientos), sube_k6)
+        p(f"   repeticion {rep}: murio {ev['servicio']} ({ev['id'][:12]}, codigo {ev['codigo']}): {causa} (padre: "
+          f"oom +{d_oom}, oom_kill +{d_kill}) -> {veredicto}")
+        muertes.append(veredicto)
+    huecos = []
+    for s in SERVICIOS_PILA:
+        serie = [(tk["t"], tk["c"].get(s)) for tk in ticks if desde <= tk["t"] <= hasta]
+        huecos += huecos_de_serie(serie, desde=desde, hasta=hasta)
+    sin_explicar = huecos_no_explicados(huecos, [e["t"] for e in eventos
+                                                 if e["clase"] == "canario" and e["accion"] == "die"])
+    if sin_explicar:
+        fallos.append(fallo(f"repeticion {rep}: {len(sin_explicar)} huecos del lector de mas de {HUECO_MAXIMO_S} s "
+                            f"fuera de una muerte registrada ({sin_explicar[:3]})"))
+    if muertos_al_final:
+        fallos.append(fallo(f"repeticion {rep}: streamers muertos en el reposo final: {sorted(set(muertos_al_final))}"))
+    etiquetados = {s: etiquetar_cgroup([(tk["t"], tk["c"].get(s)) for tk in ticks]) for s in SERVICIOS_PILA}
+    ids_rep = {e["id"] for e in eventos if e["clase"] == "canario" and e["accion"] == "start"}
+    problemas = conciliar(sum(1 for e in eventos if e["clase"] == "canario" and e["accion"] == "oom"),
+                          sum(acumulado_contadores(etiquetados[s][1])["oom"] for s in SERVICIOS_PILA),
+                          starts_no_esperados(eventos), sum(ej.reinicios.get(i, 0) for i in ids_rep))
+    if problemas:
+        fallos.append(fallo(f"repeticion {rep}: el detector no concilia: {'; '.join(problemas)}"))
+    reinicios = sum(ej.reinicios.get(i, 0) for i in ids_rep)
+    return {"fallos": fallos, "muertes": muertes, "reinicios": reinicios, "etiquetados": etiquetados}
+
+
+def memoria_informativa(vig, k6, lector_vivo, fin_reposo):
+    """B5 (informativo): la puerta de memoria de R1 sobre la API, con la
+    semántica de L1 y sin adaptadores (H12, PY-6): el máximo muestreado sobre
+    TODA la ejecución de k6 (inicio_vm a fin_vm) y el reposo de REPOSO_S sin
+    tráfico DESPUÉS de k6, con reposo_de_escalon sobre el propio resultado de
+    k6 (que lleva fin_vm). La RECUPERACIÓN no es reposo. No cambia el RESULTADO
+    GLOBAL."""
+    if k6["inicio_vm"] is None or k6["fin_vm"] is None:
+        p("   memoria sin ventana de k6")
+        return
+    muestras = vig["etiquetados"]["api"][0]
+    maximo = maximo_memoria(muestras, k6["inicio_vm"], k6["fin_vm"])
+    if maximo is None:
+        p("   memoria de la API (informativo): sin muestras del lector en la ejecucion de k6")
+        return
+    ruta = {"lector_vivo_al_final": lector_vivo, "fin_reposo_vm": fin_reposo}
+    minimo, motivo = reposo_de_escalon(muestras, k6, None, ruta, maximo[1])
+    veredicto, texto, nota = veredicto_escalon_memoria(maximo[0], minimo, motivo)
+    p(f"   memoria de la API en toda la ejecucion de k6 (informativo, {veredicto} por muestreo a 4 Hz): {texto}; {nota}")
+
+
+def preparar_datos_k6(ej, modo, escenarios, humos, fases, alinear_ms):
+    """El texto de /datos/ejecucion.json (lo único que k6 lee, nada por argv) y
+    las listas de IPs de cada escenario, que van APARTE (/datos/ips.json) para
+    que l3.js las guarde en SharedArray y no una copia por VU (PY-1)."""
+    limpios = [{**{k: v for k, v in e.items() if k != "ips"}, "n_ips": len(e["ips"])} if "ips" in e else dict(e)
+               for e in escenarios]
+    datos = {"modo": modo, "identificador_a": ej.id_a, "identificador_b": ej.id_b, "contrasena": ej.contrasena,
+             "texto_humo": ej.texto_humo, "host_api": HOST_API, "host_web": HOST_WEB, "fases": fases,
+             "escenarios": limpios, "humos": humos, "alinear_epoch_ms": alinear_ms}
+    return json.dumps(datos), {e["nombre"]: e["ips"] for e in escenarios if "ips" in e}
+
+
+def escribir_datos_k6(ej, texto, ips):
+    (ej.datos / "ejecucion.json").write_text(texto, encoding="utf-8", newline="\n")
+    if ips:
+        (ej.datos / "ips.json").write_text(json.dumps(ips), encoding="utf-8", newline="\n")
+
+
+def estimar_repeticion_s(modo, repeticion=1):
+    """Duración estimada (peor caso) de una repetición, con su arranque y la
+    espera a la frontera de L3 y L3b. A partir de la repetición 2 de L3 y L3b se
+    suma el sandwich de J5 (sandwich_j5_maximo_s), que va al principio de la
+    repetición: espera_por_medianoche usa la estimación de la repetición
+    concreta."""
+    duracion = {"l2": 390, "pico": 360, "l3": 300, "l3b": 570}[modo]
+    espera = MARGEN_ARRANQUE_S + (300 if modo == "l3b" else 60) if modo in ("l3", "l3b") else 0
+    sandwich = sandwich_j5_maximo_s() if modo in ("l3", "l3b") and repeticion > 1 else 0
+    return duracion + REPOSO_S + SOBRECOSTE_S + SOBRECOSTE_REPETICION_S + espera + sandwich
+
+
+def estimar_total_s(modo, repeticiones):
+    """Peor caso de la ejecucion entera: cada repeticion con su estimacion y los controles."""
+    return sum(estimar_repeticion_s(modo, rep) for rep in range(1, repeticiones + 1)) + SOBRECOSTE_CONTROLES_S
+
+
+def comprobar_sonda_descartes(ej):
+    """E14 y E16: antes de medir L4, comprueba en k6 las seis condiciones de las
+    marcas de dropped_iterations. Si alguna falla, PARADA: la regla de E14 (una
+    ventana con algun descarte no cumple) descansa en esa propiedad. El CSV y el
+    resumen JSON quedan en la salida de la ejecucion (y entran en el anti-fuga)."""
+    # Carga perezosa: solo --pico necesita el fichero; L1, L2, L3 y L3b no dependen de el.
+    import sonda_descartes
+    # Los avisos de limpieza llegan por el callback `avisar` y salen desde el
+    # finally de ejecutar_sonda: se dicen incluso si la medida propaga una
+    # excepción, y siempre ANTES de las PARADA de abajo (que se lanzan después de
+    # volver). Con una PARADA por delante la ejecución termina, y un contenedor o
+    # una red huérfanos quedarían sin mencionar justo cuando más falta hace saberlo.
+    marcas, iteraciones, inicio, motivo = sonda_descartes.ejecutar_sonda(
+        ejecutar, ej.imagen, IMG_K6, ej.cpus_k6, DIR_ESTRES,
+        {"prefijo": PREFIJO_EFIMEROS, "usuario_api": USUARIO_API, "usuario_k6": USUARIO_K6, "memoria_k6": MEMORIA_K6},
+        ej.salida, avisar=lambda texto: sinc(f"limpieza de la sonda de descartes: {texto}"))
+    if motivo is not None:
+        raise Parada("sonda de descartes de k6 (E14): " + motivo)
+    veredicto, texto = sonda_descartes.evaluar_marcas(marcas, inicio, iteraciones)
+    linea_control(veredicto, "sonda de descartes de k6 (E14): " + texto)
+    if veredicto != "PASA":
+        raise Parada("las marcas de dropped_iterations de k6 no son las que supone E14: " + texto)
+
+
+def ejecutar_repeticion_fases(ej, modo, rep, n_reps):
+    """Una repetición de L2, L4, L3 o L3b. L2 y L4: pila nueva (down -v, up).
+    L3 y L3b: la pila sigue y la API se recrea entre repeticiones dentro del
+    sandwich de J5 (la sal es nueva y los contadores de la API empiezan de
+    cero; los de Redis sobrevivirian a un down -v sin ninguna ventana viva que
+    probar). Despues, controles, una ejecucion de k6, reposo y análisis.
+    Devuelve el dict de la repetición."""
+    salida_rep = ej.salida / f"rep{rep}"
+    salida_rep.mkdir()
+    http_prod = modo in ("l3", "l3b")
+    t_ini = hora_motor_ahora()
+    fallos_previos = []
+    if http_prod:
+        # PY-9: una repeticion no puede cruzar las 00:00 UTC.
+        espera = espera_por_medianoche(t_ini, estimar_repeticion_s(modo, rep))
+        if espera:
+            p(f"   la repeticion cruzaria las 00:00 UTC: se espera {espera:.0f} s")
+            time.sleep(espera)
+        t_ini = hora_motor_ahora()
+    if http_prod and rep > 1:
+        fallos_previos += sandwich_j5(ej, modo, rep, ej.plan_ips[rep - 1])
+    else:
+        preparar_repeticion(ej, rep)
+        if rep == 1 and modo == "pico":
+            comprobar_sonda_descartes(ej)
+        if modo != "l3":
+            ej.id_a = alta_empresa("Empresa estres A")
+            ej.id_b = alta_empresa("Empresa estres B")
+            ej.ids_empresas += [ej.id_a, ej.id_b]
+            p(f"   empresas de la repeticion {rep}: A (atacada) y B (la del denunciante) dadas de alta")
+    fases = {"l2": fases_de("l2"), "pico": fases_de("pico"), "l3b": fases_de("l3b"),
+             "l3": [{"nombre": "carga", "desde_s": 0, "hasta_s": 300}]}[modo]
+    ips = ej.plan_ips[rep] if http_prod else None
+    humos = []
+    if modo == "l2":
+        escenarios = escenarios_l2(ej.tasas)
+    elif modo == "pico":
+        escenarios = escenarios_pico(ej.tasas)
+        humos = [{"nombre": "humo_previo", "inicio_s": HUMO_PREVIO_S}, {"nombre": "humo_posterior", "inicio_s": HUMO_POSTERIOR_S}]
+    elif modo == "l3":
+        escenarios = escenarios_l3(ips)
+    else:
+        escenarios = escenarios_l3b(ej.tasas, ips)
+    texto_json, _ = preparar_datos_k6(ej, modo, escenarios, humos, fases, 0)
+    mib = comprobar_presupuesto(escenarios, len(humos), len(texto_json.encode("utf-8")))
+    sin_holgura = holgura_insuficiente(escenarios)
+    if sin_holgura:
+        raise Parada(f"VUs sin holgura sobre el SLO de su ruta: {sin_holgura}")
+    p(f"   {len(escenarios)} escenarios, memoria estimada de k6 {mib} MiB de {MEMORIA_K6_MIB} MiB")
+    with contextlib.ExitStack() as pila:
+        # Cada Registro se da de alta en la pila justo al crearlo (PY-8): si el
+        # segundo falla al arrancar, el primero se para.
+        registros = []
+        for servicio in ("redis", "postgres"):
+            registro = Registro(servicio, salida_rep / f"log_{servicio}.txt")
+            pila.callback(registro.parar)
+            registros.append(registro)
+        lector = iniciar_lector(ej, f"rep{rep}_{modo}")
+        pila.callback(lector.parar)
+        stats_ruta = salida_rep / "stats_pila.txt"
+        estadisticas = Estadisticas(list(ej.ids.values()), stats_ruta)
+        pila.callback(estadisticas.parar)
+        registro_api = Registro("api", salida_rep / "log_api.txt")
+        pila.callback(registro_api.parar)
+        contexto = {"datos": ej.datos, "cpus_k6": ej.cpus_k6, "eventos": ej.eventos,
+                    "vigilados": lambda: [ej.eventos, lector, estadisticas, registro_api, *registros]}
+        frontera = None
+        if http_prod:
+            fallos_previos += controles_configuracion(ej, modo, rep, ips)
+            ahora = hora_motor_ahora()
+            if modo == "l3":
+                frontera = proxima_frontera(ahora, 60, MARGEN_ARRANQUE_S)
+                t0_objetivo = frontera
+            else:
+                carga = fase_por_nombre(fases, "carga")
+                frontera = proxima_frontera(ahora, VENTANA_ACCESO_S, MARGEN_ARRANQUE_S + carga["desde_s"])
+                t0_objetivo = frontera - carga["desde_s"]
+            alinear_ms, espera = int(t0_objetivo * 1000), t0_objetivo - ahora
+            p(f"   la carga empieza en la frontera {datetime.datetime.fromtimestamp(frontera, datetime.UTC):%H:%M:%S} UTC "
+              f"(reloj de la VM, dentro de {frontera - ahora:.0f} s)")
+        else:
+            alinear_ms, espera = None, 0
+        texto_json, ips_json = preparar_datos_k6(ej, modo, escenarios, humos, fases, alinear_ms)
+        escribir_datos_k6(ej, texto_json, ips_json)
+        nombre = f"{modo}_rep{rep}"
+        salida_k6 = salida_rep / nombre
+        salida_k6.mkdir()
+        args_red = (["--network", RED_EDGE, "--ip", IP_TRAEFIK] if http_prod
+                    else ["--network", f"container:{ej.ids['caddy']}"])
+        script = "l3.js" if http_prod else "fases.js"
+        k6 = ejecutar_k6(contexto, nombre, script, args_red, espera + duracion_total(escenarios, humos), salida_k6)
+        if "CONTROL_421" in k6["registro"] or "CONTROL_SETUP" in k6["registro"]:
+            # S10: el control de setup() de k6 (Host de produccion hacia la API y, en L3b, la
+            # pagina del denunciante) no se cumple: el montaje no es el de produccion.
+            raise Parada("el control de setup() de k6 falla (421 con el Host de produccion, POST /salud distinto de "
+                         "405 o, en L3b, GET /seguimiento distinto de 200): ver k6_salida.txt")
+        time.sleep(3)
+        time.sleep(REPOSO_S)
+        fin_reposo_vm = hora_motor_ahora()
+        muertos_al_final = comprobar_vida(contexto["vigilados"](), "reposo final")
+        lector_vivo = streamer_vivo(lector)
+        registrar_reinicios(ej)
+        ticks = lector.copia_ticks()
+        time.sleep(3)
+    return analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, frontera, fallos_previos,
+                                     stats_ruta, ticks, t_ini, muertos_al_final, lector_vivo, fin_reposo_vm, ips)
+
+
+def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, frontera, fallos_previos,
+                              stats_ruta, ticks, t_ini, muertos_al_final, lector_vivo, fin_reposo_vm, ips):
+    """Veredicto de cada parte de una repetición a partir del CSV, de los logs y
+    de la vigilancia. Devuelve {"modo", "repeticion", "muertes", "reinicios",
+    "comun" (fallos de validez comunes), "partes" ({nombre: {"resultado",
+    "validez", "control_ataque", "detalle"}}), "veredictos" ({nombre:
+    (veredicto, motivos)})}; agregar_fases los combina."""
+    p(f"=== analisis de la repeticion {rep} ({modo})")
+    csv_k6 = salida_k6 / "k6.csv"
+    t0 = leer_t0(k6["registro"])
+    comun = []
+    if not csv_k6.is_file():
+        comun.append(fallo("k6 no dejo el CSV"))
+        datos = {"filas": [], "descartes": {}, "retry": [], "checks": [], "ilegibles": 0}
+    else:
+        datos = leer_csv_fases(csv_k6)
+    insuficientes = set(PATRON_INSUFICIENTES.findall(k6["registro"]))
+    cpu = {}
+    if t0 is not None and k6["desfase"] is not None:
+        cpu = cpu_en_ventana([salida_k6 / "stats.txt", stats_ruta], k6["desfase"], t0, t0 + fases[-1]["hasta_s"])
+    comun += validez_generador(k6, t0, datos, insuficientes, cpu, es_http=modo in ("l3", "l3b"))
+    desde = k6["inicio_vm"] if k6["inicio_vm"] is not None else t_ini
+    vig = evaluar_vigilancia(ej, rep, ticks, t_ini, {k6["k6_id"]}, muertos_al_final, desde, fin_reposo_vm)
+    comun += vig["fallos"]
+    # Medianoche UTC (C8): la sal y los contadores empiezan de cero.
+    if k6["inicio_vm"] is not None and k6["fin_vm"] is not None and cruza_frontera(k6["inicio_vm"], k6["fin_vm"], 86400):
+        comun.append(fallo("la repeticion cruza las 00:00 UTC: la sal del limitador cambia y los contadores empiezan "
+                           "de cero"))
+    p("   CPU por contenedor (media/maxima, % de una CPU): "
+      + ", ".join(f"{n} {c['media']:.0f}/{c['maxima']:.0f}" for n, c in sorted(cpu.items())))
+    filas = [f for f in datos["filas"] if not f["nombre"].startswith("humo")]
+    nombres = PARTES[modo]
+    if t0 is None or not filas:
+        partes = {n: {"resultado": "SIN CONCLUSION", "validez": [], "control_ataque": None, "detalle": {}}
+                  for n in nombres}
+        partes[nombres[0]]["validez"] = list(fallos_previos)
+    elif modo == "l2":
+        partes, extra = analizar_l2(filas, datos, t0, fases, insuficientes, salida_rep, vig, k6, lector_vivo, fin_reposo_vm,
+                                   arranques_redis_desde(ej, t_ini))
+        comun += extra
+    elif modo == "pico":
+        partes, extra = analizar_pico(filas, datos, t0, fases, insuficientes, vig["reinicios"])
+        comun += extra
+    elif modo == "l3":
+        partes = analizar_l3(filas, datos, t0, frontera, fallos_previos, salida_rep, fases, ips,
+                               arranques_redis_desde(ej, t_ini))
+    else:
+        partes = analizar_l3b(filas, datos, t0, frontera, fases, insuficientes, fallos_previos, salida_rep, ips)
+    veredictos = {}
+    for n, parte in partes.items():
+        veredictos[n] = veredicto_con_validez(parte["resultado"], comun + parte["validez"], parte["control_ataque"],
+                                              vig["muertes"])
+        motivos = veredictos[n][1]
+        p(f"   repeticion {rep}, {n}: {veredictos[n][0]}" + (f" ({'; '.join(motivos)})" if motivos else ""))
+    return {"modo": modo, "repeticion": rep, "muertes": vig["muertes"], "reinicios": vig["reinicios"], "comun": comun,
+            "partes": partes, "veredictos": veredictos}
+
+
+def analizar_l2(filas, datos, t0, fases, insuficientes, salida_rep, vig, k6, lector_vivo, fin_reposo_vm,
+                arranques_redis):
+    victimas, f_base = analizar_victimas(filas, t0, fases, insuficientes, datos["descartes"])
+    login, efectivo = analizar_login(filas, t0, fases, insuficientes, datos["descartes"], "login_email")
+    veredictos = veredictos_victimas(victimas)
+    resultado = veredicto_l2(veredictos)
+    p("   victimas (BASE -> INUNDACION; veredicto B1):")
+    for ruta, v in victimas.items():
+        p("      " + lineas_fase(f"{ruta} BASE", v["base"]))
+        p("      " + lineas_fase(f"{ruta} INUNDACION", v["carga"]) + f" descartes con aviso {v['descartes_aviso']} -> "
+          f"{veredictos[ruta][0]} {veredictos[ruta][1]}")
+        p("      " + lineas_fase(f"{ruta} RECUPERACION (sin los primeros {EXCLUSION_RECUP_S} s)", v["recup"]))
+    p("   login inundado: " + lineas_fase("INUNDACION", login) + f" 503={login['n503']} servida {login['servida_por_s']:.1f}/s "
+      f"descartes con aviso {login['descartes_aviso']}; el ataque existe (B2): {efectivo}")
+    p("   " + esperas_predichas())
+    sonda = {f["nombre"]: resumen_filas([x for x in filas if x["nombre"] == "sonda_salud" and x["fase"] == f["nombre"]], 405)
+             for f in fases}
+    p("   sonda_salud p95 por fase (si suben las dos sondas: CPU, bucle o GIL; solo web_seguimiento: hilos): "
+      + ", ".join(f"{n} {ms(s['p95_ms'])} ms" for n, s in sonda.items()))
+    senales = senales_por_fase(salida_rep, fases, t0, arranques_redis)
+    for f in fases:
+        p(f"   senales del log en {f['nombre']}: {texto_senales(senales[f['nombre']]) or 'ninguna'}")
+    memoria_informativa(vig, k6, lector_vivo, fin_reposo_vm)
+    validez = list(f_base)
+    fuera_429 = [f for f in filas if f["estado"] == 429]
+    if fuera_429:
+        validez.append(fallo(f"{len(fuera_429)} respuestas 429 con los limites de estres (no tocan)"))
+    # H15: el reloj de fases. El login empieza donde dice el escenario.
+    comun = []
+    carga = fase_por_nombre(fases, "carga")
+    ok, texto = evaluar_alineacion(min((f["inicio"] for f in filas if f["nombre"] == "login_email"), default=None),
+                                   t0 + carga["desde_s"])
+    p(f"   reloj de fases (H15): {texto}")
+    if not ok:
+        comun.append(fallo("reloj de fases: " + texto))
+    return {"l2": {"resultado": resultado, "validez": validez, "control_ataque": efectivo,
+                   "detalle": {"victimas": victimas, "login": login}}}, comun
+
+
+def descartes_de_rutas(descartes_csv, t0):
+    """E14: los descartes (dropped_iterations) de las 4 rutas de F2, en segundos
+    relativos a t0 y ordenados, de CUALQUIER fase y con o sin el aviso de VUs
+    insuficientes. Los escenarios de L4 se llaman "<ruta>__<fase>"; la sonda de
+    salud (escenario sonda_salud) no es una ruta de F2 y no entra. Cada
+    descarte invalida despues, en serie_cumple, las ventanas [s, s + 10) que lo
+    contienen, para su ruta."""
+    return {ruta: sorted(d - t0 for escenario, marcas in descartes_csv.items()
+                         if escenario.startswith(ruta + "__") for d in marcas)
+            for ruta in RUTAS_FASES}
+
+
+def descartes_en_tramo(descartes, desde_s, hasta_s):
+    """Cuantos descartes (segundos relativos) caen en [desde_s, hasta_s)."""
+    return sum(1 for d in descartes if desde_s <= d < hasta_s)
+
+
+def analizar_pico(filas, datos, t0, fases, insuficientes, reinicios=0):
+    base_f, carga_f, recup_f = (fase_por_nombre(fases, n) for n in ("base", "carga", "recup"))
+    fin_pico = carga_f["hasta_s"]
+    series_base, series_recup, resumen = {}, {}, {}
+    fallos, comun = [], []
+    descartes = descartes_de_rutas(datos["descartes"], t0)
+    for ruta in RUTAS_FASES:
+        propias = [f for f in filas if f["nombre"] == ruta]
+        esperado = ESTADO_RUTAS[ruta]
+        # H8: en L4 el login usa la definicion de error por defecto (un 503 ES
+        # error) y tambien el 99 % del estado esperado. E8 solo vale en L2 y L3b.
+        r_base = resumen_filas([f for f in propias if f["fase"] == "base"], esperado)
+        resumen[ruta] = {"base": r_base, "pico": resumen_filas([f for f in propias if f["fase"] == "carga"], esperado),
+                         "recup": resumen_filas([f for f in propias if f["fase"] == "recup"], esperado)}
+        if not r_base["peticiones"]:
+            fallos.append(fallo(f"{ruta}: la BASE no tiene peticiones"))
+            continue
+        slo = SLO_RUTAS_MS[ruta]
+        if r_base["p95_ms"] > slo:
+            fallos.append(fallo(f"{ruta}: la BASE no cumple el SLO (p95 {r_base['p95_ms']:.0f} ms > {slo} ms)"))
+        if r_base["tasa_errores"] >= UMBRAL_ERRORES:
+            fallos.append(fallo(f"{ruta}: la BASE tiene {r_base['tasa_errores']:.2%} de errores"))
+        if r_base["proporcion_esperado"] < UMBRAL_ESPERADO:
+            fallos.append(fallo(f"{ruta}: solo el {r_base['proporcion_esperado']:.2%} de la BASE tiene el estado {esperado}"))
+        muestras = [(f["inicio"] - t0, f["dur"]) for f in propias]
+        series_base[ruta] = serie_cumple(ventanas_p95(muestras, base_f["desde_s"], base_f["hasta_s"]),
+                                         r_base["p95_ms"], slo, descartes[ruta])
+        series_recup[ruta] = serie_cumple(ventanas_p95(muestras, fin_pico, recup_f["hasta_s"]), r_base["p95_ms"], slo,
+                                          descartes[ruta])
+    # E14: un solo descarte de cualquiera de las 4 rutas dentro de la BASE
+    # programada es SIN CONCLUSION por validez, se cumpla o no el 95 %.
+    en_base = {ruta: descartes_en_tramo(ds, base_f["desde_s"], base_f["hasta_s"]) for ruta, ds in descartes.items()}
+    if any(en_base.values()):
+        fallos.append(fallo(f"E14: descartes en la BASE programada por ruta {en_base}"))
+    p(f"   descartes de k6 por ruta, BASE {en_base}, PICO (solo informativo) "
+      f"{ {r: descartes_en_tramo(ds, carga_f['desde_s'], carga_f['hasta_s']) for r, ds in descartes.items()} }, "
+      f"RECUPERACION {  {r: descartes_en_tramo(ds, recup_f['desde_s'], math.inf) for r, ds in descartes.items()} }")
+    tiempo = None
+    if len(series_base) == len(RUTAS_FASES):
+        # F2 y J14: el control de la BASE es de validez.
+        base_ok, _, motivo = control_base_f2(series_base)
+        p(f"   control de la BASE (F2, J14): {'PASA' if base_ok else 'SIN CONCLUSION'}: {motivo}")
+        if not base_ok:
+            fallos.append(fallo("F2: " + motivo))
+        tiempo = segundos_hasta_recuperar(series_recup, fin_pico)
+    humo_previo, humo_posterior = humo_ok(datos["checks"], "humo_previo"), humo_ok(datos["checks"], "humo_posterior")
+    p(f"   humo previo al pico: {'PASA' if humo_previo else 'FALLA'}; humo posterior (120 s tras el fin programado "
+      f"del pico): {'PASA' if humo_posterior else 'FALLA'}")
+    if not humo_previo:
+        fallos.append(fallo("el humo previo al pico falla: el humo posterior no demostraria nada (E5)"))
+    for ruta, r in resumen.items():
+        p("      " + lineas_fase(f"{ruta} BASE", r["base"]))
+        p("      " + lineas_fase(f"{ruta} PICO", r["pico"]))
+        p("      " + lineas_fase(f"{ruta} RECUPERACION", r["recup"]))
+    p(f"   tiempo de recuperacion de esta repeticion: {'no se recupera en los 180 s' if tiempo is None else f'{tiempo} s'}")
+    fuera_429 = [f for f in filas if f["estado"] == 429]
+    if fuera_429:
+        fallos.append(fallo(f"{len(fuera_429)} respuestas 429 con los limites de estres (no tocan)"))
+    # H15: el pico empieza donde dice el escenario.
+    primer = min((f["inicio"] for f in filas if f["escenario"] == "login_email__carga"), default=None)
+    ok, texto = evaluar_alineacion(primer, t0 + carga_f["desde_s"])
+    p(f"   reloj de fases (H15): {texto}")
+    if not ok:
+        comun.append(fallo("reloj de fases: " + texto))
+    resultado, _ = veredicto_recuperacion(math.inf if tiempo is None else tiempo, reinicios, humo_posterior)
+    return {"pico": {"resultado": resultado, "validez": fallos, "control_ataque": None,
+                     "detalle": {"tiempo": tiempo, "humo_posterior": humo_posterior, "humo_previo": humo_previo}}}, comun
+
+
+def filas_de_ip(filas, escenario):
+    """Filas con etiqueta ip del escenario, en el formato de contar_por_ip_ventana."""
+    return [{"ip": f["ip"], "inicio": f["inicio"], "fin": f["fin"], "estado": f["estado"]}
+            for f in filas if f["escenario"] == escenario and f["ip"] is not None]
+
+
+def analizar_carga_por_ip(filas, datos, escenario, aceptado, limite, ventana_s, frontera, esperadas, fallos):
+    """El oráculo por IP y ventana (C1, J2, J3, E7, H11) de L3 y L3b, con sus
+    controles de validez (J2, alineación y conjunto de IPs, PY-3), que se
+    añaden a fallos. Devuelve (veredicto, texto, pares)."""
+    propias = filas_de_ip(filas, escenario)
+    pares = contar_por_ip_ventana(propias, ventana_s, aceptado)
+    ok, motivos = control_l3(pares, limite)
+    p(f"   control positivo (J2): {'PASA' if ok else 'SIN CONCLUSION'} {motivos}")
+    if not ok:
+        fallos.append(fallo("J2: " + "; ".join(motivos)))
+    alineada, texto_alineacion = evaluar_alineacion(min((f["inicio"] for f in propias), default=None), frontera)
+    p(f"   alineacion con la frontera: {texto_alineacion}")
+    if not alineada:
+        fallos.append(fallo("alineacion con la frontera: " + texto_alineacion))
+    for motivo in validar_ips_vistas(filas, escenario, esperadas):
+        p(f"   IPs vistas: {motivo}")
+        fallos.append(fallo("IPs vistas: " + motivo))
+    n429 = sum(1 for f in propias if f["estado"] == 429)
+    invalidos = retry_after_invalidos(datos["retry"], n429, ventana_s)
+    veredicto, texto = veredicto_l3(pares, limite, invalidos)
+    p(f"   oraculo por IP y ventana ({sum(1 for x in pares.values() if x['peticiones'])} pares, {n429} respuestas 429, "
+      f"{invalidos} Retry-After no validos): {veredicto}: {texto}")
+    return veredicto, texto, pares
+
+
+def informar_503(filas, salida_rep):
+    """H14 (informativo): los 503 de k6 conciliados uno a uno, por hora, con las
+    líneas EVENTO del log de la API."""
+    marcas = [m for m, msg in leer_log(salida_rep / "log_api.txt") if PATRON_EVENTO_503.search(msg)]
+    intervalos = [(f["inicio"], f["fin"]) for f in filas if f["estado"] == 503]
+    c = conciliar_503(intervalos, marcas)
+    p(f"   informacion (H14): {len(intervalos)} respuestas 503 en k6 y {len(marcas)} lineas EVENTO en el log de la "
+      f"API: {c['emparejados']} emparejadas por hora (2 s de tolerancia), {c['sin_evento']} 503 sin linea, "
+      f"{c['eventos_sin_503']} lineas sin 503")
+
+
+def analizar_l3(filas, datos, t0, frontera, fallos_previos, salida_rep, fases, ips, arranques_redis):
+    validez = list(fallos_previos)
+    veredicto, texto, pares = analizar_carga_por_ip(filas, datos, "seguimiento_ips", 404, LIMITE_SEGUIMIENTO,
+                                                    VENTANA_SEGUIMIENTO_S, frontera, ips["carga"], validez)
+    propias = [f for f in filas if f["escenario"] == "seguimiento_ips"]
+    otros_429 = [f for f in filas if f["estado"] == 429 and f["escenario"] != "seguimiento_ips"]
+    if otros_429:
+        validez.append(fallo(f"{len(otros_429)} respuestas 429 donde no toca (sonda de salud, exenta)"))
+    sin_error = [f for f in propias if f["estado"] not in (0, 429, 503)]
+    if sin_error and sum(1 for f in sin_error if f["estado"] == 404) / len(sin_error) < UMBRAL_ESPERADO:
+        validez.append(fallo("menos del 99 % del estado esperado (404) entre las respuestas que no son error"))
+    # Información (no oráculo): caudal aceptado, p95, defecto de la ventana fija, 503 y sonda.
+    aceptadas = [f for f in propias if f["estado"] == 404]
+    duracion = fases[-1]["hasta_s"]
+    en_primeros_40 = sum(1 for f in aceptadas if (f["inicio"] % 60) < 40)
+    p(f"   informacion: caudal aceptado {len(aceptadas) / duracion:.1f}/s de media sobre 300/s ofrecidos; "
+      f"{en_primeros_40 / max(1, len(aceptadas)):.0%} cae en los primeros 40 s de cada minuto (ventana fija alineada con el reloj UTC)")
+    p("   informacion: " + lineas_fase("seguimiento", resumen_filas(propias, 404)))
+    maximo, ip_max = maximo_deslizante({ip: [f["inicio"] for f in aceptadas if f["ip"] == ip]
+                                        for ip in {f["ip"] for f in aceptadas}}, 60)
+    p(f"   informacion (defecto de la ventana fija, l.695): maximo aceptado por una IP en un tramo deslizante de 60 s = "
+      f"{maximo} (se espera como mucho 120; IP {ip_max})")
+    senales = senales_por_fase(salida_rep, fases, t0, arranques_redis)["carga"]
+    p(f"   informacion (H-R): senales del log: {texto_senales(senales) or 'ninguna'}")
+    informar_503(filas, salida_rep)
+    sonda = [f for f in filas if f["nombre"] == "sonda_salud"]
+    con_503 = {int(f["inicio"] // 10) for f in propias if f["estado"] == 503}
+    p("   informacion (contencion del GIL): p95 de sonda_salud "
+      + f"en tramos de 10 s con 503 {ms(percentil(sorted(f['dur'] for f in sonda if int(f['inicio'] // 10) in con_503), 95))} ms, "
+      + f"sin 503 {ms(percentil(sorted(f['dur'] for f in sonda if int(f['inicio'] // 10) not in con_503), 95))} ms")
+    return {"l3": {"resultado": veredicto, "validez": validez, "control_ataque": None,
+                   "detalle": {"texto": texto, "n_pares": len(pares)}}}
+
+
+def analizar_l3b(filas, datos, t0, frontera, fases, insuficientes, fallos_previos, salida_rep, ips):
+    # L3b-a: el oraculo por IP y ventana. Validez propia: J2, D3, J5 y strict (en
+    # fallos_previos), la alineacion y el conjunto de IPs.
+    validez_a = list(fallos_previos)
+    veredicto_a, texto_a, pares = analizar_carga_por_ip(filas, datos, "login_ataque", 401, LIMITE_ACCESO,
+                                                        VENTANA_ACCESO_S, frontera, ips["ataque"], validez_a)
+    # L3b-b: las victimas. Validez propia: la BASE y los 429 donde no tocan; el
+    # control B2 solo actua sobre este.
+    victimas, validez_b = analizar_victimas(filas, t0, fases, insuficientes, datos["descartes"])
+    login, efectivo = analizar_login(filas, t0, fases, insuficientes, datos["descartes"], "login_ataque")
+    veredictos = veredictos_victimas(victimas)
+    veredicto_b = veredicto_l2(veredictos)
+    p("   victimas (BASE -> ATAQUE; veredicto B1):")
+    for ruta, v in victimas.items():
+        p("      " + lineas_fase(f"{ruta} BASE", v["base"]))
+        p("      " + lineas_fase(f"{ruta} ATAQUE", v["carga"]) + f" descartes con aviso {v['descartes_aviso']} -> "
+          f"{veredictos[ruta][0]} {veredictos[ruta][1]}")
+        p("      " + lineas_fase(f"{ruta} RECUPERACION (sin los primeros {EXCLUSION_RECUP_S} s)", v["recup"]))
+    p("   ataque: " + lineas_fase("ATAQUE", login) + f" 503={login['n503']} servida {login['servida_por_s']:.1f}/s; "
+      f"el ataque existe (B2): {efectivo}")
+    p("   " + esperas_predichas())
+    fuera_429 = [f for f in filas if f["estado"] == 429 and f["escenario"] != "login_ataque"]
+    if fuera_429:
+        validez_b.append(fallo(f"{len(fuera_429)} respuestas 429 donde no toca (victimas o sonda)"))
+    informar_503(filas, salida_rep)
+    return {"l3b-a": {"resultado": veredicto_a, "validez": validez_a, "control_ataque": None,
+                      "detalle": {"texto": texto_a, "n_pares": len(pares)}},
+            "l3b-b": {"resultado": veredicto_b, "validez": validez_b, "control_ataque": efectivo,
+                      "detalle": {"victimas": victimas, "login": login}}}
+
+
+def agregar_fases(modo, repeticiones, tamano_pedido, fallos_globales=(), controles=None):
+    """Veredicto final de cada parte de la prueba (A1, J1, E9, H1, H2, H3, H4).
+    Publica el de cada repetición y calcula el global: los resultados de los
+    oráculos se combinan con peor_estado (o, en L2, L3b-b y L4, sobre la mediana
+    de las repeticiones); la validez (comun de cada repetición, la de la parte y
+    los fallos_globales: control final del detector, stream de eventos,
+    anti-fuga) entra aparte por fallos; las muertes (veredicto_muerte de cada
+    una, repetición por repetición) mandan sobre todo. Devuelve {nombre:
+    (veredicto, motivos)}."""
+    nombres = PARTES[modo]
+    p(f"=== veredicto de {modo} (3 repeticiones validas, A1)")
+    for r in repeticiones:
+        for n, (v, motivos) in r["veredictos"].items():
+            p(f"   repeticion {r['repeticion']}, {n}: {v}" + (f" ({'; '.join(motivos)})" if motivos else ""))
+    muertes = [m for r in repeticiones for m in r["muertes"]]
+    comun = [f for r in repeticiones for f in r["comun"]] + list(fallos_globales)
+    if len(repeticiones) < 3 or tamano_pedido < 3:
+        comun.append(fallo(f"solo {len(repeticiones)} repeticiones (A1 exige 3)"))
+    finales = {}
+    for nombre in nombres:
+        partes = [r["partes"][nombre] for r in repeticiones if nombre in r["partes"]]
+        validez = comun + [f for pa in partes for f in pa["validez"]]
+        control = None
+        detalles = [pa["detalle"] for pa in partes]
+        if nombre in ("l2", "l3b-b"):
+            if detalles and all("victimas" in d for d in detalles):
+                medianas = victimas_medianas([d["victimas"] for d in detalles])
+                veredictos = veredictos_victimas(medianas)
+                resultado = veredicto_l2(veredictos)
+                for ruta, (v, motivos) in veredictos.items():
+                    p(f"   victima {ruta} (mediana de los p95): {v} {motivos}")
+                logins = [d["login"] for d in detalles]
+                errores = [x["tasa_errores"] for x in logins if x["tasa_errores"] is not None]
+                control = ataque_efectivo(mediana_p95([x["p95_ms"] for x in logins]),
+                                          statistics.median(errores) if errores else None,
+                                          sum(x["descartes_aviso"] for x in logins))
+            else:
+                resultado = "SIN CONCLUSION"
+        elif nombre == "pico":
+            tiempos = [d["tiempo"] for d in detalles if "tiempo" in d]
+            if tiempos:
+                mediana = mediana_recuperacion(tiempos)
+                p(f"   tiempos de recuperacion por repeticion: {['no se recupera' if t is None else t for t in tiempos]}; "
+                  f"mediana {mediana}")
+                resultado, _ = veredicto_recuperacion(mediana, sum(r["reinicios"] for r in repeticiones),
+                                                      all(d["humo_posterior"] for d in detalles if "humo_posterior" in d))
+            else:
+                resultado = "SIN CONCLUSION"
+        else:
+            resultado = combinar_resultados([pa["resultado"] for pa in partes]) if partes else "SIN CONCLUSION"
+        finales[nombre] = veredicto_con_validez(resultado, validez, control, muertes)
+        if controles is not None:
+            controles[nombre] = control
+        # E15 y E17: sin cota de coste si la FALLA es de una muerte.
+        if nombre == "l3b-b" and MOTIVO_MUERTE not in finales[nombre][1]:
+            cota = texto_cota_ataque(finales[nombre][0], control, N_IPS_ATAQUE_CONGELADO)
+            if cota:
+                p(f"   coste del ataque (D5, E15): {cota}; un corte de 30 s: ~{102.04 * 30 / 10:.0f} IPs, o "
+                  f"~{102.04 * 30 / 20:.0f} aprovechando la frontera de la ventana fija (aritmetica, sin medir)")
+    return finales
+
+
+def literales_siembra():
+    """Los valores que el lanzador siembra en cada ejecución (A3): la contraseña
+    sintética del login y el texto del humo (con un acento y espacios, para
+    que sus formas codificadas difieran del original). Distintos en cada
+    ejecución."""
+    return {"contrasena": "Estres-" + secrets.token_hex(12), "texto_humo": "Humo de recuperación L4 " + secrets.token_hex(8)}
+
+
+def ids_a_escanear(ej):
+    return {f"empresa{i}": x for i, x in enumerate(ej.ids_empresas)}
+
+
+def escanear_salida(ej):
+    """Anti-fuga (A3, J7, S6, PY-4): busca los literales sembrados, tal cual y
+    codificados, y cualquier código de seguimiento en TODOS los ficheros de la
+    salida, y los identificadores de empresa en los que no los necesitan. El
+    centinela se planta dentro de la propia salida y el MISMO recorrido tiene
+    que encontrarlo todo (escanear_con_centinela); si no, SIN CONCLUSION.
+    Devuelve (veredicto, texto)."""
+    reales, faltan = escanear_con_centinela(ej.salida, ej.literales, ids_a_escanear(ej), [("codigo", PATRON_CODIGO)])
+    return veredicto_fuga(reales, not faltan)
+
+
+def escanear_texto_final(ej):
+    """S7: al final de main, el texto de la salida (PARADA, traceback y
+    veredictos) tambien se escanea. El control positivo va DENTRO del texto real
+    que se escanea (no en una cadena aparte): se anade un centinela al final de
+    ese mismo texto, se exige encontrarlo y despues se descuenta de los
+    hallazgos. Si el escaner no lo encuentra, SIN CONCLUSION."""
+    control = "Centinela ó " + secrets.token_hex(6)
+    texto = "\n".join(lineas_salida) + "\n" + control
+    hallazgos = buscar_en_bytes(texto.encode("utf-8"), {**ej.literales, **ids_a_escanear(ej), "centinela": control},
+                                [("codigo", PATRON_CODIGO)])
+    if "centinela" not in hallazgos:
+        sinc("anti-fuga del texto de la salida: el escaner de texto no encuentra su centinela")
+        return
+    hallazgos = [h for h in hallazgos if h != "centinela"]
+    if hallazgos:
+        sinc(f"anti-fuga: valores sembrados en el texto de la salida: {hallazgos}")
+
+
+def comprobar_origen_produccion():
+    """S8 (L3 y L3b, en el arranque real): registra git rev-parse HEAD, exige
+    que proxy/, compose.produccion.yaml y docker-compose.yml no tengan cambios
+    y compara el command y los ports de caddy y networks.edge.internal del override con lo
+    que resuelve docker compose con compose.produccion.yaml, como
+    comando_postgres_resuelto. PARADA si algo difiere."""
+    commit = ejecutar(["git", "-C", str(RAIZ), "rev-parse", "HEAD"], timeout=60)
+    if commit.rc != 0:
+        raise Parada(f"git rev-parse HEAD falla: {commit.err.strip()[-200:]!r}")
+    p(f"   commit del repo: {commit.out.strip()}")
+    estado_ = ejecutar(["git", "-C", str(RAIZ), "status", "--short", "--", "proxy/", "compose.produccion.yaml",
+                        "docker-compose.yml"], timeout=60)
+    if estado_.rc != 0:
+        raise Parada(f"git status falla: {estado_.err.strip()[-200:]!r}")
+    sucias = rutas_sucias(estado_.out)
+    if sucias:
+        raise Parada(f"hay cambios sin commitear en el montaje de produccion: {sucias}")
+    produccion = ejecutar(["docker", "compose", "-f", str(COMPOSE), "-f", str(RAIZ / "compose.produccion.yaml"), "config",
+                           "--format", "json"], timeout=120)
+    nuestro = dc("config", "--format", "json", timeout=120)
+    for nombre, r in (("compose.produccion.yaml", produccion), ("el override de la bateria", nuestro)):
+        if r.rc != 0:
+            raise Parada(f"docker compose config de {nombre} falla (codigo {r.rc}): {r.err.strip()[-300:]!r}")
+    try:
+        dif = diferencias_caddy_produccion(json.loads(produccion.out), json.loads(nuestro.out))
+    except ValueError:
+        raise Parada("docker compose config --format json no da un JSON legible") from None
+    if dif:
+        raise Parada(f"el override de Caddy de produccion difiere de compose.produccion.yaml: {dif}")
+    p("   el override de Caddy coincide con compose.produccion.yaml (command y networks.edge.internal)")
+
+
+def guardar_resultados(salida, hechas):
+    (salida / "resultados.json").write_text(json.dumps(hechas, indent=1, default=str), encoding="utf-8", newline="\n")
+
+
+def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones):
+    """--l2, --pico, --l3 o --l3b: comprobaciones, controles en sándwich, las
+    repeticiones, el escáner anti-fuga, el veredicto agregado y su emisión."""
+    if t != T_CONGELADA:
+        raise Parada(f"--t {t} no es la t congelada ({T_CONGELADA}): las tasas ya no serian las de la segunda congelacion")
+    tasas = tasas_de(t)
+    n_ataque = n_ips_ataque(tasas["login_pico"])
+    comprobar_cifras_congeladas(tasas, n_ataque, ips_necesarias(TASA_VICTIMA, 570, LIMITE_DENUNCIA, VENTANA_DENUNCIA_S),
+                                ips_necesarias(TASA_VICTIMA, 570, LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S))
+    plan = plan_ips(modo, repeticiones, n_ataque) if modo in ("l3", "l3b") else {}
+    p(f"=== {modo}: tasas {tasas}; tiempo estimado (peor caso) {estimar_repeticion_s(modo) / 60:.1f} min la repeticion 1 y "
+      f"{estimar_repeticion_s(modo, 2) / 60:.1f} min las siguientes, {estimar_total_s(modo, repeticiones) / 3600:.1f} h en total")
+    if modo in ("l2", "pico"):
+        comprobar_literales_argon2()
+    if modo in ("l3", "l3b"):
+        comprobar_origen_produccion()
+    ej = Ejecucion(t, datos, salida, cpus_canario, cpus_k6, None,
+                   LINEA_LIMITES_PRODUCCION if modo in ("l3", "l3b") else LINEA_LIMITES)
+    ej.modo, ej.tasas, ej.plan_ips = modo, tasas, plan
+    ej.literales = literales_siembra()
+    ej.contrasena, ej.texto_humo = ej.literales["contrasena"], ej.literales["texto_humo"]
+    ej.id_a = ej.id_b = None
+    ej.ids_empresas = []
+    ej.escaneado = False
+    ACTUAL["ej"] = ej
+    hechas, globales = [], []
+    try:
+        with contextlib.ExitStack() as pila:
+            pila.callback(limpiar_efimeros)
+            # La PARADA se imprime AQUI, dentro del with y antes de que corran los
+            # callbacks de la pila (limpiar_efimeros, eventos.parar), y no en el
+            # except del try exterior: esos callbacks y el escaneo del finally
+            # tardan, un segundo Ctrl+C durante ellos se llevaría por delante la
+            # línea y la causa quedaría sin decir. `impresa` se lo avisa a main,
+            # que si no la imprimiría otra vez (una línea PARADA, no dos).
+            try:
+                ej.eventos = EventosDocker(hora_motor_ahora(), salida / "docker_events.err")
+                pila.callback(ej.eventos.parar)
+                for rep in range(1, repeticiones + 1):
+                    hechas.append(ejecutar_repeticion_fases(ej, modo, rep, repeticiones))
+                # H1: el control final del detector, las lineas ilegibles o la muerte del
+                # stream de eventos son fallos de validez de todas las partes.
+                if not ejecutar_control(ej, "final"):
+                    globales.append(fallo("el control positivo final del detector no se ve completo"))
+                if ej.eventos.ilegibles:
+                    globales.append(fallo(f"{ej.eventos.ilegibles} lineas ilegibles en el stream de docker events"))
+                if not streamer_vivo(ej.eventos):
+                    globales.append(fallo("el stream de docker events murio durante la ejecucion"))
+            except Parada as e:
+                p(f"PARADA: {e}")
+                e.impresa = True
+                raise
+        guardar_resultados(salida, hechas)
+        # H1: el anti-fuga corre ANTES de emitir el veredicto de la prueba.
+        try:
+            v_fuga, t_fuga = escanear_salida(ej)
+        except Exception as e:  # noqa: BLE001 - cualquier fallo del escaner deja SIN CONCLUSION, visible
+            t_fuga = f"anti-fuga no completado: {type(e).__name__}: {e}"
+            sinc(t_fuga)
+            globales.append(fallo(t_fuga))
+        else:
+            p(f"   anti-fuga: {v_fuga}: {t_fuga}")
+            if v_fuga != "PASA":
+                globales.append(fallo("anti-fuga: " + t_fuga))
+        ej.escaneado = True
+        controles = {}
+        finales = agregar_fases(modo, hechas, repeticiones, globales, controles)
+        for nombre, (veredicto, motivos) in finales.items():
+            texto = f"{nombre}: {veredicto}" + (f" ({'; '.join(motivos)})" if motivos else "")
+            if nombre == "l3b-b":
+                texto = linea_l3b_b(veredicto, motivos, controles.get(nombre)) or texto
+            emitir(veredicto, texto)
+    finally:
+        # Lo medido hasta ahora queda escrito y escaneado tambien con PARADA o Ctrl+C (J7).
+        # Cada paso en su propio try: que falle guardar no puede impedir el reescaneo (PY-4).
+        try:
+            guardar_resultados(salida, hechas)
+            p(f"   resultados: {salida / 'resultados.json'}")
+        except OSError as e:
+            sinc(f"no se pudo guardar resultados.json: {type(e).__name__}: {e}")
+        if not ej.escaneado:
+            try:
+                v_fuga, t_fuga = escanear_salida(ej)
+                emitir(v_fuga, f"anti-fuga (ejecucion abortada): {t_fuga}")
+            except Exception as e:  # noqa: BLE001 - igual que arriba
+                sinc(f"anti-fuga no completado: {type(e).__name__}: {e}")
+
+
 def main():
     analizador = argparse.ArgumentParser(description="Prueba de estres L1 de Canario")
     modo = analizador.add_mutually_exclusive_group(required=True)
     modo.add_argument("--hash", action="store_true", help="mide t (Argon2id) en el contenedor de la API")
     modo.add_argument("--l1", action="store_true", help="capacidad y codo con k6")
-    analizador.add_argument("--t", type=float, help="t en segundos de la primera congelacion (obligatorio con --l1)")
+    modo.add_argument("--l2", action="store_true", help="aislamiento: inundacion del login y victimas (limites de estres)")
+    modo.add_argument("--pico", action="store_true", help="L4: pico de 10 veces durante 30 s y recuperacion")
+    modo.add_argument("--l3", action="store_true", help="200 IPs con los limites de produccion")
+    modo.add_argument("--l3b", action="store_true", help="el coste del ataque de L2 con los limites de produccion")
+    analizador.add_argument("--t", type=float, help="t en segundos de la primera congelacion (obligatorio salvo con "
+                                                    "--hash; con --l2, --pico, --l3 y --l3b debe ser 0.0196)")
     analizador.add_argument("--repeticiones", type=int, default=REPETICIONES_POR_DEFECTO,
-                            help="repeticiones independientes de --l1 (3 por defecto, unas 2 h)")
+                            help="repeticiones independientes (3 por defecto)")
     analizador.add_argument("--conservar", action="store_true",
                             help="no borra la pila ni los temporales (solo para desarrollar)")
     argumentos = analizador.parse_args()
-    if argumentos.l1 and argumentos.t is None:
-        # Sin t congelada, las tasas del login no serían las de la hipótesis
-        # publicada antes de medir (sección 3, primera congelación).
-        p("PARADA: --l1 necesita --t con el valor de la primera congelacion (python tests\\estres\\lanzar.py --hash)")
+    con_t = argumentos.l1 or argumentos.l2 or argumentos.pico or argumentos.l3 or argumentos.l3b
+    modo_nuevo = "l2" if argumentos.l2 else "pico" if argumentos.pico else "l3" if argumentos.l3 else \
+        "l3b" if argumentos.l3b else None
+    if con_t and argumentos.t is None:
+        # Sin t congelada, las tasas no serían las de la hipótesis publicada
+        # antes de medir (sección 3, primera y segunda congelación).
+        p("PARADA: este modo necesita --t con el valor de la primera congelacion (python tests\\estres\\lanzar.py --hash)")
         terminar_con_parada()
     if argumentos.repeticiones < 1:
         p("PARADA: --repeticiones debe ser 1 o mas")
         terminar_con_parada()
-    if argumentos.l1 and not T_MINIMA <= argumentos.t <= T_MAXIMA:
+    if con_t and not T_MINIMA <= argumentos.t <= T_MAXIMA:
         p(f"PARADA: --t {argumentos.t} fuera de lo plausible ({T_MINIMA} a {T_MAXIMA} s)")
         terminar_con_parada()
 
@@ -2994,7 +5325,7 @@ def main():
     # Precondiciones: si fallan, no se limpia nada (podrían ser recursos ajenos).
     comprobaciones_previas()
     try:
-        if argumentos.hash or argumentos.l1:
+        if argumentos.hash or argumentos.l1 or modo_nuevo in ("l2", "pico"):
             comprobar_literales_argon2()
         hermanas = leer_topologia()
         canario, k6, texto, sin_smt = elegir_cpus(hermanas)
@@ -3012,21 +5343,30 @@ def main():
     temporal = pathlib.Path(tempfile.mkdtemp(prefix="canario_estres_"))
     datos = pathlib.Path(tempfile.mkdtemp(prefix="canario_estres_datos_"))
     salida = pathlib.Path(tempfile.mkdtemp(prefix="canario_estres_salida_"))
-    for fichero in preparar_overrides(temporal, canario):
+    # L3 y L3b: limites de produccion (sin CANARIO_LIMITES) y Caddy con
+    # Caddyfile.produccion; el resto, limites de estres y Caddyfile local.
+    produccion = modo_nuevo in ("l3", "l3b")
+    for fichero in preparar_overrides(temporal, canario, None if produccion else LIMITES_ESTRES,
+                                      caddy_produccion=produccion):
         BASE.extend(["-f", str(fichero)])
 
     parada = None
     try:
-        if argumentos.l1:
+        if con_t:
             preparar_override_postgres(temporal)
         if argumentos.hash:
             arrancar(("api",), canario)
             medir_hash(salida)
+        elif modo_nuevo is not None:
+            ejecutar_modo(modo_nuevo, argumentos.t, datos, salida, canario, k6, argumentos.repeticiones)
         else:
             ejecutar_l1(argumentos.t, datos, salida, canario, k6, argumentos.repeticiones)
     except Parada as e:
         parada = str(e)
-        p(f"PARADA: {parada}")
+        # ejecutar_modo ya la imprimió (e.impresa) antes de su limpieza; L1, --hash
+        # y el resto no, y siguen imprimiéndola aquí como siempre.
+        if not getattr(e, "impresa", False):
+            p(f"PARADA: {parada}")
     except KeyboardInterrupt:
         # Ctrl+C: PARADA visible; la limpieza y lo medido hasta ahora siguen.
         parada = "interrumpido con Ctrl+C"
@@ -3063,6 +5403,13 @@ def main():
                 p(f"   al arrancar: {git_arranque}")
                 p(f"   al terminar: {git_final}")
         p(f"Salida (CSV y panel de k6, logs, docker stats, resultados): {salida}")
+        if ACTUAL["ej"] is not None:
+            # S7: el texto que acaba de salir por pantalla (PARADA, traceback,
+            # veredictos) tambien se escanea en busca de lo sembrado.
+            try:
+                escanear_texto_final(ACTUAL["ej"])
+            except Exception as e:  # noqa: BLE001 - un fallo del escaner deja SIN CONCLUSION, visible
+                sinc(f"anti-fuga del texto no completado: {type(e).__name__}: {e}")
     if parada is not None:
         estado["falla"] = True
     terminar()
