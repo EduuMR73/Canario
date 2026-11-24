@@ -37,7 +37,15 @@ misma sentencia, y que aplicacion sigue sin poder cambiar ningún contenido
 cifrado por su cuenta. También la autenticación: el pg_hba.conf que manda es el del
 repositorio, sin trust; el superusuario solo entra por el socket con peer;
 las contraseñas se guardan en SCRAM-SHA-256 y un cliente que exige md5 no
-entra; y los roles de Canario solo llegan a la base canario.
+entra; y los roles de Canario solo llegan a la base canario. El socket
+en /run/postgresql (tmpfs con nosuid y noexec, srwx------ de 70:70). La versión
+del servidor (18.7) y que en las bases conectables solo existe la extensión
+plpgsql (la excepción de los 14 días de 18.7 se apoya en que xml2 no está
+creada).
+La puerta de postmaster.pid del healthcheck de postgres (qp: con un
+postmaster.pid simulado, "stopping" y la línea 6 vacía dan 1 con su motivo
+literal; qd: en un contenedor desechable sin red, el healthcheck anterior deja el
+FATAL "the database system is shutting down" durante una parada y el nuevo no).
 Cada prueba negativa lleva su
 control positivo: si el control falla, el resultado es SIN CONCLUSION, nunca
 PASA.
@@ -531,6 +539,21 @@ SOL_CERRADA = "c5000000-0000-4000-8000-000000000003"
 SOL_CADUCADA = "c5000000-0000-4000-8000-000000000004"
 SOL_EN_USO = "c5000000-0000-4000-8000-000000000005"
 
+# Socket (sección au) y versión y extensiones (sección ex), de PostgreSQL 18.7.
+# Literales comprobados en un arranque real de 18.7 (24 de noviembre de 2026): el
+# directorio queda drwxrwsr-t (el chmod 03775 del entrypoint anula el mode del
+# tmpfs) y el socket srwx------, ambos de 70:70.
+DIR_SOCKET = "/run/postgresql"
+RUTA_SOCKET = "/run/postgresql/.s.PGSQL.5432"
+STAT_DIR_SOCKET = "drwxrwsr-t 70 70"
+STAT_SOCKET = "srwx------ 70 70"
+OPCIONES_TMPFS_SEGURAS = {"nosuid", "noexec"}
+VERSION_NUM_ESPERADA = "180007"
+# Bases que admiten conexiones: si aparece otra, escaparía a la invariante de
+# extensiones (FALLA).
+BASES_CONECTABLES = ["canario", "postgres", "template1"]
+BASE_CONTROL_EXT = "control_ext"
+
 # Autenticación (db/pg_hba.conf y docker-compose.yml), seccion au. Literales
 # comprobados contra postgres:18.6-alpine con el pg_hba.conf del repositorio.
 HBA_FILE = "/etc/postgresql/pg_hba.conf"
@@ -595,6 +618,13 @@ PSQL = ["exec", "-T", "postgres", "psql", "-U", "postgres", "-d", "canario",
 def sup(sql):
     """SQL como superusuario por el socket (stdin)."""
     return dc(*PSQL, entrada=sql.encode("utf-8"))
+
+
+def sup_en(base, sql):
+    """Igual que sup() (mismo PSQL) pero conectado a otra base: psql_en_postgres
+    no sirve, porque fija -d canario y solo ejecuta select 1."""
+    assert PSQL[6] == "-d"
+    return dc(*(PSQL[:7] + [base] + PSQL[8:]), entrada=sql.encode("utf-8"))
 
 
 SIN = None  # sin contexto de empresa
@@ -1473,6 +1503,22 @@ def psql_en_postgres(usuario, *conexion):
               "-d", "canario", "-w", "-X", "-q", "-A", "-t", "-c", "select 1")
 
 
+def opciones_tmpfs(proc_mounts, destino):
+    """Opciones de montaje del tmpfs en `destino` según /proc/mounts, o None si
+    ahí no hay un tmpfs. Si hay varios montajes, vale el último (el visible)."""
+    encontradas = None
+    for linea in proc_mounts.splitlines():
+        campos = linea.split()
+        if len(campos) >= 4 and campos[1] == destino and campos[2] == "tmpfs":
+            encontradas = set(campos[3].split(","))
+    return encontradas
+
+
+def stat_en_postgres(ruta):
+    """Permisos y dueño (uid gid) de una ruta dentro del contenedor de postgres."""
+    return dc("exec", "-T", "postgres", "stat", "-c", "%A %u %g", ruta).out.strip()
+
+
 def seccion_au():
     p("=== au) autenticacion de PostgreSQL")
     # El fichero que manda es el del repositorio, no el de PGDATA.
@@ -1532,6 +1578,72 @@ def seccion_au():
     otra = cliente_red("select 1;", base="postgres")
     negativo("au) aplicacion a la base postgres por red se rechaza", otra, TEXTO_RECHAZO_OTRA_BASE,
              ctl.lineas() == ["1"] and TEXTO_RECHAZO_HBA in otra.err)
+
+    # El socket, donde 18.7 lo crea (DEFAULT_PGSOCKET_DIR = /run/postgresql) y
+    # en un tmpfs sin ejecución ni setuid. Si el tmpfs del compose apuntara a
+    # otra ruta, el socket caería en la raíz de solo lectura: aquí se ve la
+    # causa. Cada prueba lleva su control: el mismo analizador sobre el tmpfs de
+    # /tmp (que lleva nosuid y noexec) y el stat del directorio del socket (el
+    # chmod 03775 del entrypoint), otro literal con el mismo método y sin
+    # arrancar otro PostgreSQL.
+    pasa(valor(sup("show unix_socket_directories;")) == DIR_SOCKET, f"au) unix_socket_directories = {DIR_SOCKET}")
+    mounts = dc("exec", "-T", "postgres", "cat", "/proc/mounts").out
+    control_mount = OPCIONES_TMPFS_SEGURAS <= (opciones_tmpfs(mounts, "/tmp") or set())
+    opciones = opciones_tmpfs(mounts, DIR_SOCKET)
+    negativo_valor(f"au) {DIR_SOCKET} es un tmpfs con nosuid y noexec ({sorted(opciones or [])})",
+                   opciones is not None and OPCIONES_TMPFS_SEGURAS <= opciones, control_mount)
+    control_dir = stat_en_postgres(DIR_SOCKET) == STAT_DIR_SOCKET
+    real_socket = stat_en_postgres(RUTA_SOCKET)
+    negativo_valor(f"au) el socket {RUTA_SOCKET} es {STAT_SOCKET} ({real_socket!r}; control: {DIR_SOCKET} es {STAT_DIR_SOCKET})",
+                   real_socket == STAT_SOCKET, control_dir)
+
+
+def seccion_ex():
+    p("=== ex) version y extensiones")
+    # La versión que de verdad se ejecuta. Igualdad positiva con literal: si no
+    # responde, FALLA, nunca un PASA vacío.
+    version = valor(sup("show server_version_num;"))
+    pasa(version == VERSION_NUM_ESPERADA, f"ex) server_version_num = {VERSION_NUM_ESPERADA} ({version!r})")
+
+    # Las bases que admiten conexiones, como literal: una nueva escaparía a la
+    # comprobación de extensiones. Se lee ANTES de crear la base de control.
+    bases = sup("select datname from pg_database where datallowconn order by 1;").lineas()
+    pasa(bases == BASES_CONECTABLES, f"ex) bases que admiten conexiones = {BASES_CONECTABLES} ({bases})")
+
+    # Control: una base desechable (desde template0, sin extensiones) con citext
+    # da ["citext", "plpgsql"] con la misma consulta; si citext no está
+    # disponible o algo falla, SIN CONCLUSION. DROP DATABASE en un finally, con
+    # el borrado comprobado. CREATE y DROP DATABASE no pueden ir en una
+    # transacción: cada uno va solo en su llamada a sup().
+    disponible = valor(sup("select count(*) from pg_available_extensions where name = 'citext';")) == "1"
+    control_valores = None
+    try:
+        creada = sin_error(sup(f"CREATE DATABASE {BASE_CONTROL_EXT} TEMPLATE template0;"))
+        if disponible and creada:
+            sup_en(BASE_CONTROL_EXT, "CREATE EXTENSION citext;")
+            control_valores = sup_en(BASE_CONTROL_EXT, "select extname from pg_extension order by 1;").lineas()
+    finally:
+        sup(f"DROP DATABASE IF EXISTS {BASE_CONTROL_EXT};")
+        borrada = valor(sup(f"select count(*) from pg_database where datname = '{BASE_CONTROL_EXT}';")) == "0"
+    pasa(borrada, f"ex) la base de control {BASE_CONTROL_EXT} se borra")
+    if not disponible:
+        sinc("ex) citext no esta en pg_available_extensions: el control de extensiones no se puede hacer")
+    control_ok = disponible and borrada and control_valores == ["citext", "plpgsql"]
+    if disponible and control_valores != ["citext", "plpgsql"]:
+        sinc(f"ex) el control (una base con citext) dio {control_valores}, no ['citext', 'plpgsql']")
+
+    # En cada base conectable solo plpgsql.
+    for base in BASES_CONECTABLES:
+        r = sup_en(base, "select extname from pg_extension order by 1;")
+        negativo_valor(f"ex) {base}: pg_extension = ['plpgsql'] ({r.lineas()})", r.lineas() == ["plpgsql"], control_ok)
+
+    # xml2 (la que enlaza libxslt) no es trusted: un rol sin privilegios no puede
+    # crearla. Vacío (xml2 no disponible) también vale. Control: la misma consulta
+    # da t para citext, que sí es trusted.
+    trusted_citext = valor(sup("select bool_or(trusted)::text from pg_available_extension_versions where name = 'citext';"))
+    trusted_xml2 = valor(sup("select bool_or(trusted)::text from pg_available_extension_versions where name = 'xml2';"))
+    negativo_valor(f"ex) xml2 no es trusted (bool_or(trusted) = {trusted_xml2!r}, vacio si no esta disponible)",
+                   trusted_xml2 in ("false", ""), trusted_citext == "true")
 
 
 def seccion_n():
@@ -2027,6 +2139,233 @@ def seccion_q():
     pasa(r.rc == 0, f"q) tras devolver el nombre al rol de redaccion el Test da {r.rc} (esperado 0)")
     r = dc("exec", "-T", "postgres", "sh", "-c", orden.replace("-U postgres", "-U nadie"))
     pasa(r.rc == 1, f"q) con -U nadie el Test da {r.rc} (esperado 1)")
+
+
+# Healthcheck de postgres ANTERIOR a la puerta de postmaster.pid, tal como llega
+# al contenedor: con "$" de shell, ya sin el escapado "$$" de compose. Ya no esta
+# en docker-compose.yml, así que se guarda aquí como literal: qd) necesita
+# ejecutarlo para comprobar la premisa (que dejaba el FATAL de la parada). No se
+# deriva del compose ni del historial de Git para que la prueba no dependa de
+# ninguno de los dos.
+HEALTHCHECK_ANTERIOR = (
+    "l=$(psql -U postgres -d postgres -Atc \"select current_setting('listen_addresses')\") || exit 1\n"
+    "[ -n \"$l\" ] || exit 1\n"
+    "x=$(psql -U postgres -d canario -Atc \"select current_setting('listen_addresses') || '|' || "
+    "(select count(*) from pg_roles where rolname in ('migrador','aplicacion','plataforma',"
+    "'propietario_funciones','propietario_supresion','propietario_redaccion')) || '|' || "
+    "(to_regprocedure('canal.redactar_mensaje(uuid,integer,uuid,bytea,bytea,integer)') is not null)::text\")\n"
+    "case $x in '*|6|true') exit 0;; *) exit 1;; esac\n"
+)
+# FATAL que el servidor escribe en su log cuando alguien se conecta durante una
+# parada (CAC_SHUTDOWN de postmaster.c, REL_18_7).
+FATAL_PARADA = "the database system is shutting down"
+# Escribe un postmaster.pid simulado con las 8 líneas del formato de pidfile.h.
+# Los valores llegan como argumentos posicionales ($1 directorio, $2 línea 6,
+# $3 línea 8): así el relleno de "ready   " y la línea 6 vacía pasan intactos.
+ESCRIBIR_PID_SIMULADO = (
+    "d=$1; mkdir -p \"$d\" && printf '%s\\n' 1 \"$d\" 1700000000 5432 /run/postgresql \"$2\" 1234 \"$3\" "
+    "> \"$d/postmaster.pid\""
+)
+
+
+def orden_healthcheck_compose():
+    """Comando del healthcheck tal como lo lee el contenedor sano (igual que q)."""
+    test = json.loads(ejecutar(["docker", "inspect", CID]).out)[0]["Config"]["Healthcheck"]["Test"]
+    if len(test) != 2 or test[0] != "CMD-SHELL":
+        raise Parada(f"el Test del healthcheck no tiene la forma esperada [CMD-SHELL, orden]: {test!r}")
+    return test[1]
+
+
+def exec_healthcheck(orden, entorno=()):
+    """Ejecuta el comando del healthcheck en el contenedor sano, con variables extra."""
+    args = ["exec", "-T"]
+    for e in entorno:
+        args += ["-e", e]
+    return dc(*args, "postgres", "sh", "-c", orden)
+
+
+def escribir_pid_simulado(directorio, linea6, linea8):
+    """Escribe el fichero simulado y lo relee: devuelve True solo si las líneas 6 y 8 son
+    exactamente las pedidas (incluido el relleno de espacios de "ready   ")."""
+    r = dc("exec", "-T", "postgres", "sh", "-c", ESCRIBIR_PID_SIMULADO, "sh", directorio, linea6, linea8)
+    if r.rc != 0:
+        return False
+    lectura = dc("exec", "-T", "postgres", "sed", "-n", "6p;8p", f"{directorio}/postmaster.pid")
+    return lectura.rc == 0 and lectura.out == f"{linea6}\n{linea8}\n"
+
+
+def seccion_qp():
+    p("=== qp) puerta de postmaster.pid del healthcheck")
+    orden = orden_healthcheck_compose()
+    pasa("$PGDATA/postmaster.pid" in orden and "$$" not in orden,
+         "qp) el Test lee $PGDATA/postmaster.pid (ruta no literal) y no contiene '$$'")
+    # El control sin cambiar PGDATA debe dar 0 antes y después: si no, el resto no
+    # prueba nada.
+    antes = exec_healthcheck(orden)
+    if antes.rc != 0:
+        sinc(f"qp) el Test sin cambiar PGDATA no da 0 antes (codigo {antes.rc}): {antes.err.strip()[:300]!r}")
+        return
+    pasa(True, "qp) control: el Test sin cambiar PGDATA da 0 (antes)")
+    # Directorio propio en /tmp (tmpfs escribible por el uid 70). El prefijo fijo
+    # protege el borrado del final.
+    directorio = f"/tmp/puerta_{uuid.uuid4().hex[:8]}"
+    assert directorio.startswith("/tmp/puerta_")
+    try:
+        # Control: el mismo tipo de fichero con "ready" (con el relleno que escribe
+        # postgres) y "*" recorre la puerta y llega a la consulta real: 0. Si no,
+        # los negativos de abajo no distinguen la puerta de otro fallo.
+        escrito = escribir_pid_simulado(directorio, "*", "ready   ")
+        control = exec_healthcheck(orden, [f"PGDATA={directorio}"]) if escrito else None
+        control_ok = escrito and control.rc == 0
+        if not escrito:
+            sinc("qp) no se pudo escribir el postmaster.pid simulado con 'ready   ' (relleno incluido)")
+        else:
+            pasa(control.rc == 0, f"qp) control: con 'ready   ' y '*' el Test da 0 (codigo {control.rc})")
+            if control.rc != 0:
+                p(f"   stderr: {control.err.strip()[:300]!r}")
+        # PGHOST=/nonexistent: si la puerta dejara pasar, psql no podría conectar y
+        # el stderr sería el de psql, no el motivo de la puerta; la comparación
+        # exacta del stderr lo distingue (y psql no mira PGDATA).
+        entorno = [f"PGDATA={directorio}", "PGHOST=/nonexistent"]
+        # Oráculos literales: la y st tal como la puerta los imprime (st ya sin relleno).
+        casos = (
+            ("stopping", "*", "stopping",
+             "healthcheck: servidor no listo (listen_addr='*', estado='stopping')\n"),
+            ("la linea 6 vacia", "", "ready   ",
+             "healthcheck: servidor no listo (listen_addr='', estado='ready')\n"),
+        )
+        for nombre, la, st, esperado in casos:
+            if not control_ok:
+                sinc(f"qp) con {nombre}: el control positivo fallo")
+                continue
+            if not escribir_pid_simulado(directorio, la, st):
+                sinc(f"qp) con {nombre}: no se pudo escribir el postmaster.pid simulado")
+                continue
+            r = exec_healthcheck(orden, entorno)
+            pasa(r.rc == 1 and r.err == esperado,
+                 f"qp) con {nombre} el Test da 1 y su stderr es exactamente {esperado!r}")
+            if not (r.rc == 1 and r.err == esperado):
+                p(f"   codigo {r.rc}, stderr real: {r.err!r}")
+    finally:
+        dc("exec", "-T", "postgres", "rm", "-r", "-f", directorio)
+    resto = dc("exec", "-T", "postgres", "sh", "-c", 'test ! -e "$1"', "sh", directorio)
+    pasa(resto.rc == 0, f"qp) el directorio simulado {directorio} se ha borrado")
+    despues = exec_healthcheck(orden)
+    if despues.rc != 0:
+        sinc(f"qp) el Test sin cambiar PGDATA no da 0 despues (codigo {despues.rc}): {despues.err.strip()[:300]!r}")
+    else:
+        pasa(True, "qp) control: el Test sin cambiar PGDATA da 0 (despues)")
+
+
+def estado_pid_de(nombre):
+    """(línea 6, línea 8) del postmaster.pid real del contenedor, o None si no se puede leer."""
+    r = ejecutar(["docker", "exec", nombre, "sh", "-c", 'sed -n "6p;8p" "$PGDATA/postmaster.pid"'])
+    partes = r.out.split("\n")
+    if r.rc != 0 or len(partes) < 3:
+        return None
+    return partes[0], partes[1]
+
+
+def seccion_qd():
+    p("=== qd) premisa: el healthcheck anterior deja el FATAL de la parada y el nuevo no")
+    nuevo = orden_healthcheck_compose()
+    nombre = f"{PROYECTO}_premisa"  # con el prefijo: si se filtrara, s) lo vería
+
+    def fatales():
+        return ejecutar(["docker", "logs", nombre]).todo.count(FATAL_PARADA)
+
+    try:
+        # Contenedor desechable con la imagen construida y las mismas restricciones
+        # que el del compose. POSTGRES_HOST_AUTH_METHOD=trust evita meter ninguna
+        # contraseña: es un contenedor sin red (nada puede conectarse desde fuera),
+        # sin volúmenes ni secretos, y se borra al terminar.
+        r = ejecutar([
+            "docker", "run", "-d", "--name", nombre, "--network", "none", "--read-only", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true", "--user", "70:70", "--pids-limit", "64", "--memory", "512m",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs", "/run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m",
+            "--tmpfs", "/var/lib/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=256m",
+            "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
+            IMAGEN, "postgres", "-c", "listen_addresses=*",
+        ])
+        if r.rc != 0:
+            sinc(f"qd) no se pudo arrancar el contenedor desechable: {r.err.strip()[:300]!r}")
+            return
+        # Servidor REAL listo: línea 6 "*" y estado "ready". El temporal de la
+        # inicialización también llega a "ready", pero con la línea 6 vacía.
+        listo = False
+        limite = time.time() + 120
+        while time.time() < limite:
+            vivo = ejecutar(["docker", "inspect", "--format", "{{.State.Running}}", nombre]).out.strip()
+            if vivo != "true":
+                break
+            est = estado_pid_de(nombre)
+            if est is not None and est[0] == "*" and est[1].strip() == "ready":
+                listo = True
+                break
+            time.sleep(1)
+        if not listo:
+            sinc("qd) el servidor real del contenedor desechable no llego a 'ready' con la linea 6 '*'")
+            p(ejecutar(["docker", "logs", nombre]).todo[-1500:])
+            return
+        # Sesión que queda abierta: sin ella, la parada "smart" terminaría enseguida.
+        ejecutar(["docker", "exec", "-d", nombre, "psql", "-U", "postgres", "-d", "postgres", "-X", "-q",
+                  "-c", "select pg_sleep(60)"])
+        abierta = False
+        for _ in range(20):
+            c = ejecutar(["docker", "exec", nombre, "psql", "-U", "postgres", "-d", "postgres", "-X", "-A", "-t",
+                          "-c", "select count(*) from pg_stat_activity where query = 'select pg_sleep(60)' "
+                                "and pid <> pg_backend_pid()"])
+            if c.out.strip() == "1":
+                abierta = True
+                break
+            time.sleep(0.5)
+        if not abierta:
+            sinc("qd) la sesion con pg_sleep no quedo abierta")
+            return
+        # -W: pg_ctl NO espera. Sin -W (el defecto de "stop" es esperar) se quedaría
+        # bloqueado hasta su plazo, porque la sesión abierta impide terminar.
+        parada = ejecutar(["docker", "exec", nombre, "pg_ctl", "stop", "-m", "smart", "-W"])
+        if parada.rc != 0:
+            sinc(f"qd) pg_ctl stop -m smart -W fallo (codigo {parada.rc}): {parada.todo.strip()[:300]!r}")
+            return
+        parando = False
+        for _ in range(30):
+            est = estado_pid_de(nombre)
+            if est is not None and est[1] == "stopping":
+                parando = True
+                break
+            time.sleep(0.5)
+        previos = fatales()
+        # Healthcheck ANTERIOR (literal guardado arriba) durante la parada.
+        viejo = ejecutar(["docker", "exec", nombre, "sh", "-c", HEALTHCHECK_ANTERIOR])
+        tras_viejo = previos
+        for _ in range(10):
+            tras_viejo = fatales()
+            if tras_viejo > previos:
+                break
+            time.sleep(0.5)
+        control_ok = parando and viejo.rc == 1 and tras_viejo > previos
+        if control_ok:
+            pasa(True, f"qd) control: el postmaster.pid real dice 'stopping' y el healthcheck anterior da 1 y deja "
+                       f"el FATAL {FATAL_PARADA!r} en el log ({previos} -> {tras_viejo})")
+        else:
+            sinc(f"qd) el control positivo fallo: stopping={parando}, healthcheck anterior rc={viejo.rc}, "
+                 f"FATAL antes={previos}, despues={tras_viejo}")
+            p(ejecutar(["docker", "logs", nombre]).todo[-1500:])
+            return
+        # Healthcheck NUEVO, leido del compose, durante la misma parada.
+        r_nuevo = ejecutar(["docker", "exec", nombre, "sh", "-c", nuevo])
+        time.sleep(2)
+        tras_nuevo = fatales()
+        motivo = "healthcheck: servidor no listo (listen_addr='*', estado='stopping')\n"
+        pasa(r_nuevo.rc == 1 and r_nuevo.err == motivo and tras_nuevo == tras_viejo,
+             f"qd) con la parada en curso el healthcheck nuevo da 1 con stderr {motivo!r} y no anade el FATAL "
+             f"({tras_viejo} -> {tras_nuevo})")
+        if not (r_nuevo.rc == 1 and r_nuevo.err == motivo and tras_nuevo == tras_viejo):
+            p(f"   codigo {r_nuevo.rc}, stderr real: {r_nuevo.err!r}")
+    finally:
+        ejecutar(["docker", "rm", "-f", "-v", nombre])
 
 
 def seccion_t():
@@ -2875,8 +3214,8 @@ def main():
         if not IMAGEN:
             raise Parada("no se pudo leer la imagen del contenedor postgres")
         for seccion in (seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_h, seccion_i,
-                        seccion_j, seccion_k, seccion_l, seccion_ie, seccion_m, seccion_au, seccion_n, seccion_o, seccion_z, seccion_p,
-                        seccion_q,
+                        seccion_j, seccion_k, seccion_l, seccion_ie, seccion_m, seccion_au, seccion_ex, seccion_n, seccion_o, seccion_z, seccion_p,
+                        seccion_q, seccion_qp, seccion_qd,
                         seccion_t, seccion_u, seccion_v, seccion_w, seccion_x, seccion_y, seccion_su, seccion_sr,
                         seccion_ra, seccion_re, seccion_r):
             seccion()

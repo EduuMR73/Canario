@@ -19,6 +19,10 @@ Qué prueba:
      declaraciones VEX vigentes (30 días como máximo), con efecto, atadas a la
      versión exacta del componente y sin suprimir nada más en ninguna imagen;
      postgres sin gosu y sin root por defecto;
+     postgres con PG_VERSION y PG_SHA256 literales en la imagen construida, y su
+     versión menor frente a la de docker-library (versions.json): una menor
+     nueva con menos de 14 días es PENDIENTE (sale en el resumen y no cambia el
+     resultado global), con 14 o más es FALLA;
      caddy sin curl, libcurl ni brotli-libs;
      caddy y postgres con el índice de la imagen base fijado cuyo manifiesto
      linux/amd64 es el literal esperado (la plataforma que se ejecuta, la que
@@ -45,6 +49,19 @@ Qué prueba:
      mailpit solo con la configuración de TLS de servidor (lista blanca) y solo
      en su red interna; y en la API, que apt nunca se ejecuta (ningún RUN lo
      llama, USER propio y servicios en solo lectura).
+     postgres con libxml2 2.13.9-r2 (CVE-2026-86144, solo XInclude), sobre la
+     imagen construida por su ID y con su sistema de ficheros leído con docker
+     export (una pasada, sin extraer, con control de integridad: si el export no
+     es íntegro, SIN CONCLUSION): (a) el código fuente de xml.c de REL_18_7 no
+     usa XInclude; (b) los ELF que enlazan libxml2 son una lista literal, con
+     scanelf y comprobando que scanelf y el export listan los mismos ELF dentro
+     de sus raíces (y un ELF del export fuera de ellas es FALLA); (c) los
+     ficheros regulares de toda la imagen que contienen xmlXInclude,
+     xmlTextReader o xmlReaderFor son exactamente una lista literal (ninguno
+     bajo /usr/local). No detecta copias estáticas stripeadas con visibilidad
+     oculta; (a) solo cubre el código de xml.c; una extensión C nueva bajo
+     /usr/local/lib/postgresql solo la cubre la lista literal de (b), y solo si
+     enlaza libxml2 de forma dinámica (el VEX de esa CVE se sostiene en esto);
      Las comprobaciones de alcanzabilidad de postgres (libcurl enlazada solo
      por el módulo OAuth de libpq, pg_hba.conf sin el método oauth, gzprintf y
      gzvprintf solo en la libz) se retiraron el 23 de noviembre de 2026 al
@@ -106,6 +123,7 @@ Solo usa la biblioteca estándar.
 """
 import collections
 import datetime
+import hashlib
 import json
 import pathlib
 import re
@@ -114,7 +132,9 @@ import shutil
 import string
 import subprocess
 import sys
+import tarfile
 import tempfile
+import threading
 import traceback
 import urllib.error
 import urllib.parse
@@ -128,6 +148,10 @@ BASE = ["docker", "compose", "-p", PROYECTO, "-f", "docker-compose.yml"]
 
 lineas_salida = []
 estado = {"falla": False, "sin_conclusion": False}
+# Estado nuevo, PENDIENTE: algo que todavía no se puede exigir (una versión menor
+# nueva con menos de 14 días). Sale en el resumen para que se vea, pero no es
+# FALLA ni SIN CONCLUSION y no cambia el resultado global.
+pendientes = []
 
 # ---------------------------------------------------------------------------
 # Oráculos literales
@@ -195,7 +219,19 @@ SBOM_API_CONTROL = ("fastapi", "0.143.0")
 # Postgres
 GOSU = "/usr/local/bin/gosu"
 USUARIO_POSTGRES = "70:70"
-IMG_POSTGRES_BASE = "postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b"
+IMG_POSTGRES_BASE = "postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71"
+# Versión de PostgreSQL de esa imagen (Config.Env de la imagen construida):
+# PG_VERSION y el sha256 del código fuente que descarga la imagen oficial, igual
+# al de ftp.postgresql.org (postgresql-18.7.tar.bz2.sha256), comprobado el 23 de
+# noviembre de 2026. Literales, no derivados de la imagen que se prueba.
+PG_VERSION = "18.7"
+PG_SHA256 = "441dfae4280cae3e0425e5f876f80559fb0731c140f1aae22b3e5a54d0411bfd"
+VERSION_POSTGRES = (18, 7)
+# Etiqueta de la imagen de docker-library para su fecha de subida en Docker Hub:
+# "<mayor>.<menor>-alpine3.24" (Alpine 3.24 es el de SO_ESPERADO["postgres"]).
+SUFIJO_ETIQUETA_POSTGRES = "alpine3.24"
+URL_VERSIONS_POSTGRES = "https://raw.githubusercontent.com/docker-library/postgres/master/versions.json"
+URL_HUB_POSTGRES = "https://hub.docker.com/v2/repositories/library/postgres/tags/"
 # Nota de recuperación: libpq-oauth y libcurl siguen en la imagen de postgres.
 # Si llega otra CVE de libcurl, el análisis de alcanzabilidad (ldd y pg_hba) y
 # sus pruebas se recuperan del historial de git (commit anterior al del 23 de
@@ -235,11 +271,13 @@ MANIFIESTOS_AMD64 = {
     # re-publicó el 13 de noviembre de 2026 solo para añadir riscv64; el
     # manifiesto linux/amd64 es del 5 de noviembre (20:52 UTC).
     "caddy": (IMG_CADDY_BASE, "sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424"),
-    # Docker Hub, comprobado el 23 de noviembre de 2026. El manifiesto amd64 se
-    # subió el 2026-11-05T22:10:27Z (elegible desde el 19 de noviembre a las
-    # 22:10 UTC); el índice se re-publicó el 11 de noviembre solo para añadir
-    # riscv64.
-    "postgres": (IMG_POSTGRES_BASE, "sha256:300ebd02c6d4de9ee27ad7f6855d5d21b4d3a4a5117767c1197d284c635d9736"),
+    # Docker Hub, comprobado el 23 de noviembre de 2026 (digest completo leído
+    # del índice en registry-1.docker.io el 24 de noviembre). El manifiesto
+    # amd64 de postgres 18.7 se subió el 2026-11-18T22:13:57Z, con 5 días cumplidos el 24
+    # de noviembre: se adopta con la excepción de los 14 días (docs/threat-model.md,
+    # 6.17; elegible sin excepción el 2 de diciembre a las 22:13 UTC). El índice
+    # se re-publicó el 21 de noviembre solo para añadir riscv64.
+    "postgres": (IMG_POSTGRES_BASE, "sha256:68e33adb18d9962952f00d5e3b8644305e10e375f98dd652bf6ee6a1836314ba"),
 }
 # Lista blanca de los FROM de cada Dockerfile (g): la imagen con su digest, en
 # orden, una por etapa. Se comparan con las constantes de esta batería, no con
@@ -280,12 +318,17 @@ JUSTIFICACIONES_OPENVEX = {"component_not_present", "vulnerable_code_not_present
 # caduca el 6 de diciembre de 2026 (30 días). Las de postgres
 # (libcurl, brotli-libs y zlib) se retiraron el 23 de noviembre de 2026 al
 # adoptar su imagen del 5 de noviembre, que las arregla.
+# CVE-2026-86144 (libxml2 2.13.9-r2, postgres) entró el 24 de noviembre de 2026
+# con la imagen 18.7: HIGH con arreglo en 2.13.9-r3, que ninguna imagen
+# oficial de postgres trae aún. Solo afecta a XInclude, que PostgreSQL no
+# usa (invariante de f). Caduca el 24 de diciembre de 2026 (30 días).
 # Ojo: el control de que el VEX es lo que suprime en el binario de Go de caddy
 # depende hoy de CVE-2026-78661 (la única de caddy). Cuando se retire, caddy
 # dejará de estar en CVES_VEX y necesitará un control propio para el binario
 # de Go, o su cobertura desaparece en silencio.
 CVES_VEX = {"api": {"CVE-2026-109518"},
-            "caddy": {"CVE-2026-78661"}}
+            "caddy": {"CVE-2026-78661"},
+            "postgres": {"CVE-2026-86144"}}
 # Lo que el mismo VEX declara no explotable en spa/package-lock.json (j).
 # CVE-2026-109869 (undici 8.11.2) se retiró el 29 de octubre de 2026 al
 # adoptar undici 8.12.2, que la arregla, cumplidos los 14 días.
@@ -294,7 +337,9 @@ CVES_VEX_LOCK = set()
 # versión siguiente del componente no deben suprimir nada.
 VERSIONES_VEX = {"pkg:deb/debian/apt@3.0.3": "pkg:deb/debian/apt@3.0.4",
                  "pkg:deb/debian/libapt-pkg7.0@3.0.3": "pkg:deb/debian/libapt-pkg7.0@3.0.4",
-                 "pkg:golang/golang.org/x/net@v0.60.0": "pkg:golang/golang.org/x/net@v0.62.0"}
+                 "pkg:golang/golang.org/x/net@v0.60.0": "pkg:golang/golang.org/x/net@v0.62.0",
+                 # r3 es la versión que arregla CVE-2026-86144: con ella el VEX no debe suprimir nada.
+                 "pkg:apk/alpine/libxml2@2.13.9-r2": "pkg:apk/alpine/libxml2@2.13.9-r3"}
 
 # Caddy
 PROTOCOLOS_CADDY = ["h1"]
@@ -366,6 +411,80 @@ CONTROLES_EOSL = {
                      "var/lib/dpkg/status": DPKG_ZLIB_CONTROL}),
 }
 
+# Invariante de XInclude (f), que sostiene el VEX de CVE-2026-86144 (libxml2,
+# solo XInclude). El fuente de xml.c de REL_18_7, con su sha de blob git
+# (gh api "repos/postgres/postgres/contents/src/backend/utils/adt/xml.c?ref=REL_18_7"
+# --jq .sha, el 24 de noviembre de 2026; calculado también en local sobre el
+# fichero de 135749 bytes). Literales, escritos una sola vez. La cadena hasta el
+# binario de la imagen la cierra PG_SHA256 (el sha256 del tarball de 18.7).
+URL_XML_C = "https://raw.githubusercontent.com/postgres/postgres/REL_18_7/src/backend/utils/adt/xml.c"
+SHA_BLOB_XML_C = "ef8641d01d4dde325513d780626626b0d52803ef"
+# Lo que xml.c no debe contener (si lo usara, el código de XInclude sería alcanzable)
+# y, de control, lo que sí contiene (el cargador de entidades externas propio).
+PROHIBIDOS_XML_C = ("XInclude", "XML_PARSE_XINCLUDE", "xmlTextReader", "xmlReaderFor")
+CONTROL_XML_C = "xmlPgEntityLoader"
+# Símbolos de la API de XInclude y de lectura por flujo de libxml2 que ningún
+# fichero de PostgreSQL (bajo /usr/local) debe contener: solo la propia libxml2.
+SIMBOLOS_XINCLUDE = ("xmlXInclude", "xmlTextReader", "xmlReaderFor")
+# Raíces que recorre scanelf en (b), con la barra inicial que usa scanelf. En el
+# export del sistema de ficheros las rutas van sin ella: se comparan normalizadas.
+# /etc queda fuera a propósito: no lleva bibliotecas.
+RAICES_SCANELF = ("/usr/local", "/usr/lib", "/usr/bin", "/usr/sbin", "/lib", "/bin", "/sbin")
+# ELF del export (REGFILE que empiezan por \x7fELF) FUERA de las raíces de scanelf
+# que se aceptan a propósito, sin barra inicial y cada uno con su motivo. Empieza
+# vacío: el 24 de noviembre de 2026 no hay datos de qué ELF hay fuera de esas
+# raíces. Lo que aparezca sale impreso y da FALLA; se añade aquí solo tras
+# analizar si enlaza libxml2.
+ELF_FUERA_DE_RAICES_ESPERADOS = ()
+# Aciertos de (c): los REGFILE de TODO el sistema de ficheros de la imagen que
+# contienen alguno de SIMBOLOS_XINCLUDE. Literal, sin barra inicial. Salió de la
+# imagen base postgres:18.7-alpine el 24 de noviembre de 2026 con `grep -r`
+# (xsltproc los importa, libxml2 los exporta y libxslt los referencia). Se
+# excluyen los enlaces simbólicos libxml2.so.2 y libxslt.so.1, que no son ficheros
+# regulares. La imagen construida es la base menos /usr/local/bin/gosu (Go
+# estático, sin libxml2 ni esos símbolos): si no cuadran, FALLA visible y se
+# investiga sin ajustar el literal.
+ACIERTOS_SIMBOLOS_ESPERADOS = ("usr/bin/xsltproc",
+                               "usr/lib/libxml2.so.2.13.9",
+                               "usr/lib/libxslt.so.1.1.43")
+# Controles positivos de (c): uno que importa los símbolos y otro que los exporta.
+CONTROL_SIMBOLOS_IMPORTA = "usr/bin/xsltproc"
+CONTROL_SIMBOLOS_EXPORTA = "usr/lib/libxml2.so.2.13.9"
+# Integridad del export como control positivo: miembros literales alejados entre
+# sí en el tar (un export truncado o vacío no los trae todos) y un recuento mínimo
+# de ficheros regulares. El mínimo es PRUDENTE, no medido: ninguna ejecución ha
+# dado aún el recuento real (la batería imprime el observado). Una imagen
+# postgres:alpine lleva muchos miles de REGFILE (base Alpine unos 400, más las
+# extensiones contrib, las zonas horarias, las cabeceras y libLLVM), así que 1000
+# detecta un export cortado de verdad sin romper por ruido; hay que subirlo
+# cuando se conozca el recuento.
+MIEMBROS_INTEGRIDAD = ("usr/local/bin/postgres", "usr/lib/libxml2.so.2.13.9", "etc/passwd")
+MIN_REGFILE_EXPORT = 1000
+# Punto de montaje del VOLUME de postgres (PGDATA cuelga de él): el export no
+# trae el contenido de los volúmenes, así que debajo no puede haber ficheros.
+MONTAJE_PGDATA = "var/lib/postgresql"
+# docker create añade al sistema de ficheros del contenedor ficheros que no están
+# en la imagen: .dockerenv, etc/hosts, etc/hostname y etc/resolv.conf (vacíos). No
+# contienen los símbolos ni son ELF, así que no alteran (b) ni (c); sí cuentan en
+# el recuento de REGFILE, y por eso el mínimo no es exacto.
+LIMITE_EXPORT = 900  # segundos para docker export + lectura del tar
+BLOQUE_LECTURA = 1 << 20
+MAGIA_ELF = b"\x7fELF"
+# Lista literal de los ELF de la imagen que enlazan libxml2 (DT_NEEDED), leída a
+# mano con scanelf (que existe en la imagen; readelf no) sobre postgres:18.7-alpine
+# el 24 de noviembre de 2026. La propia libxml2 no está: no se enlaza a sí misma.
+# postgres la usa para el tipo xml; pgxml.so es la extensión xml2 (no creada,
+# no trusted); libxslt, libexslt y xsltproc solo los alcanza pgxml.so; libLLVM es
+# del JIT. Un ELF nuevo que la enlace cambia el análisis del VEX: FALLA.
+ELF_LIBXML2_ESPERADOS = ("/usr/bin/xsltproc",
+                         "/usr/lib/libLLVM.so.21.1",
+                         "/usr/lib/libexslt.so.0.8.24",
+                         "/usr/lib/libxslt.so.1.1.43",
+                         "/usr/local/bin/postgres",
+                         "/usr/local/lib/postgresql/pgxml.so")
+PREFIJO_LIBXSLT = "libxslt.so"
+PREFIJO_LIBXML2 = "libxml2.so"
+
 TEMPORAL = None
 ESTADO_GIT_ARRANQUE = None
 NOMBRES = {}
@@ -415,6 +534,11 @@ def pasa(cond, texto):
 def sinc(texto):
     p("SIN CONCLUSION " + texto)
     estado["sin_conclusion"] = True
+
+
+def pendiente(texto):
+    p("PENDIENTE " + texto)
+    pendientes.append(texto)
 
 
 def negativo(nombre, cond, control_ok, detalle=""):
@@ -915,6 +1039,9 @@ def seccion_e():
                  amd64 == [manifiesto], len(amd64) >= 1,
                  "control: el indice no se pudo leer con docker buildx imagetools inspect --raw o no tiene entrada linux/amd64")
 
+    # La versión de PostgreSQL de la imagen y frente a docker-library.
+    comprobar_version_postgres()
+
     # Control de Trivy: rootfs sintético con Jinja2 2.10 y un token.
     token = token_sintetico()
     rfs = TEMPORAL / "control_rootfs"
@@ -1096,6 +1223,400 @@ def escribir_vex_movido():
                          "a la version no movería nada")
         texto = texto.replace(actual, siguiente)
     return escribir(TEMPORAL / "vex_movido" / "movido.openvex.json", texto)
+
+
+def evaluar_version_postgres(texto_versions, actual, hoy, fecha_amd64):
+    """Compara la versión menor de PostgreSQL de docker-library (versions.json,
+    clave "18", campo "version") con la fijada. Devuelve (estado, detalle) con
+    estado PASA, FALLA, PENDIENTE o SIN CONCLUSION:
+      - igual: PASA;
+      - mayor: con fecha_amd64(menor) (la subida del manifiesto amd64 de esa
+        menor) de menos de DIAS_ESPERA días, PENDIENTE (todavía no es elegible y
+        no se debe adoptar aún); con DIAS_ESPERA o más, FALLA (ya era elegible y
+        no se adoptó);
+      - menor, JSON ilegible, sin la clave, sin el formato 18.N o sin fecha:
+        SIN CONCLUSION (la fuente no permite concluir).
+    La comparación es de tuplas de enteros: 18.10 es mayor que 18.9."""
+    datos = json_de_texto(texto_versions) if isinstance(texto_versions, str) else None
+    if not isinstance(datos, dict) or not isinstance(datos.get("18"), dict):
+        return "SIN CONCLUSION", "versions.json no es JSON o no tiene la clave '18'"
+    publicada = datos["18"].get("version")
+    if not isinstance(publicada, str) or not re.fullmatch(r"18\.[0-9]+", publicada):
+        return "SIN CONCLUSION", f"el campo version ({publicada!r}) no tiene el formato 18.N"
+    nueva = tuple(int(x) for x in publicada.split("."))
+    if nueva == actual:
+        return "PASA", f"docker-library publica {publicada}, la fijada"
+    if nueva < actual:
+        return "SIN CONCLUSION", f"docker-library publica {publicada}, anterior a la fijada: la fuente no es de fiar"
+    fecha = fecha_amd64(nueva)
+    if fecha is None:
+        return "SIN CONCLUSION", f"no se pudo leer la fecha de subida del amd64 de {publicada}"
+    elegible = fecha + datetime.timedelta(days=DIAS_ESPERA)
+    if hoy < elegible:
+        return "PENDIENTE", (f"docker-library publica {publicada}, subida el {fecha:%Y-%m-%d %H:%M} UTC: "
+                             f"elegible el {elegible:%Y-%m-%d %H:%M} UTC")
+    return "FALLA", (f"docker-library publica {publicada}, subida el {fecha:%Y-%m-%d %H:%M} UTC y ya elegible "
+                     f"desde el {elegible:%Y-%m-%d %H:%M} UTC: hay que adoptarla")
+
+
+def leer_url(url, timeout=60):
+    """Bytes de una URL, o None si no se puede leer (sin red: SIN CONCLUSION)."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as respuesta:
+            return respuesta.read()
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+
+def fecha_amd64_hub(nueva):
+    """last_pushed del manifiesto linux/amd64 de la etiqueta 18.N-alpine3.24 en
+    Docker Hub (con zona horaria), o None si no se puede leer."""
+    cuerpo = leer_url(URL_HUB_POSTGRES + f"{nueva[0]}.{nueva[1]}-{SUFIJO_ETIQUETA_POSTGRES}")
+    datos = json_de_texto(cuerpo.decode("utf-8", "replace")) if cuerpo else None
+    for imagen in (datos or {}).get("images") or []:
+        if imagen.get("os") == "linux" and imagen.get("architecture") == "amd64" and imagen.get("last_pushed"):
+            try:
+                fecha = datetime.datetime.fromisoformat(imagen["last_pushed"])
+            except ValueError:
+                return None
+            return fecha if fecha.tzinfo is not None else None
+    return None
+
+
+def comprobar_version_postgres():
+    """e) PG_VERSION y PG_SHA256 literales en la imagen construida, y la menor
+    fijada frente a docker-library, con su control sintético."""
+    r = ejecutar(["docker", "image", "inspect", "--format", "{{json .Config.Env}}", NOMBRES["postgres"]])
+    entorno = json_de_texto(r.out)
+    entorno = dict(e.split("=", 1) for e in entorno if "=" in e) if isinstance(entorno, list) else {}
+    # Igualdades positivas con literal: si no responden, FALLA, nunca un PASA vacío.
+    pasa(entorno.get("PG_VERSION") == PG_VERSION,
+         f"e) postgres: la imagen construida declara PG_VERSION={PG_VERSION} ({entorno.get('PG_VERSION')!r})")
+    pasa(entorno.get("PG_SHA256") == PG_SHA256,
+         f"e) postgres: la imagen construida declara PG_SHA256={PG_SHA256}")
+    # Control: la misma función sobre JSON sintéticos. Una menor 18.99 con la
+    # fecha de hace 30 días ya era elegible (FALLA); con la de hoy no (PENDIENTE).
+    # Y 18.10 frente a 18.9 es mayor (tuplas de enteros, no cadenas).
+    hoy = datetime.datetime.now(datetime.UTC)
+    sintetico = '{"18": {"version": "18.99"}}'
+    c_vieja = evaluar_version_postgres(sintetico, VERSION_POSTGRES, hoy,
+                                       lambda v: hoy - datetime.timedelta(days=30))[0]
+    c_hoy = evaluar_version_postgres(sintetico, VERSION_POSTGRES, hoy, lambda v: hoy)[0]
+    c_tupla = evaluar_version_postgres('{"18": {"version": "18.10"}}', (18, 9), hoy,
+                                       lambda v: hoy - datetime.timedelta(days=30))[0]
+    control = (c_vieja, c_hoy, c_tupla) == ("FALLA", "PENDIENTE", "FALLA")
+    pasa(control, "e) control: la comparacion con docker-library da FALLA (18.99 con fecha vieja), PENDIENTE (18.99 de "
+                  f"hoy) y FALLA (18.10 frente a 18.9) sobre JSON sinteticos ({c_vieja}, {c_hoy}, {c_tupla})")
+    cuerpo = leer_url(URL_VERSIONS_POSTGRES)
+    resultado, detalle = evaluar_version_postgres(cuerpo.decode("utf-8", "replace") if cuerpo else None,
+                                                  VERSION_POSTGRES, hoy, fecha_amd64_hub)
+    texto = f"e) postgres: la menor fijada {PG_VERSION} frente a docker-library: {detalle}"
+    if not control:
+        sinc(texto + " (el control sintetico fallo)")
+    elif resultado == "PASA":
+        pasa(True, texto)
+    elif resultado == "FALLA":
+        pasa(False, texto)
+    elif resultado == "PENDIENTE":
+        pendiente(texto)
+    else:
+        sinc(texto)
+
+
+def id_de_imagen(nombre):
+    """El ID de la imagen (sha256:<64 hex>) que docker resuelve para `nombre`, o
+    None si docker falla o no devuelve un ID con esa forma. Se calcula UNA vez y
+    se usa en docker create y en scanelf: así (b) y (c) hablan de la misma imagen
+    aunque otra construcción mueva la etiqueta entre medias."""
+    try:
+        r = ejecutar(["docker", "image", "inspect", "--format", "{{.Id}}", nombre], timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    valor = r.out.strip()
+    if r.rc != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", valor):
+        return None
+    return valor
+
+
+def dentro_de_raices(ruta):
+    """True si la ruta (con o sin barra inicial) cuelga de una raíz de scanelf."""
+    ruta = ruta.lstrip("/")
+    return any(ruta == raiz.lstrip("/") or ruta.startswith(raiz.lstrip("/") + "/") for raiz in RAICES_SCANELF)
+
+
+def escanear_elf(imagen):
+    """scanelf sobre la imagen (por ID). Devuelve (enlazan, listados, sin_needed,
+    errores): los ELF cuyo DT_NEEDED incluye libxml2 (lista ordenada), TODOS los
+    ELF que lista scanelf (conjunto de rutas), cuántos de ellos no traen ninguna
+    dependencia y los errores.
+
+    Ojo: scanelf se salta lo que no puede leer o recorrer EN SILENCIO (pax-utils,
+    scanelf_fileat y scanelf_dirat solo lo dicen con -vvv, y por stdout). Su
+    silencio no prueba que lo viera todo: la completitud se comprueba aparte,
+    contra los ELF del export del sistema de ficheros. Aquí solo se comprueba que
+    docker y scanelf terminan bien y sin nada en stderr; un fallo da errores, no
+    una lista vacía."""
+    try:
+        r = ejecutar(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                      "--security-opt", "no-new-privileges", "--user", "70:70",
+                      "--entrypoint", "scanelf", imagen, "-R", "-n", "-B", "-F", "%F|%n"] + list(RAICES_SCANELF),
+                     timeout=300)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return [], set(), 0, [f"docker run scanelf no termino: {type(e).__name__}: {e}"]
+    errores = r.err.strip().splitlines()
+    if r.rc != 0:
+        errores = [f"docker run scanelf termina con codigo {r.rc}"] + errores
+    enlazan, listados, sin_needed = set(), set(), 0
+    for linea in r.out.splitlines():
+        ruta, _, libs = linea.partition("|")
+        listados.add(ruta)
+        if libs.strip() in ("", "-"):
+            sin_needed += 1
+        if any(lib.startswith(PREFIJO_LIBXML2) for lib in libs.split(",")):
+            enlazan.add(ruta)
+    return sorted(enlazan), listados, sin_needed, errores
+
+
+def resultado_vacio():
+    return {"nombres": set(), "n_regfile": 0, "aciertos": set(), "elf": set(), "sin_resolver": [],
+            "nombres_barra": [], "pgdata": [], "errores": []}
+
+
+def leer_tar(flujo, simbolos):
+    """Una sola pasada, sin extraer nada, sobre un tar leído en modo flujo
+    ("r|"). Devuelve un diccionario con:
+      nombres: todos los nombres vistos (cualquier tipo de miembro);
+      n_regfile: cuántos ficheros regulares;
+      aciertos: los ficheros (regulares, y enlaces duros resueltos) que contienen
+        alguno de los símbolos, como bytes en cualquier sitio del fichero;
+      elf: los ficheros (igual) que empiezan por \\x7fELF;
+      sin_resolver: enlaces duros cuyo destino no se vio antes (en modo flujo no
+        se puede volver atrás: sin destino no hay resultado y no se concluye);
+      nombres_barra: nombres con "/" inicial (docker export no los trae);
+      pgdata: ficheros regulares bajo el punto de montaje de PGDATA;
+      errores: lo que impidió leer el tar entero (no listas vacías ante un fallo).
+    Los símbolos se buscan en bloques con un solape de max(len)-1 bytes entre
+    ellos, para no perder uno partido por el límite de dos bloques."""
+    buscados = [s.encode("ascii") for s in simbolos]
+    solape = max(len(s) for s in buscados) - 1
+    res = resultado_vacio()
+    # Resultado por ruta (acierto, es_elf) para resolver los enlaces duros por
+    # linkname: el destino siempre se emite antes que el enlace en un tar.
+    por_ruta = {}
+    try:
+        with tarfile.open(fileobj=flujo, mode="r|") as tar:
+            for miembro in tar:
+                nombre = miembro.name
+                res["nombres"].add(nombre)
+                if nombre.startswith("/"):
+                    res["nombres_barra"].append(nombre)
+                if miembro.isreg():
+                    res["n_regfile"] += 1
+                    if nombre == MONTAJE_PGDATA or nombre.startswith(MONTAJE_PGDATA + "/"):
+                        res["pgdata"].append(nombre)
+                    acierto, es_elf, cola, primero = False, False, b"", True
+                    fichero = tar.extractfile(miembro)
+                    while True:
+                        bloque = fichero.read(BLOQUE_LECTURA)
+                        if not bloque:
+                            break
+                        if primero:
+                            es_elf = bloque.startswith(MAGIA_ELF)
+                            primero = False
+                        if not acierto:
+                            visto = cola + bloque
+                            acierto = any(s in visto for s in buscados)
+                            cola = visto[-solape:]
+                    por_ruta[nombre] = (acierto, es_elf)
+                elif miembro.islnk():
+                    if miembro.linkname in por_ruta:
+                        por_ruta[nombre] = por_ruta[miembro.linkname]
+                    else:
+                        res["sin_resolver"].append(f"{nombre} -> {miembro.linkname}")
+                if nombre in por_ruta:
+                    acierto, es_elf = por_ruta[nombre]
+                    if acierto:
+                        res["aciertos"].add(nombre)
+                    if es_elf:
+                        res["elf"].add(nombre)
+    except (tarfile.TarError, EOFError, OSError) as e:
+        res["errores"].append(f"lectura del tar: {type(e).__name__}: {e}")
+    return res
+
+
+def exportar_imagen(imagen_id, simbolos, limite=LIMITE_EXPORT):
+    """docker create <ID> + docker export por tubería a leer_tar, sin extraer
+    nada. stderr de docker export va a un fichero de TEMPORAL (con PIPE se
+    bloquearía si nadie lo lee), y un temporizador mata el proceso si pasa del
+    límite (SIN CONCLUSION, no un cuelgue). docker rm -v corre SIEMPRE en el
+    finally: borra el contenedor y el volumen anónimo que crea el VOLUME de la
+    imagen. Cualquier fallo queda en res["errores"]."""
+    res = resultado_vacio()
+    try:
+        r = ejecutar(["docker", "create", imagen_id], timeout=120)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        res["errores"].append(f"docker create no termino: {type(e).__name__}: {e}")
+        return res
+    contenedor = r.out.strip()
+    if r.rc != 0 or not re.fullmatch(r"[0-9a-f]{64}", contenedor):
+        res["errores"].append(f"docker create falla (rc {r.rc}): {r.err.strip()[-300:]} {r.out.strip()[-100:]}")
+        return res
+    try:
+        ruta_err = TEMPORAL / "export_stderr.txt"
+        vencido = threading.Event()
+        with open(ruta_err, "wb") as f_err:
+            proc = subprocess.Popen(["docker", "export", contenedor], stdout=subprocess.PIPE, stderr=f_err)
+
+            def matar():
+                vencido.set()
+                proc.kill()
+
+            temporizador = threading.Timer(limite, matar)
+            temporizador.start()
+            try:
+                res = leer_tar(proc.stdout, simbolos)
+                # Drenar lo que quede (el relleno final del tar) para que docker
+                # export termine y no se quede escribiendo en una tubería llena.
+                while proc.stdout.read(BLOQUE_LECTURA):
+                    pass
+                proc.wait()
+            finally:
+                temporizador.cancel()
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                proc.stdout.close()
+        stderr = ruta_err.read_bytes().decode("utf-8", "replace").strip()
+        if vencido.is_set():
+            res["errores"].append(f"docker export supero el limite de {limite} s y se mato")
+        if proc.returncode != 0:
+            res["errores"].append(f"docker export termina con codigo {proc.returncode}")
+        if stderr:
+            res["errores"].append(f"docker export escribe en stderr: {stderr[-300:]}")
+    except OSError as e:
+        res["errores"].append(f"export: {type(e).__name__}: {e}")
+    finally:
+        try:
+            r = ejecutar(["docker", "rm", "-v", contenedor], timeout=120)
+            if r.rc != 0:
+                res["errores"].append(f"docker rm -v {contenedor[:12]} falla (rc {r.rc}): {r.err.strip()[-200:]}")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            res["errores"].append(f"docker rm -v {contenedor[:12]} no termino: {type(e).__name__}: {e}")
+    return res
+
+
+def integridad_export(exp):
+    """Control positivo del export: (True, []) solo si docker create, export y rm
+    fueron bien (rc 0, stderr vacío, sin error de lectura del tar ni de tiempo),
+    no quedan enlaces duros sin resolver, aparecen los miembros literales de
+    MIEMBROS_INTEGRIDAD y hay al menos MIN_REGFILE_EXPORT ficheros regulares. Si
+    no, devuelve los motivos y (b) y (c) son SIN CONCLUSION."""
+    motivos = list(exp["errores"])
+    if exp["sin_resolver"]:
+        motivos.append(f"enlaces duros con destino no visto: {exp['sin_resolver'][:5]}")
+    faltan = [m for m in MIEMBROS_INTEGRIDAD if m not in exp["nombres"]]
+    if faltan:
+        motivos.append(f"faltan miembros esperados en el export: {faltan}")
+    if exp["n_regfile"] < MIN_REGFILE_EXPORT:
+        motivos.append(f"solo {exp['n_regfile']} ficheros regulares (minimo literal {MIN_REGFILE_EXPORT})")
+    return not motivos, motivos
+
+
+def comprobar_xinclude_postgres():
+    """f) CVE-2026-86144 (libxml2, solo XInclude): PostgreSQL no llama al código
+    vulnerable. (a) el fuente de xml.c, (b) los ELF que enlazan libxml2 y (c) que
+    ningún fichero de PostgreSQL contiene los símbolos de XInclude.
+
+    (b) y (c) leen el sistema de ficheros de la imagen construida, por su ID, con
+    docker export (una pasada, sin extraer). (c) mira los ficheros regulares de
+    TODA la imagen y compara con una lista literal; no detecta copias estáticas
+    stripeadas con visibilidad oculta; (a) solo cubre el código de xml.c; una
+    extensión C nueva bajo /usr/local/lib/postgresql solo la cubre la lista
+    literal de (b), y solo si enlaza libxml2 de forma dinámica."""
+    # (a) El fuente de la etiqueta REL_18_7, con su sha de blob git literal. Sin
+    # red, SIN CONCLUSION. Un sha distinto es FALLA: no es el fichero que se revisó.
+    datos = leer_url(URL_XML_C)
+    if datos is None:
+        sinc(f"f) postgres: no se pudo descargar {URL_XML_C}: la invariante de XInclude no se puede comprobar")
+    else:
+        sha = hashlib.sha1(b"blob %d\0" % len(datos) + datos).hexdigest()
+        sha_ok = sha == SHA_BLOB_XML_C
+        pasa(sha_ok, f"f) postgres: xml.c de REL_18_7 tiene el sha de blob git {SHA_BLOB_XML_C} ({sha})")
+        texto = datos.decode("utf-8", "replace")
+        # Control: lo que sí tiene xml.c (el cargador de entidades propio) se encuentra.
+        control_xml = sha_ok and CONTROL_XML_C in texto
+        for prohibido in PROHIBIDOS_XML_C:
+            negativo(f"f) postgres: xml.c de REL_18_7 no contiene {prohibido}", prohibido not in texto, control_xml,
+                     f"control: el sha de blob o {CONTROL_XML_C} no cuadran")
+    # La imagen construida, por ID y una sola vez. Se imprime para el informe.
+    id_imagen = id_de_imagen(NOMBRES["postgres"])
+    if id_imagen is None:
+        sinc(f"f) postgres: no se pudo leer el ID de la imagen {NOMBRES['postgres']} (docker image inspect): "
+             "(b) y (c) no se pueden comprobar")
+        return
+    p(f"f) postgres: imagen construida {NOMBRES['postgres']} con ID {id_imagen}")
+    exp = exportar_imagen(id_imagen, SIMBOLOS_XINCLUDE)
+    p(f"f) postgres: export leido: {exp['n_regfile']} ficheros regulares observados "
+      f"(minimo literal de integridad {MIN_REGFILE_EXPORT}), {len(exp['nombres'])} miembros, "
+      f"{len(exp['elf'])} ELF y {len(exp['aciertos'])} ficheros con los simbolos")
+    # PARADA, sin tocar ningun literal: si el export no se parece a lo que se
+    # supuso al disenar la invariante, hay que investigar, no ajustar.
+    if not exp["errores"]:
+        if exp["nombres_barra"]:
+            raise Parada(f"f) postgres: nombres del export con '/' inicial, algo que no se esperaba: {exp['nombres_barra'][:5]}")
+        if exp["pgdata"]:
+            raise Parada(f"f) postgres: el punto de montaje {MONTAJE_PGDATA} trae ficheros en el export, "
+                         f"algo que no se esperaba: {exp['pgdata'][:5]}")
+    integro, motivos = integridad_export(exp)
+    if not integro:
+        sinc(f"f) postgres: el export de la imagen no es integro, (b) y (c) no se pueden comprobar: {motivos}")
+        return
+    # (b) Los ELF que enlazan libxml2. Control: libxslt, que enlaza libxml2, aparece.
+    # Antes, completitud: scanelf se salta lo ilegible en silencio, así que su lista
+    # de TODOS los ELF (%F, sin filtrar por DT_NEEDED) debe ser la de los ELF del
+    # export dentro de las mismas raíces. Esa igualdad cubre también los ELF sin
+    # DT_NEEDED (no se garantiza uno concreto sin datos: si scanelf se los saltara,
+    # la diferencia saldría aquí) y deja a (b) sin cabos sueltos.
+    enlazan, listados, sin_needed, errores_elf = escanear_elf(id_imagen)
+    en_tar = {x for x in exp["elf"] if dentro_de_raices(x)}
+    en_scanelf = {x.lstrip("/") for x in listados}
+    p(f"f) postgres: scanelf lista {len(en_scanelf)} ELF ({sin_needed} sin dependencias); el export tiene "
+      f"{len(en_tar)} dentro de las mismas raices")
+    if errores_elf:
+        sinc(f"f) postgres: scanelf no termino bien, la lista de ELF que enlazan libxml2 no es completa "
+             f"({errores_elf[:5]})")
+    elif en_tar != en_scanelf:
+        sinc("f) postgres: scanelf y el export no listan los mismos ELF: "
+             f"solo en el export {sorted(en_tar - en_scanelf)[:10]}; solo en scanelf {sorted(en_scanelf - en_tar)[:10]}")
+    else:
+        control_elf = any(pathlib.PurePosixPath(x).name.startswith(PREFIJO_LIBXSLT) for x in enlazan)
+        if not control_elf:
+            sinc(f"f) postgres: control: scanelf no encuentra {PREFIJO_LIBXSLT} entre los ELF que enlazan libxml2 ({enlazan})")
+        else:
+            negativo(f"f) postgres: los ELF que enlazan libxml2 son exactamente {list(ELF_LIBXML2_ESPERADOS)} ({enlazan})",
+                     enlazan == sorted(ELF_LIBXML2_ESPERADOS), control_elf)
+    # Un ELF fuera de las raíces de scanelf no lo ve scanelf: se imprime y da FALLA
+    # salvo que esté en el literal comentado. Control: el export es íntegro.
+    fuera = sorted(x for x in exp["elf"] if not dentro_de_raices(x))
+    for x in fuera:
+        p(f"   ELF fuera de las raices de scanelf: {x}")
+    negativo(f"f) postgres: ningun ELF del export fuera de las raices de scanelf salvo {list(ELF_FUERA_DE_RAICES_ESPERADOS)} "
+             f"({fuera})", sorted(fuera) == sorted(ELF_FUERA_DE_RAICES_ESPERADOS), integro)
+    # (c) Los ficheros regulares de TODO el sistema de ficheros que contienen los
+    # símbolos son exactamente la lista literal (nada bajo /usr/local). Controles:
+    # xsltproc (los importa) y la propia libxml2 (los exporta) están entre los
+    # aciertos, y el export es íntegro. Un acierto nuevo o uno que falte: FALLA.
+    aciertos = exp["aciertos"]
+    control_simbolos = CONTROL_SIMBOLOS_IMPORTA in aciertos and CONTROL_SIMBOLOS_EXPORTA in aciertos
+    esperados = set(ACIERTOS_SIMBOLOS_ESPERADOS)
+    detalle = (f"control: {CONTROL_SIMBOLOS_IMPORTA} y {CONTROL_SIMBOLOS_EXPORTA} "
+               f"{'aparecen' if control_simbolos else 'no aparecen ambos'}; nuevos {sorted(aciertos - esperados)}; "
+               f"faltan {sorted(esperados - aciertos)}")
+    negativo(f"f) postgres: los ficheros con {list(SIMBOLOS_XINCLUDE)} son exactamente {list(ACIERTOS_SIMBOLOS_ESPERADOS)} "
+             f"({sorted(aciertos)}) (CVE-2026-86144)", aciertos == esperados, control_simbolos, detalle)
+    bajo_local = sorted(x for x in aciertos if x.startswith("usr/local/"))
+    negativo(f"f) postgres: ningun fichero bajo /usr/local contiene {list(SIMBOLOS_XINCLUDE)} ({bajo_local})",
+             not bajo_local, control_simbolos, detalle)
 
 
 def json_de_texto(texto):
@@ -1398,6 +1919,11 @@ def seccion_f():
     control_mailpit = mailpit_sin_salida(["-f", str(compose_control)])
     for condicion, cumple in real_mailpit.items():
         negativo(f"f) mailpit sin reenvio ni salida: {condicion}", cumple, control_mailpit[condicion] is False)
+
+    # CVE-2026-86144 en postgres (libxml2): solo se declara mientras la
+    # invariante de XInclude se compruebe; sin la declaración, no hace falta.
+    if "CVE-2026-86144" in CVES_VEX.get("postgres", set()):
+        comprobar_xinclude_postgres()
 
     # CVE-2026-109518 en la API: apt nunca se ejecuta. Ninguna orden RUN del
     # Dockerfile lo llama (control: un Dockerfile con apt-get), la imagen
@@ -1828,6 +2354,11 @@ def terminar(parada=False):
         resultado = "NO OK (PARADA)"
     else:
         resultado = "NO OK (hay FALLA o SIN CONCLUSION)" if estado["falla"] or estado["sin_conclusion"] else "OK"
+    # Los PENDIENTE van siempre al resumen, también cuando son cero: así se ve que
+    # el estado existe y que esta ejecución no tenía ninguno.
+    p(f"PENDIENTES (no cambian el resultado global): {len(pendientes)}")
+    for texto in pendientes:
+        p(f"   {texto}")
     p("RESULTADO GLOBAL: " + resultado)
     SALIDA.write_text("\n".join(lineas_salida) + "\n", encoding="utf-8", newline="\n")
     sys.exit(0 if resultado == "OK" else 1)

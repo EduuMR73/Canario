@@ -175,6 +175,33 @@ Cada cambio se prueba en el PC y se despliega igual: el paso 1, el 2 (en vez de 
 
 3. **El paso 4 va con `--force-recreate`** (`up -d --wait --force-recreate`). Sin él, Compose puede dejar un contenedor con la imagen de antes aunque `:latest` ya apunte a la nueva, y no avisa. El 20 de noviembre de 2026 solo recreó `caddy`: `postgres`, `api`, `broker` y `cartero` siguieron con la imagen anterior, con todos `Healthy`. Recrear lo para todo unos segundos (unos 15 s medidos); los datos están en los volúmenes. Después, la comprobación de `.Image` contra `.Id` que describe "Revertir".
 
+**Cambio de versión menor de PostgreSQL (de 18.6 a 18.7).** Misma versión mayor y mismo formato en disco: no hay `pg_upgrade` ni `ANALYZE`, el volumen `pgdata` se reutiliza tal cual. La 18.7 arregla dos fallos de índices GIN presentes en 18.6 (sus notas de versión recomiendan `REINDEX` si se sospecha), y Canario tiene un índice GIN: `canal.sesion_personal_tokens_usados`. Por eso, en el VPS (bash), desde `~/apps/canario`, el orden es este y no otro:
+
+1. **Copia de seguridad antes de tocar nada:** la de las 03:30 UTC si es reciente, o una a mano (ver "Copias de seguridad", más abajo).
+2. **Recrear con la imagen 18.7:** los pasos de siempre (`docker load` y `up -d --wait --force-recreate`), y esperar a `Healthy`.
+3. **Comparar el índice con la tabla.** Cada `SET` va en el mismo `-c` que su consulta, porque cada `psql` es una sesión distinta. Se ejecuta como `postgres`, que es superusuario y no pasa por RLS (la tabla lo tiene forzado: con otro rol se verían 0 filas y las dos cifras serían iguales por vacío). Primero, con el índice (el `EXPLAIN` tiene que mostrar `Bitmap Index Scan on sesion_personal_tokens_usados`; si no lo muestra, la comparación no prueba nada y no vale):
+
+   ```bash
+   P="sudo docker compose -f docker-compose.yml -f compose.produccion.yaml exec -T postgres psql -U postgres -d canario -X -q -A -t -v ON_ERROR_STOP=1"
+   Q="select count(*) from canal.sesion_personal s, unnest(s.tokens_usados) t where exists (select 1 from canal.sesion_personal x where x.tokens_usados @> array[t])"
+   $P -c "SET enable_seqscan=off; EXPLAIN $Q;"
+   $P -c "SET enable_seqscan=off; $Q;"
+   $P -c "SET enable_bitmapscan=off; SET enable_indexscan=off; $Q;"
+   $P -c "select coalesce(sum(cardinality(tokens_usados)),0) from canal.sesion_personal;"
+   ```
+
+   El segundo y el tercer recuento (la última línea de cada salida) tienen que ser iguales, y el cuarto es el recuento esperado, independiente del índice. **Si el cuarto vale 0** (tabla vacía o sin rotaciones), la comparación es vacía: no se da por buena. Alcance: detecta entradas que **faltan** en el índice (el fallo "searches miss rows"); no detecta entradas de más, que el recheck del bitmap filtra. No es una prueba de que el índice esté sano.
+4. **Reconstruir el índice** (un `REINDEX` normal con `lock_timeout`, no `CONCURRENTLY`: la tabla es pequeña, así es atómico y no deja restos `_ccnew`; bloquea unos milisegundos incluso las lecturas que planifican sobre la tabla, y si no consigue el bloqueo en 2 s falla limpio y se repite). No se usa `amcheck`: exigiría crear una extensión y rompería la invariante de que solo existe `plpgsql` (`verificar_esquema.py`, `ex`):
+
+   ```bash
+   $P -c "SET lock_timeout = '2s'; REINDEX INDEX canal.sesion_personal_tokens_usados;"
+   $P -c "select indisvalid and indisready from pg_index where indexrelid = 'canal.sesion_personal_tokens_usados'::regclass;"
+   ```
+
+   El segundo comando tiene que dar `t`. Después se repite la comparación del paso 3.
+
+**Vuelta atrás a 18.6:** el digest de 18.6 sobre el mismo volumen. Las versiones menores son compatibles entre sí en disco, también después del `REINDEX`.
+
 El paso 3 se repite siempre: `generar_secretos.py` nunca sobrescribe un fichero existente, solo crea los que una versión nueva necesita y aún no están (como `smtp_usuario.txt` y `smtp_contrasena.txt`), y sin ellos el paso 4 no arranca. Los que ya existen, incluida la clave maestra, se quedan como están. Si cambia `despliegue/traefik/canario.yml`, también el `cp` del paso 6; la conexión de Traefik se queda como está. El límite del esquema sin migraciones (arriba, "Actualizar una instalación existente") vale igual aquí.
 
 La API (imagen `canario-api`) y la SPA (va dentro de `canario-caddy`) se despliegan y se revierten juntas, siempre de la misma versión del repositorio: el paso 1 construye las dos y el 4 las arranca a la vez (el procedimiento para revertir, abajo). Nunca se cambia una sola de esas imágenes. Hay contratos entre las dos que no se comprueban en marcha. Por ejemplo, la vuelta de Google al vincular una cuenta va a `/cuenta/externas` (`app/rutas_externo.py`, `DESTINOS`); con una API nueva y una SPA vieja, o al revés, esa vuelta cae en una página que no completa el vínculo, y la persona no ve ningún error.
@@ -518,7 +545,7 @@ New-Item -ItemType Directory -Path $R, "$R\copia", "$R\secretos" | Out-Null
    Después, igual en los dos casos (del repo solo `01_roles.sh` y `pg_hba.conf`, de solo lectura):
 
    ```powershell
-   docker run -d --name canario-restauracion --network none --user 70:70 --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /var/run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m -e POSTGRES_DB=canario -e POSTGRES_PASSWORD_FILE=/run/secrets/contrasena_postgres_superusuario --mount type=volume,src=canario-restauracion,dst=/var/lib/postgresql @secretos --mount "type=bind,src=$REPO\db\init\01_roles.sh,dst=/docker-entrypoint-initdb.d/01_roles.sh,readonly" --mount "type=bind,src=$R\copia,dst=/copia,readonly" --mount "type=bind,src=$REPO\db\pg_hba.conf,dst=/etc/postgresql/pg_hba.conf,readonly" canario-postgres postgres -c hba_file=/etc/postgresql/pg_hba.conf -c listen_addresses=* -c unix_socket_permissions=0700 -c password_encryption=scram-sha-256 -c ssl=off
+   docker run -d --name canario-restauracion --network none --user 70:70 --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=64m --tmpfs /run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m -e POSTGRES_DB=canario -e POSTGRES_PASSWORD_FILE=/run/secrets/contrasena_postgres_superusuario --mount type=volume,src=canario-restauracion,dst=/var/lib/postgresql @secretos --mount "type=bind,src=$REPO\db\init\01_roles.sh,dst=/docker-entrypoint-initdb.d/01_roles.sh,readonly" --mount "type=bind,src=$R\copia,dst=/copia,readonly" --mount "type=bind,src=$REPO\db\pg_hba.conf,dst=/etc/postgresql/pg_hba.conf,readonly" canario-postgres postgres -c hba_file=/etc/postgresql/pg_hba.conf -c listen_addresses=* -c unix_socket_permissions=0700 -c password_encryption=scram-sha-256 -c ssl=off
    ```
 
    Se espera a que `docker logs canario-restauracion` diga que el servidor está listo para aceptar conexiones. Si la imagen no se llama `canario-postgres`, se mira con `docker image ls`. Para restaurar en producción, la instancia es el servicio `postgres` de siempre con un volumen vacío y ese mismo montaje de `init` (un fichero de Compose añadido con `-f` que sustituya el montaje de `/docker-entrypoint-initdb.d`). Ese camino no está ensayado todavía: el primer simulacro en el VPS lo ensaya antes de que haga falta.

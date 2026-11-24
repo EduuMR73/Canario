@@ -4,9 +4,19 @@
   "author": "Canario",
   "role": "Responsable del despliegue",
   "timestamp": "2026-10-12T22:00:00Z",
-  "last_updated": "2026-11-23T12:00:00Z",
-  "version": 12,
+  "last_updated": "2026-11-24T12:00:00Z",
+  "version": 13,
   "statements": [
+    {
+      "vulnerability": {"name": "CVE-2026-86144"},
+      "timestamp": "2026-11-24T12:00:00Z",
+      "products": [
+        {"@id": "pkg:apk/alpine/libxml2@2.13.9-r2"}
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "En xinclude de libxml2 anterior a 2.15.4, xmlXIncludeProcess y xmlXIncludeProcessTree no propagan los parseFlags (por ejemplo XML_PARSE_NONET) al procesar una inclusión. Solo afecta al procesamiento de XInclude. En la imagen de PostgreSQL 18.7, libxml2 SÍ se alcanza con cualquier rol que pueda ejecutar SQL (xmlparse, xpath, XMLTABLE y similares), pero el código vulnerable no: src/backend/utils/adt/xml.c de REL_18_7 no contiene XInclude, XML_PARSE_XINCLUDE, xmlTextReader ni xmlReaderFor, e instala xmlPgEntityLoader como cargador de entidades externas, así que ninguna consulta llega a xmlXIncludeProcess. libxslt solo llega por la extensión xml2 (contrib), que no está creada en ninguna base y no es trusted, de modo que un rol sin privilegios no puede crearla. Comprobado en verificar_escaneos.py, f: el fichero fuente descargado de la etiqueta REL_18_7 con su sha de blob git literal (la cadena hasta el binario se cierra con el PG_SHA256 de la imagen), los ELF que enlazan libxml2 y que ningún fichero bajo /usr/local contiene xmlXInclude, xmlTextReader ni xmlReaderFor (control: la propia libxml2 sí los contiene); y en verificar_esquema.py (ex), que en las bases conectables solo existe la extensión plpgsql. Alpine ya publicó libxml2 2.13.9-r3 con el arreglo (security.alpinelinux.org). Se retira al adoptar una imagen oficial de postgres con libxml2 2.13.9-r3 o posterior, cumplidos los 14 días de su manifiesto amd64 (docs/threat-model.md, 6.17); mientras tanto, se renueva cada 30 días repitiendo las invariantes."
+    },
     {
       "vulnerability": {"name": "CVE-2026-78661"},
       "timestamp": "2026-11-20T15:30:00Z",

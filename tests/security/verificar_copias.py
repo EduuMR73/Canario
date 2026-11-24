@@ -455,7 +455,7 @@ def servicio_bd(init_dir, volumen, solo_roles, copia_dir=None):
                         "POSTGRES_PASSWORD_FILE": "/run/secrets/contrasena_postgres_superusuario"},
         "secrets": ["contrasena_postgres_superusuario", "contrasena_migrador", "contrasena_aplicacion",
                     "contrasena_plataforma"],
-        "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m", "/var/run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m"],
+        "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m", "/run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m"],
         "volumes": [f"{volumen}:/var/lib/postgresql",
                     {"type": "bind", "source": (RAIZ / "db" / "pg_hba.conf").as_posix(),
                      "target": "/etc/postgresql/pg_hba.conf", "read_only": True},
@@ -597,6 +597,53 @@ def hash_esperado_python(empresa, servicio):
 
 
 # ---------------------------------------------------------------------------
+# Socket de PostgreSQL (postgres 18.7: DEFAULT_PGSOCKET_DIR = /run/postgresql)
+# ---------------------------------------------------------------------------
+# Oráculos literales, comprobados en un arranque real de 18.7 (24 de noviembre
+# de 2026): el directorio queda drwxrwsr-t (el "chmod 03775" del entrypoint
+# anula el mode del tmpfs) y el socket srwx------, ambos de 70:70.
+DIR_SOCKET = "/run/postgresql"
+RUTA_SOCKET = "/run/postgresql/.s.PGSQL.5432"
+STAT_DIR_SOCKET = "drwxrwsr-t 70 70"
+STAT_SOCKET = "srwx------ 70 70"
+OPCIONES_TMPFS_SEGURAS = {"nosuid", "noexec"}
+
+
+def opciones_tmpfs(proc_mounts, destino):
+    """Opciones de montaje del tmpfs en `destino` según /proc/mounts, o None si
+    ahí no hay un tmpfs. Si hay varios montajes, vale el último (el visible)."""
+    encontradas = None
+    for linea in proc_mounts.splitlines():
+        campos = linea.split()
+        if len(campos) >= 4 and campos[1] == destino and campos[2] == "tmpfs":
+            encontradas = set(campos[3].split(","))
+    return encontradas
+
+
+def comprobar_socket(servicio):
+    """El socket está donde 18.7 lo crea, en memoria y sin ejecución ni setuid.
+    Si el tmpfs se montara en otra ruta, el socket caería en el sistema de
+    ficheros raíz de solo lectura y el servidor no arrancaría, pero así se ve la
+    causa, no solo el síntoma. Cada prueba lleva su control: el mismo analizador
+    sobre el tmpfs de /tmp, y el stat del directorio del socket."""
+    cid = IDS[servicio]
+    mounts = ejecutar(["docker", "exec", cid, "cat", "/proc/mounts"]).out
+
+    def stat(ruta):
+        return ejecutar(["docker", "exec", cid, "stat", "-c", "%A %u %g", ruta]).out.strip()
+
+    control_mount = OPCIONES_TMPFS_SEGURAS <= (opciones_tmpfs(mounts, "/tmp") or set())
+    opciones = opciones_tmpfs(mounts, DIR_SOCKET)
+    negativo(f"{servicio}: {DIR_SOCKET} es un tmpfs con nosuid y noexec ({sorted(opciones or [])})",
+             opciones is not None and OPCIONES_TMPFS_SEGURAS <= opciones, control_mount,
+             "control: el analizador no ve nosuid y noexec en el tmpfs de /tmp")
+    control_dir = stat(DIR_SOCKET) == STAT_DIR_SOCKET
+    real = stat(RUTA_SOCKET)
+    negativo(f"{servicio}: el socket {RUTA_SOCKET} es {STAT_SOCKET} ({real!r})", real == STAT_SOCKET, control_dir,
+             f"control: el directorio {DIR_SOCKET} no es {STAT_DIR_SOCKET}")
+
+
+# ---------------------------------------------------------------------------
 # Secciones
 # ---------------------------------------------------------------------------
 def seccion_a():
@@ -652,6 +699,7 @@ def seccion_a():
     IDS["restauracion"] = dc("ps", "-q", "restauracion").out.strip()
     if r.rc != 0 or esperar_sano(IDS["restauracion"]) != "healthy":
         raise Parada(f"no arranca la instancia de restauracion: {r.todo.strip()[-300:]}")
+    comprobar_socket("restauracion")
     antes = psql("restauracion", "select count(*) from pg_database where datname = 'canario';").out.strip()
     p(f"instancia de restauracion con solo los roles: base canario existe={antes}")
     # El 01_roles.sh exige la base canario: pg_restore la tiene que BORRAR y crear

@@ -77,7 +77,7 @@ services:
         max-file: "3"
 
   postgres:
-    # Imagen propia (db/Dockerfile) sobre postgres:18.6-alpine fijada por
+    # Imagen propia (db/Dockerfile) sobre postgres:18.7-alpine fijada por
     # versión y por digest, por el mismo motivo que redis (defensa ante cadena
     # de suministro). Solo quita gosu, que este despliegue nunca ejecuta y que
     # arrastraba vulnerabilidades de su compilador de Go.
@@ -156,9 +156,12 @@ services:
     tmpfs:
       # Temporales en memoria, sin ejecución ni setuid.
       - /tmp:rw,noexec,nosuid,size=64m
-      # Socket Unix en memoria. El modo del directorio lo fija el entrypoint de
-      # la imagen y el acceso al socket lo restringe unix_socket_permissions.
-      - /var/run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m
+      # Socket Unix en memoria. Desde 18.7 el servidor lo crea en
+      # /run/postgresql (DEFAULT_PGSOCKET_DIR); se monta esa ruta de forma
+      # explícita en vez de depender del enlace var/run -> ../run de la imagen
+      # base, que la imagen oficial ya no usa. El modo del directorio lo fija el
+      # entrypoint y el acceso al socket lo restringe unix_socket_permissions.
+      - /run/postgresql:rw,noexec,nosuid,uid=70,gid=70,size=8m
     volumes:
       # A diferencia de redis, los datos de PostgreSQL sí persisten.
       - pgdata:/var/lib/postgresql
@@ -182,12 +185,11 @@ services:
       - data
     healthcheck:
       # pg_isready da OK aunque pg_hba rechace la conexión. Aquí solo es sano
-      # si el servidor responde por el socket, escucha ya por TCP (lo que
-      # descarta el servidor temporal de la inicialización de la imagen) y
-      # existen los seis roles y lo último que crea la inicialización (se usa
-      # como centinela la función redactar_mensaje, la última del último
-      # script, 05_redaccion.sql). Así, si un script de inicialización falla y
-      # el contenedor se reinicia, la imagen se salta los scripts sin aviso (el
+      # si el servidor real está listo y escucha ya por TCP, y existen los seis
+      # roles y lo último que crea la inicialización (se usa como centinela la
+      # función redactar_mensaje, la última del último script,
+      # 05_redaccion.sql). Así, si un script de inicialización falla y el
+      # contenedor se reinicia, la imagen se salta los scripts sin aviso (el
       # volumen ya no está vacío) y este healthcheck deja el estado visible
       # como unhealthy. Cada script se aplica en una sola transacción y en
       # orden, y la inicialización se detiene en el primero que falla: si
@@ -195,17 +197,51 @@ services:
       # el centinela están también en db/init y deben mantenerse iguales. No se
       # suprime stderr para que el fallo quede visible en el historial del
       # healthcheck.
-      # Dos pasos: primero, en la base postgres (que siempre existe), si el
-      # servidor escucha ya por TCP. El servidor temporal de la inicialización
-      # arranca con listen_addresses='' (docker-entrypoint.sh de la imagen) y
-      # todavía no ha creado canario: preguntarle por canario dejaba en el log
-      # un FATAL "database canario does not exist" si la comprobación caía en
-      # esa ventana. Solo con el servidor real se consulta canario.
+      # Dos pasos: primero una puerta que NO se conecta al servidor y después
+      # la consulta a canario. En la primera arrancada, el entrypoint de la
+      # imagen levanta un servidor temporal solo por el socket
+      # (listen_addresses=''), aplica los scripts de db/init, lo para con
+      # "pg_ctl -m fast -w stop" y solo entonces arranca el servidor real. Ese
+      # servidor temporal acepta conexiones por el mismo socket: si el
+      # healthcheck se conecta mientras arranca, el servidor responde con un
+      # FATAL "the database system is starting up"; si se conecta mientras se
+      # para, con un FATAL "the database system is shutting down" (visto en
+      # verificar_esquema.py, a, con 18.7); y antes de que se cree canario,
+      # con "database canario does not exist". Los tres quedan en el log del
+      # servidor aunque el healthcheck falle como debe. El servidor real tiene
+      # las mismas ventanas al arrancar y al pararse. La puerta lee
+      # "$PGDATA/postmaster.pid", que el propio servidor escribe y mantiene
+      # (es lo que hace pg_ctl -w para saber si ya está listo: no se
+      # conecta), sin abrir ninguna conexión: la línea 6 es la dirección de
+      # escucha (vacía en el temporal, que no escucha por TCP) y la 8 el estado
+      # ("starting", "stopping" o "ready" con relleno de espacios; "read" con
+      # el IFS por defecto lo recorta). Solo con listen_addr no vacío y estado
+      # "ready" se consulta canario. La ruta sale de PGDATA, no es literal. La
+      # consulta previa a la base postgres se quita: la puerta la sustituye.
+      # Dependencia: el formato de postmaster.pid está en
+      # src/include/utils/pidfile.h de PostgreSQL (líneas 6 y 8 y los valores
+      # del estado). Si una versión mayor lo cambiara, el healthcheck daría
+      # unhealthy con su motivo en stderr (no sano en silencio), y
+      # verificar_esquema.py (qp y qd) lo detectaría. TOCTOU residual: el
+      # fichero puede decir "ready" y el servidor empezar a pararse antes de
+      # que psql conecte; solo ocurre en una parada real y entonces el FATAL
+      # del log es verdadero, no un falso positivo de la inicialización. Si
+      # falta el fichero o le faltan líneas, el motivo va a stderr y sale con 1.
+      # En compose, "$$" se escribe para que llegue un "$" literal al shell.
       test:
         - CMD-SHELL
         - |
-          l=$$(psql -U postgres -d postgres -Atc "select current_setting('listen_addresses')") || exit 1
-          [ -n "$$l" ] || exit 1
+          f="$$PGDATA/postmaster.pid"
+          [ -r "$$f" ] || { echo "healthcheck: no se puede leer $$f" >&2; exit 1; }
+          n=0
+          la=
+          st=
+          while read -r linea || [ -n "$$linea" ]; do
+            n=$$((n + 1))
+            [ "$$n" -eq 6 ] && la=$$linea
+            [ "$$n" -eq 8 ] && st=$$linea
+          done < "$$f"
+          { [ -n "$$la" ] && [ "$$st" = ready ]; } || { echo "healthcheck: servidor no listo (listen_addr='$$la', estado='$$st')" >&2; exit 1; }
           x=$$(psql -U postgres -d canario -Atc "select current_setting('listen_addresses') || '|' || (select count(*) from pg_roles where rolname in ('migrador','aplicacion','plataforma','propietario_funciones','propietario_supresion','propietario_redaccion')) || '|' || (to_regprocedure('canal.redactar_mensaje(uuid,integer,uuid,bytea,bytea,integer)') is not null)::text")
           case $$x in '*|6|true') exit 0;; *) exit 1;; esac
       interval: 10s

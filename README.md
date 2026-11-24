@@ -37,7 +37,7 @@ El enunciado recomienda React o Vue. Se usa Angular porque trae de serie lo que 
 | Capa | Tecnología |
 |---|---|
 | Backend | Python 3.12, FastAPI 0.143.0, uvicorn 0.54.0, Jinja2 (páginas del denunciante) |
-| Base de datos | PostgreSQL 18.6, con seguridad por filas (RLS) entre empresas |
+| Base de datos | PostgreSQL 18.7, con seguridad por filas (RLS) entre empresas |
 | Límites de peticiones | Redis 8.10.2 |
 | Frontend | Angular 22.2.2, TypeScript 6.0.3 |
 | Proxy y TLS | Caddy 2.11.9, con su propia autoridad de certificación |
