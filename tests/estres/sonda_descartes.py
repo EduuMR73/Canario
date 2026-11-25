@@ -69,6 +69,13 @@ CODIGO_SERVIDOR = (
 )
 
 
+def nombre_servidor(prefijo):
+    """Nombre del contenedor del servidor lento. Es la única fuente: lo usan
+    ejecutar_sonda para crearlo y el control C5 de lanzar.py para reconocer su
+    die (el k6 de la sonda lleva la misma etiqueta y no vale para C5)."""
+    return f"{prefijo}sonda_lento"
+
+
 def indice_k(marca, inicio):
     """k = redondeo((marca - T0) / 0,5): a que llegada programada corresponde la marca."""
     return round((marca - inicio) / PASO_S)
@@ -175,7 +182,7 @@ def ejecutar_sonda(ejecutar, imagen_api, imagen_k6, cpus_k6, dir_estres, constan
     total 1200 s. Solo afecta a --pico en la repeticion 1 y no entra en la
     estimacion impresa. NO se ha ejecutado."""
     prefijo = constantes["prefijo"]
-    red, servidor, k6 = f"{prefijo}sonda_red", f"{prefijo}sonda_lento", f"{prefijo}sonda_k6"
+    red, servidor, k6 = f"{prefijo}sonda_red", nombre_servidor(prefijo), f"{prefijo}sonda_k6"
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="canario_estres_sonda_"))
     # El resultado se calcula en una variable y se devuelve DESPUES del finally:
     # un return dentro del finally se tragaria cualquier excepcion (un Ctrl+C

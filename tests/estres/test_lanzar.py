@@ -32,6 +32,61 @@ ID_API_NUEVO = "b" * 64
 ID_PG = "c" * 64
 ID_K6 = "d" * 64
 
+# --- Literales medidos del plan v4.2 (no se derivan de lanzar.py) -------------
+# M2: cabecera del CSV de k6 v2.3.0 con 'check' en systemTags (m2.js, sin
+# K6_CSV_TIME_FORMAT), medidas_v4_25nov/m2.csv, 25/11/2026. Sin columna error.
+CABECERA_M2 = ("metric_name,timestamp,metric_value,check,error_code,expected_response,method,name,proto,scenario,"
+               "status,extra_tags,metadata")
+# Cabecera real de L4 con fases.js del commit c7791e6 (sin 'check'): primera
+# línea de rep1/pico_rep1/k6.csv de canario_estres_salida_px5x7po1, k6 v2.3.0,
+# 24/11/2026.
+CABECERA_L4 = ("metric_name,timestamp,metric_value,error_code,expected_response,method,name,proto,scenario,status,"
+               "extra_tags,metadata")
+# Fila checks real del humo previo de L4 (misma salida, línea 48055 del k6.csv).
+FILA_CHECKS_L4 = "checks,1795546507075,1.000000,,,,,,humo_previo,,ruta=humo,"
+# Fila checks de M4 con la cabecera M2 (medidas_v4_25nov/m4.csv, k6 v2.3.0 con
+# K6_CSV_TIME_FORMAT=unix_milli, 25/11/2026).
+FILA_CHECKS_M4 = "checks,1795596322789,1.000000,humo_previo: x,,,,,,default,,,"
+# M4-real: cabecera de l3.js (sin 'check') y fila http_req_duration de una
+# petición fallida de L3b (status 0, proto vacío, error_code 1050),
+# medidas_v4_25nov/fila_status0_l3b_rep1.csv, k6 v2.3.0, 25/11/2026.
+CABECERA_L3B = ("metric_name,timestamp,metric_value,error_code,expected_response,method,name,proto,scenario,status,"
+                "extra_tags,metadata")
+FILA_M4_REAL = ("http_req_duration,1795592728795,15000.393788,1050,false,POST,login_email,,login_ataque,0,"
+                "ip=198.18.5.119&ruta=login_email&fase=carga,")
+# Peticiones de setup() de l3.js, fuera de todo escenario (scenario vacío), con la
+# cabecera de l3.js (CABECERA_L3B): medidas_v4_25nov/filas_setup_l3_l3b.csv, copia
+# de canario_estres_salida_anx_ifad/rep1/l3_rep1/k6.csv:3 y de
+# canario_estres_salida_ky1_5amj/rep1/l3b_rep1/k6.csv:7 y :16, k6 v2.3.0,
+# 25/11/2026 (enmienda v4.3, punto 1).
+FILAS_SETUP_L3 = (
+    "http_req_duration,1795556284245,1.864927,1405,false,POST,http://caddy:8080/salud,HTTP/1.1,,405,,",
+    "http_req_duration,1795592410286,1.888676,1405,false,POST,http://caddy:8080/salud,HTTP/1.1,,405,,",
+    "http_req_duration,1795592410293,6.870392,,true,GET,http://caddy:8080/seguimiento,HTTP/1.1,,200,,",
+)
+# Un 404 de L4 con error_code 1404 y la cabecera de L4 (CABECERA_L4):
+# medidas_v4_25nov/fila_404_l4_rep1.csv, copia de
+# canario_estres_salida_px5x7po1/rep1/pico_rep1/k6.csv:31, k6 v2.3.0, 24/11/2026.
+FILA_404_L4 = ("http_req_duration,1795546367107,39.437354,1404,false,POST,seguimiento,HTTP/1.1,seguimiento__cal,404,"
+               "ruta=seguimiento&fase=cal,")
+# Cabecera real del CSV de la sonda de descartes (sonda_descartes.csv de
+# canario_estres_salida_px5x7po1, k6 v2.3.0, 24/11/2026).
+CABECERA_SONDA = "metric_name,timestamp,metric_value,name,scenario,status,extra_tags,metadata"
+# Etiquetas de la imagen de la API (M1-bis: docker image inspect
+# canario_estres-api:latest, 25/11/2026) y del lector (M1-contenedor: docker ps
+# --format {{.Labels}} de canario_estres_lector_3 durante L3b, 25/11/2026).
+ETIQUETAS_IMAGEN_API = {"com.docker.compose.project": "canario_estres", "com.docker.compose.service": "api",
+                        "com.docker.compose.version": "5.1.4"}
+ETIQUETAS_LECTOR = ("canario.estres=lector,com.docker.compose.project=canario_estres,com.docker.compose.service=api,"
+                    "com.docker.compose.version=5.1.4,desktop.docker.io/ports.scheme=v2")
+# Nombre del servidor de la sonda con el prefijo del lanzador
+# (PREFIJO_EFIMEROS = PROYECTO + "_", lanzar.py:261 del commit c7791e6). Se
+# escribe sin barra inicial porque así llega, según se supone, el atributo name
+# de docker events. Procedencia: M5 del 25/11/2026 (PENDIENTE, sin medir; enmienda
+# v4.3, punto 6). Si la M5 diera una barra, este literal y los eventos de las
+# pruebas cambian con ella.
+NOMBRE_SERVIDOR_SONDA = "canario_estres_sonda_lento"
+
 
 def ev(accion, ident=ID_API, t=100.0, clase="canario", codigo=None, servicio="api"):
     return {"id": ident, "accion": accion, "t": t, "clase": clase, "servicio": servicio, "nombre": servicio,
@@ -67,8 +122,12 @@ class Eventos(unittest.TestCase):
         e = L.parsear_evento(linea)
         self.assertEqual((e["accion"], e["clase"], e["codigo"], e["t"]), ("die", "canario", "137", 1795341600.5))
         # Control positivo de la clasificación: las otras clases.
+        # k6 con las etiquetas medidas: canario.estres=k6 y ninguna de compose
+        # (M1-contenedor, canario_estres_k6_l3b_rep2, 25/11/2026).
         self.assertEqual(L.clase_contenedor({"canario.estres": "k6"}), "k6")
-        self.assertEqual(L.clase_contenedor({"canario.estres": "control"}), "control")
+        # El control sale de la imagen de la API (lanzar.py, ejecutar_control): hereda sus
+        # etiquetas de compose (M1-bis, 25/11/2026) y aun así es "control".
+        self.assertEqual(L.clase_contenedor({**ETIQUETAS_IMAGEN_API, "canario.estres": "control"}), "control")
         self.assertEqual(L.clase_contenedor({"com.docker.compose.project": "canario_estres",
                                              "com.docker.compose.service": "gestion"}), "auxiliar")
         self.assertIsNone(L.clase_contenedor({"com.docker.compose.project": "otro"}))
@@ -80,6 +139,20 @@ class Eventos(unittest.TestCase):
     def test_exec_start_se_normaliza(self):
         linea = json.dumps({"Type": "container", "Action": "exec_start: sh", "timeNano": 1, "Actor": {"ID": "x"}})
         self.assertEqual(L.parsear_evento(linea)["accion"], "exec_start")
+
+    def test_d_canario_estres_manda_sobre_compose(self):
+        # Plan v4.2, prueba d: las etiquetas medidas del lector (ETIQUETAS_LECTOR), que
+        # heredan las de compose de la imagen de la API.
+        lector = L.etiquetas_de(ETIQUETAS_LECTOR)
+        self.assertEqual(lector["com.docker.compose.service"], "api")
+        self.assertEqual(L.clase_contenedor(lector), "lector")
+        # Con canario.estres=sonda (el servidor de la sonda, misma imagen): "sonda", no "canario".
+        self.assertEqual(L.clase_contenedor({**lector, "canario.estres": "sonda"}), "sonda")
+        # Un valor desconocido: la clase de instrumento, nunca "canario" ni None.
+        self.assertEqual(L.clase_contenedor({**lector, "canario.estres": "otro"}), "instrumento_desconocido")
+        # Control: las mismas etiquetas de compose sin canario.estres son la API ("canario").
+        sin_propia = {k: v for k, v in lector.items() if k != "canario.estres"}
+        self.assertEqual(L.clase_contenedor(sin_propia), "canario")
 
 
 class Ventanas(unittest.TestCase):
@@ -177,6 +250,60 @@ class Muertes(unittest.TestCase):
         # Control: el fin normal de k6 (código 0) no cuenta, ni fuera de la ventana.
         self.assertFalse(L.otro_murio([ev("die", ID_K6, 105.0, clase="k6", codigo="0")], ID_API, 100.0, 110.0, []))
         self.assertFalse(L.otro_murio(eventos, ID_API, 200.0, 210.0, []))
+
+    def test_e_el_die_137_de_la_sonda_no_es_una_muerte_de_canario(self):
+        # Plan v4.2, prueba e: el die del servidor de la sonda tal como llega de docker
+        # events, con las etiquetas heredadas de la imagen de la API (M1-bis) y la suya.
+        def die(atributos):
+            return L.parsear_evento(json.dumps({"Type": "container", "Action": "die", "timeNano": 105000000000,
+                                                "Actor": {"ID": "f" * 64, "Attributes": {
+                                                    **atributos, "exitCode": "137", "name": NOMBRE_SERVIDOR_SONDA}}}))
+        sonda = die({**ETIQUETAS_IMAGEN_API, "canario.estres": "sonda"})
+        self.assertEqual(sonda["clase"], "sonda")
+        self.assertEqual(L.muertes_no_esperadas([sonda], []), [])
+        self.assertFalse(L.otro_murio([sonda], ID_API, 100.0, 110.0, []))
+        # Control: el mismo die con clase canario (sin canario.estres) es una muerte.
+        canario = die(ETIQUETAS_IMAGEN_API)
+        self.assertEqual(canario["clase"], "canario")
+        self.assertEqual(len(L.muertes_no_esperadas([canario], [])), 1)
+        self.assertTrue(L.otro_murio([canario], ID_API, 100.0, 110.0, []))
+
+
+class ControlC5(unittest.TestCase):
+    """Plan v4.2, prueba i: el die del servidor de la sonda clasificado como sonda."""
+
+    def die(self, nombre, codigo, heredadas):
+        # El servidor sale de la imagen de la API (hereda M1-bis); el k6 de la sonda, de la
+        # de k6 (sin etiquetas de compose, como canario_estres_k6_l3b_rep2 en M1-contenedor).
+        atributos = {**(ETIQUETAS_IMAGEN_API if heredadas else {}), "canario.estres": "sonda", "exitCode": codigo,
+                     "name": nombre}
+        return L.parsear_evento(json.dumps({"Type": "container", "Action": "die", "timeNano": 1050000000000,
+                                            "Actor": {"ID": ("f" if heredadas else "e") * 64,
+                                                      "Attributes": atributos}}))
+
+    def test_el_nombre_del_servidor_es_el_literal(self):
+        # El oráculo es el literal, no la función.
+        self.assertEqual(sonda_descartes.nombre_servidor(L.PREFIJO_EFIMEROS), NOMBRE_SERVIDOR_SONDA)
+        # Control: con otro prefijo el nombre cambia (la función usa el prefijo que recibe).
+        self.assertEqual(sonda_descartes.nombre_servidor("p_"), "p_sonda_lento")
+
+    def test_i_c5(self):
+        servidor = self.die(NOMBRE_SERVIDOR_SONDA, "137", True)
+        k6_sonda = self.die("canario_estres_sonda_k6", "0", False)
+        # rep1 sin el die de la sonda: SIN CONCLUSION.
+        ok, texto = L.control_c5([])
+        self.assertFalse(ok)
+        self.assertIn("no hay un die de canario_estres_sonda_lento clasificado como sonda", texto)
+        # Control: con el die del servidor, PASA, y los die salen por clase.
+        ok, texto = L.control_c5([servidor, k6_sonda])
+        self.assertTrue(ok, texto)
+        self.assertIn("die por clase {'sonda': 2}", texto)
+        # Control negativo: solo el die del k6 de la sonda (misma clase, otro nombre): SIN CONCLUSION.
+        self.assertEqual(k6_sonda["clase"], "sonda")
+        self.assertFalse(L.control_c5([k6_sonda])[0])
+        # El die del servidor con la clase de compose (el fallo 2 de L4) tampoco vale.
+        compose = {**servidor, "clase": "canario"}
+        self.assertFalse(L.control_c5([compose])[0])
 
 
 class RegladelPadre(unittest.TestCase):
@@ -521,6 +648,30 @@ class EvaluarRepeticion(unittest.TestCase):
         # Control: el caso sin muertos (test de arriba) no da SIN CONCLUSION.
         self.assertFalse(self.evaluar([self.ruta()])[2])
 
+    def test_j_instrumento_desconocido_en_l1_es_sin_conclusion(self):
+        # Plan v4.2, prueba j (L1): un die de un contenedor con un valor desconocido de
+        # canario.estres, con las etiquetas medidas del lector (ETIQUETAS_LECTOR).
+        def correr(valor):
+            atributos = {**L.etiquetas_de(ETIQUETAS_LECTOR), "canario.estres": valor, "exitCode": "1",
+                         "name": "canario_estres_raro"}
+            evento = L.parsear_evento(json.dumps({"Type": "container", "Action": "die", "timeNano": 1050000000000,
+                                                  "Actor": {"ID": "f" * 64, "Attributes": atributos}}))
+            lineas = []
+            ej = types.SimpleNamespace(eventos=types.SimpleNamespace(copia=lambda: [evento]), mantenimientos=[],
+                                       reinicios={})
+            with mock.patch.object(L, "p", lineas.append), \
+                    mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}):
+                L.evaluar_repeticion(ej, 1, [self.ruta()], 0.0, False)
+                return lineas, L.estado["sin_conclusion"]
+        lineas, sin_conclusion = correr("otro")
+        self.assertIn("SIN CONCLUSION repeticion 1: eventos de contenedores con un valor desconocido de canario.estres: "
+                      "['canario_estres_raro']", lineas)
+        self.assertTrue(sin_conclusion)
+        # Control: el mismo evento con canario.estres=lector no da nada.
+        lineas, sin_conclusion = correr("lector")
+        self.assertFalse(any("valor desconocido" in x for x in lineas))
+        self.assertFalse(sin_conclusion)
+
     def test_solo_memoria_tiene_veredicto(self):
         lineas, datos, _ = self.evaluar([self.ruta(solo_memoria=True)])
         self.assertEqual(lineas, ["PASA  repeticion 1, login_email__e5 (escalon): memoria maximo 139812864 B <= "
@@ -685,6 +836,16 @@ class Lector(unittest.TestCase):
         self.assertEqual(L.hijos_ajenos(["buildkit", "buildx"], conocidos, procesos), ["buildx"])
         self.assertEqual(L.hijos_ajenos(["buildkit"], conocidos), ["buildkit"])
         self.assertEqual(L.hijos_ajenos(["f" * 64], conocidos, {"f" * 64: False}), ["ajeno"])
+
+    def test_hijos_ajenos_con_un_valor_desconocido_de_canario_estres(self):
+        # Enmienda v4.3, punto 4: con las etiquetas medidas del lector (ETIQUETAS_LECTOR) y
+        # otro valor de canario.estres, el hijo es ajeno (antes del cambio 3, PARADA).
+        raro = {**L.etiquetas_de(ETIQUETAS_LECTOR), "canario.estres": "otro"}
+        conocidos = {"f" * 64: {"nombre": "canario_estres_raro", "etiquetas": raro}}
+        self.assertEqual(L.hijos_ajenos(["f" * 64], conocidos), ["canario_estres_raro"])
+        # Control: las mismas etiquetas con canario.estres=lector no son ajenas.
+        conocidos = {"f" * 64: {"nombre": "canario_estres_lector_3", "etiquetas": L.etiquetas_de(ETIQUETAS_LECTOR)}}
+        self.assertEqual(L.hijos_ajenos(["f" * 64], conocidos), [])
 
     def test_etiquetas(self):
         self.assertEqual(L.etiquetas_de("a=b,canario.estres=k6,sin_valor"), {"a": "b", "canario.estres": "k6"})
@@ -1485,7 +1646,7 @@ class ComprobarLimites(unittest.TestCase):
 
 
 class Ejecutar_k6(unittest.TestCase):
-    def ejecutar(self, eventos):
+    def ejecutar(self, eventos, duracion=390):
         llamadas = []
         estado_json = json.dumps({"OOMKilled": False, "StartedAt": "2026-11-22T10:00:00.0Z",
                                   "FinishedAt": "2026-11-22T10:10:00.0Z"})
@@ -1508,7 +1669,7 @@ class Ejecutar_k6(unittest.TestCase):
             with mock.patch.object(L, "ejecutar", falso), mock.patch.object(L, "medir_desfase", lambda: 0.0), \
                     mock.patch.object(L, "Estadisticas", lambda c, destino: types.SimpleNamespace(parar=lambda: None)), \
                     mock.patch.object(L, "p", lambda t: None):
-                res = L.ejecutar_k6(contexto, "prueba", "fases.js", ["--network", "none"], 390, pathlib.Path(d))
+                res = L.ejecutar_k6(contexto, "prueba", "fases.js", ["--network", "none"], duracion, pathlib.Path(d))
         return res, llamadas
 
     def test_devuelve_sin_conclusion_como_lista_con_el_die_ausente(self):
@@ -1524,6 +1685,21 @@ class Ejecutar_k6(unittest.TestCase):
         _, llamadas = self.ejecutar([])
         esperas = [t for a, t in llamadas if a[1] == "wait"]
         self.assertEqual(esperas, [390 + 20 + 300])
+
+    def test_k_plazo_real_de_docker_wait_en_l4(self):
+        # Enmienda v4.3, punto 3 (prueba k): el plazo que llega a docker wait en L4, con
+        # la duración que calcula ejecutar_repeticion_fases (espera 0 + duracion_total).
+        # Humo posterior a los 300 s con maxDuration 90 s y gracefulStop 20 s, literales:
+        # duracion_total = 300 + 90 + 20 = 410 y el plazo = 410 + 20 (GRACEFUL_STOP_S) +
+        # 300 (INICIALIZACION_S) = 730. El gracefulStop cuenta dos veces (en fin_humo y
+        # en el plazo): queda escrito y es hacia el lado seguro (más plazo, nunca menos).
+        esc = L.escenarios_pico(L.tasas_de(0.0196))
+        humo = {"nombre": "humo_posterior", "inicio_s": 300, "max_duracion_s": 90, "graceful_stop_s": 20}
+        _, llamadas = self.ejecutar([], duracion=0 + L.duracion_total(esc, [humo]))
+        self.assertEqual([t for a, t in llamadas if a[1] == "wait"], [730])
+        # Control: con maxDuration 100 s el plazo sube a 740.
+        _, llamadas = self.ejecutar([], duracion=0 + L.duracion_total(esc, [{**humo, "max_duracion_s": 100}]))
+        self.assertEqual([t for a, t in llamadas if a[1] == "wait"], [740])
 
     def test_script_y_red_van_en_el_run(self):
         _, llamadas = self.ejecutar([])
@@ -2072,6 +2248,40 @@ class Escenarios(unittest.TestCase):
         self.assertLessEqual(L.comprobar_presupuesto(lista, 2), 4096)
         self.assertEqual(L.presupuesto_k6_mib(lista, 2), 747 * 5)
 
+    def test_k_el_plazo_de_docker_wait_sale_de_los_valores_que_viajan_en_humos(self):
+        # Plan v4.2, prueba k. Escenarios del pico, que acaban a los 360 s (fases_de("pico")).
+        esc = L.escenarios_pico(L.tasas_de(0.0196))
+        # Humo posterior a los 300 s con maxDuration 90 s y gracefulStop 20 s, literales
+        # de la prueba: el plazo cubre 300 + 90 + 20 = 410 s.
+        humos = [{"nombre": "humo_posterior", "inicio_s": 300, "max_duracion_s": 90, "graceful_stop_s": 20}]
+        self.assertEqual(L.duracion_total(esc, humos), 410)
+        # Control: cambiar maxDuration o gracefulStop cambia el plazo (no queda un 60 escrito a mano).
+        self.assertEqual(L.duracion_total(esc, [{**humos[0], "max_duracion_s": 100}]), 420)
+        self.assertEqual(L.duracion_total(esc, [{**humos[0], "graceful_stop_s": 30}]), 420)
+        # Sin humos, el fin del último escenario.
+        self.assertEqual(L.duracion_total(esc), 360)
+        # Los humos que manda el lanzador llevan los dos valores, los mismos en los dos.
+        self.assertEqual([(h["nombre"], h["inicio_s"]) for h in L.humos_pico()],
+                         [("humo_previo", 140), ("humo_posterior", 300)])
+        self.assertEqual({(h["max_duracion_s"], h["graceful_stop_s"]) for h in L.humos_pico()},
+                         {(L.HUMO_MAX_DURACION_S, L.HUMO_GRACEFUL_STOP_S)})
+        # maxDuration por encima de 4 plazos de 15 s (fases.js, PLAZO = '15s').
+        self.assertGreater(L.HUMO_MAX_DURACION_S, 4 * 15)
+
+    def test_k_fases_js_lee_maxduration_y_gracefulstop_de_humos(self):
+        import re
+        js = (pathlib.Path(__file__).resolve().parent / "fases.js").read_text(encoding="utf-8")
+        # Ningún maxDuration escrito a mano: viene de h.max_duracion_s, validado con exigir.
+        self.assertEqual(re.findall(r"maxDuration: '(\d+)s'", js), [])
+        self.assertIn("maxDuration: `${h.max_duracion_s}s`", js)
+        self.assertIn("gracefulStop: `${h.graceful_stop_s}s`", js)
+        self.assertIn("`${h.nombre}: max_duracion_s`", js)
+        self.assertIn("`${h.nombre}: graceful_stop_s`", js)
+        # Control: el gracefulStop de los demás escenarios sigue escrito (20 s, fases.js:83).
+        self.assertEqual(re.findall(r"gracefulStop: '(\d+)s'", js), ["20"])
+        # Cambio 1: 'check' en systemTags.
+        self.assertIn("'expected_response', 'check'],", js)
+
     def test_presupuesto_pasa_de_4_gib_es_parada_con_su_control(self):
         # Control positivo: 819 VUs caben (4095 MiB).
         self.assertEqual(L.comprobar_presupuesto([{"vus": 819}]), 4095)
@@ -2117,17 +2327,23 @@ import collections  # noqa: E402
 
 class CsvFases(unittest.TestCase):
     def test_lee_filas_descartes_retry_y_checks(self):
-        columnas = ["metric_name", "timestamp", "metric_value", "check", "error", "error_code", "expected_response",
-                    "method", "name", "proto", "scenario", "status", "extra_tags"]
+        # Cabecera medida M2 (plan v4.2): k6 v2.3.0 con 'check' en systemTags, m2.js en
+        # medidas_v4_25nov/m2.csv, 25/11/2026. Sin columna error.
+        columnas = CABECERA_M2.split(",")
+        # Filas con la forma de las reales: error_code 1404 y expected_response false en un
+        # 404 (k6.csv de rep1 de L4, canario_estres_salida_px5x7po1, 24/11/2026) y extra_tags
+        # con el formato k=v&k=v de la fila de L3b (fila_status0_l3b_rep1.csv, 25/11/2026),
+        # en su mismo orden ip, ruta, fase.
         filas = [
-            ["http_req_duration", "1795342200500", "500.0", "", "", "", "true", "POST", "seguimiento", "HTTP/1.1",
-             "seguimiento_ips", "404", "fase=carga&ip=198.18.0.1&ruta=seguimiento"],
-            ["http_reqs", "1795342200500", "1", "", "", "", "true", "POST", "seguimiento", "HTTP/1.1",
-             "seguimiento_ips", "404", "ip=198.18.0.9"],
-            ["dropped_iterations", "1795342201000", "1", "", "", "", "", "", "", "", "seguimiento_ips", "", ""],
-            ["retry_after_s", "1795342202000", "33", "", "", "", "", "", "seguimiento", "", "seguimiento_ips", "",
-             "ip=198.18.0.1"],
-            ["checks", "1795342203000", "1", "humo_previo: denuncia 201 con codigo", "", "", "", "", "", "", "", "", ""],
+            ["http_req_duration", "1795342200500", "500.0", "", "1404", "false", "POST", "seguimiento", "HTTP/1.1",
+             "seguimiento_ips", "404", "ip=198.18.0.1&ruta=seguimiento&fase=carga", ""],
+            ["http_reqs", "1795342200500", "1", "", "1404", "false", "POST", "seguimiento", "HTTP/1.1",
+             "seguimiento_ips", "404", "ip=198.18.0.9", ""],
+            ["dropped_iterations", "1795342201000", "1", "", "", "", "", "", "", "seguimiento_ips", "", "", ""],
+            ["retry_after_s", "1795342202000", "33", "", "", "", "", "seguimiento", "", "seguimiento_ips", "",
+             "ip=198.18.0.1", ""],
+            ["checks", "1795342203000", "1", "humo_previo: denuncia 201 con codigo", "", "", "", "", "", "humo_previo",
+             "", "ruta=humo", ""],
         ]
         with tempfile.TemporaryDirectory() as d:
             ruta = pathlib.Path(d) / "k6.csv"
@@ -2146,6 +2362,136 @@ class CsvFases(unittest.TestCase):
         self.assertEqual(datos["descartes"], {"seguimiento_ips": [1795342201.0]})
         self.assertEqual(datos["retry"], [33.0])
         self.assertEqual(datos["checks"], [("humo_previo: denuncia 201 con codigo", 1.0)])
+
+    def leer_texto(self, cabecera, *filas):
+        """leer_csv_fases sobre un CSV escrito con la cabecera y las filas tal cual (LF)."""
+        with tempfile.TemporaryDirectory() as d:
+            ruta = pathlib.Path(d) / "k6.csv"
+            ruta.write_text("\n".join((cabecera, *filas)) + "\n", encoding="utf-8", newline="")
+            return L.leer_csv_fases(ruta)
+
+    # Los cuatro check del humo previo: la fila checks real de L4 (FILA_CHECKS_L4) con la
+    # columna check de M2 rellena con los nombres de fases.js de esta copia (humo,
+    # check en las líneas 251, 263, 266 y 273).
+    CHECKS_HUMO_PREVIO = [
+        "checks,1795546507075,1.000000,humo_previo: denuncia 201 con codigo,,,,,,humo_previo,,ruta=humo,",
+        "checks,1795546507082,1.000000,humo_previo: seguimiento 200 con el texto sembrado,,,,,,humo_previo,,ruta=humo,",
+        "checks,1795546507086,1.000000,humo_previo: formulario web 200,,,,,,humo_previo,,ruta=humo,",
+        "checks,1795546507095,1.000000,humo_previo: consulta web 200 con el texto sembrado,,,,,,humo_previo,,ruta=humo,",
+    ]
+
+    def test_a_cabecera_m2_con_los_cuatro_checks_del_humo_previo(self):
+        datos = self.leer_texto(CABECERA_M2, *self.CHECKS_HUMO_PREVIO)
+        self.assertEqual(datos["ilegibles"], 0)
+        self.assertTrue(L.humo_ok(datos["checks"], "humo_previo"))
+        # Control: el mismo CSV con un check a 0 da False.
+        uno_a_cero = [*self.CHECKS_HUMO_PREVIO[:3], self.CHECKS_HUMO_PREVIO[3].replace(",1.000000,", ",0.000000,")]
+        datos = self.leer_texto(CABECERA_M2, *uno_a_cero)
+        self.assertEqual(datos["ilegibles"], 0)
+        self.assertFalse(L.humo_ok(datos["checks"], "humo_previo"))
+
+    def test_b_la_cabecera_real_de_l4_deja_la_fila_checks_ilegible(self):
+        datos = self.leer_texto(CABECERA_L4, FILA_CHECKS_L4)
+        self.assertEqual((datos["ilegibles"], datos["checks"]), (1, []))
+        self.assertEqual(datos["motivos_ilegibles"], {"checks sin la columna check": 1})
+        k6 = {"codigo": 0, "oom": False, "sin_conclusion": [], "registro": "T0_MS=1795546367000\n", "desfase": 0.0,
+              "motivo_desfase": None}
+        fallos = L.validez_generador(k6, 1795546367.0, {**datos, "filas": [{"proto": "HTTP/1.1", "estado": 201}]},
+                                     set(), {"k6": {"maxima": 100.0}})
+        self.assertEqual([f["motivo"] for f in fallos],
+                         ["1 filas ilegibles en el CSV de k6 ({'checks sin la columna check': 1})"])
+        self.assertEqual(L.veredicto_con_validez("PASA", fallos, None)[0], "SIN CONCLUSION")
+        # Control positivo: con la cabecera M2 y la fila checks de M4, 0 ilegibles.
+        datos = self.leer_texto(CABECERA_M2, FILA_CHECKS_M4)
+        self.assertEqual((datos["ilegibles"], datos["checks"]), (0, [("humo_previo: x", 1.0)]))
+
+    def test_f_http_req_duration_sin_columna_status_es_ilegible(self):
+        # Un 404 real de L4 (rep1/pico_rep1/k6.csv, 24/11/2026) con la cabecera M2.
+        con_status = "http_req_duration,1795546367107,39.437354,,1404,false,POST,seguimiento,HTTP/1.1,seguimiento__cal,404,ruta=seguimiento&fase=cal,"
+        sin_columna = CABECERA_M2.replace(",status,", ",")
+        sin_status = "http_req_duration,1795546367107,39.437354,,1404,false,POST,seguimiento,HTTP/1.1,seguimiento__cal,ruta=seguimiento&fase=cal,"
+        datos = self.leer_texto(sin_columna, sin_status)
+        # Ilegible, no estado 0.
+        self.assertEqual((datos["filas"], datos["ilegibles"]), ([], 1))
+        self.assertEqual(datos["motivos_ilegibles"], {"http_req_duration sin la columna status": 1})
+        # Control: la misma fila con status se lee.
+        datos = self.leer_texto(CABECERA_M2, con_status)
+        self.assertEqual(datos["ilegibles"], 0)
+        self.assertEqual([(f["estado"], f["nombre"], f["escenario"]) for f in datos["filas"]],
+                         [(404, "seguimiento", "seguimiento__cal")])
+
+    def test_f_bis_la_fila_m4_real_de_estado_0_se_lee_y_es_error(self):
+        datos = self.leer_texto(CABECERA_L3B, FILA_M4_REAL)
+        self.assertEqual(datos["ilegibles"], 0)
+        self.assertEqual([(f["estado"], f["proto"], f["error_code"]) for f in datos["filas"]], [(0, "", "1050")])
+        # Cuenta como error (el login espera 401), no como ilegible.
+        self.assertEqual(L.resumen_filas(datos["filas"], 401)["errores"], 1)
+        # Control: la misma fila con status 200 y proto vacío es ilegible.
+        con_200 = FILA_M4_REAL.replace(",login_ataque,0,", ",login_ataque,200,")
+        self.assertNotEqual(con_200, FILA_M4_REAL)
+        datos = self.leer_texto(CABECERA_L3B, con_200)
+        self.assertEqual((datos["filas"], datos["ilegibles"]), ([], 1))
+        self.assertEqual(datos["motivos_ilegibles"], {"http_req_duration con proto vacio y estado 200": 1})
+
+    def test_h_un_csv_de_l3_sin_columna_check_no_tiene_ilegibles(self):
+        # Cabecera de l3.js (sin 'check') y su fila real, sin filas checks.
+        datos = self.leer_texto(CABECERA_L3B, FILA_M4_REAL)
+        self.assertNotIn("check", CABECERA_L3B.split(","))
+        self.assertEqual((len(datos["filas"]), datos["ilegibles"], datos["checks"]), (1, 0, []))
+        # Enmienda v4.3, punto 1: las peticiones de setup() de l3.js salen con scenario
+        # vacío y se leen (FILAS_SETUP_L3, literales medidos).
+        datos = self.leer_texto(CABECERA_L3B, *FILAS_SETUP_L3)
+        self.assertEqual(datos["ilegibles"], 0)
+        self.assertEqual([(f["estado"], f["escenario"]) for f in datos["filas"]], [(405, ""), (405, ""), (200, "")])
+        # Control: las mismas filas con status o con name vacíos son ilegibles.
+        sin_status = [f.replace(",,405,", ",,,").replace(",,200,", ",,,") for f in FILAS_SETUP_L3]
+        self.assertTrue(all(a != b for a, b in zip(sin_status, FILAS_SETUP_L3, strict=True)))
+        datos = self.leer_texto(CABECERA_L3B, *sin_status)
+        self.assertEqual((datos["filas"], datos["motivos_ilegibles"]), ([], {"http_req_duration con status vacio": 3}))
+        sin_name = [f.replace("http://caddy:8080/salud", "").replace("http://caddy:8080/seguimiento", "")
+                    for f in FILAS_SETUP_L3]
+        datos = self.leer_texto(CABECERA_L3B, *sin_name)
+        self.assertEqual((datos["filas"], datos["motivos_ilegibles"]), ([], {"http_req_duration con name vacio": 3}))
+
+    def test_error_code_vacio_con_un_404_es_ilegible(self):
+        # Enmienda v4.3, punto 3: el 404 literal de L4 (FILA_404_L4, error_code 1404).
+        # Con error_code vacío no es una fila que k6 escriba: en L4 todo 4xx y 5xx trae
+        # 1000 + estado, y el 429 de L3 trae 1429 (barrido de QA, enmienda v4.3).
+        vacio = FILA_404_L4.replace(",1404,", ",,")
+        self.assertNotEqual(vacio, FILA_404_L4)
+        datos = self.leer_texto(CABECERA_L4, vacio)
+        self.assertEqual((datos["filas"], datos["motivos_ilegibles"]),
+                         ([], {"http_req_duration con error_code vacio y estado 404": 1}))
+        # Control: el mismo 404 con 1404 se lee.
+        datos = self.leer_texto(CABECERA_L4, FILA_404_L4)
+        self.assertEqual(datos["ilegibles"], 0)
+        self.assertEqual([(f["estado"], f["error_code"]) for f in datos["filas"]], [(404, "1404")])
+
+    def test_status_no_numerico_es_ilegible(self):
+        no_numerico = FILA_404_L4.replace(",seguimiento__cal,404,", ",seguimiento__cal,cuatro,")
+        self.assertNotEqual(no_numerico, FILA_404_L4)
+        datos = self.leer_texto(CABECERA_L4, no_numerico)
+        self.assertEqual((datos["filas"], datos["motivos_ilegibles"]),
+                         ([], {"http_req_duration con status no numerico": 1}))
+        # Control: la fila literal se lee.
+        self.assertEqual(self.leer_texto(CABECERA_L4, FILA_404_L4)["ilegibles"], 0)
+
+    def test_name_vacio_es_ilegible(self):
+        sin_name = FILA_404_L4.replace(",POST,seguimiento,", ",POST,,")
+        self.assertNotEqual(sin_name, FILA_404_L4)
+        datos = self.leer_texto(CABECERA_L4, sin_name)
+        self.assertEqual((datos["filas"], datos["motivos_ilegibles"]), ([], {"http_req_duration con name vacio": 1}))
+        # Control: la fila literal se lee con su name.
+        self.assertEqual([f["nombre"] for f in self.leer_texto(CABECERA_L4, FILA_404_L4)["filas"]], ["seguimiento"])
+
+    def test_check_vacio_es_ilegible(self):
+        # La fila checks de M4 con la columna check vacía.
+        vacio = FILA_CHECKS_M4.replace(",humo_previo: x,", ",,")
+        self.assertNotEqual(vacio, FILA_CHECKS_M4)
+        datos = self.leer_texto(CABECERA_M2, vacio)
+        self.assertEqual((datos["checks"], datos["motivos_ilegibles"]), ([], {"checks con check vacio": 1}))
+        # Control: la fila literal se lee.
+        self.assertEqual(self.leer_texto(CABECERA_M2, FILA_CHECKS_M4)["checks"], [("humo_previo: x", 1.0)])
 
     def test_t0(self):
         self.assertEqual(L.leer_t0('time="x" level=info msg="T0_MS=1795342200123" source=console'), 1795342200.123)
@@ -2412,10 +2758,11 @@ class ControlesPuros(unittest.TestCase):
             L.comprobar_presupuesto([{"vus": 1000}], 0, 1048576)
 
     def test_csv_con_filas_ilegibles_las_cuenta(self):
-        columnas = ["metric_name", "timestamp", "metric_value", "check", "error", "error_code", "expected_response",
-                    "method", "name", "proto", "scenario", "status", "extra_tags"]
-        buena = ["http_req_duration", "1795342200500", "500.0", "", "", "", "true", "POST", "seguimiento", "HTTP/1.1",
-                 "seguimiento_ips", "404", "ip=198.18.0.1"]
+        # Cabecera M2 (k6 v2.3.0, medidas_v4_25nov/m2.csv, 25/11/2026) y un 404 con la forma
+        # real (error_code 1404, expected_response false: k6.csv de rep1 de L4, 24/11/2026).
+        columnas = CABECERA_M2.split(",")
+        buena = ["http_req_duration", "1795342200500", "500.0", "", "1404", "false", "POST", "seguimiento", "HTTP/1.1",
+                 "seguimiento_ips", "404", "ip=198.18.0.1", ""]
         mala = list(buena)
         mala[1] = "no-es-un-numero"
         with tempfile.TemporaryDirectory() as d:
@@ -2698,15 +3045,17 @@ class SondaDeDescartes(unittest.TestCase):
     def test_leer_marcas_del_csv_cuenta_marcas_e_iteraciones(self):
         with tempfile.TemporaryDirectory() as d:
             ruta = pathlib.Path(d) / "sonda.csv"
-            ruta.write_text("metric_name,timestamp,metric_value,scenario\n"
-                            "dropped_iterations,1795342200500,1,sonda\n"
-                            "http_reqs,1795342200600,1,sonda\n"
-                            "iterations,1795342200700,1,sonda\n"
-                            "dropped_iterations,1795342201000,1,sonda\n", encoding="utf-8", newline="")
+            # Cabecera real de sonda_descartes.csv (CABECERA_SONDA, k6 v2.3.0, 24/11/2026) y
+            # filas con su forma (dropped_iterations,<ms>,1.000000,,sonda,,,).
+            ruta.write_text(CABECERA_SONDA + "\n"
+                            "dropped_iterations,1795342200500,1.000000,,sonda,,,\n"
+                            "http_reqs,1795342200600,1.000000,lento,sonda,200,,\n"
+                            "iterations,1795342200700,1.000000,,sonda,,,\n"
+                            "dropped_iterations,1795342201000,1.000000,,sonda,,,\n", encoding="utf-8", newline="")
             self.assertEqual(sonda_descartes.leer_marcas(ruta), ([1795342200.5, 1795342201.0], 1))
             # Una ultima linea sin salto final es un error visible, no una fila menos.
-            ruta.write_text("metric_name,timestamp,metric_value,scenario\n"
-                            "dropped_iterations,1795342200500,1,sonda", encoding="utf-8", newline="")
+            ruta.write_text(CABECERA_SONDA + "\n"
+                            "dropped_iterations,1795342200500,1.000000,,sonda,,,", encoding="utf-8", newline="")
             with self.assertRaises(ValueError):
                 sonda_descartes.leer_marcas(ruta)
 
@@ -2762,6 +3111,9 @@ class CondicionDeLaSonda(unittest.TestCase):
             ej = L.Ejecucion(0.05, None, pathlib.Path(d), [0], [1], {})
             ej.plan_ips = {1: ["10.0.0.1"], 2: ["10.0.0.2"]}
             ej.ids_empresas = []
+            # Enmienda v4.4: un ej.eventos falso explícito (como en EvaluarRepeticion), sin
+            # eventos; ejecutar_repeticion_fases exige que exista.
+            ej.eventos = types.SimpleNamespace(copia=list)
             parches = [mock.patch.object(L, "hora_motor_ahora", lambda: 100.0),
                        mock.patch.object(L, "espera_por_medianoche", lambda *a: 0),
                        mock.patch.object(L, "preparar_repeticion", lambda *a: None),
@@ -2773,8 +3125,12 @@ class CondicionDeLaSonda(unittest.TestCase):
             for parche in parches:
                 parche.start()
                 self.addCleanup(parche.stop)
+            # La excepción que sale es la original (Corte), no la del finally.
             with self.assertRaises(self.Corte):
                 L.ejecutar_repeticion_fases(ej, modo, rep, 2)
+            # Control positivo: el finally escribió el fichero de eventos, vacío.
+            destino = pathlib.Path(d) / f"rep{rep}" / "eventos_docker.json"
+            self.assertEqual(json.loads(destino.read_text(encoding="utf-8")), [])
         return llamadas
 
     def test_solo_pico_en_la_repeticion_1(self):
@@ -2787,6 +3143,63 @@ class CondicionDeLaSonda(unittest.TestCase):
         # Si el montaje no llegara al punto de decisión, todo sería [] y la
         # prueba anterior pasaría en vacío: aquí se exige al menos una llamada.
         self.assertEqual(self.correr("pico", 1), [("pico", 1)])
+
+
+class PrecondicionDeEventos(unittest.TestCase):
+    """Enmienda v4.4: ejecutar_repeticion_fases y ejecutar_repeticion exigen
+    ej.eventos antes de cualquier efecto. Los mensajes son literales."""
+    MENSAJE_FASES = ("ejecutar_repeticion_fases: ej.eventos sin iniciar: lo crean ejecutar_l1 y ejecutar_modo antes "
+                     "de la primera repetición")
+    MENSAJE_L1 = ("ejecutar_repeticion: ej.eventos sin iniciar: lo crean ejecutar_l1 y ejecutar_modo antes de la "
+                  "primera repetición")
+
+    class Corte(Exception):
+        pass
+
+    def correr(self, funcion, eventos):
+        """Ejecuta la repetición 1 (L2 en fases) con ej.eventos = eventos y
+        preparar_repeticion cortando con Corte. Devuelve (excepción, carpeta rep1
+        existe, llamadas a hora_motor_ahora)."""
+        def corte(*_):
+            raise self.Corte()
+        hora = mock.MagicMock(return_value=1000.0)
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            ej = L.Ejecucion(0.05, None, pathlib.Path(d), [0], [1], {})
+            ej.eventos = eventos
+            for parche in (mock.patch.object(L, "hora_motor_ahora", hora),
+                           mock.patch.object(L, "preparar_repeticion", corte),
+                           mock.patch.object(L, "p", lambda *a, **k: None)):
+                pila.enter_context(parche)
+            try:
+                if funcion == "fases":
+                    L.ejecutar_repeticion_fases(ej, "l2", 1, 1)
+                else:
+                    L.ejecutar_repeticion(ej, 1, 1)
+            except Exception as error:  # noqa: BLE001 - la prueba mira el tipo exacto
+                excepcion = error
+            else:
+                excepcion = None
+            return excepcion, (pathlib.Path(d) / "rep1").exists(), hora.call_count
+
+    def comprobar(self, funcion, mensaje):
+        excepcion, carpeta, horas = self.correr(funcion, None)
+        # Sin ej.eventos: RuntimeError con su mensaje literal (nunca AttributeError), sin
+        # carpeta rep1 y sin llamar a hora_motor_ahora.
+        self.assertIs(type(excepcion), RuntimeError, repr(excepcion))
+        self.assertEqual(str(excepcion), mensaje)
+        self.assertFalse(carpeta)
+        self.assertEqual(horas, 0)
+        # Control: con el falso, sale la excepción original (Corte) tras crear rep1.
+        excepcion, carpeta, horas = self.correr(funcion, types.SimpleNamespace(copia=list))
+        self.assertIs(type(excepcion), self.Corte, repr(excepcion))
+        self.assertTrue(carpeta)
+        self.assertEqual(horas, 1)
+
+    def test_fases_sin_eventos_es_runtimeerror_antes_de_cualquier_efecto(self):
+        self.comprobar("fases", self.MENSAJE_FASES)
+
+    def test_l1_sin_eventos_es_runtimeerror_antes_de_cualquier_efecto(self):
+        self.comprobar("l1", self.MENSAJE_L1)
 
 
 class ConexionDelSandwichEnLasRepeticiones(unittest.TestCase):
@@ -2820,6 +3233,8 @@ class ConexionDelSandwichEnLasRepeticiones(unittest.TestCase):
             r.ej = L.Ejecucion(0.05, None, pathlib.Path(d), [0], [1], {})
             r.ej.plan_ips = {numero: list(ips) for numero, ips in self.PLAN.items()}
             r.ej.ids_empresas = []
+            # Enmienda v4.4: un ej.eventos falso explícito, sin eventos.
+            r.ej.eventos = types.SimpleNamespace(copia=list)
             for parche in (mock.patch.object(L, "hora_motor_ahora", lambda: hora),
                            mock.patch.object(L, "preparar_repeticion", r.preparar),
                            mock.patch.object(L, "sandwich_j5", r.sandwich),
@@ -2829,8 +3244,12 @@ class ConexionDelSandwichEnLasRepeticiones(unittest.TestCase):
                            mock.patch.object(L, "p", lambda *a, **k: None),
                            mock.patch.object(L.time, "sleep", r.dormir)):
                 pila.enter_context(parche)
+            # La excepción que sale es la original (Corte), no la del finally.
             with self.assertRaises(self.Corte):
                 L.ejecutar_repeticion_fases(r.ej, modo, rep, 3)
+            # Control positivo: el finally escribió el fichero de eventos, vacío.
+            destino = pathlib.Path(d) / f"rep{rep}" / "eventos_docker.json"
+            self.assertEqual(json.loads(destino.read_text(encoding="utf-8")), [])
         return r
 
     def test_l3_y_l3b_en_las_repeticiones_2_y_3_llaman_al_sandwich_sin_preparar(self):
@@ -3292,8 +3711,10 @@ class LimpiezaDeLaSonda(unittest.TestCase):
 
 
 class LectorCsvRoto(unittest.TestCase):
-    COLUMNAS = "metric_name,timestamp,metric_value,check,error,error_code,expected_response,method,name,proto,scenario,status,extra_tags"
-    BUENA = "http_req_duration,1795342200500,500.0,,,,true,POST,seguimiento,HTTP/1.1,seguimiento_ips,404,ip=198.18.0.1"
+    # Cabecera M2 (k6 v2.3.0, medidas_v4_25nov/m2.csv, 25/11/2026) y un 404 con la forma
+    # real (error_code 1404, expected_response false: k6.csv de rep1 de L4, 24/11/2026).
+    COLUMNAS = CABECERA_M2
+    BUENA = "http_req_duration,1795342200500,500.0,,1404,false,POST,seguimiento,HTTP/1.1,seguimiento_ips,404,ip=198.18.0.1,"
 
     def leer(self, contenido):
         with tempfile.TemporaryDirectory() as d:
@@ -3371,9 +3792,12 @@ class AnalisisSintetico(unittest.TestCase):
                     filas.append(self.fila(inicio, 30, ruta, estado, f"{ruta}__{f['nombre']}", f["nombre"]))
         return filas, fases
 
-    def pico(self, descartes=None, reinicios=0, **cambios):
+    def pico(self, descartes=None, reinicios=0, checks=None, filas_humo=(), **cambios):
         filas, fases = self.filas_pico(**cambios)
-        datos = {"descartes": descartes or {}, "checks": self.humo()}
+        # datos["filas"] son TODAS las filas del CSV (con las del humo), como en
+        # analizar_repeticion_fases; analizar_pico recibe aparte las que no son del humo.
+        datos = {"descartes": descartes or {}, "checks": self.humo() if checks is None else checks,
+                 "filas": filas + list(filas_humo)}
         return L.analizar_pico(filas, datos, self.T0, fases, set(), reinicios)
 
     def motivos(self, parte):
@@ -3408,6 +3832,91 @@ class AnalisisSintetico(unittest.TestCase):
     def test_qa_r4_los_reinicios_llegan_al_veredicto_de_l4(self):
         self.assertEqual(self.pico(reinicios=1)[0]["pico"]["resultado"], "FALLA")
         self.assertEqual(self.pico(reinicios=0)[0]["pico"]["resultado"], "PASA")
+
+    def test_g_una_etapa_programada_con_0_checks_es_sin_conclusion(self):
+        # Plan v4.2, prueba g. Sin ningún check del humo posterior: no se ejecutó.
+        solo_previo = [(f"humo_previo: {x}", 1.0) for x in "abcd"]
+        self.assertEqual(L.veredicto_humo(solo_previo, "humo_posterior"), "SIN CONCLUSION")
+        partes, comun = self.pico(checks=solo_previo)
+        self.assertIn("humo_posterior: 0 check en el CSV: el humo no se ejecuto", self.motivos(partes["pico"]))
+        self.assertEqual(L.veredicto_con_validez(partes["pico"]["resultado"], comun + partes["pico"]["validez"],
+                                                 None)[0], "SIN CONCLUSION")
+        # Control: 4 checks a 1 en cada etapa dan PASA.
+        self.assertEqual(L.veredicto_humo(self.humo(), "humo_posterior"), "PASA")
+        partes, comun = self.pico()
+        self.assertEqual(L.veredicto_con_validez(partes["pico"]["resultado"], comun + partes["pico"]["validez"],
+                                                 None), ("PASA", []))
+        # Un check a 0 sigue siendo FALLA, no SIN CONCLUSION.
+        uno_a_cero = solo_previo + [("humo_posterior: a", 0.0)]
+        self.assertEqual(L.veredicto_humo(uno_a_cero, "humo_posterior"), "FALLA")
+
+    def fila_humo(self, fin_relativo_s):
+        """Una petición del humo previo que TERMINA en t0 + fin_relativo_s (la marca del
+        CSV es el fin), con etapa=humo_previo como en extra_tags."""
+        fila = self.fila(self.T0 + fin_relativo_s - 0.012, 12, "humo_denuncia", 201, "humo_previo")
+        fila["etapa"] = "humo_previo"
+        return fila
+
+    def test_k_el_humo_previo_tiene_que_acabar_antes_del_pico(self):
+        # Plan v4.2, prueba k: la carga empieza en t0 + 150 s (fases_de("pico"), literal en
+        # test_fases_literales). Fin a los 151 s: SIN CONCLUSION.
+        partes, comun = self.pico(filas_humo=[self.fila_humo(100.0), self.fila_humo(151.0)])
+        self.assertEqual(len(comun), 1)
+        self.assertTrue(comun[0]["motivo"].startswith("humo previo: la ultima peticion del humo previo termina 1.00 s "
+                                                      "despues del inicio de la carga"), comun[0]["motivo"])
+        self.assertEqual(L.veredicto_con_validez(partes["pico"]["resultado"], comun + partes["pico"]["validez"],
+                                                 None)[0], "SIN CONCLUSION")
+        # Control: fin a los 149 s, nada.
+        partes, comun = self.pico(filas_humo=[self.fila_humo(100.0), self.fila_humo(149.0)])
+        self.assertEqual(comun, [])
+        # Las filas de otra etapa no cuentan aunque acaben tarde.
+        tarde = self.fila_humo(151.0)
+        tarde["etapa"] = "humo_posterior"
+        self.assertEqual(self.pico(filas_humo=[self.fila_humo(149.0), tarde])[1], [])
+
+    def analizar_rep(self, modo, rep, eventos):
+        """analizar_repeticion_fases sin CSV ni T0 (todas las partes SIN CONCLUSION) y
+        con los eventos dados: solo interesa qué entra en comun."""
+        ej = types.SimpleNamespace(eventos=types.SimpleNamespace(copia=lambda: list(eventos)), mantenimientos=[],
+                                   reinicios={})
+        k6 = {"registro": "", "codigo": 0, "oom": False, "sin_conclusion": [], "desfase": None,
+              "motivo_desfase": "sin medir", "inicio_vm": None, "fin_vm": None, "k6_id": ID_K6}
+        with tempfile.TemporaryDirectory() as d:
+            salida_rep = pathlib.Path(d)
+            res = L.analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_rep / "no_existe", k6,
+                                              L.fases_de("l2" if modo == "l2" else "pico"), None, [],
+                                              salida_rep / "stats.txt", self.ticks(), 1000.0, [], True, 1010.0, None)
+        return [f["motivo"] for f in res["comun"]]
+
+    def test_c5_solo_en_pico_rep1_y_entra_en_comun(self):
+        # Enmienda v4.3, punto 3. El die del servidor de la sonda como llega de docker
+        # events (etiquetas heredadas M1-bis y nombre NOMBRE_SERVIDOR_SONDA).
+        servidor = L.parsear_evento(json.dumps({"Type": "container", "Action": "die", "timeNano": 1001000000000,
+                                                "Actor": {"ID": "f" * 64, "Attributes": {
+                                                    **ETIQUETAS_IMAGEN_API, "canario.estres": "sonda",
+                                                    "exitCode": "137", "name": NOMBRE_SERVIDOR_SONDA}}}))
+        # pico, rep1, sin el die: C5 entra en comun.
+        self.assertTrue(any(m.startswith("C5: ") for m in self.analizar_rep("pico", 1, [])))
+        # Control: pico, rep1, con el die del servidor: no hay C5 en comun.
+        self.assertFalse(any(m.startswith("C5: ") for m in self.analizar_rep("pico", 1, [servidor])))
+        # Fuera de pico rep1 no corre aunque falte el die: pico rep2 y l2 rep1.
+        self.assertFalse(any(m.startswith("C5: ") for m in self.analizar_rep("pico", 2, [])))
+        self.assertFalse(any(m.startswith("C5: ") for m in self.analizar_rep("l2", 1, [])))
+
+    def test_la_linea_de_muerte_lleva_nombre_y_clase(self):
+        # Plan v4.2, cambio 4: un die no esperado de la API (ev: nombre "api", clase canario).
+        lineas = []
+        with mock.patch.object(L, "p", lineas.append):
+            self.vigilar(eventos=[ev("die", ID_API, 1005.0, codigo="137")])
+        muertes = [x for x in lineas if "murio" in x]
+        self.assertEqual(len(muertes), 1)
+        self.assertTrue(muertes[0].startswith("   repeticion 1: murio api (api, clase canario, aaaaaaaaaaaa, codigo 137)"),
+                        muertes[0])
+        # Control: sin el die no hay línea de muerte.
+        lineas.clear()
+        with mock.patch.object(L, "p", lineas.append):
+            self.vigilar()
+        self.assertFalse(any("murio" in x for x in lineas))
 
     def filas_victimas(self, fases, dur_carga=30, dur_base=30, login=True, desfase_login=0.0):
         filas = []
@@ -3506,6 +4015,182 @@ class AnalisisSintetico(unittest.TestCase):
         vig = self.vigilar(eventos=[ev("start", ID_API, 1001.0), ev("start", ID_API, 1002.0)], reinicios={ID_API: 1})
         self.assertEqual(vig["reinicios"], 1)
 
+    def test_j_instrumento_desconocido_en_fases_es_sin_conclusion(self):
+        # Plan v4.2, prueba j (fases): el mismo die que en la prueba de L1, con las
+        # etiquetas medidas del lector (ETIQUETAS_LECTOR) y otro valor de canario.estres.
+        def evento(valor):
+            atributos = {**L.etiquetas_de(ETIQUETAS_LECTOR), "canario.estres": valor, "exitCode": "1",
+                         "name": "canario_estres_raro"}
+            return L.parsear_evento(json.dumps({"Type": "container", "Action": "die", "timeNano": 1005000000000,
+                                                "Actor": {"ID": "f" * 64, "Attributes": atributos}}))
+        vig = self.vigilar(eventos=[evento("otro")])
+        self.assertEqual([f["motivo"] for f in vig["fallos"]],
+                         ["repeticion 1: eventos de contenedores con un valor desconocido de canario.estres: "
+                          "['canario_estres_raro']"])
+        self.assertEqual(vig["muertes"], [])
+        # Control: el mismo evento con canario.estres=lector no da nada.
+        vig = self.vigilar(eventos=[evento("lector")])
+        self.assertEqual((vig["fallos"], vig["muertes"]), ([], []))
+
+
+class EventosPorRepeticion(unittest.TestCase):
+    """Plan v4.2, cambio 4, y enmienda v4.3, punto 2: eventos_docker.json por
+    repetición, escrito en el finally y sin lanzar nunca."""
+
+    def evento(self, t, nombre="canario_estres-api-1"):
+        return ev("die", ID_API, t, codigo="137", servicio="api") | {"nombre": nombre}
+
+    def test_guardar_eventos_escribe_el_fichero(self):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(L, "p", lambda *a: None), \
+                mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}):
+            destino = pathlib.Path(d) / "eventos_docker.json"
+            L.guardar_eventos(destino, [self.evento(1005.0)])
+            self.assertEqual(json.loads(destino.read_text(encoding="utf-8")), [self.evento(1005.0)])
+            self.assertFalse(L.estado["sin_conclusion"])
+
+    def test_si_la_escritura_falla_da_sin_conclusion_y_no_lanza(self):
+        for nombre, destino_de, eventos in (
+                ("carpeta inexistente (OSError)", lambda d: pathlib.Path(d) / "no_existe" / "e.json", []),
+                ("no serializable (TypeError)", lambda d: pathlib.Path(d) / "e.json", [object()]),
+                ("referencia circular (ValueError)", lambda d: pathlib.Path(d) / "e.json", None)):
+            with self.subTest(nombre), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(L, "p", lambda *a: None), \
+                    mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}):
+                if eventos is None:
+                    circular = []
+                    circular.append(circular)
+                    eventos = circular
+                L.guardar_eventos(destino_de(d), eventos)
+                self.assertTrue(L.estado["sin_conclusion"], nombre)
+        # Control: con un destino válido y eventos serializables, sin SIN CONCLUSION.
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(L, "p", lambda *a: None), \
+                mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False}):
+            L.guardar_eventos(pathlib.Path(d) / "e.json", [self.evento(1005.0)])
+            self.assertFalse(L.estado["sin_conclusion"])
+
+    def ej_fases(self, d, eventos):
+        return types.SimpleNamespace(salida=pathlib.Path(d), eventos=types.SimpleNamespace(copia=lambda: list(eventos)),
+                                     tasas=L.tasas_de(0.0196), contrasena="Estres-xxxxxxxxxxxxxxxx", texto_humo="Humo",
+                                     ids_empresas=[], ids={"caddy": "c" * 64}, datos=pathlib.Path(d), cpus_k6="2,3",
+                                     plan_ips={}, id_a=None, id_b=None)
+
+    def parches_fases(self, pila, llamadas, preparar):
+        """Todo lo de Docker de ejecutar_repeticion_fases (L2, repetición 1) sustituido.
+        guardar_eventos se envuelve para contar sus llamadas."""
+        original = L.guardar_eventos
+        falso = types.SimpleNamespace(parar=lambda: None, copia_ticks=lambda: [])
+
+        def contar(destino, eventos):
+            llamadas.append(destino)
+            original(destino, eventos)
+        for parche in (mock.patch.object(L, "p", lambda *a: None),
+                       mock.patch.object(L, "hora_motor_ahora", lambda: 1000.0),
+                       mock.patch.object(L, "preparar_repeticion", preparar),
+                       mock.patch.object(L, "alta_empresa", lambda nombre: "a" * 32),
+                       mock.patch.object(L, "Registro", lambda *a: falso),
+                       mock.patch.object(L, "iniciar_lector", lambda *a: falso),
+                       mock.patch.object(L, "Estadisticas", lambda *a: falso),
+                       mock.patch.object(L, "escribir_datos_k6", lambda *a: None),
+                       mock.patch.object(L, "ejecutar_k6", lambda *a: {"registro": ""}),
+                       mock.patch.object(L.time, "sleep", lambda s: None),
+                       mock.patch.object(L, "comprobar_vida", lambda *a: []),
+                       mock.patch.object(L, "streamer_vivo", lambda s: True),
+                       mock.patch.object(L, "registrar_reinicios", lambda ej: None),
+                       mock.patch.object(L, "analizar_repeticion_fases", lambda *a: {"analizada": True}),
+                       mock.patch.object(L, "guardar_eventos", contar),
+                       mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False})):
+            pila.enter_context(parche)
+
+    def test_con_una_parada_antes_del_analisis_el_fichero_existe_y_la_parada_sigue(self):
+        def parada(ej, rep):
+            raise L.Parada("parada simulada antes del analisis")
+        eventos = [self.evento(999.0, "anterior"), self.evento(1005.0)]
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            llamadas = []
+            self.parches_fases(pila, llamadas, parada)
+            with self.assertRaises(L.Parada) as contexto:
+                L.ejecutar_repeticion_fases(self.ej_fases(d, eventos), "l2", 1, 1)
+            self.assertEqual(str(contexto.exception), "parada simulada antes del analisis")
+            destino = pathlib.Path(d) / "rep1" / "eventos_docker.json"
+            self.assertEqual(llamadas, [destino])
+            # Solo los eventos desde t_ini (1000.0): el de 999.0 es de antes.
+            self.assertEqual(json.loads(destino.read_text(encoding="utf-8")), [self.evento(1005.0)])
+
+    def test_sin_parada_el_fichero_se_escribe_una_sola_vez(self):
+        eventos = [self.evento(1005.0)]
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            llamadas = []
+            self.parches_fases(pila, llamadas, lambda ej, rep: None)
+            self.assertEqual(L.ejecutar_repeticion_fases(self.ej_fases(d, eventos), "l2", 1, 1), {"analizada": True})
+            destino = pathlib.Path(d) / "rep1" / "eventos_docker.json"
+            self.assertEqual(llamadas, [destino])
+            self.assertEqual(json.loads(destino.read_text(encoding="utf-8")), eventos)
+
+    # --- La misma pareja para L1 (ejecutar_repeticion) -------------------------
+    DATOS_REP_L1 = {"max_memoria": None, "muertes": 0, "muerte_en_login": False}
+
+    def ej_l1(self, d, eventos):
+        return types.SimpleNamespace(salida=pathlib.Path(d), eventos=types.SimpleNamespace(copia=lambda: list(eventos)),
+                                     t=0.0196, escalera={}, datos=pathlib.Path(d), ids={"caddy": "c" * 64},
+                                     cpus_k6="2,3", identificador=None)
+
+    def parches_l1(self, pila, llamadas, preparar):
+        """Todo lo de Docker de ejecutar_repeticion (L1) sustituido. guardar_eventos se
+        envuelve para contar sus llamadas. La salida de alta-empresa tiene la forma
+        que exige PATRON_ALTA."""
+        original = L.guardar_eventos
+        falso = types.SimpleNamespace(parar=lambda: None)
+        alta = ("empresa creada: empresa_id=00000000-0000-0000-0000-000000000000 "
+                "identificador_publico=" + "a" * 32 + "\n")
+
+        def contar(destino, eventos):
+            llamadas.append(destino)
+            original(destino, eventos)
+        for parche in (mock.patch.object(L, "p", lambda *a: None),
+                       mock.patch.object(L, "hora_motor_ahora", lambda: 1000.0),
+                       mock.patch.object(L, "preparar_repeticion", preparar),
+                       mock.patch.object(L, "dc", lambda *a, **k: L.R(0, alta, "")),
+                       mock.patch.object(L, "Registro", lambda *a: falso),
+                       mock.patch.object(L, "ejecutar_ruta", lambda ej, rep, ruta, *a: {"ruta": ruta, "resultados": []}),
+                       mock.patch.object(L.time, "sleep", lambda s: None),
+                       mock.patch.object(L, "leer_log", lambda ruta: []),
+                       mock.patch.object(L, "evaluar_repeticion", lambda *a: dict(self.DATOS_REP_L1)),
+                       mock.patch.object(L, "ejecutar", lambda *a, **k: L.R(0, "", "")),
+                       mock.patch.object(L, "tabla", lambda resultados: None),
+                       mock.patch.object(L, "codo_de", lambda resultados: None),
+                       mock.patch.object(L, "hipotesis", lambda *a: None),
+                       mock.patch.object(L, "guardar_eventos", contar),
+                       mock.patch.dict(L.estado, {"falla": False, "sin_conclusion": False})):
+            pila.enter_context(parche)
+
+    def test_l1_con_una_parada_antes_del_analisis_el_fichero_existe_y_la_parada_sigue(self):
+        def parada(ej, rep):
+            raise L.Parada("parada simulada antes del analisis de L1")
+        eventos = [self.evento(999.0, "anterior"), self.evento(1005.0)]
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            llamadas = []
+            self.parches_l1(pila, llamadas, parada)
+            with self.assertRaises(L.Parada) as contexto:
+                L.ejecutar_repeticion(self.ej_l1(d, eventos), 1, 1)
+            self.assertEqual(str(contexto.exception), "parada simulada antes del analisis de L1")
+            destino = pathlib.Path(d) / "rep1" / "eventos_docker.json"
+            self.assertEqual(llamadas, [destino])
+            # Solo los eventos desde t_ini (1000.0): el de 999.0 es de antes.
+            self.assertEqual(json.loads(destino.read_text(encoding="utf-8")), [self.evento(1005.0)])
+
+    def test_l1_sin_parada_el_fichero_se_escribe_una_sola_vez(self):
+        eventos = [self.evento(1005.0)]
+        with tempfile.TemporaryDirectory() as d, contextlib.ExitStack() as pila:
+            llamadas = []
+            self.parches_l1(pila, llamadas, lambda ej, rep: None)
+            self.assertEqual(L.ejecutar_repeticion(self.ej_l1(d, eventos), 1, 1),
+                             {"resultados": [], **self.DATOS_REP_L1})
+            destino = pathlib.Path(d) / "rep1" / "eventos_docker.json"
+            self.assertEqual(llamadas, [destino])
+            self.assertEqual(json.loads(destino.read_text(encoding="utf-8")), eventos)
+
 
 class LineasDeL3bB(unittest.TestCase):
     def test_pasa_con_b2_es_el_literal_de_e17_sin_cifra_de_ips(self):
@@ -3569,8 +4254,10 @@ class EstimacionDeTiempo(unittest.TestCase):
         self.assertEqual(L.estimar_repeticion_s("l3b", 1), 1275)
         self.assertEqual(L.estimar_repeticion_s("l3b", 2), 1275 + 541)
         self.assertEqual(L.estimar_repeticion_s("l3", 3), L.estimar_repeticion_s("l3", 2))
-        # Control: L2 y L4 no tienen sandwich, ninguna repeticion cambia.
-        for modo, esperado in (("l2", 675), ("pico", 645)):
+        # Control: L2 y L4 no tienen sandwich, ninguna repetición cambia. L4 (plan v4.2,
+        # cambio 2): el humo posterior acaba en 300 + 90 (maxDuration) + 20 (gracefulStop)
+        # = 410 s, después de las fases (360 s): 410 + 30 + 15 + 240 = 695 s (antes 645).
+        for modo, esperado in (("l2", 675), ("pico", 695)):
             self.assertEqual((L.estimar_repeticion_s(modo, 1), L.estimar_repeticion_s(modo, 2)), (esperado, esperado))
 
     def test_totales_con_tres_repeticiones(self):

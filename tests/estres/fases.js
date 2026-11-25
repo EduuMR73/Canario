@@ -92,14 +92,20 @@ for (const e of datos.escenarios) {
   escenarios[e.nombre] = escenario(e);
 }
 // El humo (L4): una sola iteración, en su momento. Sus peticiones llevan la
-// etiqueta ruta=humo y se excluyen del p95.
+// etiqueta ruta=humo y se excluyen del p95. maxDuration y gracefulStop vienen
+// del lanzador (humos_pico en lanzar.py, la única fuente, de la que sale también
+// el plazo de docker wait): aquí no se escribe ninguna cifra. Sin gracefulStop
+// explícito, k6 aplicaba su valor por defecto (30 s, medido en k6_salida.txt de
+// L4, k6 v2.3.0, 24/11/2026), distinto del de los demás escenarios.
 for (const h of datos.humos) {
   exigir(typeof h.nombre === 'string' && /^humo_[a-z]+$/.test(h.nombre), 'humo: nombre');
   exigir(Number.isInteger(h.inicio_s) && h.inicio_s >= 0, `${h.nombre}: inicio_s`);
+  exigir(Number.isInteger(h.max_duracion_s) && h.max_duracion_s > 0, `${h.nombre}: max_duracion_s`);
+  exigir(Number.isInteger(h.graceful_stop_s) && h.graceful_stop_s >= 0, `${h.nombre}: graceful_stop_s`);
   exigir(escenarios[h.nombre] === undefined, `${h.nombre}: repetido`);
   escenarios[h.nombre] = {
-    executor: 'shared-iterations', vus: 1, iterations: 1, maxDuration: '60s',
-    startTime: `${h.inicio_s}s`, exec: 'humo', tags: { ruta: 'humo' },
+    executor: 'shared-iterations', vus: 1, iterations: 1, maxDuration: `${h.max_duracion_s}s`,
+    gracefulStop: `${h.graceful_stop_s}s`, startTime: `${h.inicio_s}s`, exec: 'humo', tags: { ruta: 'humo' },
   };
 }
 
@@ -111,7 +117,13 @@ export const options = {
   // Solo importa el código de estado: sin cuerpos, menos memoria por VU. El
   // humo pide el cuerpo de sus respuestas con responseType: 'text'.
   discardResponseBodies: true,
-  systemTags: ['status', 'error_code', 'scenario', 'proto', 'method', 'name', 'expected_response'],
+  // 'check' hace falta para que las filas `checks` del CSV lleven el nombre de
+  // cada check del humo: sin ella la columna no existe (cabecera real de L4 del
+  // 24/11) y el lanzador no puede saber de qué etapa es cada check. Cabecera
+  // medida con 'check' (M2 del plan v4.2, k6 v2.3.0, 25/11/2026): metric_name,
+  // timestamp, metric_value, check, error_code, expected_response, method,
+  // name, proto, scenario, status, extra_tags, metadata.
+  systemTags: ['status', 'error_code', 'scenario', 'proto', 'method', 'name', 'expected_response', 'check'],
   summaryTrendStats: ['min', 'med', 'p(95)', 'p(99)', 'max', 'count'],
   userAgent: 'canario-estres-fases',
   noUsageReport: true,

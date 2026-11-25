@@ -664,14 +664,29 @@ def etiquetas_de(texto):
     return etiquetas
 
 
+# Valores de la etiqueta canario.estres que pone el lanzador (k6, lector y
+# control) y la sonda de descartes (sonda_descartes.ETIQUETA_SONDA).
+CLASES_PROPIAS = ("k6", "lector", "control", "sonda")
+# Clase de un contenedor con canario.estres y un valor que no está en
+# CLASES_PROPIAS: es un instrumento nuestro que el lanzador no sabe tratar.
+# Los filtros de muertes, starts y huecos lo ignorarían en silencio, así que
+# instrumentos_desconocidos lo convierte en SIN CONCLUSION con su nombre.
+CLASE_INSTRUMENTO = "instrumento_desconocido"
+
+
 def clase_contenedor(atributos):
-    """Qué es un contenedor por sus etiquetas: "k6", "lector" o "control" por
-    canario.estres (nunca por la etiqueta de compose); "canario" si es uno de
-    los 4 servicios de la pila; "auxiliar" si es de compose pero de otro
-    servicio (gestion); None si no es nuestro (se ignora)."""
-    propia = atributos.get("canario.estres")
-    if propia in ("k6", "lector", "control"):
-        return propia
+    """Qué es un contenedor por sus etiquetas. Si lleva la clave
+    canario.estres, es un contenedor propio y NUNCA se clasifica por compose:
+    los que salen de la imagen de la API (lector, control y el servidor de la
+    sonda) heredan sus etiquetas de compose (M1-bis y M1-contenedor del plan
+    v4.2, 25/11/2026), y por ellas pasarían por la API. Un valor de
+    CLASES_PROPIAS da esa clase; uno desconocido, CLASE_INSTRUMENTO. Sin la
+    clave: "canario" si es uno de los 4 servicios de la pila; "auxiliar" si es
+    de compose pero de otro servicio (gestion); None si no es nuestro (se
+    ignora)."""
+    if "canario.estres" in atributos:
+        propia = atributos["canario.estres"]
+        return propia if propia in CLASES_PROPIAS else CLASE_INSTRUMENTO
     if atributos.get("com.docker.compose.project") == PROYECTO:
         return "canario" if atributos.get("com.docker.compose.service") in SERVICIOS_PILA else "auxiliar"
     return None
@@ -792,6 +807,41 @@ def otro_murio(eventos, ident, desde, hasta, mantenimientos):
                 and not any(ev["id"] in m["ids"] and ev["t"] >= m["desde"] for m in mantenimientos)):
             return True
     return False
+
+
+def instrumentos_desconocidos(eventos):
+    """Nombres (sin repetir y ordenados) de los contenedores con clase
+    CLASE_INSTRUMENTO que aparecen en eventos, con cualquier acción. Los
+    filtros de muertes, starts, huecos y conciliación solo miran la clase
+    "canario" y lo ignorarían en silencio: quien llama lo convierte en SIN
+    CONCLUSION. Sin nombre en el evento, se da el id corto."""
+    return sorted({e["nombre"] or e["id"][:12] for e in eventos if e["clase"] == CLASE_INSTRUMENTO})
+
+
+def muertes_por_clase(eventos):
+    """Recuento de los die por clase de contenedor ("ajeno" si no es nuestro),
+    para la salida."""
+    return dict(sorted(collections.Counter(e["clase"] or "ajeno" for e in eventos if e["accion"] == "die").items()))
+
+
+def control_c5(eventos):
+    """Control C5 de L4 (plan v4.2, cambio 7), sobre los eventos de la
+    repetición 1: el servidor de la sonda de descartes tiene que haber dejado
+    un die clasificado como "sonda". Si no, la clasificación de la sonda no
+    está demostrada y la repetición es SIN CONCLUSION. Se busca por el NOMBRE
+    del servidor (sonda_descartes.nombre_servidor, la misma fuente que lo
+    crea) y no solo por la clase: el k6 de la sonda también lleva
+    canario.estres=sonda y muere con 0 al terminar. No se exige el código
+    137: no está medido. Devuelve (ok, texto) con los die por clase."""
+    # Carga perezosa, como en comprobar_sonda_descartes: solo --pico la necesita.
+    import sonda_descartes
+    servidor = sonda_descartes.nombre_servidor(PREFIJO_EFIMEROS)
+    por_clase = muertes_por_clase(eventos)
+    visto = any(e["accion"] == "die" and e["nombre"] == servidor and e["clase"] == "sonda" for e in eventos)
+    if visto:
+        return True, f"die por clase {por_clase}; el servidor de la sonda {servidor} muere clasificado como sonda"
+    return False, (f"die por clase {por_clase}; no hay un die de {servidor} clasificado como sonda: la "
+                   "clasificacion de la sonda no esta demostrada")
 
 
 def delta_serie(serie, desde, hasta):
@@ -1161,7 +1211,10 @@ def hijos_ajenos(nombres_hijos, contenedores, procesos=None):
     id no se conoce también es ajeno (se da su nombre de cgroup), salvo que
     procesos diga que no tiene ningún proceso en su subárbol: un cgroup vacío
     (por ejemplo, el de buildkit sin construir) no puede sumar un OOM al padre.
-    Sin el dato de procesos, se trata como ajeno (fallo visible)."""
+    Sin el dato de procesos, se trata como ajeno (fallo visible). Un contenedor
+    con un valor desconocido de canario.estres (CLASE_INSTRUMENTO) también es
+    ajeno (enmienda v4.3, punto 4): el lanzador no sabe qué es ni quién lo
+    lanzó, y antes del cambio 3 de la v4.2 daba PARADA."""
     procesos = procesos or {}
     ajenos = []
     for nombre in nombres_hijos:
@@ -1170,7 +1223,7 @@ def hijos_ajenos(nombres_hijos, contenedores, procesos=None):
         if conocido is None:
             if procesos.get(nombre, True):
                 ajenos.append(nombre)
-        elif clase_contenedor(conocido["etiquetas"]) is None:
+        elif clase_contenedor(conocido["etiquetas"]) in (None, CLASE_INSTRUMENTO):
             ajenos.append(conocido["nombre"])
     return ajenos
 
@@ -1671,6 +1724,23 @@ class EventosDocker:
         parar_proceso(self.proceso, 15)
         self.hilo.join(timeout=15)
         self.err.close()
+
+
+def guardar_eventos(destino, eventos):
+    """Deja en la salida los eventos parseados de una repetición (plan v4.2,
+    cambio 4): con ellos se puede saber después qué contenedor murió, con su
+    nombre, su clase y su hora, cosa que la consola de L4 del 24/11 no
+    permitía. Solo llevan id, acción, hora, clase, servicio, nombre y código
+    (ninguna etiqueta ni variable de entorno). Si no se puede escribir, SIN
+    CONCLUSION visible: la evidencia faltaría.
+
+    No lanza nunca (enmienda v4.3, punto 2): se llama desde el finally de cada
+    repetición, y una excepción aquí taparía la original (una PARADA, por
+    ejemplo). Por eso captura también TypeError y ValueError, los de json.dumps."""
+    try:
+        destino.write_text(json.dumps(eventos, indent=1), encoding="utf-8", newline="\n")
+    except (OSError, TypeError, ValueError) as e:
+        sinc(f"no se pudieron guardar los eventos de docker en {destino}: {type(e).__name__}: {e}")
 
 
 ENDURECIDO = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--network", "none",
@@ -2875,13 +2945,21 @@ def evaluar_repeticion(ej, rep, rutas, t_ini, muerte_en_login):
         veredicto, causa = veredicto_muerte(d_oom > 0, d_kill > 0, otro_murio(eventos, ev["id"], a, b,
                                                                            ej.mantenimientos), sube_k6)
         ventana = ventana_atribuida(ev["t"], ventanas) or "fuera de toda ventana"
-        emitir(veredicto, f"repeticion {rep}: murio {ev['servicio']} ({ev['id'][:12]}, codigo {ev['codigo']}) en "
-                          f"{ventana}: {causa} (padre: oom +{d_oom}, oom_kill +{d_kill})")
+        # Nombre y clase en la línea (plan v4.2, cambio 4): el die de la consola de
+        # L4 del 24/11 no permitía saber qué contenedor era.
+        emitir(veredicto, f"repeticion {rep}: murio {ev['servicio']} ({ev['nombre']}, clase {ev['clase']}, "
+                          f"{ev['id'][:12]}, codigo {ev['codigo']}) en {ventana}: {causa} (padre: oom +{d_oom}, "
+                          f"oom_kill +{d_kill})")
         escalon = por_nombre.get(ventana.split(" (")[0])
         if escalon is not None:
             escalon["no_evaluable"] = True
             muerte_en_login = muerte_en_login or escalon["ruta"] in LOGIN
             p(f"   {ventana}: latencias y codo NO EVALUABLE por la muerte")
+    # --- instrumentos propios con una clase que el lanzador no sabe tratar: los
+    # filtros de arriba solo miran "canario" y los ignorarían en silencio.
+    desconocidos = instrumentos_desconocidos(eventos)
+    if desconocidos:
+        sinc(f"repeticion {rep}: eventos de contenedores con un valor desconocido de canario.estres: {desconocidos}")
     # --- cgroups por servicio, encarnaciones y huecos
     series = {s: [(tk["t"], tk["c"].get(s)) for tk in ticks] for s in SERVICIOS_PILA}
     etiquetados = {s: etiquetar_cgroup(series[s]) for s in SERVICIOS_PILA}
@@ -2969,59 +3047,82 @@ def evaluar_repeticion(ej, rep, rutas, t_ini, muerte_en_login):
 
 
 def ejecutar_repeticion(ej, rep, n_reps):
+    # Enmienda v4.4: precondición explícita. El finally de abajo lee ej.eventos.copia();
+    # si ej.eventos faltara (Ejecucion nace con None), el AttributeError taparía la
+    # excepción original. Se comprueba aquí, antes de cualquier efecto (sin carpeta,
+    # sin Docker y sin hora_motor_ahora), con un fallo visible que dice quién lo crea.
+    if ej.eventos is None:
+        raise RuntimeError("ejecutar_repeticion: ej.eventos sin iniciar: lo crean ejecutar_l1 y ejecutar_modo antes "
+                           "de la primera repetición")
     salida_rep = ej.salida / f"rep{rep}"
     salida_rep.mkdir()
     t_ini = hora_motor_ahora()
-    preparar_repeticion(ej, rep)
-    r = dc("run", "--rm", "-T", "gestion", "alta-empresa", "--nombre", "Empresa estres", "--zona", "Europe/Madrid")
-    alta = PATRON_ALTA.search(r.out)
-    if r.rc != 0 or alta is None:
-        raise Parada(f"no se pudo dar de alta la empresa de prueba: {r.err.strip()[-300:]!r}")
-    ej.identificador = alta.group(2)
-    p(f"   empresa de prueba de la repeticion {rep}: {ej.identificador}")
-    rutas = []
-    with contextlib.ExitStack() as pila:
-        # Cada Registro entra en la pila justo al crearse (PY-8): si el segundo
-        # falla al arrancar, el primero se para y no queda un docker logs huerfano.
-        registros = []
-        for servicio in ("redis", "postgres"):
-            registro = Registro(servicio, salida_rep / f"log_{servicio}.txt")
-            pila.callback(registro.parar)
-            registros.append(registro)
-        contexto = {"t": ej.t, "escalera": ej.escalera, "datos": ej.datos, "salida": salida_rep,
-                    "caddy": ej.ids["caddy"], "cpus_k6": ej.cpus_k6, "registros": registros}
-        for n_ruta, ruta in enumerate(ORDEN_RUTAS):
-            rutas.append(ejecutar_ruta(ej, rep, ruta, n_ruta, n_ruta == len(ORDEN_RUTAS) - 1, contexto))
-        time.sleep(3)
-    otras = {s: leer_log(salida_rep / f"log_{s}.txt") for s in ("redis", "postgres")}
-    # Arranques de Redis de esta repetición (mismo reloj de la VM que el log):
-    # la ventana de arranque del resumen del limitador cuenta desde ellos.
-    arranques_redis = arranques_redis_desde(ej, t_ini)
-    for r_ruta in rutas:
-        lineas_api = leer_log(salida_rep / f"log_{r_ruta['ruta']}_api.txt")
-        for res in r_ruta["resultados"]:
-            senales_escalon(lineas_api, otras, res, arranques_redis)
-    datos_rep = evaluar_repeticion(ej, rep, rutas, t_ini, False)
-    resultados = [res for r_ruta in rutas for res in r_ruta["resultados"]]
-    p(f"=== repeticion {rep} de {n_reps}: reinicios y OOMKilled de los contenedores de Canario (docker inspect)")
-    for ident in ej.ids.values():
-        r = ejecutar(["docker", "inspect", "--format", "{{.Name}} reinicios={{.RestartCount}} "
-                      "OOMKilled={{.State.OOMKilled}} estado={{.State.Status}}", ident])
-        p(f"   {r.out.strip()}")
-    tabla(resultados)
-    for res in resultados:
-        for motivo in res["sin_conclusion"]:
-            sinc(f"repeticion {rep}, {res['ruta']}__{res['escalon']}: {motivo}")
-        if res.get("principal") is not None:
-            pasa((salida_rep / f"{res['ruta']}__{res['escalon']}" / "panel.html").is_file(),
-                 f"repeticion {rep}, {res['ruta']}__{res['escalon']}: k6 exporto el panel HTML")
-    p(f"=== codo por ruta, repeticion {rep} (primer escalon con p95 > SLO, >= 1 % de errores o maxVUs alcanzados)")
-    for ruta in ORDEN_RUTAS:
-        codo = codo_de([res for res in resultados if res["ruta"] == ruta])
-        p(f"   {ruta}: " + ("sin codo en la escalera medida" if codo is None else
-                            f"{codo['escalon']} {codo['etiqueta']} = {codo['tasa']}/s ({'; '.join(codo['motivos_fuera'])})"))
-    hipotesis(resultados, ej.t, datos_rep["muerte_en_login"])
-    return {"resultados": resultados, **datos_rep}
+    # Enmienda v4.3, punto 2: los eventos de la repetición se guardan en el finally,
+    # también si una PARADA o una excepción corta la repetición antes del análisis
+    # (es justo lo que se quiere diagnosticar). El try empieza después de la
+    # primera t_ini: si empezara antes, una PARADA de hora_motor_ahora dejaría t_ini
+    # sin definir y el NameError del finally la taparía. guardar_eventos no lanza.
+    try:
+        preparar_repeticion(ej, rep)
+        r = dc("run", "--rm", "-T", "gestion", "alta-empresa", "--nombre", "Empresa estres", "--zona", "Europe/Madrid")
+        alta = PATRON_ALTA.search(r.out)
+        if r.rc != 0 or alta is None:
+            raise Parada(f"no se pudo dar de alta la empresa de prueba: {r.err.strip()[-300:]!r}")
+        ej.identificador = alta.group(2)
+        p(f"   empresa de prueba de la repeticion {rep}: {ej.identificador}")
+        rutas = []
+        with contextlib.ExitStack() as pila:
+            # Cada Registro entra en la pila justo al crearse (PY-8): si el segundo
+            # falla al arrancar, el primero se para y no queda un docker logs huerfano.
+            registros = []
+            for servicio in ("redis", "postgres"):
+                registro = Registro(servicio, salida_rep / f"log_{servicio}.txt")
+                pila.callback(registro.parar)
+                registros.append(registro)
+            contexto = {"t": ej.t, "escalera": ej.escalera, "datos": ej.datos, "salida": salida_rep,
+                        "caddy": ej.ids["caddy"], "cpus_k6": ej.cpus_k6, "registros": registros}
+            for n_ruta, ruta in enumerate(ORDEN_RUTAS):
+                rutas.append(ejecutar_ruta(ej, rep, ruta, n_ruta, n_ruta == len(ORDEN_RUTAS) - 1, contexto))
+            time.sleep(3)
+        otras = {s: leer_log(salida_rep / f"log_{s}.txt") for s in ("redis", "postgres")}
+        # Arranques de Redis de esta repetición (mismo reloj de la VM que el log):
+        # la ventana de arranque del resumen del limitador cuenta desde ellos.
+        arranques_redis = arranques_redis_desde(ej, t_ini)
+        for r_ruta in rutas:
+            lineas_api = leer_log(salida_rep / f"log_{r_ruta['ruta']}_api.txt")
+            for res in r_ruta["resultados"]:
+                senales_escalon(lineas_api, otras, res, arranques_redis)
+        datos_rep = evaluar_repeticion(ej, rep, rutas, t_ini, False)
+        resultados = [res for r_ruta in rutas for res in r_ruta["resultados"]]
+        p(f"=== repeticion {rep} de {n_reps}: reinicios y OOMKilled de los contenedores de Canario (docker inspect)")
+        for ident in ej.ids.values():
+            r = ejecutar(["docker", "inspect", "--format", "{{.Name}} reinicios={{.RestartCount}} "
+                          "OOMKilled={{.State.OOMKilled}} estado={{.State.Status}}", ident])
+            p(f"   {r.out.strip()}")
+        tabla(resultados)
+        for res in resultados:
+            for motivo in res["sin_conclusion"]:
+                sinc(f"repeticion {rep}, {res['ruta']}__{res['escalon']}: {motivo}")
+            if res.get("principal") is not None:
+                pasa((salida_rep / f"{res['ruta']}__{res['escalon']}" / "panel.html").is_file(),
+                     f"repeticion {rep}, {res['ruta']}__{res['escalon']}: k6 exporto el panel HTML")
+        p(f"=== codo por ruta, repeticion {rep} (primer escalon con p95 > SLO, >= 1 % de errores o maxVUs "
+          "alcanzados)")
+        for ruta in ORDEN_RUTAS:
+            codo = codo_de([res for res in resultados if res["ruta"] == ruta])
+            p(f"   {ruta}: " + ("sin codo en la escalera medida" if codo is None else
+                                f"{codo['escalon']} {codo['etiqueta']} = {codo['tasa']}/s "
+                                f"({'; '.join(codo['motivos_fuera'])})"))
+        hipotesis(resultados, ej.t, datos_rep["muerte_en_login"])
+        return {"resultados": resultados, **datos_rep}
+    finally:
+        # ej.eventos.copia() se evalúa aquí, fuera de guardar_eventos, a propósito:
+        # que ej.eventos exista lo garantiza la comprobación del principio de esta
+        # función (enmienda v4.4), que lanza RuntimeError antes del try si falta; y
+        # copia() solo toma el cerrojo y hace list(). Meterla dentro de
+        # guardar_eventos obligaría a un except Exception amplio que taparía fallos
+        # reales.
+        guardar_eventos(salida_rep / "eventos_docker.json", [e for e in ej.eventos.copia() if e["t"] >= t_ini])
 
 
 def agregar(repeticiones):
@@ -3181,6 +3282,25 @@ MINIMO_BASE_OK = 0.95
 # Humo de L4: 120 s después del fin PROGRAMADO del pico (E10) y 10 s antes de
 # que empiece (el humo previo, justo antes del pico).
 HUMO_PREVIO_S, HUMO_POSTERIOR_S = 140, 300
+# maxDuration y gracefulStop del humo (plan v4.2, cambio 2). UNA SOLA FUENTE:
+# viajan en `humos` (humos_pico) y de ahí los leen fases.js, duracion_total
+# (el plazo de docker wait) y estimar_repeticion_s; ninguno los repite.
+# maxDuration: el humo encadena 4 peticiones con el plazo de 15 s de fases.js
+# (PLAZO, el mismo SEGUNDOS_PLAZO de l1.js), así que una API lenta pero correcta
+# puede tardar 4 x 15 = 60 s. Con los 60 s exactos de antes (fases.js:101 del
+# commit c7791e6) cortaría el humo y daría una FALLA falsa: se deja un margen
+# de dos plazos más (supuesto, sin medir): 90 s.
+# gracefulStop: antes no se fijaba y k6 aplicaba su valor por defecto, 30 s
+# (medido: "humo_previo: ... (maxDuration: 1m0s, ..., gracefulStop: 30s)", línea
+# 24 de k6_salida.txt de la repetición 2 de L4, k6 v2.3.0, 24/11/2026). Ahora se
+# fija al gracefulStop del resto de escenarios (GRACEFUL_STOP_S, fases.js:83). Por
+# qué basta con 20 s: es mayor o igual que el PLAZO de 15 s de una petición, así
+# que la que esté en vuelo al llegar a maxDuration termina (con éxito o por su
+# plazo) antes de que k6 la corte, y nunca cuenta como un error falso.
+HUMO_PASOS = 4
+HUMO_PLAZOS_MARGEN = 2
+HUMO_MAX_DURACION_S = (HUMO_PASOS + HUMO_PLAZOS_MARGEN) * SEGUNDOS_PLAZO
+HUMO_GRACEFUL_STOP_S = GRACEFUL_STOP_S
 SLO_VICTIMAS_MS = {"denuncia": 1000, "seguimiento": 500, "web_seguimiento": 300}
 SLO_RUTAS_MS = {**SLO_VICTIMAS_MS, "login_email": 1500}
 ESTADO_RUTAS = {"denuncia": 201, "seguimiento": 404, "web_seguimiento": 200, "login_email": 401,
@@ -3784,9 +3904,25 @@ def escenarios_l3b(tasas, ips):
     return esc
 
 
+def humos_pico():
+    """Los dos humos de L4 tal como viajan en ejecucion.json: nombre, inicio,
+    maxDuration y gracefulStop. Es la única fuente de esos valores para
+    fases.js, duracion_total y estimar_repeticion_s (plan v4.2, cambio 2)."""
+    return [{"nombre": nombre, "inicio_s": inicio, "max_duracion_s": HUMO_MAX_DURACION_S,
+             "graceful_stop_s": HUMO_GRACEFUL_STOP_S}
+            for nombre, inicio in (("humo_previo", HUMO_PREVIO_S), ("humo_posterior", HUMO_POSTERIOR_S))]
+
+
+def fin_humo(humo):
+    """Segundo en que k6 da por terminado un humo en el peor caso: su inicio,
+    su maxDuration y su gracefulStop, los tres leídos del propio humo."""
+    return humo["inicio_s"] + humo["max_duracion_s"] + humo["graceful_stop_s"]
+
+
 def duracion_total(escenarios, humos=()):
-    """Segundos hasta el fin del último escenario (con sus arranques)."""
-    fines = [e["inicio_s"] + e["duracion_s"] for e in escenarios] + [h["inicio_s"] + 60 for h in humos]
+    """Segundos hasta el fin del último escenario (con sus arranques) o del
+    último humo (fin_humo, con los valores que viajan en humos)."""
+    fines = [e["inicio_s"] + e["duracion_s"] for e in escenarios] + [fin_humo(h) for h in humos]
     return max(fines)
 
 
@@ -3801,17 +3937,74 @@ def etiquetas_extra(texto):
     return etiquetas
 
 
+# Columnas que necesita cada fila http_req_duration (plan v4.2, cambio 5). La
+# PRESENCIA se exige sin valor por defecto: una columna que falta no puede leerse
+# como estado 0 o nombre vacío (con status ausente, todo saldría estado 0 y una
+# FALLA falsa).
+COLUMNAS_HTTP = ("status", "name", "scenario", "proto", "error_code")
+# Columnas de http_req_duration que k6 nunca deja vacías, según los literales
+# medidos: la fila de estado 0 de L3b (M4-real, medidas_v4_25nov/
+# fila_status0_l3b_rep1.csv, k6 v2.3.0, 25/11/2026), las 13072 filas de la
+# repetición 1 de L4 (canario_estres_salida_px5x7po1, k6 v2.3.0, 24/11/2026) y el
+# barrido de QA de la enmienda v4.3 sobre L1, L2, L3, L3b y L4. scenario NO está:
+# las peticiones de setup() de l3.js no pertenecen a ningún escenario y salen con
+# scenario vacío (medidas_v4_25nov/filas_setup_l3_l3b.csv, k6 v2.3.0, 25/11/2026).
+# Su columna sigue siendo obligatoria (COLUMNAS_HTTP). Un literal medido con un
+# script no vale para otro.
+NO_VACIAS_HTTP = ("status", "name")
+
+
+def motivo_ilegible_http(fila):
+    """None si una fila http_req_duration trae lo que necesita; si no, el
+    motivo, que dice la columna. Vacíos admitidos, según los literales medidos:
+    proto vacío solo con estado 0 (M4-real: una petición fallida no tiene
+    protocolo, como supone evaluar_protocolo); error_code vacío solo si la
+    petición fue bien (estado entre 1 y 399): en L4 todas las filas 4xx y 5xx
+    traen 1000 + estado (1401, 1404, 1405, 1502, 1503), el 429 de L3 trae 1429
+    y la de estado 0, 1050; scenario vacío, en las peticiones de setup()."""
+    for columna in COLUMNAS_HTTP:
+        if fila.get(columna) is None:
+            return f"http_req_duration sin la columna {columna}"
+    for columna in NO_VACIAS_HTTP:
+        if fila[columna] == "":
+            return f"http_req_duration con {columna} vacio"
+    try:
+        estado = int(fila["status"])
+    except ValueError:
+        return "http_req_duration con status no numerico"
+    if fila["proto"] == "" and estado != 0:
+        return f"http_req_duration con proto vacio y estado {estado}"
+    if fila["error_code"] == "" and not 0 < estado < 400:
+        return f"http_req_duration con error_code vacio y estado {estado}"
+    return None
+
+
+def motivo_ilegible_check(fila):
+    """None si una fila checks trae el nombre del check; si no, el motivo. La
+    columna check solo existe con 'check' en systemTags (M2) y k6 nunca la deja
+    vacía en una fila checks (M2 y M4, medidas_v4_25nov, k6 v2.3.0, 25/11/2026):
+    sin ella no se sabe de qué etapa del humo es el check."""
+    if fila.get("check") is None:
+        return "checks sin la columna check"
+    if fila["check"] == "":
+        return "checks con check vacio"
+    return None
+
+
 def leer_csv_fases(ruta):
     """Lee el CSV de k6 una vez. Devuelve un dict con las peticiones
     ("filas", solo las filas http_req_duration, que traen estado, name, proto y
     etiquetas; inicio = marca - duración porque la marca es el FIN de la
     petición, H-k6d), los descartes por escenario con su marca, los Retry-After
-    de los 429 (métrica retry_after_s), los resultados de los check y el
-    número de filas ILEGIBLES ("ilegibles": campos ausentes o que no se pueden
-    convertir; validez_generador lo convierte en fallo). Solo se capturan los
-    errores de conversion de cada fila, nunca el analisis entero."""
+    de los 429 (métrica retry_after_s), los resultados de los check, el
+    número de filas ILEGIBLES ("ilegibles": columnas ausentes, vacíos que k6
+    nunca deja o campos que no se pueden convertir; validez_generador lo
+    convierte en fallo) y sus motivos ("motivos_ilegibles": {motivo: n}). Solo
+    se capturan los errores de conversion de cada fila, nunca el analisis
+    entero."""
     filas, descartes, retry, checks = [], collections.defaultdict(list), [], []
     ilegibles = 0
+    motivos = collections.Counter()
     # Una ultima linea sin salto final puede estar cortada (k6 muerto a medias): cuenta
     # como ilegible, aunque se lea lo que haya.
     with open(ruta, "rb") as binario:
@@ -3820,6 +4013,7 @@ def leer_csv_fases(ruta):
             binario.seek(-1, 2)
             if binario.read(1) != b"\n":
                 ilegibles += 1
+                motivos["ultima linea sin salto final"] += 1
     with open(ruta, encoding="utf-8", newline="") as fichero:
         lector = csv.DictReader(fichero)
         while True:
@@ -3831,26 +4025,37 @@ def leer_csv_fases(ruta):
                 # PY-13: un CSV roto deja de leerse (no se sabe donde seguir) y cuenta
                 # como fila ilegible: validez_generador da SIN CONCLUSION.
                 ilegibles += 1
+                motivos["CSV roto (csv.Error)"] += 1
                 break
             metrica = fila.get("metric_name")
+            # Presencia y vacíos de las columnas que la fila necesita: el motivo dice
+            # cuál falta (plan v4.2, cambio 5).
+            motivo = (motivo_ilegible_http(fila) if metrica == "http_req_duration"
+                      else motivo_ilegible_check(fila) if metrica == "checks" else None)
+            if motivo is not None:
+                ilegibles += 1
+                motivos[motivo] += 1
+                continue
             try:
                 if metrica == "http_req_duration":
                     fin, dur = int(fila["timestamp"]) / 1000, float(fila["metric_value"])
                     tags = etiquetas_extra(fila.get("extra_tags"))
                     filas.append({"inicio": fin - dur / 1000, "fin": fin, "dur": dur,
-                                  "estado": int(fila.get("status") or 0), "nombre": fila.get("name") or "",
-                                  "escenario": fila.get("scenario") or "", "proto": fila.get("proto") or "",
-                                  "error_code": fila.get("error_code") or "", "ip": tags.get("ip"),
+                                  "estado": int(fila["status"]), "nombre": fila["name"],
+                                  "escenario": fila["scenario"], "proto": fila["proto"],
+                                  "error_code": fila["error_code"], "ip": tags.get("ip"),
                                   "fase": tags.get("fase"), "etapa": tags.get("etapa")})
                 elif metrica == "dropped_iterations":
                     descartes[fila.get("scenario") or ""].append(int(fila["timestamp"]) / 1000)
                 elif metrica == "retry_after_s":
                     retry.append(float(fila["metric_value"]))
                 elif metrica == "checks":
-                    checks.append((fila.get("check") or "", float(fila["metric_value"])))
+                    checks.append((fila["check"], float(fila["metric_value"])))
             except (ValueError, TypeError, KeyError):
                 ilegibles += 1
-    return {"filas": filas, "descartes": dict(descartes), "retry": retry, "checks": checks, "ilegibles": ilegibles}
+                motivos[f"{metrica}: campo que no se puede convertir"] += 1
+    return {"filas": filas, "descartes": dict(descartes), "retry": retry, "checks": checks, "ilegibles": ilegibles,
+            "motivos_ilegibles": dict(motivos)}
 
 
 def leer_t0(registro_k6):
@@ -4151,6 +4356,35 @@ def humo_ok(checks, etapa):
     return len(propios) == 4 and all(valor == 1 for valor in propios)
 
 
+def veredicto_humo(checks, etapa):
+    """Veredicto del humo de una etapa programada (plan v4.2, cambio 6): con 0
+    check el humo no se ejecutó y no demuestra nada, ni bueno ni malo: SIN
+    CONCLUSION. Con alguno, humo_ok decide: PASA o FALLA (un check a 0 sigue
+    siendo FALLA)."""
+    if not any(nombre.startswith(etapa + ":") for nombre, _ in checks):
+        return "SIN CONCLUSION"
+    return "PASA" if humo_ok(checks, etapa) else "FALLA"
+
+
+def humo_previo_antes_del_pico(filas, inicio_carga):
+    """Control de validez del humo previo (plan v4.2, cambio 2): su última
+    petición tiene que terminar antes del inicio de la carga, porque un PASA
+    medido bajo el pico no vale como humo previo. filas: TODAS las del CSV,
+    antes del filtro que quita el humo; las del humo previo se reconocen por
+    etapa=humo_previo (extra_tags). El reloj es el FIN de la petición (la marca
+    del CSV) y inicio_carga es t0 + desde_s de la fase carga, el mismo de H15.
+    Sin filas del humo previo no decide (ok): lo hace veredicto_humo. Devuelve
+    (ok, texto)."""
+    fines = [f["fin"] for f in filas if f["etapa"] == "humo_previo"]
+    if not fines:
+        return True, "sin peticiones del humo previo: decide su veredicto"
+    margen = inicio_carga - max(fines)
+    if margen < 0:
+        return False, (f"la ultima peticion del humo previo termina {-margen:.2f} s despues del inicio de la carga: "
+                       "un PASA medido bajo el pico no vale como humo previo")
+    return True, f"la ultima peticion del humo previo termina {margen:.2f} s antes del inicio de la carga"
+
+
 def evaluar_alineacion(primer_inicio, frontera_s, tolerancia_s=3.0):
     """Control de que la carga empezó donde debía (validez): el inicio de la
     primera petición cae entre el instante programado (una frontera de ventana
@@ -4188,7 +4422,11 @@ def validez_generador(k6, t0, datos_csv, insuficientes, cpu, es_http=False):
         if marcas and escenario not in insuficientes:
             fallos.append(fallo(f"{escenario}: {len(marcas)} iteraciones descartadas sin el aviso de VUs insuficientes"))
     if datos_csv.get("ilegibles"):
-        fallos.append(fallo(f"{datos_csv['ilegibles']} filas ilegibles en el CSV de k6"))
+        # El motivo lleva la columna que faltaba (plan v4.2, cambio 5): sin él, un
+        # cambio de cabecera de k6 se vería solo como un número.
+        detalle = datos_csv.get("motivos_ilegibles", {})
+        fallos.append(fallo(f"{datos_csv['ilegibles']} filas ilegibles en el CSV de k6"
+                            + (f" ({dict(sorted(detalle.items()))})" if detalle else "")))
     filas = datos_csv["filas"]
     if not filas:
         fallos.append(fallo("el CSV de k6 no tiene peticiones"))
@@ -4560,9 +4798,16 @@ def evaluar_vigilancia(ej, rep, ticks, t_ini, k6_ids, muertos_al_final, desde, h
                                   for tk in ticks], a, b) > 0 for k6 in k6_ids)
         veredicto, causa = veredicto_muerte(d_oom > 0, d_kill > 0, otro_murio(eventos, ev["id"], a, b,
                                                                             ej.mantenimientos), sube_k6)
-        p(f"   repeticion {rep}: murio {ev['servicio']} ({ev['id'][:12]}, codigo {ev['codigo']}): {causa} (padre: "
-          f"oom +{d_oom}, oom_kill +{d_kill}) -> {veredicto}")
+        # Nombre y clase en la línea (plan v4.2, cambio 4), como en evaluar_repeticion.
+        p(f"   repeticion {rep}: murio {ev['servicio']} ({ev['nombre']}, clase {ev['clase']}, {ev['id'][:12]}, codigo "
+          f"{ev['codigo']}): {causa} (padre: oom +{d_oom}, oom_kill +{d_kill}) -> {veredicto}")
         muertes.append(veredicto)
+    # Instrumentos propios con una clase que el lanzador no sabe tratar (plan v4.2,
+    # cambio 3): los filtros de abajo solo miran "canario" y los ignorarían.
+    desconocidos = instrumentos_desconocidos(eventos)
+    if desconocidos:
+        fallos.append(fallo(f"repeticion {rep}: eventos de contenedores con un valor desconocido de canario.estres: "
+                            f"{desconocidos}"))
     huecos = []
     for s in SERVICIOS_PILA:
         serie = [(tk["t"], tk["c"].get(s)) for tk in ticks if desde <= tk["t"] <= hasta]
@@ -4582,7 +4827,9 @@ def evaluar_vigilancia(ej, rep, ticks, t_ini, k6_ids, muertos_al_final, desde, h
     if problemas:
         fallos.append(fallo(f"repeticion {rep}: el detector no concilia: {'; '.join(problemas)}"))
     reinicios = sum(ej.reinicios.get(i, 0) for i in ids_rep)
-    return {"fallos": fallos, "muertes": muertes, "reinicios": reinicios, "etiquetados": etiquetados}
+    # Los eventos de la repetición vuelven al que llama: C5 los usa.
+    return {"fallos": fallos, "muertes": muertes, "reinicios": reinicios, "etiquetados": etiquetados,
+            "eventos": eventos}
 
 
 def memoria_informativa(vig, k6, lector_vivo, fin_reposo):
@@ -4630,7 +4877,13 @@ def estimar_repeticion_s(modo, repeticion=1):
     suma el sandwich de J5 (sandwich_j5_maximo_s), que va al principio de la
     repetición: espera_por_medianoche usa la estimación de la repetición
     concreta."""
-    duracion = {"l2": 390, "pico": 360, "l3": 300, "l3b": 570}[modo]
+    if modo == "pico":
+        # El humo posterior acaba después de la última fase (plan v4.2, cambio 2): la
+        # estimación usa su fin con los mismos valores que viajan en humos. Es una
+        # estimación, no un plazo.
+        duracion = max(fases_de("pico")[-1]["hasta_s"], *(fin_humo(h) for h in humos_pico()))
+    else:
+        duracion = {"l2": 390, "l3": 300, "l3b": 570}[modo]
     espera = MARGEN_ARRANQUE_S + (300 if modo == "l3b" else 60) if modo in ("l3", "l3b") else 0
     sandwich = sandwich_j5_maximo_s() if modo in ("l3", "l3b") and repeticion > 1 else 0
     return duracion + REPOSO_S + SOBRECOSTE_S + SOBRECOSTE_REPETICION_S + espera + sandwich
@@ -4672,105 +4925,129 @@ def ejecutar_repeticion_fases(ej, modo, rep, n_reps):
     cero; los de Redis sobrevivirian a un down -v sin ninguna ventana viva que
     probar). Despues, controles, una ejecucion de k6, reposo y análisis.
     Devuelve el dict de la repetición."""
+    # Enmienda v4.4: precondición explícita. El finally de abajo lee ej.eventos.copia();
+    # si ej.eventos faltara (Ejecucion nace con None), el AttributeError taparía la
+    # excepción original. Se comprueba aquí, antes de cualquier efecto (sin carpeta,
+    # sin Docker y sin hora_motor_ahora), con un fallo visible que dice quién lo crea.
+    if ej.eventos is None:
+        raise RuntimeError("ejecutar_repeticion_fases: ej.eventos sin iniciar: lo crean ejecutar_l1 y ejecutar_modo "
+                           "antes de la primera repetición")
     salida_rep = ej.salida / f"rep{rep}"
     salida_rep.mkdir()
     http_prod = modo in ("l3", "l3b")
     t_ini = hora_motor_ahora()
-    fallos_previos = []
-    if http_prod:
-        # PY-9: una repeticion no puede cruzar las 00:00 UTC.
-        espera = espera_por_medianoche(t_ini, estimar_repeticion_s(modo, rep))
-        if espera:
-            p(f"   la repeticion cruzaria las 00:00 UTC: se espera {espera:.0f} s")
-            time.sleep(espera)
-        t_ini = hora_motor_ahora()
-    if http_prod and rep > 1:
-        fallos_previos += sandwich_j5(ej, modo, rep, ej.plan_ips[rep - 1])
-    else:
-        preparar_repeticion(ej, rep)
-        if rep == 1 and modo == "pico":
-            comprobar_sonda_descartes(ej)
-        if modo != "l3":
-            ej.id_a = alta_empresa("Empresa estres A")
-            ej.id_b = alta_empresa("Empresa estres B")
-            ej.ids_empresas += [ej.id_a, ej.id_b]
-            p(f"   empresas de la repeticion {rep}: A (atacada) y B (la del denunciante) dadas de alta")
-    fases = {"l2": fases_de("l2"), "pico": fases_de("pico"), "l3b": fases_de("l3b"),
-             "l3": [{"nombre": "carga", "desde_s": 0, "hasta_s": 300}]}[modo]
-    ips = ej.plan_ips[rep] if http_prod else None
-    humos = []
-    if modo == "l2":
-        escenarios = escenarios_l2(ej.tasas)
-    elif modo == "pico":
-        escenarios = escenarios_pico(ej.tasas)
-        humos = [{"nombre": "humo_previo", "inicio_s": HUMO_PREVIO_S}, {"nombre": "humo_posterior", "inicio_s": HUMO_POSTERIOR_S}]
-    elif modo == "l3":
-        escenarios = escenarios_l3(ips)
-    else:
-        escenarios = escenarios_l3b(ej.tasas, ips)
-    texto_json, _ = preparar_datos_k6(ej, modo, escenarios, humos, fases, 0)
-    mib = comprobar_presupuesto(escenarios, len(humos), len(texto_json.encode("utf-8")))
-    sin_holgura = holgura_insuficiente(escenarios)
-    if sin_holgura:
-        raise Parada(f"VUs sin holgura sobre el SLO de su ruta: {sin_holgura}")
-    p(f"   {len(escenarios)} escenarios, memoria estimada de k6 {mib} MiB de {MEMORIA_K6_MIB} MiB")
-    with contextlib.ExitStack() as pila:
-        # Cada Registro se da de alta en la pila justo al crearlo (PY-8): si el
-        # segundo falla al arrancar, el primero se para.
-        registros = []
-        for servicio in ("redis", "postgres"):
-            registro = Registro(servicio, salida_rep / f"log_{servicio}.txt")
-            pila.callback(registro.parar)
-            registros.append(registro)
-        lector = iniciar_lector(ej, f"rep{rep}_{modo}")
-        pila.callback(lector.parar)
-        stats_ruta = salida_rep / "stats_pila.txt"
-        estadisticas = Estadisticas(list(ej.ids.values()), stats_ruta)
-        pila.callback(estadisticas.parar)
-        registro_api = Registro("api", salida_rep / "log_api.txt")
-        pila.callback(registro_api.parar)
-        contexto = {"datos": ej.datos, "cpus_k6": ej.cpus_k6, "eventos": ej.eventos,
-                    "vigilados": lambda: [ej.eventos, lector, estadisticas, registro_api, *registros]}
-        frontera = None
+    # Enmienda v4.3, punto 2: los eventos de la repetición se guardan en el finally,
+    # también con una PARADA o una excepción antes del análisis (la sonda, el
+    # CONTROL_421 o ejecutar_k6), que es justo lo que se quiere diagnosticar. El try
+    # empieza después de la primera t_ini: si empezara antes, una PARADA de
+    # hora_motor_ahora dejaría t_ini sin definir y el NameError del finally la
+    # taparía. En L3 y L3b t_ini se reasigna dentro: el finally lee el valor final.
+    # guardar_eventos no lanza nunca, así que la excepción que sigue es la original.
+    try:
+        fallos_previos = []
         if http_prod:
-            fallos_previos += controles_configuracion(ej, modo, rep, ips)
-            ahora = hora_motor_ahora()
-            if modo == "l3":
-                frontera = proxima_frontera(ahora, 60, MARGEN_ARRANQUE_S)
-                t0_objetivo = frontera
-            else:
-                carga = fase_por_nombre(fases, "carga")
-                frontera = proxima_frontera(ahora, VENTANA_ACCESO_S, MARGEN_ARRANQUE_S + carga["desde_s"])
-                t0_objetivo = frontera - carga["desde_s"]
-            alinear_ms, espera = int(t0_objetivo * 1000), t0_objetivo - ahora
-            p(f"   la carga empieza en la frontera {datetime.datetime.fromtimestamp(frontera, datetime.UTC):%H:%M:%S} UTC "
-              f"(reloj de la VM, dentro de {frontera - ahora:.0f} s)")
+            # PY-9: una repeticion no puede cruzar las 00:00 UTC.
+            espera = espera_por_medianoche(t_ini, estimar_repeticion_s(modo, rep))
+            if espera:
+                p(f"   la repeticion cruzaria las 00:00 UTC: se espera {espera:.0f} s")
+                time.sleep(espera)
+            t_ini = hora_motor_ahora()
+        if http_prod and rep > 1:
+            fallos_previos += sandwich_j5(ej, modo, rep, ej.plan_ips[rep - 1])
         else:
-            alinear_ms, espera = None, 0
-        texto_json, ips_json = preparar_datos_k6(ej, modo, escenarios, humos, fases, alinear_ms)
-        escribir_datos_k6(ej, texto_json, ips_json)
-        nombre = f"{modo}_rep{rep}"
-        salida_k6 = salida_rep / nombre
-        salida_k6.mkdir()
-        args_red = (["--network", RED_EDGE, "--ip", IP_TRAEFIK] if http_prod
-                    else ["--network", f"container:{ej.ids['caddy']}"])
-        script = "l3.js" if http_prod else "fases.js"
-        k6 = ejecutar_k6(contexto, nombre, script, args_red, espera + duracion_total(escenarios, humos), salida_k6)
-        if "CONTROL_421" in k6["registro"] or "CONTROL_SETUP" in k6["registro"]:
-            # S10: el control de setup() de k6 (Host de produccion hacia la API y, en L3b, la
-            # pagina del denunciante) no se cumple: el montaje no es el de produccion.
-            raise Parada("el control de setup() de k6 falla (421 con el Host de produccion, POST /salud distinto de "
-                         "405 o, en L3b, GET /seguimiento distinto de 200): ver k6_salida.txt")
-        time.sleep(3)
-        time.sleep(REPOSO_S)
-        fin_reposo_vm = hora_motor_ahora()
-        muertos_al_final = comprobar_vida(contexto["vigilados"](), "reposo final")
-        lector_vivo = streamer_vivo(lector)
-        registrar_reinicios(ej)
-        ticks = lector.copia_ticks()
-        time.sleep(3)
-    return analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, frontera, fallos_previos,
-                                     stats_ruta, ticks, t_ini, muertos_al_final, lector_vivo, fin_reposo_vm, ips)
+            preparar_repeticion(ej, rep)
+            if rep == 1 and modo == "pico":
+                comprobar_sonda_descartes(ej)
+            if modo != "l3":
+                ej.id_a = alta_empresa("Empresa estres A")
+                ej.id_b = alta_empresa("Empresa estres B")
+                ej.ids_empresas += [ej.id_a, ej.id_b]
+                p(f"   empresas de la repeticion {rep}: A (atacada) y B (la del denunciante) dadas de alta")
+        fases = {"l2": fases_de("l2"), "pico": fases_de("pico"), "l3b": fases_de("l3b"),
+                 "l3": [{"nombre": "carga", "desde_s": 0, "hasta_s": 300}]}[modo]
+        ips = ej.plan_ips[rep] if http_prod else None
+        humos = []
+        if modo == "l2":
+            escenarios = escenarios_l2(ej.tasas)
+        elif modo == "pico":
+            escenarios = escenarios_pico(ej.tasas)
+            humos = humos_pico()
+        elif modo == "l3":
+            escenarios = escenarios_l3(ips)
+        else:
+            escenarios = escenarios_l3b(ej.tasas, ips)
+        texto_json, _ = preparar_datos_k6(ej, modo, escenarios, humos, fases, 0)
+        mib = comprobar_presupuesto(escenarios, len(humos), len(texto_json.encode("utf-8")))
+        sin_holgura = holgura_insuficiente(escenarios)
+        if sin_holgura:
+            raise Parada(f"VUs sin holgura sobre el SLO de su ruta: {sin_holgura}")
+        p(f"   {len(escenarios)} escenarios, memoria estimada de k6 {mib} MiB de {MEMORIA_K6_MIB} MiB")
+        with contextlib.ExitStack() as pila:
+            # Cada Registro se da de alta en la pila justo al crearlo (PY-8): si el
+            # segundo falla al arrancar, el primero se para.
+            registros = []
+            for servicio in ("redis", "postgres"):
+                registro = Registro(servicio, salida_rep / f"log_{servicio}.txt")
+                pila.callback(registro.parar)
+                registros.append(registro)
+            lector = iniciar_lector(ej, f"rep{rep}_{modo}")
+            pila.callback(lector.parar)
+            stats_ruta = salida_rep / "stats_pila.txt"
+            estadisticas = Estadisticas(list(ej.ids.values()), stats_ruta)
+            pila.callback(estadisticas.parar)
+            registro_api = Registro("api", salida_rep / "log_api.txt")
+            pila.callback(registro_api.parar)
+            contexto = {"datos": ej.datos, "cpus_k6": ej.cpus_k6, "eventos": ej.eventos,
+                        "vigilados": lambda: [ej.eventos, lector, estadisticas, registro_api, *registros]}
+            frontera = None
+            if http_prod:
+                fallos_previos += controles_configuracion(ej, modo, rep, ips)
+                ahora = hora_motor_ahora()
+                if modo == "l3":
+                    frontera = proxima_frontera(ahora, 60, MARGEN_ARRANQUE_S)
+                    t0_objetivo = frontera
+                else:
+                    carga = fase_por_nombre(fases, "carga")
+                    frontera = proxima_frontera(ahora, VENTANA_ACCESO_S, MARGEN_ARRANQUE_S + carga["desde_s"])
+                    t0_objetivo = frontera - carga["desde_s"]
+                alinear_ms, espera = int(t0_objetivo * 1000), t0_objetivo - ahora
+                p(f"   la carga empieza en la frontera "
+                  f"{datetime.datetime.fromtimestamp(frontera, datetime.UTC):%H:%M:%S} UTC "
+                  f"(reloj de la VM, dentro de {frontera - ahora:.0f} s)")
+            else:
+                alinear_ms, espera = None, 0
+            texto_json, ips_json = preparar_datos_k6(ej, modo, escenarios, humos, fases, alinear_ms)
+            escribir_datos_k6(ej, texto_json, ips_json)
+            nombre = f"{modo}_rep{rep}"
+            salida_k6 = salida_rep / nombre
+            salida_k6.mkdir()
+            args_red = (["--network", RED_EDGE, "--ip", IP_TRAEFIK] if http_prod
+                        else ["--network", f"container:{ej.ids['caddy']}"])
+            script = "l3.js" if http_prod else "fases.js"
+            k6 = ejecutar_k6(contexto, nombre, script, args_red, espera + duracion_total(escenarios, humos), salida_k6)
+            if "CONTROL_421" in k6["registro"] or "CONTROL_SETUP" in k6["registro"]:
+                # S10: el control de setup() de k6 (Host de produccion hacia la API y, en L3b, la
+                # pagina del denunciante) no se cumple: el montaje no es el de produccion.
+                raise Parada("el control de setup() de k6 falla (421 con el Host de produccion, POST /salud distinto "
+                             "de 405 o, en L3b, GET /seguimiento distinto de 200): ver k6_salida.txt")
+            time.sleep(3)
+            time.sleep(REPOSO_S)
+            fin_reposo_vm = hora_motor_ahora()
+            muertos_al_final = comprobar_vida(contexto["vigilados"](), "reposo final")
+            lector_vivo = streamer_vivo(lector)
+            registrar_reinicios(ej)
+            ticks = lector.copia_ticks()
+            time.sleep(3)
+        return analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, frontera, fallos_previos,
+                                         stats_ruta, ticks, t_ini, muertos_al_final, lector_vivo, fin_reposo_vm, ips)
+    finally:
+        # ej.eventos.copia() se evalúa aquí, fuera de guardar_eventos, a propósito:
+        # que ej.eventos exista lo garantiza la comprobación del principio de esta
+        # función (enmienda v4.4), que lanza RuntimeError antes del try si falta; y
+        # copia() solo toma el cerrojo y hace list(). Meterla dentro de
+        # guardar_eventos obligaría a un except Exception amplio que taparía fallos
+        # reales.
+        guardar_eventos(salida_rep / "eventos_docker.json", [e for e in ej.eventos.copia() if e["t"] >= t_ini])
 
 
 def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, frontera, fallos_previos,
@@ -4786,7 +5063,7 @@ def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, f
     comun = []
     if not csv_k6.is_file():
         comun.append(fallo("k6 no dejo el CSV"))
-        datos = {"filas": [], "descartes": {}, "retry": [], "checks": [], "ilegibles": 0}
+        datos = {"filas": [], "descartes": {}, "retry": [], "checks": [], "ilegibles": 0, "motivos_ilegibles": {}}
     else:
         datos = leer_csv_fases(csv_k6)
     insuficientes = set(PATRON_INSUFICIENTES.findall(k6["registro"]))
@@ -4797,6 +5074,13 @@ def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, f
     desde = k6["inicio_vm"] if k6["inicio_vm"] is not None else t_ini
     vig = evaluar_vigilancia(ej, rep, ticks, t_ini, {k6["k6_id"]}, muertos_al_final, desde, fin_reposo_vm)
     comun += vig["fallos"]
+    if modo == "pico" and rep == 1:
+        # C5 (plan v4.2, cambio 7): la sonda de descartes corre en la repetición 1,
+        # después de t_ini; su servidor tiene que morir clasificado como sonda.
+        ok_c5, texto_c5 = control_c5(vig["eventos"])
+        p(f"   control C5: {'PASA' if ok_c5 else 'SIN CONCLUSION'}: {texto_c5}")
+        if not ok_c5:
+            comun.append(fallo("C5: " + texto_c5))
     # Medianoche UTC (C8): la sal y los contadores empiezan de cero.
     if k6["inicio_vm"] is not None and k6["fin_vm"] is not None and cruza_frontera(k6["inicio_vm"], k6["fin_vm"], 86400):
         comun.append(fallo("la repeticion cruza las 00:00 UTC: la sal del limitador cambia y los contadores empiezan "
@@ -4932,11 +5216,23 @@ def analizar_pico(filas, datos, t0, fases, insuficientes, reinicios=0):
         if not base_ok:
             fallos.append(fallo("F2: " + motivo))
         tiempo = segundos_hasta_recuperar(series_recup, fin_pico)
-    humo_previo, humo_posterior = humo_ok(datos["checks"], "humo_previo"), humo_ok(datos["checks"], "humo_posterior")
-    p(f"   humo previo al pico: {'PASA' if humo_previo else 'FALLA'}; humo posterior (120 s tras el fin programado "
-      f"del pico): {'PASA' if humo_posterior else 'FALLA'}")
-    if not humo_previo:
+    v_previo = veredicto_humo(datos["checks"], "humo_previo")
+    v_posterior = veredicto_humo(datos["checks"], "humo_posterior")
+    humo_previo, humo_posterior = v_previo == "PASA", v_posterior == "PASA"
+    p(f"   humo previo al pico: {v_previo}; humo posterior (120 s tras el fin programado del pico): {v_posterior}")
+    if v_previo == "FALLA":
         fallos.append(fallo("el humo previo al pico falla: el humo posterior no demostraria nada (E5)"))
+    # Cambio 6 del plan v4.2: un humo programado con 0 check no se ejecutó. Es de
+    # validez y gana a la FALLA que veredicto_recuperacion daría por el posterior.
+    for etapa, veredicto in (("humo_previo", v_previo), ("humo_posterior", v_posterior)):
+        if veredicto == "SIN CONCLUSION":
+            fallos.append(fallo(f"{etapa}: 0 check en el CSV: el humo no se ejecuto"))
+    # Cambio 2 del plan v4.2: el humo previo tiene que acabar antes del pico, con el
+    # reloj de H15 y sobre todas las filas (datos["filas"], antes del filtro del humo).
+    ok_previo, texto_previo = humo_previo_antes_del_pico(datos["filas"], t0 + carga_f["desde_s"])
+    p(f"   humo previo antes del pico: {texto_previo}")
+    if not ok_previo:
+        comun.append(fallo("humo previo: " + texto_previo))
     for ruta, r in resumen.items():
         p("      " + lineas_fase(f"{ruta} BASE", r["base"]))
         p("      " + lineas_fase(f"{ruta} PICO", r["pico"]))
