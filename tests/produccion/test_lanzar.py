@@ -493,9 +493,22 @@ class P6(unittest.TestCase):
         self.assertEqual(L.analizar_q12("CANARIO_Q12_INICIO\nbasura\nCANARIO_Q12_FIN\n", ventanas)[0], "SIN CONCLUSION")
 
     def test_congelacion_sin_rellenar_es_parada(self):
+        # Las cinco constantes sin rellenar se pasan como valores explícitos:
+        # antes se leían las del módulo, y la prueba solo podía pasar antes del
+        # commit de congelación.
+        vacias = dict.fromkeys(("P5_P50_MS", "P5_P95_MS", "P5_MAX_MS", "P6_P50_B_MAX_MS", "HMAC_VECINAS"))
         with self.assertRaises(L.Parada):
-            L.comprobar_congelacion()
-        self.assertEqual(L.verificar_congelacion()[0], "PARADA")
+            L.comprobar_congelacion(vacias)
+        self.assertEqual(L.verificar_congelacion(vacias)[0], "PARADA")
+
+    def test_congelacion_del_25_11_es_la_de_p5_y_pasa(self):
+        # Control positivo: las constantes del módulo son las congeladas el
+        # 25/11/2026 con P5 en producción (literales, no derivadas del código)
+        # y verificar_congelacion las da por buenas.
+        self.assertEqual(L.valores_congelados(), {
+            "P5_P50_MS": 428.0, "P5_P95_MS": 634.4, "P5_MAX_MS": 961.7, "P6_P50_B_MAX_MS": 856.0,
+            "HMAC_VECINAS": "210d0bba62fb47aca06fded4221abf56685b24cf31f2c17c84740b040abd16d2"})
+        self.assertEqual(L.verificar_congelacion()[0], "PASA")
 
     def test_falla_de_a_en_ventana_incompleta(self):
         # Parada a los 40 s de la ventana 1 (instante 100): la ventana no es

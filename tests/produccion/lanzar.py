@@ -131,11 +131,11 @@ LIMITE_SEGUIMIENTO = 60
 # None, P6 da PARADA: un umbral sin congelar se podría ajustar después de ver
 # los datos.
 # ---------------------------------------------------------------------------
-P5_P50_MS = None
-P5_P95_MS = None
-P5_MAX_MS = None
-P6_P50_B_MAX_MS = None           # 2 x P5_P50_MS, escrito como literal
-HMAC_VECINAS = None              # HMAC-SHA256(sal, bytes del fichero de vecinas), en hexadecimal
+P5_P50_MS = 428.0
+P5_P95_MS = 634.4
+P5_MAX_MS = 961.7
+P6_P50_B_MAX_MS = 856.0          # 2 x P5_P50_MS, escrito como literal
+HMAC_VECINAS = "210d0bba62fb47aca06fded4221abf56685b24cf31f2c17c84740b040abd16d2"  # HMAC-SHA256(sal, bytes del fichero de vecinas), en hexadecimal
 
 # ---------------------------------------------------------------------------
 # Destinos. Producción solo con --destino produccion (plan §1).

@@ -386,6 +386,12 @@ No hay un mínimo de eventos por escalón: un solo escalón que refute refuta H7
 
 **Qué no es un arreglo.** Subir el plazo de 0,2 s o las 20 conexiones, reintentar el pool o filtrar los 503 no se plantea a partir de este resultado: serían parches. Si H7 se confirma, el arreglo de raíz es repartir la carga del bucle (otro bloque); si se refuta con el bucle sano, primero se descartan un Redis lento y la contención con los hilos, y después se discute el tamaño del pool con su propia medida; si se refuta por Redis, se investiga Redis.
 
+### Congelación de P6 (25/11/2026, escrita antes de medir)
+
+Producción en `e2bd349` con PostgreSQL 18.7, desplegada el 25/11/2026 a las 18:49 UTC. Las cifras salen de P5 en producción, desde la red B, a las 19:33 UTC (300 respuestas, 0 errores), y se congelan como literales en `tests/produccion/lanzar.py`: `P5_P50_MS = 428.0`, `P5_P95_MS = 634.4`, `P5_MAX_MS = 961.7` y `P6_P50_B_MAX_MS = 856.0` (2 × p50). La latencia de B es sobre todo la de la red móvil; por eso P6 se compara con esta línea base y no con un umbral absoluto. Las vecinas son 5, con el HMAC `210d0bba62fb47aca06fded4221abf56685b24cf31f2c17c84740b040abd16d2`.
+
+**D10, guarda de frontera.** En P6, A solo lanza una llegada en el instante local t si t + d_min >= F_anterior y t + d_max + 1,0 s + 0,001 s <= F_siguiente, con F las fronteras de minuto del servidor y [d_min, d_max] el desfase medido con el `Date` de Caddy (A1). Las llegadas omitidas se registran, no se reenvían y no cuentan como descartes ni en el control de retraso. Es una desviación del perfil de "2 minutos" de l.100: la pausa es de unos 1 + (d_max - d_min) s por minuto. Una aceptada (404) ambigua da `SIN CONCLUSION`; un 429 ambiguo no invalida. En producción **no se mide el caso "120 si cruza la frontera"** de l.100: la guarda lo evita a propósito. Ese defecto de la ventana fija lo mide L3 en local (`maximo_deslizante`, l.192 y l.448); en P6 `maximo_deslizante` se da como información. Las vecinas se fijan con HMAC-SHA256(sal, bytes del fichero), con la sal de 32 bytes fuera del repositorio; quien evalúe puede recibir del autor la sal y el fichero para recalcularlo.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |
