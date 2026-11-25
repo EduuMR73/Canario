@@ -25,6 +25,16 @@
 // escenarios es inmediato y la alineación no depende de cuánto tarde k6 en
 // inicializar. Si la espera ya no es posible, avisa con ALINEACION_PERDIDA y
 // el lanzador da SIN CONCLUSION.
+//
+// L6 y L7 (plan v3.2, 25/11/2026). L7 inunda GET /salud (salud_get) desde una
+// IP con las víctimas de L2. L6 llena Redis: el relleno (denuncia_relleno) manda
+// cuerpos {} a la ruta de denuncia, que el limitador cuenta antes de validar
+// (422 sin base de datos), cada uno desde una IP distinta de 100.64.0.0/10
+// calculada aquí con ipRelleno; el legítimo (legitimo) consulta un seguimiento
+// inexistente desde una IP fija. El relleno se para solo cuando un mismo VU
+// recibe 5 respuestas 503 seguidas con Retry-After 5: imprime RELLENO_PARADO y
+// llama a exec.test.abort (k6 sale con 108). El lanzador decide los veredictos;
+// aquí solo se mide y se anota.
 
 import http from 'k6/http';
 import exec from 'k6/execution';
@@ -43,10 +53,17 @@ function exigir(condicion, texto) {
   }
 }
 
-const FUNCIONES = ['seguimiento_ip', 'login_ataque', 'denuncia_ip', 'web_ip', 'sonda_salud'];
+const FUNCIONES = ['seguimiento_ip', 'login_ataque', 'denuncia_ip', 'web_ip', 'sonda_salud', 'salud_get',
+  'denuncia_relleno', 'legitimo'];
 const IPV4 = /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/;
 
-exigir(datos.modo === 'l3' || datos.modo === 'l3b', 'modo');
+exigir(['l3', 'l3b', 'l6', 'l7'].includes(datos.modo), 'modo');
+if (datos.modo === 'l6') {
+  // El relleno necesita la empresa B (la ruta de denuncia) y la repetición,
+  // que fija su bloque de IPs.
+  exigir(datos.identificador_b !== null, 'identificador_b en l6');
+  exigir(Number.isInteger(datos.repeticion) && datos.repeticion >= 1, 'repeticion');
+}
 exigir(typeof datos.host_api === 'string' && typeof datos.host_web === 'string', 'hosts');
 exigir(Array.isArray(datos.fases) && datos.fases.length > 0, 'fases');
 exigir(Array.isArray(datos.escenarios) && datos.escenarios.length > 0, 'escenarios');
@@ -63,7 +80,10 @@ function escenario(e) {
   exigir(Number.isInteger(e.duracion_s) && e.duracion_s > 0, `${e.nombre}: duracion_s`);
   exigir(Number.isInteger(e.inicio_s) && e.inicio_s >= 0, `${e.nombre}: inicio_s`);
   exigir(Number.isInteger(e.vus) && e.vus > 0, `${e.nombre}: vus`);
-  exigir(Number.isInteger(e.n_ips) && e.n_ips > 0, `${e.nombre}: n_ips`);
+  // El relleno no trae lista de IPs: cada iteración calcula la suya (ipRelleno).
+  if (e.funcion !== 'denuncia_relleno') {
+    exigir(Number.isInteger(e.n_ips) && e.n_ips > 0, `${e.nombre}: n_ips`);
+  }
   return {
     executor: 'constant-arrival-rate',
     rate: e.rate,
@@ -84,6 +104,9 @@ const etiquetarIp = {};
 for (const e of datos.escenarios) {
   exigir(escenarios[e.nombre] === undefined, `${e.nombre}: repetido`);
   escenarios[e.nombre] = escenario(e);
+  if (e.funcion === 'denuncia_relleno') {
+    continue;
+  }
   // Las listas de IPs (hasta 3402) viven en /datos/ips.json y en un
   // SharedArray: una sola copia en memoria para todos los VUs, no una por VU
   // dentro de ejecucion.json (PY-1). Se valida que sean IPv4 y que el
@@ -110,6 +133,38 @@ export const options = {
 // un valor que no son dígitos, se anota como -1 (el lanzador lo da por fuera
 // de rango).
 const retryAfter = new Trend('retry_after_s');
+// L6: el Retry-After de cada 503 del legítimo, con el texto TAL CUAL en la
+// etiqueta ra ('ausente' si no viene): el lanzador lo compara con el literal
+// "5"; el valor numérico es solo orientativo.
+const retryAfter503 = new Trend('retry_after_503_s');
+// L6 (D-8): Date.now() justo al volver cada petición del relleno. Su max sale en
+// resumen.json y da el fin de la última petición del relleno sin CSV (plan B);
+// el humo, con CSV, lo compara al milisegundo con el fin máximo del CSV.
+const finRelleno = new Trend('fin_relleno_ms');
+
+// IPs del relleno (D-L6-1): 100.64.0.0/10 sin .0 ni .255 de cada /24, un
+// millón por repetición. La misma fórmula que ip_relleno de lanzar.py; los
+// vectores literales de abajo los comprueba setup() y, como texto, la prueba
+// U-IP-2. Fuera de rango, excepción: nunca una IP repetida en silencio.
+const IPS_POR_REPETICION = 1000000;
+const IPS_TOTAL = 16384 * 254;
+function ipRelleno(i, rep) {
+  if (!Number.isInteger(i) || !Number.isInteger(rep) || i < 0 || i >= IPS_POR_REPETICION || rep < 1) {
+    throw new Error(`indice de IP del relleno fuera de rango: ${i} (repeticion ${rep})`);
+  }
+  const g = (rep - 1) * IPS_POR_REPETICION + i;
+  if (g >= IPS_TOTAL) {
+    throw new Error(`la repeticion ${rep} no cabe en 100.64.0.0/10`);
+  }
+  const bloque = Math.floor(g / 254);
+  return `100.${64 + Math.floor(bloque / 256)}.${bloque % 256}.${(g % 254) + 1}`;
+}
+const VECTORES_IP = [
+  [0, 1, '100.64.0.1'],
+  [253, 1, '100.64.0.254'],
+  [254, 1, '100.64.1.1'],
+  [0, 2, '100.79.97.3'],
+];
 
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const HEX = '0123456789abcdef';
@@ -128,6 +183,20 @@ function codigoInexistente() {
 }
 
 export function setup() {
+  // Control de ipRelleno con vectores literales (y que fuera de rango lance): si
+  // no cuadra, CONTROL_IP y aborta antes de medir nada.
+  let fueraDeRango = false;
+  try {
+    ipRelleno(IPS_POR_REPETICION, 1);
+  } catch (e) {
+    fueraDeRango = true;
+  }
+  for (const [i, rep, ip] of VECTORES_IP) {
+    if (ipRelleno(i, rep) !== ip || !fueraDeRango) {
+      console.error('CONTROL_IP');
+      exec.test.abort(`CONTROL_IP: ipRelleno(${i}, ${rep}) no da ${ip}`);
+    }
+  }
   // S10: control de que el Host de produccion llega a la API. Sin el Host
   // correcto, Caddy responde 421 a todo y la medida seria de un sitio por
   // defecto. Va desde 10.88.1.2 (la IP de Traefik) y a /salud (exenta del
@@ -247,6 +316,58 @@ export function web_ip(datosSetup) {
 export function sonda_salud(datosSetup) {
   const p = parametros(datos.host_api, 'sonda_salud', datosSetup.t0, true, false);
   enviar('POST', `${BASE}/salud`, null, p);
+}
+
+// GET /salud (L6 y L7): exenta del limitador, espera 200.
+export function salud_get(datosSetup) {
+  const p = parametros(datos.host_api, 'salud_get', datosSetup.t0, false, false);
+  enviar('GET', `${BASE}/salud`, null, p);
+}
+
+// L6: el cliente legítimo, desde su IP fija (la única de su lista). Espera 404;
+// con Redis lleno, 503 con Retry-After. Solo en el plan B imprime cada respuesta.
+export function legitimo(datosSetup) {
+  const p = parametros(datos.host_api, 'legitimo', datosSetup.t0, true, false);
+  const respuesta = http.request('POST', `${BASE}/v1/seguimiento`, JSON.stringify({ codigo: codigoInexistente() }), p);
+  const valor = respuesta.headers['Retry-After'];
+  if (respuesta.status === 503) {
+    const texto = typeof valor === 'string' ? valor : 'ausente';
+    retryAfter503.add(/^[0-9]+$/.test(texto) ? parseInt(texto, 10) : -1, { name: 'legitimo', ra: texto });
+  }
+  if (datos.imprimir_legitimo === true) {
+    console.log(`LEGITIMO t=${Date.now()} estado=${respuesta.status} ra=${typeof valor === 'string' ? valor : ''}`);
+  }
+}
+
+// Racha de 503 seguidos con Retry-After 5 de ESTE VU: es una variable de
+// módulo, y cada VU tiene su propia copia del módulo.
+let rachaRelleno = 0;
+
+// L6: el relleno. Cuerpo {} contra la ruta de denuncia de B: el limitador cuenta
+// antes de validar (422 sin base de datos) y cada petición crea una clave nueva
+// en Redis, porque la IP es distinta en cada iteración: el índice es
+// exec.scenario.iterationInTest, único en todo el escenario.
+export function denuncia_relleno(datosSetup) {
+  const i = exec.scenario.iterationInTest;
+  const ip = ipRelleno(i, datos.repeticion);
+  if (i % 10000 === 0) {
+    console.log(`IP_MUESTRA i=${i} ip=${ip}`);
+  }
+  const respuesta = http.post(`${BASE}/v1/empresas/${datos.identificador_b}/denuncias`, '{}', {
+    headers: { Host: datos.host_api, 'X-Forwarded-For': ip, 'Content-Type': 'application/json' },
+    timeout: PLAZO,
+    tags: { name: 'denuncia_relleno', ruta: 'denuncia', fase: faseDe(datosSetup.t0) },
+  });
+  finRelleno.add(Date.now(), { name: 'denuncia_relleno' });
+  if (respuesta.status === 503 && respuesta.headers['Retry-After'] === '5') {
+    rachaRelleno += 1;
+  } else {
+    rachaRelleno = 0;
+  }
+  if (rachaRelleno >= 5) {
+    console.log(`RELLENO_PARADO t=${Date.now()}`);
+    exec.test.abort('RELLENO_PARADO: 5 respuestas 503 seguidas con Retry-After 5 en un VU');
+  }
 }
 
 export function handleSummary(datosResumen) {

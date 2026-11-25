@@ -5,7 +5,13 @@ local parada:
 
     python tests\\estres\\lanzar.py --hash [--conservar]
     python tests\\estres\\lanzar.py --l1 --t <segundos> [--conservar]
-    python tests\\estres\\lanzar.py --l2|--pico|--l3|--l3b --t 0.0196 [--repeticiones N] [--conservar]
+    python tests\\estres\\lanzar.py --l2|--pico|--l3|--l3b|--l7 --t 0.0196 [--repeticiones N] [--conservar]
+    python tests\\estres\\lanzar.py --l5 [--repeticiones N] [--conservar]
+    python tests\\estres\\lanzar.py --l6 [--humo] [--conservar]
+
+--l5 (IP compartida), --l6 (agotar el limitador; --humo es la sonda B del
+plan v3.2) y --l7 (inundacion de /salud) usan los limites de produccion y el
+arnes de L3; sus funciones puras estan en la seccion "L5, L6 y L7".
 
 --l2 (aislamiento: inundacion del login y tres victimas), --pico (L4: pico de
 10 veces y recuperacion), --l3 (200 IPs con los limites de produccion) y
@@ -73,6 +79,7 @@ import collections
 import contextlib
 import csv
 import datetime
+import heapq
 import itertools
 import json
 import math
@@ -1419,6 +1426,58 @@ def preparar_override_postgres(temporal):
         raise Parada(f"el override de PostgreSQL cambia mas que los dos -c de logging: {diferencias}")
     p("   PostgreSQL con log_checkpoints=on y log_autovacuum_min_duration=0 (solo en el override de estres): "
       "cambia el logging del sistema medido; sus lineas entran en la tabla por ventana")
+
+
+def comando_servicio_resuelto(servicio):
+    """El command de `servicio` tal como lo resuelve docker compose con los
+    ficheros de BASE (lista de cadenas), como comando_postgres_resuelto."""
+    r = dc("config", "--format", "json", timeout=120)
+    try:
+        comando = json.loads(r.out)["services"][servicio]["command"]
+    except (ValueError, KeyError, TypeError):
+        raise Parada(f"docker compose config --format json no da el command de {servicio} (codigo {r.rc}): "
+                     f"{r.err.strip()[-300:]!r}") from None
+    if not isinstance(comando, list) or not all(isinstance(a, str) for a in comando):
+        raise Parada(f"el command de {servicio} no es una lista de cadenas: {comando!r}")
+    return comando
+
+
+def comando_con_maxmemory(original, maxmemory):
+    """El command de Redis con el valor de --maxmemory cambiado. Exige
+    exactamente un --maxmemory con valor: si no lo hay, PARADA (el override no
+    sabría qué cambiar)."""
+    posiciones = [i for i, a in enumerate(original) if a == "--maxmemory"]
+    if len(posiciones) != 1 or posiciones[0] + 1 >= len(original):
+        raise Parada(f"el command de redis no tiene exactamente un --maxmemory con valor: {original!r}")
+    nuevo = list(original)
+    nuevo[posiciones[0] + 1] = maxmemory
+    return nuevo
+
+
+def yaml_comando_servicio(servicio, comando):
+    """Override de compose con el command entero de `servicio` (como
+    yaml_comando: cada elemento como cadena JSON y con $ duplicado)."""
+    lineas = ["services:", f"  {servicio}:", "    command:"]
+    lineas += [f"      - {json.dumps(a.replace('$', '$$'))}" for a in comando]
+    return "\n".join(lineas) + "\n"
+
+
+def preparar_override_redis(temporal, maxmemory=None):
+    """Solo en el humo de L6 (§5.2): Redis con --maxmemory <M del humo> para que
+    se llene en unos 120 s y no en una hora. Como preparar_override_postgres:
+    el override lleva el command original con ese único cambio y, antes de
+    arrancar, se compara con lo que resuelve compose; si difiere en algo más,
+    PARADA. Sin maxmemory, el literal MAXMEMORY_HUMO."""
+    maxmemory = MAXMEMORY_HUMO if maxmemory is None else maxmemory
+    original = comando_servicio_resuelto("redis")
+    esperado = comando_con_maxmemory(original, maxmemory)
+    fichero = temporal / "redis_humo.yml"
+    fichero.write_text(yaml_comando_servicio("redis", esperado), encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(fichero)])
+    resuelto = comando_servicio_resuelto("redis")
+    if resuelto != esperado:
+        raise Parada(f"el override de Redis del humo cambia mas que --maxmemory: esperado {esperado}, resuelto {resuelto}")
+    p(f"   Redis con --maxmemory {maxmemory} (solo en el humo de L6)")
 
 
 def comprobaciones_previas():
@@ -3381,9 +3440,26 @@ def solapes_de_bloques(bloques):
 def plan_ips(modo, repeticiones, n_ataque=None):
     """Bloques de IPs de todas las repeticiones, comprobados (E4): si se
     solapan o no caben, PARADA. Devuelve {repeticion: {rol: [IPs]}}. L3: un
-    rol "carga" de 200 IPs. L3b: ataque, control y las tres víctimas."""
+    rol "carga" de 200 IPs. L3b: ataque, control y las tres víctimas.
+
+    L5: la IP de las 11 denuncias y la de la 12.ª, informativa. L6: el cliente
+    legítimo, UNA IP fija de 198.18.0.0/15 que sale de bloques_ips y pasa por
+    solapes_de_bloques (PY-IP): así nunca cae en las reservadas ni en
+    strict_falsas (el índice 130044, que parecería libre, está dentro de
+    strict_falsas), y queda fuera de 100.64.0.0/10, que es del relleno. L7:
+    las víctimas de L2 con IPs por E4 sobre 390 s (293, 8 y 8) y la IP de la
+    inundación de /salud."""
     if modo == "l3":
         roles = [("carga", IPS_L3)]
+    elif modo == "l5":
+        roles = [("l5", 1), ("l5_otra", 1)]
+    elif modo == "l6":
+        roles = [("legitimo_l6", 1)]
+    elif modo == "l7":
+        roles = [("denuncia", ips_necesarias(TASA_VICTIMA, 390, LIMITE_DENUNCIA, VENTANA_DENUNCIA_S)),
+                 ("seguimiento", ips_necesarias(TASA_VICTIMA, 390, LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S)),
+                 ("web_seguimiento", ips_necesarias(TASA_VICTIMA, 390, LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S)),
+                 ("inundacion", 1)]
     else:
         roles = [("ataque", n_ataque), ("control", IPS_CONTROL_L3B),
                  ("denuncia", ips_necesarias(TASA_VICTIMA, 570, LIMITE_DENUNCIA, VENTANA_DENUNCIA_S)),
@@ -3822,8 +3898,11 @@ def holgura_insuficiente(escenarios):
 # --- construcción de los escenarios (el lanzador calcula, k6 transcribe) -----
 def fases_de(modo):
     """Fases de cada prueba como [{"nombre","desde_s","hasta_s"}]. "carga" es
-    la inundación (L2), el pico (L4) o el ataque (L3b)."""
-    duraciones = {"l2": (30, 120, 120, 120), "pico": (30, 120, 30, 180), "l3b": (30, 120, 300, 120)}[modo]
+    la inundación (L2 y L7), el pico (L4) o el ataque (L3b). L7 usa las fases
+    de L2 a propósito: con las mismas víctimas y fases, solo cambia la ruta
+    inundada (plan v3.2, §4)."""
+    duraciones = {"l2": (30, 120, 120, 120), "pico": (30, 120, 30, 180), "l3b": (30, 120, 300, 120),
+                  "l7": (30, 120, 120, 120)}[modo]
     nombres, desde, resultado = ("cal", "base", "carga", "recup"), 0, []
     for nombre, d in zip(nombres, duraciones, strict=True):
         resultado.append({"nombre": nombre, "desde_s": desde, "hasta_s": desde + d})
@@ -3991,7 +4070,7 @@ def motivo_ilegible_check(fila):
     return None
 
 
-def leer_csv_fases(ruta):
+def leer_csv_fases(ruta, desviar=None):
     """Lee el CSV de k6 una vez. Devuelve un dict con las peticiones
     ("filas", solo las filas http_req_duration, que traen estado, name, proto y
     etiquetas; inicio = marca - duración porque la marca es el FIN de la
@@ -4001,8 +4080,19 @@ def leer_csv_fases(ruta):
     nunca deja o campos que no se pueden convertir; validez_generador lo
     convierte en fallo) y sus motivos ("motivos_ilegibles": {motivo: n}). Solo
     se capturan los errores de conversion de cada fila, nunca el analisis
-    entero."""
+    entero.
+
+    Trae también "retry_503": [(marca, valor de la etiqueta ra)] de la métrica
+    retry_after_503_s (los 503 del cliente legítimo de L6, con el Retry-After
+    TAL CUAL como etiqueta, porque el oráculo compara el texto literal "5").
+
+    desviar (L6): función que recibe cada fila ya validada y devuelve True si
+    la consume (el agregador en streaming del relleno, unas 675 000 peticiones
+    que no caben como dicts en memoria). Las filas consumidas no se guardan;
+    un error de conversión dentro de desviar cuenta como fila ilegible, igual
+    que en el resto."""
     filas, descartes, retry, checks = [], collections.defaultdict(list), [], []
+    retry_503 = []
     ilegibles = 0
     motivos = collections.Counter()
     # Una ultima linea sin salto final puede estar cortada (k6 muerto a medias): cuenta
@@ -4037,6 +4127,8 @@ def leer_csv_fases(ruta):
                 motivos[motivo] += 1
                 continue
             try:
+                if desviar is not None and desviar(fila):
+                    continue
                 if metrica == "http_req_duration":
                     fin, dur = int(fila["timestamp"]) / 1000, float(fila["metric_value"])
                     tags = etiquetas_extra(fila.get("extra_tags"))
@@ -4049,13 +4141,15 @@ def leer_csv_fases(ruta):
                     descartes[fila.get("scenario") or ""].append(int(fila["timestamp"]) / 1000)
                 elif metrica == "retry_after_s":
                     retry.append(float(fila["metric_value"]))
+                elif metrica == "retry_after_503_s":
+                    retry_503.append((int(fila["timestamp"]) / 1000, etiquetas_extra(fila.get("extra_tags")).get("ra")))
                 elif metrica == "checks":
                     checks.append((fila["check"], float(fila["metric_value"])))
             except (ValueError, TypeError, KeyError):
                 ilegibles += 1
                 motivos[f"{metrica}: campo que no se puede convertir"] += 1
     return {"filas": filas, "descartes": dict(descartes), "retry": retry, "checks": checks, "ilegibles": ilegibles,
-            "motivos_ilegibles": dict(motivos)}
+            "motivos_ilegibles": dict(motivos), "retry_503": retry_503}
 
 
 def leer_t0(registro_k6):
@@ -4305,13 +4399,759 @@ def texto_cota_ataque(veredicto_b, control_ataque, n_ips):
 
 
 # ---------------------------------------------------------------------------
+# L5, L6 y L7 (plan v3.2 del 25/11/2026, con la decisión D-8): cifras literales
+# y análisis puro, sin Docker. Sus pruebas, con los IDs del plan (U-L5-*,
+# U-L6-*, U-OOM-*, U-K6-*, U-PB-*, U-IP-*, U-PY3-*, U-D4-1, U-F2-1, U-HUMO-1,
+# U-N4-1 y las de L7), están en tests/estres/test_lanzar.py.
+# ---------------------------------------------------------------------------
+# Modos con los límites de producción, Caddyfile.produccion y el arnés de L3
+# (k6 o el cliente de control desde 10.88.1.2, la IP de Traefik, en la red edge).
+MODOS_PRODUCCION = ("l3", "l3b", "l5", "l6", "l7")
+
+# --- L5: IP compartida (Tor o NAT) --------------------------------------------
+# 11 denuncias válidas en serie desde una IP: con el límite de producción
+# (denuncia = 10 por hora) la 11.ª tiene que dar 429.
+DENUNCIAS_L5 = LIMITE_DENUNCIA + 1
+# Segundos que tienen que quedar de la hora UTC para empezar: las 11 deben caer
+# en la misma ventana del limitador (ventana fija de 3600 s).
+MARGEN_HORA_L5_S = 300
+# Retry-After: solo dígitos ASCII. No vale str.isdigit() (acepta dígitos
+# Unicode como "²") ni int() a secas (acepta " 5" y "+5"): la cabecera la manda
+# el servidor y se comprueba como texto, sin normalizarla antes.
+PATRON_RETRY_AFTER = re.compile(r"[0-9]+")
+TEXTO_COSTE_L5 = "coste asumido, threat-model §8 l.706"
+
+
+def retry_after_429_valido(valor, ventana_s):
+    """Un Retry-After de 429 en texto: dígitos ASCII y entre 1 y la ventana."""
+    return isinstance(valor, str) and PATRON_RETRY_AFTER.fullmatch(valor) is not None and 1 <= int(valor) <= ventana_s
+
+
+def sin_cuerpos(resultados):
+    """Los resultados de cliente_control sin el cuerpo (PY-L5): el de un 201 de
+    denuncia lleva el código de seguimiento, y no debe llegar a ningún print,
+    fichero ni resultados.json. Se quita nada más volver del cliente."""
+    return [{k: v for k, v in r.items() if k != "cuerpo"} for r in resultados]
+
+
+def evaluar_l5(resultados):
+    """Oráculo de L5 sobre las 11 respuestas, en orden. Un único parámetro
+    (V31-8): no recibe ni ruta ni carpeta, no imprime y no escribe; devuelve
+    (veredicto, texto) y quien llama lo publica. Solo lee estado, retry_after,
+    inicio y fin, aunque las entradas traigan otras claves (cuerpo).
+
+    SIN CONCLUSION: no son 11, cruzan la hora UTC (no caen en la misma ventana),
+    alguna de las 10 primeras no es 201 (control positivo) o la 11.ª es 503 o 0
+    (el limitador no respondió). FALLA: la 11.ª no es 429, o es 429 con un
+    Retry-After que no son dígitos ASCII entre 1 y 3600. PASA: el coste asumido
+    de threat-model §8."""
+    if len(resultados) != DENUNCIAS_L5:
+        return "SIN CONCLUSION", f"{len(resultados)} respuestas, se esperaban {DENUNCIAS_L5}"
+    if cruza_frontera(resultados[0]["inicio"], resultados[-1]["fin"], VENTANA_DENUNCIA_S):
+        return "SIN CONCLUSION", "las 11 denuncias cruzan una frontera de hora UTC: no caen en la misma ventana"
+    primeras = [r["estado"] for r in resultados[:-1]]
+    if any(e != 201 for e in primeras):
+        return "SIN CONCLUSION", f"control positivo: las 10 primeras deben dar 201 y dan {primeras}"
+    ultima = resultados[-1]
+    if ultima["estado"] in (0, 503):
+        return "SIN CONCLUSION", f"la 11.a da {ultima['estado']}: el limitador no respondio y no hay oraculo"
+    if ultima["estado"] != 429:
+        return "FALLA", f"la 11.a da {ultima['estado']} y no 429: el limite de denuncia por IP no actua"
+    if not retry_after_429_valido(ultima.get("retry_after"), VENTANA_DENUNCIA_S):
+        return "FALLA", f"la 11.a da 429 con un Retry-After no valido ({ultima.get('retry_after')!r})"
+    return "PASA", f"la 11.a da 429 con Retry-After {ultima['retry_after']}; {TEXTO_COSTE_L5}"
+
+
+def peticion_denuncia(identificador, ip):
+    """Una denuncia válida contra la empresa `identificador`, con la IP del
+    cliente en X-Forwarded-For (la pone Traefik; strict la lee a la derecha)."""
+    return peticion_control("POST", f"/v1/empresas/{identificador}/denuncias", HOST_API, ip,
+                            json.dumps({"categoria": "otros",
+                                        "texto": "Denuncia de la prueba de estres L5 " + secrets.token_hex(8)}))
+
+
+# --- L6: agotar el limitador --------------------------------------------------
+# Estimación de una repetición (V32-6), un margen fijo: ver estimar_repeticion_s.
+ESTIMACION_L6_S = 6000
+# Escenario de la fase 1 (§3.1): BASE de 60 s; relleno a 150/s con 600 VUs
+# durante como mucho 4500 s (600 s en el humo); legítimo a 0,5/s con 15 VUs.
+BASE_L6_S = 60
+RELLENO_L6_S = 4500
+RELLENO_HUMO_S = 600
+TASA_RELLENO = 150
+VUS_RELLENO = TOPE_VUS
+TASA_LEGITIMO = 0.5
+VUS_LEGITIMO = 15
+ESCENARIO_RELLENO = "denuncia_relleno"
+# Fase 2 (§3.2, V31-9): fin en inicio_relleno + 4290 s o más, con 300 s como
+# mínimo; en el humo dura unos 30 s (QA-SB). Tiene que empezar antes de
+# inicio_relleno + 3598 - 120 = 3478 s para vigilar 120 s antes del primer
+# instante en que H5 admite la recuperación (N3).
+FIN_FASE2_S = 4290
+FASE2_MINIMA_S = 300
+FASE2_HUMO_S = 30
+PLAZO_ARRANQUE_FASE2_S = 3478
+# H5 (§3.8): llenado antes de 3600 s y R entre 3598 y 4200 s, relativos al
+# inicio del relleno; R es el inicio de 30 respuestas seguidas sin 503.
+H5_LLENADO_S = 3600
+H5_R_MINIMO_S = 3598
+H5_R_MAXIMO_S = 4200
+RACHA_R = 30
+# Controles positivos (§3.6): al menos 25 respuestas del legítimo en la BASE,
+# todas 404, y al menos el 99 % de 422 en el relleno hasta la primera OOM.
+RESPUESTAS_BASE_L6 = 25
+UMBRAL_422_RELLENO = 0.99
+# Información: más de 120 s entre la primera línea OOM y el primer 503.
+INFO_OOM_503_S = 120
+# maxmemory de Redis: 64mb en docker-compose.yml (la medida real) y el literal
+# del humo, que se fija con la sonda A ANTES del humo (§5.1: 4mb si la sonda da
+# al menos 18 000 claves; si no, el M literal que salga de la regla). No se
+# calcula en tiempo de ejecución.
+MAXMEMORY_REAL_B = 67108864
+MAXMEMORY_HUMO = "4mb"
+MAXMEMORY_HUMO_B = 4194304
+# IPs del relleno (D-L6-1): 100.64.0.0/10 sin .0 ni .255 de cada /24 (16384
+# bloques de 254), un millón por repetición; 150 x 4500 = 675 000 índices.
+IPS_RELLENO_POR_REPETICION = 1000000
+IPS_RELLENO_TOTAL = 16384 * 254
+INTERVALO_IP_MUESTRA = 10000
+# Conciliación de las líneas OOM (§3.4): E0 son los error_code admitidos para
+# un estado 0 (plazo agotado, CODIGOS_K6, y el literal medido de la fila de
+# estado 0 de L3b); tolerancia de 2 s; ventana excluida de 30 s tras T_RP.
+E0_OOM = frozenset({"1050"})
+TOLERANCIA_OOM_S = 2.0
+VENTANA_ABORTO_S = 30.0
+# Humo (§5.2, V32-1): PARADA si la última petición del relleno termina más de
+# 15 s después de T_RP; extrapolación a 675 000 peticiones; topes de 3 GB de
+# CSV y 3 GiB de memoria de k6 (MEMORIA_K6 = 4g); al menos 5000 peticiones
+# entre las dos muestras de memoria.
+COTA_HUMO_S = 15.0
+PETICIONES_RELLENO_EXTRAPOLAR = 675000
+TOPE_CSV_HUMO_B = 3000000000
+TOPE_MEMORIA_K6_HUMO_B = 3 * 1024 ** 3
+MINIMO_PETICIONES_EXTRAPOLAR = 5000
+# Línea OOM literal (formato de app/limitador.py, texto_evento; la clase y la
+# causa las confirma la sonda A). Se busca al final de la línea: otra clase u
+# otra causa no casan.
+PATRON_OOM = re.compile(r"EVENTO limitador_no_disponible: OutOfMemoryError causa=otra "
+                        r"espera=(?:<0\.25|0\.25-0\.5|>0\.5)$")
+PATRON_RELLENO_PARADO = re.compile(r"RELLENO_PARADO t=(\d+)")
+PATRON_IP_MUESTRA = re.compile(r"IP_MUESTRA i=(\d+) ip=([0-9.]+)")
+# ra= puede ir vacío y, en la salida de k6, seguido de la comilla del msg="...".
+PATRON_LEGITIMO = re.compile(r"LEGITIMO t=(\d+) estado=(\d+) ra=([^\s\"]*)")
+# Estado de L6 que impide el OK sin ser FALLA ni SIN CONCLUSION (D-L6-4).
+NO_SE_LLENO = "NO SE LLENO (H5 refutada)"
+SUFIJO_L6 = "(1 de 3 repeticiones; J1 exige 3)"
+
+
+def ip_relleno(i, repeticion):
+    """IP número i del relleno de la repetición, en 100.64.0.0/10 sin .0 ni
+    .255. ValueError fuera de rango (un fallo visible, nunca una IP repetida)."""
+    if not 0 <= i < IPS_RELLENO_POR_REPETICION or repeticion < 1:
+        raise ValueError(f"indice de IP del relleno fuera de rango: {i} (repeticion {repeticion})")
+    g = (repeticion - 1) * IPS_RELLENO_POR_REPETICION + i
+    if g >= IPS_RELLENO_TOTAL:
+        raise ValueError(f"la repeticion {repeticion} no cabe en 100.64.0.0/10")
+    bloque, resto = divmod(g, 254)
+    return f"100.{64 + bloque // 256}.{bloque % 256}.{resto + 1}"
+
+
+def comprobar_ip_muestras(registro, repeticion):
+    """CONTROL_IP de setup() y las líneas IP_MUESTRA del relleno contra
+    ip_relleno (D-L6-1): devuelve los motivos de fallo (vacía si todo cuadra).
+    Sin ninguna IP_MUESTRA no se ha comprobado nada: también es un motivo."""
+    motivos = []
+    if "CONTROL_IP" in registro:
+        motivos.append("CONTROL_IP: los vectores literales de ip_relleno no coinciden en l3.js")
+    muestras = PATRON_IP_MUESTRA.findall(registro)
+    if not muestras:
+        motivos.append("ninguna linea IP_MUESTRA: no se comprueba la IP del relleno")
+    for i, ip in muestras:
+        try:
+            esperada = ip_relleno(int(i), repeticion)
+        except ValueError as e:
+            motivos.append(f"IP_MUESTRA i={i}: {e}")
+            continue
+        if ip != esperada:
+            motivos.append(f"IP_MUESTRA i={i} ip={ip}, se esperaba {esperada}")
+    return motivos
+
+
+def marcas_relleno_parado(registro):
+    """Instantes (s, reloj de la VM) de las líneas RELLENO_PARADO, ordenados.
+    Puede haber más de una: el aborto tarda en propagarse a todos los VUs."""
+    return sorted(int(x) / 1000 for x in PATRON_RELLENO_PARADO.findall(registro))
+
+
+def validez_codigo_fase1(codigo, marcas):
+    """Código de salida de la fase 1 (N2, V31-7). Válidos: 0 sin ninguna
+    RELLENO_PARADO (llegó al final) y 108 (ScriptAborted) con al menos una.
+    Cualquier otro (108 sin parada, 0 con parada, 105, 137, 1 o None, el plazo
+    vencido de ejecutar_k6) es SIN CONCLUSION. Devuelve (válido, T_RP o None,
+    texto): T_RP es la primera, y se publica cuántas hubo."""
+    t_rp = marcas[0] if marcas else None
+    texto = f"codigo {codigo} con {len(marcas)} lineas RELLENO_PARADO"
+    if t_rp is not None:
+        texto += f" (cuenta la primera, T_RP = {t_rp:.3f}; desfase de la ultima {marcas[-1] - t_rp:.3f} s)"
+    valido = (codigo == 0 and not marcas) or (codigo == 108 and bool(marcas))
+    return valido, t_rp, texto
+
+
+def validez_codigo_fase2(codigo):
+    """La fase 2 solo vale con 0 (None, el plazo vencido, no vale)."""
+    return codigo == 0, f"codigo {codigo}"
+
+
+def fin_fase2(inicio_relleno, i2):
+    """Fin de la fase 2 (V31-9): inicio_relleno + 4290 s o I2 + 300 s si es más tarde."""
+    return max(inicio_relleno + FIN_FASE2_S, i2 + FASE2_MINIMA_S)
+
+
+def mantenimiento_aborto(eventos, k6_id, t_rp, ahora):
+    """Mantenimiento del aborto del relleno (PY-3): el die con 108 del k6 de la
+    fase 1 deja de contar como "murió otro" desde T_RP. "hasta" es el instante
+    del destroy de ese k6 (ejecutar_k6 hace docker rm -f), visto en el stream
+    con CENTINELA_S de plazo, como el start y el die. Nunca None (construir_
+    ventanas lo haría infinito): si el destroy no llega, SIN CONCLUSION y
+    "hasta" toma ahora() tras el plazo. eventos: EventosDocker (esperar, copia).
+    Devuelve (mantenimiento, fallos)."""
+    fallos = []
+    def es_destroy(e):
+        return e["id"] == k6_id and e["accion"] == "destroy"
+    if eventos.esperar(es_destroy, CENTINELA_S):
+        hasta = min(e["t"] for e in eventos.copia() if es_destroy(e))
+    else:
+        hasta = ahora()
+        fallos.append(fallo("el detector no vio el destroy del k6 de la fase 1"))
+    return {"ids": frozenset([k6_id]), "desde": t_rp, "hasta": hasta,
+            "motivo": "aborto del relleno (fase 1 de L6)"}, fallos
+
+
+def conciliar_oom(intervalos_503, intervalos_0, grupos, tolerancia_s=TOLERANCIA_OOM_S):
+    """Emparejamiento uno a uno de las líneas OOM con peticiones de k6 (§3.4,
+    V31-2). Pura.
+
+    intervalos_503: [(inicio, fin)]; intervalos_0: [(inicio, fin, error_code)],
+    de los que solo cuentan los de E0. Los dos forman UN conjunto, cada
+    intervalo con su tipo. grupos: lista ordenada de listas de marcas (C1, C2,
+    C4a...), procesadas en ese orden sobre los mismos intervalos libres; si la
+    última marca de un grupo es posterior a la primera del siguiente,
+    ValueError (un orden silencioso escondería el error del llamante).
+
+    Un solo paso por tiempo: cada marca t toma, entre los intervalos libres con
+    inicio - tolerancia <= t <= fin + tolerancia, el de fin + tolerancia menor
+    (a igualdad: inicio menor, "503" antes que "0" y el índice). Es el voraz
+    clásico de puntos e intervalos y da el emparejamiento máximo; el de
+    conciliar_503 (voraz por inicio) no. Las marcas de un grupo anterior se
+    emparejan antes, así que uno posterior no les quita pareja (prioridad de
+    C1 sobre C2).
+
+    Devuelve {"grupos": [{"con_503": [(t, (inicio, fin))], "con_0": [(t,
+    (inicio, fin, error_code))], "sin_pareja": [t]}], "intervalos_sin_usar": n}."""
+    no_vacios = [sorted(g) for g in grupos if g]
+    for a, b in itertools.pairwise(no_vacios):
+        if a[-1] > b[0]:
+            raise ValueError(f"grupos fuera de orden: un grupo acaba en {a[-1]} y el siguiente empieza en {b[0]}")
+    intervalos = [(i, f, "503", None) for i, f in intervalos_503]
+    intervalos += [(i, f, "0", c) for i, f, c in intervalos_0 if c in E0_OOM]
+    orden_tipo = {"503": 0, "0": 1}
+    por_inicio = sorted(range(len(intervalos)), key=lambda k: intervalos[k][0])
+    monton, siguiente, usados = [], 0, 0
+    resultado = []
+    for g in grupos:
+        res = {"con_503": [], "con_0": [], "sin_pareja": []}
+        for t in sorted(g):
+            # Entran los que ya pueden contener t por su inicio...
+            while siguiente < len(por_inicio) and intervalos[por_inicio[siguiente]][0] - tolerancia_s <= t:
+                k = por_inicio[siguiente]
+                inicio, fin, tipo, _ = intervalos[k]
+                heapq.heappush(monton, (fin + tolerancia_s, inicio, orden_tipo[tipo], k))
+                siguiente += 1
+            # ...y salen los que ya acabaron: no sirven a t ni a ninguna marca posterior.
+            while monton and monton[0][0] < t:
+                heapq.heappop(monton)
+            if not monton:
+                res["sin_pareja"].append(t)
+                continue
+            _, _, _, k = heapq.heappop(monton)
+            usados += 1
+            inicio, fin, tipo, codigo = intervalos[k]
+            if tipo == "503":
+                res["con_503"].append((t, (inicio, fin)))
+            else:
+                res["con_0"].append((t, (inicio, fin, codigo)))
+        resultado.append(res)
+    return {"grupos": resultado, "intervalos_sin_usar": len(intervalos) - usados}
+
+
+def desglose(res):
+    """Texto de un grupo conciliado: total, con 503, con estado 0 y sin pareja."""
+    n = len(res["con_503"]) + len(res["con_0"]) + len(res["sin_pareja"])
+    return f"{n} (con 503 {len(res['con_503'])}, con estado 0 {len(res['con_0'])}, sin pareja {len(res['sin_pareja'])})"
+
+
+def conciliacion_l6(lineas, t_rp, f1, i2, fin_f2, fase1, fase2, n_parado=0, tolerancia_s=TOLERANCIA_OOM_S):
+    """Reglas C1 a C6 de §3.4 sobre las líneas OOM (instantes, reloj de la VM).
+
+    t_rp: primera RELLENO_PARADO o None; f1: die del k6 de la fase 1; i2 y
+    fin_f2: start y die del k6 de la fase 2 (None si no hubo). fase1 y fase2:
+    (intervalos_503, intervalos_0) de las peticiones que pasan por el limitador
+    (relleno y legítimo); fase1 None es el plan B (sin CSV: C1 lo decide el
+    recuento y C4a no se puede emparejar).
+
+    Grupos: C1 (antes de T_RP - 2; sin T_RP, toda la fase 1), C2 ([T_RP - 2,
+    min(F1, T_RP + 30)], información), C4a ((T_RP + 30, F1], sin pareja = SIN
+    CONCLUSION), C4b ((F1, F1 + 2], información), C4c ((F1 + 2, I2), SIN
+    CONCLUSION), C5 ([I2, fin de la fase 2], sin pareja = FALLA). Lo que el plan
+    no cubre, las líneas posteriores a la fase 2, sigue la regla de C4b y C4c
+    sobre el fin de la fase 2: hasta 2 s, información ("C5b"); después, SIN
+    CONCLUSION. C3 es el recuento a +-2 s de T_RP. Devuelve {"falla",
+    "sin_conclusion" (motivos), "grupos" ({nombre: desglose}), "c3",
+    "f1_t_rp", "texto" (la línea de publicación obligatoria)}."""
+    lineas = sorted(lineas)
+    g = {k: [] for k in ("C1", "C2", "C4a", "C4b", "C4c", "C5", "C5b", "tras_f2")}
+    for t in lineas:
+        if (t_rp is not None and t < t_rp - tolerancia_s) or (t_rp is None and t <= f1):
+            g["C1"].append(t)
+        elif t_rp is not None and t <= min(f1, t_rp + VENTANA_ABORTO_S):
+            g["C2"].append(t)
+        elif t <= f1:
+            g["C4a"].append(t)
+        elif t <= f1 + tolerancia_s:
+            g["C4b"].append(t)
+        elif i2 is None or t < i2:
+            g["C4c"].append(t)
+        elif fin_f2 is None or t <= fin_f2:
+            g["C5"].append(t)
+        elif t <= fin_f2 + tolerancia_s:
+            g["C5b"].append(t)
+        else:
+            g["tras_f2"].append(t)
+    c3 = sum(1 for t in lineas if t_rp is not None and t_rp - tolerancia_s <= t <= t_rp + tolerancia_s)
+    vacio = {"con_503": [], "con_0": [], "sin_pareja": []}
+    res = {}
+    if fase1 is not None:
+        c = conciliar_oom(fase1[0], fase1[1], [g["C1"], g["C2"], g["C4a"], g["C4b"]], tolerancia_s)["grupos"]
+        res.update(zip(("C1", "C2", "C4a", "C4b"), c, strict=True))
+    else:
+        # Plan B: sin filas no hay intervalos; las líneas solo se cuentan.
+        res.update({k: {**vacio, "sin_pareja": list(g[k])} for k in ("C1", "C2", "C4a", "C4b")})
+    if fase2 is not None:
+        c = conciliar_oom(fase2[0], fase2[1], [g["C5"], g["C5b"]], tolerancia_s)["grupos"]
+        res.update(zip(("C5", "C5b"), c, strict=True))
+    else:
+        res.update({k: {**vacio, "sin_pareja": list(g[k])} for k in ("C5", "C5b")})
+    falla, sin_conclusion = [], []
+    if fase1 is not None and res["C1"]["sin_pareja"]:
+        falla.append(f"{len(res['C1']['sin_pareja'])} lineas OOM de C1 sin 503 ni estado 0 de E0 que las contenga "
+                     f"(la primera en {res['C1']['sin_pareja'][0]:.3f})")
+    if res["C4a"]["sin_pareja"]:
+        sin_conclusion.append(f"{len(res['C4a']['sin_pareja'])} lineas OOM mas de 30 s despues de la parada sin "
+                              "ninguna peticion que las explique (C4a)")
+    if g["C4c"]:
+        sin_conclusion.append(f"{len(g['C4c'])} lineas OOM sin ningun k6 en marcha (C4c, la primera en "
+                              f"{g['C4c'][0]:.3f}): algo fuera del instrumento llega al limitador")
+    if g["tras_f2"]:
+        sin_conclusion.append(f"{len(g['tras_f2'])} lineas OOM mas de 2 s despues del fin de la fase 2, sin k6 en marcha")
+    if g["C5"] and fase2 is None:
+        sin_conclusion.append(f"{len(g['C5'])} lineas OOM en la fase 2 sin su CSV: no se pueden conciliar")
+    elif res["C5"]["sin_pareja"]:
+        falla.append(f"{len(res['C5']['sin_pareja'])} lineas OOM de la fase 2 sin 503 ni estado 0 de E0 (C5, la "
+                     f"primera en {res['C5']['sin_pareja'][0]:.3f})")
+    f1_t_rp = None if t_rp is None else round(f1 - t_rp, 3)
+    texto = (f"lineas OOM {len(lineas)}; F1 - T_RP = {f1_t_rp}; C1 {desglose(res['C1'])}; C2 {desglose(res['C2'])}; "
+             f"C3 {c3}; C4a {desglose(res['C4a'])}; C4b {desglose(res['C4b'])}; C4c {len(g['C4c'])}; "
+             f"C5 {desglose(res['C5'])}; C5b {desglose(res['C5b'])}; tras la fase 2 {len(g['tras_f2'])}; "
+             f"RELLENO_PARADO {n_parado}")
+    return {"falla": falla, "sin_conclusion": sin_conclusion, "grupos": res, "c3": c3, "f1_t_rp": f1_t_rp,
+            "texto": texto, "n": {k: len(v) for k, v in g.items()}}
+
+
+def calcular_r(respuestas):
+    """R (§3.3 f): inicio de la primera racha de 30 respuestas seguidas del
+    legítimo que no son 503, después de su primer 503, con las dos fases unidas
+    en orden de tiempo (la racha se cuenta en respuestas, no en segundos).
+    respuestas: [(t, estado)]. None si no hay 503 o no hay racha."""
+    ordenadas = sorted(respuestas)
+    primero = next((i for i, (_, e) in enumerate(ordenadas) if e == 503), None)
+    if primero is None:
+        return None
+    inicio_racha, seguidas = None, 0
+    for t, e in ordenadas[primero + 1:]:
+        if e == 503:
+            inicio_racha, seguidas = None, 0
+            continue
+        if inicio_racha is None:
+            inicio_racha = t
+        seguidas += 1
+        if seguidas == RACHA_R:
+            return inicio_racha
+    return None
+
+
+def parsear_legitimo(linea):
+    """NO CONECTADA (R3): el plan B no está implementado; ningún flujo la llama.
+    (t en s, estado, Retry-After o None) de una línea LEGITIMO del plan B, o
+    None si la línea no lo es. ra= vacío es una respuesta sin la cabecera."""
+    encaje = PATRON_LEGITIMO.search(linea)
+    if encaje is None:
+        return None
+    return int(encaje.group(1)) / 1000, int(encaje.group(2)), encaje.group(3) or None
+
+
+def legitimo_completo(n_lineas, n_contador):
+    """NO CONECTADA (R3): el plan B no está implementado; ningún flujo la llama.
+    Control de completitud del plan B (V31-5): las líneas LEGITIMO de la fase
+    1 tienen que ser exactamente el total del legítimo en los Counters de
+    resumen.json. Si faltan o sobran, R no se puede situar en la fase 1."""
+    return n_lineas == n_contador
+
+
+def oraculo_recuento_plan_b(lineas_oom, t_rp, n503, estados0):
+    """NO CONECTADA (R3): el plan B no está implementado; ningún flujo la llama.
+    Oráculo por recuento del plan B (QA-PB), congelado: N_OOM son las líneas
+    del dominio C1 (antes de T_RP - 2; las de la ventana C2 no entran); N_0,
+    los estados 0 con error_code en E0. FALLA si N_OOM > N_503 + N_0. Es una
+    condición necesaria, más débil que el emparejamiento: los Counters cubren
+    toda la fase 1. Devuelve (falla, texto con los tres números)."""
+    n_oom = sum(1 for t in lineas_oom if t_rp is None or t < t_rp - TOLERANCIA_OOM_S)
+    n0 = sum(n for codigo, n in estados0.items() if codigo in E0_OOM)
+    return n_oom > n503 + n0, f"N_OOM {n_oom}, N_503 {n503}, N_0 {n0}"
+
+
+def instrumento_fase1(hay_csv, hay_resumen, humo, plan_b=False):
+    """Lo que dejó la fase 1 (D-4, V31-6, H-CSV). Devuelve (acción, texto):
+    None si es evaluable; "PARADA" en el humo (sin ninguno de los dos:
+    rediseño; sin CSV con el plan de CSV: H-CSV falsa y plan B); "SIN
+    CONCLUSION" en la medida real (sin ninguno: fallo del instrumento)."""
+    if not hay_csv and not hay_resumen:
+        texto = "fallo del instrumento: la fase 1 no dejo ni k6.csv ni resumen.json"
+        return ("PARADA", texto + " (D-4: rediseño, sin plan B que valga)") if humo else ("SIN CONCLUSION", texto)
+    if plan_b:
+        if hay_resumen:
+            return None, "plan B: resumen.json presente"
+        texto = "plan B sin resumen.json: no hay Counters de la fase 1"
+        return ("PARADA", texto) if humo else ("SIN CONCLUSION", texto)
+    if not hay_csv:
+        texto = "la fase 1 no dejo k6.csv"
+        return ("PARADA", texto + " (H-CSV falsa: plan B)") if humo else ("SIN CONCLUSION", texto)
+    return None, "k6.csv presente"
+
+
+def regla_cota_humo(t_rp, fin_ultima_relleno, f1):
+    """Regla de PARADA del humo y de B' (V32-1): si la última petición del
+    relleno termina más de 15 s después de T_RP, la cota de 30 s de C2 se queda
+    sin margen. F1 - T_RP no entra: incluye handleSummary y el volcado del CSV.
+    Devuelve (motivo de PARADA o None, texto informativo)."""
+    retraso = fin_ultima_relleno - t_rp
+    info = (f"fin de la ultima peticion del relleno - T_RP = {retraso:.3f} s; "
+            f"F1 - T_RP = {f1 - t_rp:.1f} s (informacion: incluye handleSummary y el volcado del CSV)")
+    if retraso > COTA_HUMO_S:
+        return (f"la ultima peticion del relleno termina {retraso:.3f} s despues de T_RP (mas de {COTA_HUMO_S:.0f} s): "
+                "revisar la cota de 30 s antes de congelar"), info
+    return None, info
+
+
+def maximo_trend(resumen, nombre):
+    """values.max de un Trend en el resumen JSON de handleSummary, o None."""
+    try:
+        valor = resumen["metrics"][nombre]["values"]["max"]
+    except (KeyError, TypeError):
+        return None
+    return valor if isinstance(valor, (int, float)) and not isinstance(valor, bool) else None
+
+
+# D-8 con R2: diferencia máxima admitida, en los dos sentidos, entre el max del
+# Trend fin_relleno_ms y el fin máximo del relleno en el CSV. Date.now() va
+# después de la marca del CSV (Trend por delante) y un aborto entre el post y el
+# add puede dejar el Trend sin la última petición (Trend por detrás).
+TOLERANCIA_D8_MS = 1000
+
+
+def comparar_trend_fin(max_trend, max_fin_csv_ms):
+    """D-8 (con R2): el max del Trend fin_relleno_ms (Date.now() justo al volver
+    el http.post) frente al fin máximo del relleno en el CSV. Vale si la
+    diferencia, en valor absoluto, es de 1000 ms o menos; se publica con su
+    signo (Trend - CSV). Si el Trend falta, PARADA; si no vale, el instrumento
+    de B' no vale. Devuelve (accion "PARADA" o None, valido, texto)."""
+    if max_trend is None:
+        return "PARADA", False, "el Trend fin_relleno_ms falta en resumen.json (D-8)"
+    if max_fin_csv_ms is None:
+        return None, False, "sin filas del relleno en el CSV: no se puede comparar el Trend fin_relleno_ms (D-8)"
+    diferencia = int(round(max_trend)) - max_fin_csv_ms
+    texto = (f"max del Trend fin_relleno_ms {max_trend:.0f} y fin maximo del CSV {max_fin_csv_ms}: diferencia "
+             f"(Trend - CSV) {diferencia:+d} ms (tolerancia {TOLERANCIA_D8_MS} ms)")
+    if abs(diferencia) <= TOLERANCIA_D8_MS:
+        return None, True, "el instrumento D-8 vale: " + texto
+    return None, False, "INSTRUMENTO D-8 NO VALE: " + texto
+
+
+def hipotesis_hgs(o1, o2):
+    """H-GS (V31-3, V32-3), información: O1 = estados 0 cortados con error_code
+    fuera de E0; O2 = peticiones del relleno vivas en T_RP que terminaron con
+    estado. Nunca es PARADA: ningún oráculo depende de ella."""
+    if o1 > 0:
+        return f"H-GS: el aborto CORTA peticiones en vuelo (O1 = {o1}, O2 = {o2})"
+    if o2 > 0:
+        return f"H-GS: el aborto RESPETA el gracefulStop (O1 = 0, O2 = {o2})"
+    return "H-GS sin cerrar (O1 = 0, O2 = 0): informacion, no PARADA"
+
+
+def sumar_cpu_por_instante(muestras):
+    """CPU de k6 sumada de todos los contenedores de clase k6 por instante (J1,
+    §3.7): muestras [(t, contenedor, cpu %)], agrupadas por segundo entero;
+    dentro de un segundo, cada contenedor cuenta con su máximo (para no sumar
+    dos muestras del mismo). Devuelve la suma máxima, o None sin muestras."""
+    por_segundo = collections.defaultdict(dict)
+    for t, contenedor, cpu in muestras:
+        actual = por_segundo[math.floor(t)]
+        actual[contenedor] = max(cpu, actual.get(contenedor, cpu))
+    return max((sum(c.values()) for c in por_segundo.values()), default=None)
+
+
+def extrapolar_memoria_k6(m1, n1, m2, n2, maxima, total=PETICIONES_RELLENO_EXTRAPOLAR):
+    """Memoria de k6 extrapolada a `total` peticiones del relleno (QA-SB):
+    pendiente = (M2 - M1) / (N2 - N1); extrapolada = M2 + pendiente x (total -
+    N2); con pendiente negativa, la máxima medida. Si N2 - N1 < 5000, la
+    extrapolación no vale. Devuelve (bytes o None, motivo de PARADA o None)."""
+    if n2 - n1 < MINIMO_PETICIONES_EXTRAPOLAR:
+        return None, (f"solo {n2 - n1} peticiones del relleno entre las dos muestras de memoria (minimo "
+                      f"{MINIMO_PETICIONES_EXTRAPOLAR}): la extrapolacion no vale")
+    pendiente = (m2 - m1) / (n2 - n1)
+    if pendiente < 0:
+        return maxima, None
+    return m2 + pendiente * (total - n2), None
+
+
+def texto_salud_l6(salud, hueco_s):
+    """Línea salud_l6 (§3.8): "/salud 200 en N de N sondas" o las que no lo son,
+    con su instante, y el hueco sin sondas entre fases. No cambia l6."""
+    malas = [x for x in salud if x["estado"] != 200]
+    hueco = "sin fase 2" if hueco_s is None else f"{hueco_s:.1f} s"
+    if not malas:
+        cabeza = f"/salud 200 en {len(salud)} de {len(salud)} sondas"
+    else:
+        cabeza = (f"/salud 200 en {len(salud) - len(malas)} de {len(salud)} sondas; no 200: "
+                  + ", ".join(f"{x['estado']} en {x['t']:.3f} (fase {x['fase']})" for x in malas[:10]))
+    return f"{cabeza}; hueco sin sondas entre fases de {hueco}"
+
+
+def evaluar_h5(d, primera_oom, l503, salud_malas):
+    """H5 (información, §3.8). Devuelve (estado, texto)."""
+    inicio = d["inicio_relleno"]
+    if primera_oom is None:
+        return "REFUTADA", "no se lleno"
+    if primera_oom - inicio >= H5_LLENADO_S:
+        return "REFUTADA", f"se lleno a los {primera_oom - inicio:.0f} s (3600 s o mas)"
+    if any(x["fase"] == 1 for x in salud_malas):
+        return "REFUTADA", "/salud fallo en la fase 1"
+    if d.get("i2") is not None and d["i2"] - inicio >= PLAZO_ARRANQUE_FASE2_S:
+        return "SIN CONCLUSION", f"la fase 2 empezo a los {d['i2'] - inicio:.1f} s (3478 s o mas): vigilancia tarde"
+    plan_b = d.get("plan_b")
+    if plan_b and not plan_b["legitimo_completo"] and l503 and l503[0]["fase"] == 1:
+        return "SIN CONCLUSION", "plan B: las lineas LEGITIMO no estan completas y el primer 503 esta en la fase 1"
+    if salud_malas:
+        return "REFUTADA", "/salud fallo en la fase 2"
+    if not l503:
+        return "SIN CONCLUSION", "el legitimo no recibio ningun 503: R no existe"
+    r = calcular_r([(x["t"], x["estado"]) for x in d["legitimo"]])
+    if r is None:
+        fin = d.get("fin_vigilancia")
+        if fin is not None and fin - inicio >= H5_R_MAXIMO_S + 2 * RACHA_R:
+            return "REFUTADA", "ninguna racha de 30 respuestas sin 503 en la vigilancia (R > 4200 s)"
+        return "SIN CONCLUSION", "sin racha de 30 respuestas sin 503 y la vigilancia acaba antes de poder verla"
+    relativo = r - inicio
+    if relativo < H5_R_MINIMO_S:
+        return "SIN CONCLUSION", f"R = {relativo:.1f} s (menos de 3598 s)"
+    if relativo > H5_R_MAXIMO_S:
+        return "REFUTADA", f"R = {relativo:.1f} s (mas de 4200 s)"
+    return "CONFIRMADA", f"llenado a los {primera_oom - inicio:.0f} s y R = {relativo:.1f} s"
+
+
+def evaluar_l6(d):
+    """Veredicto de L6 (§3.6 a §3.8) a partir de lo medido. Pura. d:
+
+    inicio_relleno, t0 (T0 de la fase 1), t_rp, i2, fin_vigilancia;
+    lineas_oom [t]; conciliacion (de conciliacion_l6: "falla" y
+    "sin_conclusion"); legitimo [{"t", "estado", "ra", "fase"}] (ra: el
+    Retry-After en texto o None); salud [{"t", "estado", "fase"}] (GET
+    /salud); hueco_s; n500; relleno {"n422", "n"} hasta la primera OOM; plan_b
+    None o {"falla_recuento": texto o None, "legitimo_completo": bool};
+    validez [fallo]; muertes.
+
+    Devuelve {"resultado", "validez", "falla" (motivos de FALLA), "oraculo"
+    (motivos de un SIN CONCLUSION del oráculo), "muertes", "salud_l6", "h5",
+    "info"}. veredicto_l6 añade la validez global y decide."""
+    validez = list(d.get("validez", []))
+    validez += [fallo(m) for m in d["conciliacion"]["sin_conclusion"]]
+    falla, oraculo, info = list(d["conciliacion"]["falla"]), [], []
+    lineas = sorted(d["lineas_oom"])
+    primera_oom = lineas[0] if lineas else None
+    legitimo = sorted(d["legitimo"], key=lambda x: x["t"])
+    l503 = [x for x in legitimo if x["estado"] == 503]
+    # Controles positivos (§3.6): si fallan, SIN CONCLUSION, nunca PASA.
+    base = [x for x in legitimo if d["t0"] <= x["t"] < d["t0"] + BASE_L6_S]
+    if len(base) < RESPUESTAS_BASE_L6 or any(x["estado"] != 404 for x in base):
+        validez.append(fallo(f"control de la BASE: {len(base)} respuestas del legitimo (minimo "
+                             f"{RESPUESTAS_BASE_L6}, todas 404): {sorted(collections.Counter(x['estado'] for x in base).items())}"))
+    salud_base = [x for x in d["salud"] if d["t0"] <= x["t"] < d["t0"] + BASE_L6_S]
+    if not salud_base or any(x["estado"] != 200 for x in salud_base):
+        validez.append(fallo(f"control de la BASE: /salud en la BASE {[x['estado'] for x in salud_base][:10]} "
+                             "(todas deben ser 200)"))
+    rel = d["relleno"]
+    if not rel["n"] or rel["n422"] / rel["n"] < UMBRAL_422_RELLENO:
+        validez.append(fallo(f"control del relleno: {rel['n422']} de {rel['n']} respuestas 422 hasta la primera "
+                             "linea OOM (minimo el 99 %)"))
+    plan_b = d.get("plan_b")
+    if plan_b and plan_b.get("falla_recuento"):
+        falla.append("plan B, recuento: " + plan_b["falla_recuento"])
+    if d["n500"]:
+        falla.append(f"{d['n500']} respuestas 500")
+    # R1: un 503 sin su fila de retry_after_503_s (ra None) es un fallo del
+    # instrumento, no del servidor: SIN CONCLUSION de validez, nunca FALLA. La
+    # FALLA es solo para un ra presente distinto de "5" ("ausente" incluido: la
+    # fila está y dice que el servidor no mandó la cabecera).
+    sin_fila = [x for x in l503 if x["ra"] is None]
+    if sin_fila:
+        validez.append(fallo(f"instrumento del Retry-After: {len(sin_fila)} respuestas 503 del legitimo sin su fila "
+                             "de retry_after_503_s"))
+    malos = [x for x in l503 if x["ra"] is not None and x["ra"] != "5"]
+    if malos:
+        falla.append(f"{len(malos)} respuestas 503 del legitimo sin Retry-After \"5\" (por ejemplo {malos[0]['ra']!r} "
+                     f"en la fase {malos[0]['fase']})")
+    if falla:
+        resultado = "FALLA"
+    elif l503 and primera_oom is None:
+        resultado = "SIN CONCLUSION"
+        oraculo.append("el legitimo recibe 503 y no hay ninguna linea OOM (Q3)")
+    elif d.get("t_rp") is not None and primera_oom is None:
+        resultado = "SIN CONCLUSION"
+        oraculo.append("el relleno aborto sin ninguna linea OOM")
+    elif primera_oom is None:
+        resultado = NO_SE_LLENO
+    elif not l503:
+        resultado = "SIN CONCLUSION"
+        oraculo.append("hay linea OOM y el legitimo no recibio ningun 503")
+    else:
+        resultado = "PASA"
+    if primera_oom is not None and l503 and l503[0]["t"] - primera_oom > INFO_OOM_503_S:
+        info.append(f"informacion: {l503[0]['t'] - primera_oom:.0f} s entre la primera linea OOM y el primer 503 del "
+                    "legitimo (mas de 120 s)")
+    salud_malas = [x for x in d["salud"] if x["estado"] != 200]
+    return {"resultado": resultado, "validez": validez, "falla": falla, "oraculo": oraculo,
+            "muertes": list(d.get("muertes", [])), "salud_l6": texto_salud_l6(d["salud"], d.get("hueco_s")),
+            "h5": evaluar_h5(d, primera_oom, l503, salud_malas), "info": info}
+
+
+def veredicto_l6(ev, globales=()):
+    """(veredicto, motivos) de L6 con la validez global (anti-fuga, detector
+    final): veredicto_con_validez decide, y aquí solo se recuperan los motivos
+    de una FALLA del oráculo o de un SIN CONCLUSION del oráculo."""
+    v, motivos = veredicto_con_validez(ev["resultado"], ev["validez"] + list(globales), None, ev["muertes"])
+    if v == "FALLA" and not ev["muertes"]:
+        motivos = ev["falla"]
+    elif v == "SIN CONCLUSION" and motivos == ["los oraculos no concluyen"]:
+        motivos = ev["oraculo"]
+    return v, motivos
+
+
+def linea_l6(veredicto, motivos):
+    """La línea final de L6, siempre con el sufijo de las repeticiones (J1)."""
+    return f"l6: {veredicto}" + (f" ({'; '.join(motivos)})" if motivos else "") + f" {SUFIJO_L6}"
+
+
+def escenarios_l6_fase1(ips, humo=False):
+    """Fase 1 de L6 (§3.1): legítimo (seguimiento inexistente a 0,5/s desde su
+    IP fija), GET /salud y la sonda POST /salud a 1/s durante toda la fase, y
+    el relleno desde t = 60 s. El relleno no lleva lista de IPs: l3.js las
+    calcula (ip_relleno). En el humo, el relleno dura como mucho 600 s."""
+    relleno_s = RELLENO_HUMO_S if humo else RELLENO_L6_S
+    total = BASE_L6_S + relleno_s
+    sonda = [ip_de_indice(INDICE_IP_SONDA)]
+    return [{"nombre": "legitimo", "funcion": "legitimo", "ruta": "seguimiento", "ips": ips["legitimo_l6"],
+             "etiquetar_ip": False, **tramo(TASA_LEGITIMO, total, 0, VUS_LEGITIMO)},
+            {"nombre": "salud_get", "funcion": "salud_get", "ruta": "salud", "ips": sonda, "etiquetar_ip": False,
+             **tramo(1, total, 0, VUS_SONDA)},
+            {"nombre": "sonda_salud", "funcion": "sonda_salud", "ruta": "sonda_salud", "ips": sonda,
+             "etiquetar_ip": False, **tramo(1, total, 0, VUS_SONDA)},
+            {"nombre": ESCENARIO_RELLENO, "funcion": ESCENARIO_RELLENO, "ruta": "denuncia",
+             **tramo(TASA_RELLENO, relleno_s, BASE_L6_S, VUS_RELLENO)}]
+
+
+def escenarios_l6_fase2(ips, duracion_s, humo=False):
+    """Fase 2 (§3.2): solo el vigía, con la misma IP del legítimo; en el humo,
+    legítimo y GET /salud solos (QA-SB), sin la sonda POST /salud."""
+    sonda = [ip_de_indice(INDICE_IP_SONDA)]
+    esc = [{"nombre": "legitimo", "funcion": "legitimo", "ruta": "seguimiento", "ips": ips["legitimo_l6"],
+            "etiquetar_ip": False, **tramo(TASA_LEGITIMO, duracion_s, 0, VUS_LEGITIMO)},
+           {"nombre": "salud_get", "funcion": "salud_get", "ruta": "salud", "ips": sonda, "etiquetar_ip": False,
+            **tramo(1, duracion_s, 0, VUS_SONDA)}]
+    if not humo:
+        esc.append({"nombre": "sonda_salud", "funcion": "sonda_salud", "ruta": "sonda_salud", "ips": sonda,
+                    "etiquetar_ip": False, **tramo(1, duracion_s, 0, VUS_SONDA)})
+    return esc
+
+
+# --- L7: inundación de /salud ---------------------------------------------------
+# Tasa de la inundación: 1,5 x 2/t, la misma de L2 por la regla de las tasas
+# (no tiene sentido físico para /salud; así, con las mismas víctimas y fases,
+# solo cambia la ruta inundada). Literal de la congelación.
+TASA_SALUD_CONGELADA = 153.06
+# Control de que la inundación existe (solo rebaja un PASA): 0,95 x 153,06 x
+# 120 = 17 448,84, hacia arriba.
+UMBRAL_INUNDACION_L7 = 17449
+# H4: la API llega a un núcleo si su CPU media en la INUNDACIÓN es de al menos
+# el 90 % de una CPU.
+UMBRAL_H4_CPU = 90.0
+
+
+def control_inundacion(respuestas_200):
+    """Si la inundación existió: al menos 17 449 respuestas 200 de GET /salud."""
+    return respuestas_200 >= UMBRAL_INUNDACION_L7
+
+
+def evaluar_h4(degradacion, cpu_api_media):
+    """H4 (información, §4): NO EVALUADA sin degradación y por debajo del 90 %;
+    REFUTA con degradación por debajo o sin degradación por encima; CONFIRMA
+    con degradación por encima. Sin CPU medida, SIN CONCLUSION."""
+    if cpu_api_media is None:
+        return "SIN CONCLUSION"
+    llega = cpu_api_media >= UMBRAL_H4_CPU
+    if llega:
+        return "CONFIRMA" if degradacion else "REFUTA"
+    return "REFUTA" if degradacion else "NO EVALUADA"
+
+
+def escenarios_l7(tasas, ips):
+    """L7: las víctimas de L2 a 5/s (50 VUs) durante 390 s, cada una desde su
+    rango (E4 sobre 390 s), la sonda POST /salud a 1/s y la inundación de GET
+    /salud a 1,5 x 2/t con 600 VUs desde una sola IP durante la INUNDACIÓN."""
+    fases = fases_de("l7")
+    total = fases[-1]["hasta_s"]
+    carga = fase_por_nombre(fases, "carga")
+    funciones = {"denuncia": "denuncia_ip", "seguimiento": "seguimiento_ip", "web_seguimiento": "web_ip"}
+    esc = [{"nombre": ruta, "funcion": funciones[ruta], "ruta": ruta, "ips": ips[ruta], "etiquetar_ip": False,
+            **tramo(TASA_VICTIMA, total, 0, 50)} for ruta in SLO_VICTIMAS_MS]
+    esc.append({"nombre": "sonda_salud", "funcion": "sonda_salud", "ruta": "sonda_salud",
+                "ips": [ip_de_indice(INDICE_IP_SONDA)], "etiquetar_ip": False, **tramo(1, total, 0, VUS_SONDA)})
+    esc.append({"nombre": "inundacion_salud", "funcion": "salud_get", "ruta": "salud", "ips": ips["inundacion"],
+                "etiquetar_ip": False, **tramo(tasas["inundacion"], carga["hasta_s"] - carga["desde_s"],
+                                               carga["desde_s"], TOPE_VUS)})
+    return esc
+
+
+# ---------------------------------------------------------------------------
 # L2, L3, L3b y L4: análisis de una repetición (funciones puras sobre las filas
 # del CSV, sin Docker) y E/S con Docker de la ejecución
 # ---------------------------------------------------------------------------
 # Partes de cada prueba, cada una con su veredicto y su validez propia: L3b da
 # dos, L3b-a (oraculo por IP y ventana) y L3b-b (victimas), nunca uno conjunto
 # (H4, E15).
-PARTES = {"l2": ("l2",), "pico": ("pico",), "l3": ("l3",), "l3b": ("l3b-a", "l3b-b")}
+PARTES = {"l2": ("l2",), "pico": ("pico",), "l3": ("l3",), "l3b": ("l3b-a", "l3b-b"),
+          "l5": ("l5",), "l6": ("l6", "salud_l6", "h5"), "l7": ("l7", "h4")}
+# Partes que son INFORMACIÓN, no veredicto: se publican en su propia línea y
+# nunca cambian el RESULTADO GLOBAL (salud_l6, h5 y h4, plan v3.2, §3.8 y §4).
+PARTES_INFORMATIVAS = ("salud_l6", "h5", "h4")
 # Lo que dice la salida cuando L3b-b da FALLA por el oraculo de las victimas (B1)
 # (E15): cuenta para el RESULTADO GLOBAL como cualquier otra prueba, aunque el
 # diseño la espere. Si la FALLA sale de la muerte de un servicio de Canario, el
@@ -4398,14 +5238,20 @@ def evaluar_alineacion(primer_inicio, frontera_s, tolerancia_s=3.0):
     return False, f"la carga empieza {desfase:.2f} s respecto a lo programado (debe estar entre 0 y {tolerancia_s} s)"
 
 
-def validez_generador(k6, t0, datos_csv, insuficientes, cpu, es_http=False):
+def validez_generador(k6, t0, datos_csv, insuficientes, cpu, es_http=False, codigos_validos=(0,)):
     """Fallos de validez del generador y de la ejecución de k6 (J1, A1): código
     de k6 u OOM, los SIN CONCLUSION de ejecutar_k6, falta de T0 o alineación
     perdida, CPU de k6 sobre el umbral o sin medir, descartes sin el aviso
     Insufficient VUs, filas ilegibles del CSV (PY-2), protocolo distinto de
-    HTTP/1.1 y respuestas 421."""
+    HTTP/1.1 y respuestas 421.
+
+    codigos_validos (con nombre, por defecto solo 0): la fase 1 de L6 aborta a
+    propósito con exec.test.abort y k6 sale con 108; ahí se pasa (0, 108) y la
+    regla de RELLENO_PARADO (validez_codigo_fase1) decide si ese 108 vale. Los
+    llamantes de antes no cambian. None (plazo vencido, ejecutar_k6) nunca
+    está en la tupla: un k6 que no terminó no es válido."""
     fallos = []
-    if k6["codigo"] != 0 or k6["oom"]:
+    if k6["codigo"] not in codigos_validos or k6["oom"]:
         fallos.append(fallo(f"k6 termina con codigo {k6['codigo']} (OOMKilled {k6['oom']})"))
     fallos += [fallo(m) for m in k6["sin_conclusion"]]
     if t0 is None:
@@ -4581,7 +5427,9 @@ MARGEN_CLIENTE_S = 60
 # imagen de la API (python, sin red hacia fuera) en la red edge con una IP
 # fija. Lee las peticiones de /datos/<fichero>.json y devuelve una línea JSON
 # por petición, con la hora de inicio y fin (reloj de la VM). Sin comillas
-# dobles ni acentos: se pasa por lista de argumentos con -c.
+# dobles ni acentos: se pasa por lista de argumentos con -c. Trae también la
+# cabecera Retry-After tal cual llega (texto o None), porque el oráculo de L5
+# la valida como literal y no puede recibirla ya convertida.
 CODIGO_CLIENTE = (
     "import http.client, json, sys, time\n"
     "peticiones = json.load(open(sys.argv[1], encoding='utf-8'))\n"
@@ -4599,10 +5447,12 @@ CODIGO_CLIENTE = (
     "        c.request(x['metodo'], x['ruta'], body=None if cuerpo is None else cuerpo.encode('utf-8'), headers=cabeceras)\n"
     "        r = c.getresponse()\n"
     "        texto = r.read(2000).decode('utf-8', 'replace')\n"
-    "        salida.append({'estado': r.status, 'cuerpo': texto, 'inicio': inicio, 'fin': time.time()})\n"
+    "        salida.append({'estado': r.status, 'cuerpo': texto, 'inicio': inicio, 'fin': time.time(),\n"
+    "                       'retry_after': r.getheader('Retry-After')})\n"
     "        c.close()\n"
     "    except Exception as e:\n"
-    "        salida.append({'estado': 0, 'cuerpo': type(e).__name__, 'inicio': inicio, 'fin': time.time()})\n"
+    "        salida.append({'estado': 0, 'cuerpo': type(e).__name__, 'inicio': inicio, 'fin': time.time(),\n"
+    "                       'retry_after': None})\n"
     "print(json.dumps(salida))\n"
 )
 
@@ -4853,15 +5703,17 @@ def memoria_informativa(vig, k6, lector_vivo, fin_reposo):
     p(f"   memoria de la API en toda la ejecucion de k6 (informativo, {veredicto} por muestreo a 4 Hz): {texto}; {nota}")
 
 
-def preparar_datos_k6(ej, modo, escenarios, humos, fases, alinear_ms):
+def preparar_datos_k6(ej, modo, escenarios, humos, fases, alinear_ms, extra=None):
     """El texto de /datos/ejecucion.json (lo único que k6 lee, nada por argv) y
     las listas de IPs de cada escenario, que van APARTE (/datos/ips.json) para
-    que l3.js las guarde en SharedArray y no una copia por VU (PY-1)."""
+    que l3.js las guarde en SharedArray y no una copia por VU (PY-1). extra:
+    campos propios de un modo (L6: la repetición, que fija el bloque de IPs del
+    relleno, y si el legítimo imprime cada respuesta, solo en el plan B)."""
     limpios = [{**{k: v for k, v in e.items() if k != "ips"}, "n_ips": len(e["ips"])} if "ips" in e else dict(e)
                for e in escenarios]
     datos = {"modo": modo, "identificador_a": ej.id_a, "identificador_b": ej.id_b, "contrasena": ej.contrasena,
              "texto_humo": ej.texto_humo, "host_api": HOST_API, "host_web": HOST_WEB, "fases": fases,
-             "escenarios": limpios, "humos": humos, "alinear_epoch_ms": alinear_ms}
+             "escenarios": limpios, "humos": humos, "alinear_epoch_ms": alinear_ms, **(extra or {})}
     return json.dumps(datos), {e["nombre"]: e["ips"] for e in escenarios if "ips" in e}
 
 
@@ -4876,14 +5728,22 @@ def estimar_repeticion_s(modo, repeticion=1):
     espera a la frontera de L3 y L3b. A partir de la repetición 2 de L3 y L3b se
     suma el sandwich de J5 (sandwich_j5_maximo_s), que va al principio de la
     repetición: espera_por_medianoche usa la estimación de la repetición
-    concreta."""
+    concreta.
+
+    L6 (V32-6): 6000 s como margen fijo. Peor caso con fase 2: 300 s de
+    arranque + 60 s de BASE + 4500 s de relleno + 20 s de gracefulStop + 300 s
+    de fase 2 mínima + 240 s de análisis = 5420 s más el hueco entre fases;
+    6000 s cubren un hueco de hasta unos 580 s. Sobrestimar solo alarga la
+    espera, y L6 arranca después de las 00:00 UTC."""
+    if modo == "l6":
+        return ESTIMACION_L6_S
     if modo == "pico":
         # El humo posterior acaba después de la última fase (plan v4.2, cambio 2): la
         # estimación usa su fin con los mismos valores que viajan en humos. Es una
         # estimación, no un plazo.
         duracion = max(fases_de("pico")[-1]["hasta_s"], *(fin_humo(h) for h in humos_pico()))
     else:
-        duracion = {"l2": 390, "l3": 300, "l3b": 570}[modo]
+        duracion = {"l2": 390, "l3": 300, "l3b": 570, "l7": 390}[modo]
     espera = MARGEN_ARRANQUE_S + (300 if modo == "l3b" else 60) if modo in ("l3", "l3b") else 0
     sandwich = sandwich_j5_maximo_s() if modo in ("l3", "l3b") and repeticion > 1 else 0
     return duracion + REPOSO_S + SOBRECOSTE_S + SOBRECOSTE_REPETICION_S + espera + sandwich
@@ -4934,7 +5794,10 @@ def ejecutar_repeticion_fases(ej, modo, rep, n_reps):
                            "antes de la primera repetición")
     salida_rep = ej.salida / f"rep{rep}"
     salida_rep.mkdir()
-    http_prod = modo in ("l3", "l3b")
+    # L7 usa el arnés de L3 (producción, l3.js, 10.88.1.2) pero con pila nueva por
+    # repetición, sin sándwich de J5 y sin alinear (plan v3.2, §4).
+    http_prod = modo in ("l3", "l3b", "l7")
+    con_sandwich = modo in ("l3", "l3b")
     t_ini = hora_motor_ahora()
     # Enmienda v4.3, punto 2: los eventos de la repetición se guardan en el finally,
     # también con una PARADA o una excepción antes del análisis (la sonda, el
@@ -4952,7 +5815,7 @@ def ejecutar_repeticion_fases(ej, modo, rep, n_reps):
                 p(f"   la repeticion cruzaria las 00:00 UTC: se espera {espera:.0f} s")
                 time.sleep(espera)
             t_ini = hora_motor_ahora()
-        if http_prod and rep > 1:
+        if con_sandwich and rep > 1:
             fallos_previos += sandwich_j5(ej, modo, rep, ej.plan_ips[rep - 1])
         else:
             preparar_repeticion(ej, rep)
@@ -4963,7 +5826,7 @@ def ejecutar_repeticion_fases(ej, modo, rep, n_reps):
                 ej.id_b = alta_empresa("Empresa estres B")
                 ej.ids_empresas += [ej.id_a, ej.id_b]
                 p(f"   empresas de la repeticion {rep}: A (atacada) y B (la del denunciante) dadas de alta")
-        fases = {"l2": fases_de("l2"), "pico": fases_de("pico"), "l3b": fases_de("l3b"),
+        fases = {"l2": fases_de("l2"), "pico": fases_de("pico"), "l3b": fases_de("l3b"), "l7": fases_de("l7"),
                  "l3": [{"nombre": "carga", "desde_s": 0, "hasta_s": 300}]}[modo]
         ips = ej.plan_ips[rep] if http_prod else None
         humos = []
@@ -4974,6 +5837,8 @@ def ejecutar_repeticion_fases(ej, modo, rep, n_reps):
             humos = humos_pico()
         elif modo == "l3":
             escenarios = escenarios_l3(ips)
+        elif modo == "l7":
+            escenarios = escenarios_l7(ej.tasas, ips)
         else:
             escenarios = escenarios_l3b(ej.tasas, ips)
         texto_json, _ = preparar_datos_k6(ej, modo, escenarios, humos, fases, 0)
@@ -5002,6 +5867,7 @@ def ejecutar_repeticion_fases(ej, modo, rep, n_reps):
             frontera = None
             if http_prod:
                 fallos_previos += controles_configuracion(ej, modo, rep, ips)
+            if con_sandwich:
                 ahora = hora_motor_ahora()
                 if modo == "l3":
                     frontera = proxima_frontera(ahora, 60, MARGEN_ARRANQUE_S)
@@ -5070,7 +5936,7 @@ def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, f
     cpu = {}
     if t0 is not None and k6["desfase"] is not None:
         cpu = cpu_en_ventana([salida_k6 / "stats.txt", stats_ruta], k6["desfase"], t0, t0 + fases[-1]["hasta_s"])
-    comun += validez_generador(k6, t0, datos, insuficientes, cpu, es_http=modo in ("l3", "l3b"))
+    comun += validez_generador(k6, t0, datos, insuficientes, cpu, es_http=modo in MODOS_PRODUCCION)
     desde = k6["inicio_vm"] if k6["inicio_vm"] is not None else t_ini
     vig = evaluar_vigilancia(ej, rep, ticks, t_ini, {k6["k6_id"]}, muertos_al_final, desde, fin_reposo_vm)
     comun += vig["fallos"]
@@ -5088,7 +5954,8 @@ def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, f
     p("   CPU por contenedor (media/maxima, % de una CPU): "
       + ", ".join(f"{n} {c['media']:.0f}/{c['maxima']:.0f}" for n, c in sorted(cpu.items())))
     filas = [f for f in datos["filas"] if not f["nombre"].startswith("humo")]
-    nombres = PARTES[modo]
+    # Las partes informativas (h4) no llevan veredicto propio por repetición.
+    nombres = [n for n in PARTES[modo] if n not in PARTES_INFORMATIVAS]
     if t0 is None or not filas:
         partes = {n: {"resultado": "SIN CONCLUSION", "validez": [], "control_ataque": None, "detalle": {}}
                   for n in nombres}
@@ -5103,6 +5970,10 @@ def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, f
     elif modo == "l3":
         partes = analizar_l3(filas, datos, t0, frontera, fallos_previos, salida_rep, fases, ips,
                                arranques_redis_desde(ej, t_ini))
+    elif modo == "l7":
+        partes, extra = analizar_l7(filas, datos, t0, fases, insuficientes, salida_rep, k6, stats_ruta,
+                                    fallos_previos, arranques_redis_desde(ej, t_ini))
+        comun += extra
     else:
         partes = analizar_l3b(filas, datos, t0, frontera, fases, insuficientes, fallos_previos, salida_rep, ips)
     veredictos = {}
@@ -5359,6 +6230,57 @@ def analizar_l3b(filas, datos, t0, frontera, fases, insuficientes, fallos_previo
                       "detalle": {"victimas": victimas, "login": login}}}
 
 
+def analizar_l7(filas, datos, t0, fases, insuficientes, salida_rep, k6, stats_ruta, fallos_previos, arranques_redis):
+    """L7 (plan v3.2, §4): las víctimas de L2 con B1, el control de que la
+    inundación de GET /salud existe (solo rebaja un PASA) y H4 como
+    información, con la CPU media de la API en la INUNDACIÓN. Validez propia:
+    los controles de configuración, la BASE y los 429 (las víctimas tienen IPs
+    de sobra por E4: un 429 es un fallo del montaje)."""
+    victimas, validez = analizar_victimas(filas, t0, fases, insuficientes, datos["descartes"])
+    validez = list(fallos_previos) + validez
+    veredictos = veredictos_victimas(victimas)
+    resultado = veredicto_l2(veredictos)
+    p("   victimas (BASE -> INUNDACION de /salud; veredicto B1):")
+    for ruta, v in victimas.items():
+        p("      " + lineas_fase(f"{ruta} BASE", v["base"]))
+        p("      " + lineas_fase(f"{ruta} INUNDACION", v["carga"]) + f" descartes con aviso {v['descartes_aviso']} -> "
+          f"{veredictos[ruta][0]} {veredictos[ruta][1]}")
+        p("      " + lineas_fase(f"{ruta} RECUPERACION (sin los primeros {EXCLUSION_RECUP_S} s)", v["recup"]))
+    carga = fase_por_nombre(fases, "carga")
+    inundacion = [f for f in filas if f["nombre"] == "salud_get" and f["fase"] == "carga"]
+    n200 = sum(1 for f in inundacion if f["estado"] == 200)
+    ok_inundacion = control_inundacion(n200)
+    p("   inundacion de GET /salud: " + lineas_fase("INUNDACION", resumen_filas(inundacion, 200))
+      + f"; control de que la inundacion existe (al menos {UMBRAL_INUNDACION_L7} respuestas 200): {ok_inundacion}")
+    cpu_api = None
+    if k6["desfase"] is not None:
+        cpu = cpu_en_ventana([stats_ruta], k6["desfase"], t0 + carga["desde_s"], t0 + carga["hasta_s"])
+        cpu_api = cpu.get("api", {}).get("media")
+    h4 = evaluar_h4(resultado == "FALLA", cpu_api)
+    p(f"   h4 de esta repeticion (informacion): {h4} (CPU media de la API en la INUNDACION "
+      f"{'sin medir' if cpu_api is None else f'{cpu_api:.0f} %'}; umbral {UMBRAL_H4_CPU:.0f} %; "
+      f"victimas {resultado})")
+    sonda = {f["nombre"]: resumen_filas([x for x in filas if x["nombre"] == "sonda_salud" and x["fase"] == f["nombre"]], 405)
+             for f in fases}
+    p("   sonda_salud p95 por fase: " + ", ".join(f"{n} {ms(s['p95_ms'])} ms" for n, s in sonda.items()))
+    senales = senales_por_fase(salida_rep, fases, t0, arranques_redis)
+    for f in fases:
+        p(f"   senales del log en {f['nombre']}: {texto_senales(senales[f['nombre']]) or 'ninguna'}")
+    fuera_429 = [f for f in filas if f["estado"] == 429]
+    if fuera_429:
+        validez.append(fallo(f"{len(fuera_429)} respuestas 429 donde no toca (las victimas tienen IPs de sobra)"))
+    # H15: la inundación empieza donde dice el escenario.
+    comun = []
+    ok, texto = evaluar_alineacion(min((f["inicio"] for f in filas if f["escenario"] == "inundacion_salud"),
+                                       default=None), t0 + carga["desde_s"])
+    p(f"   reloj de fases (H15): {texto}")
+    if not ok:
+        comun.append(fallo("reloj de fases: " + texto))
+    return {"l7": {"resultado": resultado, "validez": validez, "control_ataque": ok_inundacion,
+                   "detalle": {"victimas": victimas, "inundacion_200": n200, "inundacion_ok": ok_inundacion,
+                               "cpu_api": cpu_api}}}, comun
+
+
 def agregar_fases(modo, repeticiones, tamano_pedido, fallos_globales=(), controles=None):
     """Veredicto final de cada parte de la prueba (A1, J1, E9, H1, H2, H3, H4).
     Publica el de cada repetición y calcula el global: los resultados de los
@@ -5378,23 +6300,41 @@ def agregar_fases(modo, repeticiones, tamano_pedido, fallos_globales=(), control
     if len(repeticiones) < 3 or tamano_pedido < 3:
         comun.append(fallo(f"solo {len(repeticiones)} repeticiones (A1 exige 3)"))
     finales = {}
+    resultados_oraculo = {}
     for nombre in nombres:
         partes = [r["partes"][nombre] for r in repeticiones if nombre in r["partes"]]
         validez = comun + [f for pa in partes for f in pa["validez"]]
         control = None
         detalles = [pa["detalle"] for pa in partes]
-        if nombre in ("l2", "l3b-b"):
+        if nombre == "h4":
+            # Información (plan v3.2, §4): con la mediana de la CPU de la API y el
+            # oráculo B1 de las víctimas sobre las medianas. Nunca entra en finales.
+            # Una repetición sin la CPU medida deja H4 sin evaluar (nunca se ignora).
+            cpus = [r["partes"]["l7"]["detalle"].get("cpu_api") if "l7" in r["partes"] else None
+                    for r in repeticiones]
+            cpu = statistics.median(cpus) if cpus and None not in cpus else None
+            h4 = evaluar_h4(resultados_oraculo.get("l7") == "FALLA", cpu)
+            p(f"   h4 (informacion): {h4} (mediana de la CPU media de la API en la INUNDACION "
+              f"{'sin medir en alguna repeticion' if cpu is None else f'{cpu:.0f} %'}; victimas "
+              f"{resultados_oraculo.get('l7')})")
+            continue
+        if nombre in ("l2", "l3b-b", "l7"):
             if detalles and all("victimas" in d for d in detalles):
                 medianas = victimas_medianas([d["victimas"] for d in detalles])
                 veredictos = veredictos_victimas(medianas)
                 resultado = veredicto_l2(veredictos)
                 for ruta, (v, motivos) in veredictos.items():
                     p(f"   victima {ruta} (mediana de los p95): {v} {motivos}")
-                logins = [d["login"] for d in detalles]
-                errores = [x["tasa_errores"] for x in logins if x["tasa_errores"] is not None]
-                control = ataque_efectivo(mediana_p95([x["p95_ms"] for x in logins]),
-                                          statistics.median(errores) if errores else None,
-                                          sum(x["descartes_aviso"] for x in logins))
+                if nombre == "l7":
+                    # El control de L7 se cumple solo si la inundación existió en
+                    # CADA repetición (al menos 17 449 respuestas 200).
+                    control = all(d["inundacion_ok"] is True for d in detalles)
+                else:
+                    logins = [d["login"] for d in detalles]
+                    errores = [x["tasa_errores"] for x in logins if x["tasa_errores"] is not None]
+                    control = ataque_efectivo(mediana_p95([x["p95_ms"] for x in logins]),
+                                              statistics.median(errores) if errores else None,
+                                              sum(x["descartes_aviso"] for x in logins))
             else:
                 resultado = "SIN CONCLUSION"
         elif nombre == "pico":
@@ -5409,6 +6349,7 @@ def agregar_fases(modo, repeticiones, tamano_pedido, fallos_globales=(), control
                 resultado = "SIN CONCLUSION"
         else:
             resultado = combinar_resultados([pa["resultado"] for pa in partes]) if partes else "SIN CONCLUSION"
+        resultados_oraculo[nombre] = resultado
         finales[nombre] = veredicto_con_validez(resultado, validez, control, muertes)
         if controles is not None:
             controles[nombre] = control
@@ -5419,6 +6360,565 @@ def agregar_fases(modo, repeticiones, tamano_pedido, fallos_globales=(), control
                 p(f"   coste del ataque (D5, E15): {cota}; un corte de 30 s: ~{102.04 * 30 / 10:.0f} IPs, o "
                   f"~{102.04 * 30 / 20:.0f} aprovechando la frontera de la ventana fija (aritmetica, sin medir)")
     return finales
+
+
+# ---------------------------------------------------------------------------
+# L5 y L6: E/S con Docker (plan v3.2, §2, §3 y §5.2)
+# ---------------------------------------------------------------------------
+def abrir_vigilancia(ej, salida_rep, pila, nombre):
+    """Los streamers de una repetición (logs de Redis, PostgreSQL y la API, el
+    lector de cgroup y docker stats de la pila), cada uno dado de alta en la
+    pila al crearlo (PY-8), como en ejecutar_repeticion_fases. Devuelve
+    {"lector", "stats_ruta", "contexto"} (el contexto de ejecutar_k6)."""
+    registros = []
+    for servicio in ("redis", "postgres"):
+        registro = Registro(servicio, salida_rep / f"log_{servicio}.txt")
+        pila.callback(registro.parar)
+        registros.append(registro)
+    lector = iniciar_lector(ej, nombre)
+    pila.callback(lector.parar)
+    stats_ruta = salida_rep / "stats_pila.txt"
+    estadisticas = Estadisticas(list(ej.ids.values()), stats_ruta)
+    pila.callback(estadisticas.parar)
+    registro_api = Registro("api", salida_rep / "log_api.txt")
+    pila.callback(registro_api.parar)
+    contexto = {"datos": ej.datos, "cpus_k6": ej.cpus_k6, "eventos": ej.eventos,
+                "vigilados": lambda: [ej.eventos, lector, estadisticas, registro_api, *registros]}
+    return {"lector": lector, "stats_ruta": stats_ruta, "contexto": contexto}
+
+
+def ejecutar_repeticion_l5(ej, rep):
+    """Una repetición de L5 (§2): pila nueva, empresa B, controles de
+    configuración, espera a que queden 300 s de la hora UTC, 11 denuncias en
+    serie desde una IP y una 12.ª desde otra (información). Los cuerpos se
+    quitan nada más volver del cliente (PY-L5)."""
+    if ej.eventos is None:
+        raise RuntimeError("ejecutar_repeticion_l5: ej.eventos sin iniciar: lo crea ejecutar_modo")
+    salida_rep = ej.salida / f"rep{rep}"
+    salida_rep.mkdir()
+    t_ini = hora_motor_ahora()
+    try:
+        preparar_repeticion(ej, rep)
+        ej.id_b = alta_empresa("Empresa estres B")
+        ej.ids_empresas.append(ej.id_b)
+        ips = ej.plan_ips[rep]
+        with contextlib.ExitStack() as pila:
+            vig_io = abrir_vigilancia(ej, salida_rep, pila, f"rep{rep}_l5")
+            desde = hora_motor_ahora()
+            validez = controles_configuracion(ej, "l5", rep, ips)
+            esperar_ventana(VENTANA_DENUNCIA_S, MARGEN_HORA_L5_S)
+            resultados = sin_cuerpos(cliente_control(
+                ej, f"l5_r{rep}", IP_TRAEFIK, [peticion_denuncia(ej.id_b, ips["l5"][0]) for _ in range(DENUNCIAS_L5)]))
+            duodecima = sin_cuerpos(cliente_control(ej, f"l5_otra_r{rep}", IP_TRAEFIK,
+                                                    [peticion_denuncia(ej.id_b, ips["l5_otra"][0])]))[0]
+            time.sleep(3)
+            fin = hora_motor_ahora()
+            muertos_al_final = comprobar_vida(vig_io["contexto"]["vigilados"](), "final de L5")
+            registrar_reinicios(ej)
+            ticks = vig_io["lector"].copia_ticks()
+        vig = evaluar_vigilancia(ej, rep, ticks, t_ini, set(), muertos_al_final, desde, fin)
+        veredicto, texto = evaluar_l5(resultados)
+        p(f"   repeticion {rep}, l5: estados {[r['estado'] for r in resultados]}; Retry-After de la 11.a "
+          f"{resultados[-1].get('retry_after')!r}: {veredicto}: {texto}")
+        p(f"   informacion: la 12.a denuncia, desde otra IP, da {duodecima['estado']}")
+        validez += vig["fallos"]
+        if cruza_frontera(t_ini, fin, 86400):
+            validez.append(fallo("la repeticion cruza las 00:00 UTC: la sal del limitador cambia"))
+        parte = {"resultado": veredicto, "validez": validez, "control_ataque": None, "detalle": {"texto": texto}}
+        v = veredicto_con_validez(veredicto, validez, None, vig["muertes"])
+        p(f"   repeticion {rep}, l5: {v[0]}" + (f" ({'; '.join(v[1])})" if v[1] else ""))
+        return {"modo": "l5", "repeticion": rep, "muertes": vig["muertes"], "reinicios": vig["reinicios"],
+                "comun": [], "partes": {"l5": parte}, "veredictos": {"l5": v}}
+    finally:
+        guardar_eventos(salida_rep / "eventos_docker.json", [e for e in ej.eventos.copia() if e["t"] >= t_ini])
+
+
+def extra_l6(rep):
+    """Campos propios de L6 en ejecucion.json: la repetición (bloque de IPs del
+    relleno) y si el legítimo imprime cada respuesta (solo el plan B, que esta
+    implementación no activa: la fase 1 lleva CSV)."""
+    return {"repeticion": rep, "imprimir_legitimo": False}
+
+
+def comprobar_control_setup(registro):
+    """S10: el control de setup() de l3.js (CONTROL_421 o CONTROL_SETUP) es PARADA."""
+    if "CONTROL_421" in registro or "CONTROL_SETUP" in registro:
+        raise Parada("el control de setup() de k6 falla (421 con el Host de produccion o POST /salud distinto de 405): "
+                     "ver k6_salida.txt")
+
+
+def ejecutar_fase1_l6(ej, contexto, rep, ips, salida_rep, humo):
+    """Fase 1 de L6 (§3.1): vigía y relleno en una ejecución de k6 desde
+    10.88.1.2. Devuelve el resultado de ejecutar_k6 con T0, el inicio del
+    relleno, T_RP, cuántas RELLENO_PARADO hubo y si el aborto es válido (la
+    condición para que exista la fase 2)."""
+    escenarios = escenarios_l6_fase1(ips, humo)
+    relleno_s = RELLENO_HUMO_S if humo else RELLENO_L6_S
+    fases = [{"nombre": "base", "desde_s": 0, "hasta_s": BASE_L6_S},
+             {"nombre": "relleno", "desde_s": BASE_L6_S, "hasta_s": BASE_L6_S + relleno_s}]
+    texto_json, ips_json = preparar_datos_k6(ej, "l6", escenarios, [], fases, None, extra_l6(rep))
+    mib = comprobar_presupuesto(escenarios, 0, len(texto_json.encode("utf-8")))
+    sin_holgura = holgura_insuficiente(escenarios)
+    if sin_holgura:
+        raise Parada(f"VUs sin holgura sobre el SLO de su ruta: {sin_holgura}")
+    p(f"=== L6, fase 1 (vigia y relleno{', HUMO' if humo else ''}): memoria estimada de k6 {mib} MiB de "
+      f"{MEMORIA_K6_MIB} MiB")
+    escribir_datos_k6(ej, texto_json, ips_json)
+    nombre = f"l6_rep{rep}_fase1"
+    salida = salida_rep / nombre
+    salida.mkdir()
+    k6 = ejecutar_k6(contexto, nombre, "l3.js", ["--network", RED_EDGE, "--ip", IP_TRAEFIK],
+                     duracion_total(escenarios), salida)
+    comprobar_control_setup(k6["registro"])
+    marcas = marcas_relleno_parado(k6["registro"])
+    codigo_ok, t_rp, texto_codigo = validez_codigo_fase1(k6["codigo"], marcas)
+    t0 = leer_t0(k6["registro"])
+    inicio_relleno = None if t0 is None else t0 + BASE_L6_S
+    aborto_valido = (codigo_ok and t_rp is not None and inicio_relleno is not None
+                     and "CONTROL_IP" not in k6["registro"])
+    p(f"   fase 1: {texto_codigo}; la fase 2 {'se lanza' if aborto_valido else 'no se lanza'}")
+    return {"k6": k6, "salida": salida, "t0": t0, "inicio_relleno": inicio_relleno, "t_rp": t_rp,
+            "n_parado": len(marcas), "marcas": marcas, "codigo_ok": codigo_ok, "texto_codigo": texto_codigo,
+            "aborto_valido": aborto_valido, "mantenimiento": None}
+
+
+def ejecutar_fase2_l6(ej, contexto, rep, ips, salida_rep, inicio_relleno, humo, ids_fase1):
+    """Fase 2 de L6 (§3.2): solo el vigía, en otra ejecución de k6 con la misma
+    IP 10.88.1.2 (Caddy solo confía en ella), hasta inicio_relleno + 4290 s o
+    I2 + 300 s (30 s en el humo). NO llama a controles_configuracion (N4): con
+    Redis lleno, el control strict daría 503 y una PARADA falsa; la
+    configuración la cubren los controles de la fase 1 y que los ids de
+    Canario sean los mismos."""
+    if ids_servicios() != ids_fase1:
+        raise Parada("los ids de los contenedores de Canario cambiaron entre las dos fases de L6")
+    ahora = hora_motor_ahora()
+    # La duración se calcula con el reloj de la VM justo antes de lanzarla (V31-9).
+    duracion = FASE2_HUMO_S if humo else math.ceil(fin_fase2(inicio_relleno, ahora) - ahora)
+    escenarios = escenarios_l6_fase2(ips, duracion, humo)
+    fases = [{"nombre": "vigia", "desde_s": 0, "hasta_s": duracion}]
+    texto_json, ips_json = preparar_datos_k6(ej, "l6", escenarios, [], fases, None, extra_l6(rep))
+    escribir_datos_k6(ej, texto_json, ips_json)
+    p(f"=== L6, fase 2 (solo el vigia, {duracion} s, sin controles de configuracion)")
+    nombre = f"l6_rep{rep}_fase2"
+    salida = salida_rep / nombre
+    salida.mkdir()
+    k6 = ejecutar_k6(contexto, nombre, "l3.js", ["--network", RED_EDGE, "--ip", IP_TRAEFIK],
+                     duracion_total(escenarios), salida)
+    comprobar_control_setup(k6["registro"])
+    codigo_ok, texto_codigo = validez_codigo_fase2(k6["codigo"])
+    p(f"   fase 2: {texto_codigo}")
+    return {"k6": k6, "salida": salida, "t0": leer_t0(k6["registro"]), "codigo_ok": codigo_ok,
+            "texto_codigo": texto_codigo, "duracion_s": duracion}
+
+
+def ejecutar_repeticion_l6(ej, rep, humo=False):
+    """Una repetición de L6 (§3), con pila nueva y empresa B. L6 no pasa por
+    ejecutar_repeticion_fases, así que comprueba aquí la medianoche (V32-7):
+    espera_por_medianoche con la estimación de L6 (6000 s), antes de preparar
+    la pila y de los controles de la fase 1."""
+    if ej.eventos is None:
+        raise RuntimeError("ejecutar_repeticion_l6: ej.eventos sin iniciar: lo crea ejecutar_modo")
+    salida_rep = ej.salida / f"rep{rep}"
+    salida_rep.mkdir()
+    t_ini = hora_motor_ahora()
+    try:
+        espera = espera_por_medianoche(t_ini, estimar_repeticion_s("l6"))
+        if espera:
+            p(f"   la repeticion cruzaria las 00:00 UTC: se espera {espera:.0f} s")
+            time.sleep(espera)
+        t_ini = hora_motor_ahora()
+        preparar_repeticion(ej, rep)
+        ej.id_b = alta_empresa("Empresa estres B")
+        ej.ids_empresas.append(ej.id_b)
+        ips = ej.plan_ips[rep]
+        with contextlib.ExitStack() as pila:
+            vig_io = abrir_vigilancia(ej, salida_rep, pila, f"rep{rep}_l6")
+            # Solo aquí, con Redis vacío (§3.1).
+            fallos_previos = controles_configuracion(ej, "l6", rep, ips)
+            ids_fase1 = dict(ej.ids)
+            f1 = ejecutar_fase1_l6(ej, vig_io["contexto"], rep, ips, salida_rep, humo)
+            f2 = None
+            if f1["aborto_valido"]:
+                mantenimiento, fallos_mant = mantenimiento_aborto(ej.eventos, f1["k6"]["k6_id"], f1["t_rp"],
+                                                                  hora_motor_ahora)
+                ej.mantenimientos.append(mantenimiento)
+                f1["mantenimiento"] = mantenimiento
+                fallos_previos += fallos_mant
+                f2 = ejecutar_fase2_l6(ej, vig_io["contexto"], rep, ips, salida_rep, f1["inicio_relleno"], humo,
+                                       ids_fase1)
+            time.sleep(3)
+            time.sleep(REPOSO_S)
+            fin_reposo_vm = hora_motor_ahora()
+            muertos_al_final = comprobar_vida(vig_io["contexto"]["vigilados"](), "reposo final")
+            registrar_reinicios(ej)
+            ticks = vig_io["lector"].copia_ticks()
+            time.sleep(3)
+        return analizar_l6(ej, rep, salida_rep, f1, f2, fallos_previos, ticks, t_ini, muertos_al_final,
+                           fin_reposo_vm, humo)
+    finally:
+        guardar_eventos(salida_rep / "eventos_docker.json", [e for e in ej.eventos.copia() if e["t"] >= t_ini])
+
+
+class AgregadorRelleno:
+    """Agregador en streaming de las filas del relleno de L6 (unas 675 000
+    peticiones; leer_csv_fases guardaría cada una como dict). Se pasa a
+    leer_csv_fases como `desviar`: consume las filas http_req_duration del
+    escenario del relleno y las del Trend fin_relleno_ms, y deja pasar todo lo
+    demás (vigía, descartes, métricas propias). Guarda solo lo que se usa:
+    recuentos por estado, las 422 hasta la primera línea OOM, los intervalos de
+    los 503 y de los estados 0 (pocos: llegan cuando Redis ya está lleno), el
+    fin máximo, O2 de H-GS, los estados 0 cortados por el aborto y cuántas
+    peticiones terminaron antes de cada instante pedido (memoria del humo)."""
+
+    def __init__(self, t_rp, t_oom, f1, instantes=()):
+        self.t_rp, self.t_oom, self.f1 = t_rp, t_oom, f1
+        self.n = 0
+        self.estados = collections.Counter()
+        self.n_antes_oom = 0
+        self.n422_antes_oom = 0
+        self.int503, self.int0 = [], []
+        self.protos = collections.Counter()
+        self.max_fin_ms = None
+        self.max_trend_csv = None
+        self.o2 = 0
+        self.cortados0 = collections.Counter()
+        self.latencia_503_ms = None
+        self.instantes = list(instantes)
+        self.n_hasta = [0] * len(self.instantes)
+
+    def desviar(self, fila):
+        metrica = fila.get("metric_name")
+        if metrica == "fin_relleno_ms":
+            valor = float(fila["metric_value"])
+            self.max_trend_csv = valor if self.max_trend_csv is None else max(self.max_trend_csv, valor)
+            return True
+        if metrica != "http_req_duration" or fila.get("scenario") != ESCENARIO_RELLENO:
+            return False
+        fin_ms, dur, estado_http = int(fila["timestamp"]), float(fila["metric_value"]), int(fila["status"])
+        fin = fin_ms / 1000
+        inicio = fin - dur / 1000
+        self.n += 1
+        self.estados[estado_http] += 1
+        if estado_http != 0:
+            self.protos[fila["proto"]] += 1
+        self.max_fin_ms = fin_ms if self.max_fin_ms is None else max(self.max_fin_ms, fin_ms)
+        if self.t_oom is None or fin < self.t_oom:
+            self.n_antes_oom += 1
+            self.n422_antes_oom += estado_http == 422
+        if estado_http == 503:
+            self.int503.append((inicio, fin))
+            self.latencia_503_ms = dur if self.latencia_503_ms is None else max(self.latencia_503_ms, dur)
+        elif estado_http == 0:
+            self.int0.append((inicio, fin, fila["error_code"]))
+            if self.t_rp is not None and self.t_rp - TOLERANCIA_OOM_S <= fin <= (self.f1 if self.f1 else math.inf):
+                self.cortados0[fila["error_code"]] += 1
+        if self.t_rp is not None and estado_http != 0 and inicio <= self.t_rp < fin:
+            self.o2 += 1
+        for k, instante in enumerate(self.instantes):
+            if fin <= instante:
+                self.n_hasta[k] += 1
+        return True
+
+
+def intervalos_de(filas):
+    """(intervalos_503, intervalos_0 con su error_code) de unas filas."""
+    return ([(f["inicio"], f["fin"]) for f in filas if f["estado"] == 503],
+            [(f["inicio"], f["fin"], f["error_code"]) for f in filas if f["estado"] == 0])
+
+
+def legitimo_con_ra(filas, retry_503, fase):
+    """Respuestas del legítimo de una fase, con el Retry-After de cada 503: en
+    orden de fin, cada 503 toma el valor de la etiqueta ra de la siguiente fila
+    de retry_after_503_s (k6 la anota justo al volver la petición). Un 503 sin
+    fila queda con ra None (R1: SIN CONCLUSION del instrumento). Devuelve
+    (respuestas, filas de la métrica que sobran)."""
+    propias = sorted((f for f in filas if f["escenario"] == "legitimo"), key=lambda f: f["fin"])
+    valores = [ra for _, ra in sorted(retry_503, key=lambda x: x[0])]
+    respuestas, usados = [], 0
+    for f in propias:
+        ra = None
+        if f["estado"] == 503:
+            ra = valores[usados] if usados < len(valores) else None
+            usados += 1
+        respuestas.append({"t": f["inicio"], "estado": f["estado"], "ra": ra, "fase": fase, "fin": f["fin"],
+                           "dur": f["dur"], "error_code": f["error_code"]})
+    return respuestas, max(0, len(valores) - usados)
+
+
+def muestras_k6(ruta, desfase):
+    """[(t VM, contenedor, CPU %, memoria en bytes o None)] de un stats.txt de
+    k6, con la hora del host corregida con el desfase de ejecutar_k6."""
+    salida = []
+    for marca, objeto in leer_estadisticas(ruta):
+        cpu = porcentaje(objeto.get("CPUPerc", ""))
+        if cpu is None:
+            continue
+        memoria = bytes_de((objeto.get("MemUsage") or "").split("/")[0])
+        salida.append((marca - desfase, objeto.get("Name", ""), cpu, memoria))
+    return salida
+
+
+def analizar_l6(ej, rep, salida_rep, f1, f2, fallos_previos, ticks, t_ini, muertos_al_final, fin_reposo_vm, humo):
+    """Análisis de L6 después de las dos fases (§3.3): conciliación, controles,
+    validez y veredicto con evaluar_l6; en el humo, además, todo lo de §5.2.
+    Devuelve el dict de la repetición; emitir_l6 publica la línea final."""
+    p(f"=== analisis de L6, repeticion {rep}" + (" (HUMO)" if humo else ""))
+    paradas = []
+    validez = list(fallos_previos)
+    k1, k2 = f1["k6"], (f2["k6"] if f2 else None)
+    t0, inicio, t_rp = f1["t0"], f1["inicio_relleno"], f1["t_rp"]
+    f1_vm = k1["fin_vm"]
+    i2 = k2["inicio_vm"] if k2 else None
+    fin_f2 = k2["fin_vm"] if k2 else None
+    if not f1["codigo_ok"]:
+        validez.append(fallo("fase 1: " + f1["texto_codigo"]))
+    if f2 is not None and not f2["codigo_ok"]:
+        validez.append(fallo("fase 2: " + f2["texto_codigo"]))
+    for motivo in comprobar_ip_muestras(k1["registro"], rep):
+        validez.append(fallo("IP del relleno: " + motivo))
+    csv1, resumen1 = f1["salida"] / "k6.csv", f1["salida"] / "resumen.json"
+    accion, texto = instrumento_fase1(csv1.is_file(), resumen1.is_file(), humo)
+    p(f"   instrumento de la fase 1: {texto}")
+    if accion == "PARADA":
+        paradas.append(texto)
+    elif accion == "SIN CONCLUSION":
+        validez.append(fallo(texto))
+    log = leer_log(salida_rep / "log_api.txt")
+    oom = sorted((m, msg) for m, msg in log if PATRON_OOM.search(msg))
+    lineas_oom = [m for m, _ in oom]
+    t_oom = lineas_oom[0] if lineas_oom else None
+    otras = collections.Counter(msg[msg.index("EVENTO"):] for _, msg in log
+                                if "EVENTO limitador_no_disponible" in msg and not PATRON_OOM.search(msg))
+    # Memoria de k6 (solo el humo): los dos instantes se fijan antes de leer el
+    # CSV para contar en la misma pasada cuántas peticiones acabaron antes.
+    muestras1 = muestras_k6(f1["salida"] / "stats.txt", k1["desfase"]) if k1["desfase"] is not None else []
+    m1 = m2 = None
+    if humo and inicio is not None and t_rp is not None:
+        m1 = next(((t, b) for t, _, _, b in muestras1 if t >= inicio + 30 and b is not None), None)
+        m2 = max(((t, b) for t, _, _, b in muestras1 if t < t_rp - TOLERANCIA_OOM_S and b is not None), default=None)
+    agg = AgregadorRelleno(t_rp, t_oom, f1_vm, [x[0] for x in (m1, m2) if x is not None])
+    vacio = {"filas": [], "descartes": {}, "retry": [], "checks": [], "ilegibles": 0, "motivos_ilegibles": {},
+             "retry_503": []}
+    datos1 = leer_csv_fases(csv1, desviar=agg.desviar) if csv1.is_file() else vacio
+    datos2, csv2 = None, None
+    if f2 is not None:
+        csv2 = f2["salida"] / "k6.csv"
+        if csv2.is_file():
+            datos2 = leer_csv_fases(csv2)
+        else:
+            validez.append(fallo("la fase 2 no dejo k6.csv"))
+            datos2 = vacio
+    # J1 con la CPU de k6 sumada por instante (§3.7): todas las ejecuciones de k6
+    # de la repetición, aunque vayan en serie.
+    rutas_k6 = [f1["salida"] / "stats.txt"] + ([f2["salida"] / "stats.txt"] if f2 else [])
+    cpu_maximas = []
+    for fase, k, datos, codigos in ((1, k1, datos1, (0, 108)), (2, k2, datos2, (0,))):
+        if k is None:
+            continue
+        cpu = {}
+        if k["desfase"] is not None and k["inicio_vm"] is not None and k["fin_vm"] is not None:
+            muestras = [(t, n, c) for ruta in rutas_k6 for t, n, c, _ in muestras_k6(ruta, k["desfase"])
+                        if k["inicio_vm"] <= t <= k["fin_vm"]]
+            suma = sumar_cpu_por_instante(muestras)
+            cpu = {"k6": None if suma is None else {"maxima": suma}}
+            if suma is not None:
+                cpu_maximas.append(suma)
+        insuficientes = set(PATRON_INSUFICIENTES.findall(k["registro"]))
+        validez += [fallo(f"fase {fase}: {f['motivo']}") for f in
+                    validez_generador(k, leer_t0(k["registro"]), datos, insuficientes, cpu, es_http=True,
+                                      codigos_validos=codigos)]
+    if agg.n:
+        v_proto, t_proto = evaluar_protocolo(agg.protos)
+        if v_proto != "PASA":
+            validez.append(fallo("relleno: " + t_proto))
+        if agg.estados.get(421):
+            validez.append(fallo(f"relleno: {agg.estados[421]} respuestas 421 (el Host de produccion no llego)"))
+    desde = k1["inicio_vm"] if k1["inicio_vm"] is not None else t_ini
+    vig = evaluar_vigilancia(ej, rep, ticks, t_ini, {k1["k6_id"]} | ({k2["k6_id"]} if k2 else set()),
+                             muertos_al_final, desde, fin_reposo_vm)
+    validez += vig["fallos"]
+    fin_ultimo = (k2 or k1)["fin_vm"]
+    if k1["inicio_vm"] is not None and fin_ultimo is not None and cruza_frontera(k1["inicio_vm"], fin_ultimo, 86400):
+        validez.append(fallo("la repeticion cruza las 00:00 UTC: la sal del limitador cambia y los contadores "
+                             "empiezan de cero"))
+    leg1, sobran1 = legitimo_con_ra(datos1["filas"], datos1["retry_503"], 1)
+    leg2, sobran2 = legitimo_con_ra(datos2["filas"], datos2["retry_503"], 2) if datos2 is not None else ([], 0)
+    if sobran1 or sobran2:
+        validez.append(fallo(f"instrumento del Retry-After: {sobran1 + sobran2} filas de retry_after_503_s sin su 503 "
+                             "del legitimo"))
+    salud = [{"t": f["inicio"], "estado": f["estado"], "fase": fase}
+             for fase, datos in ((1, datos1), (2, datos2)) if datos is not None
+             for f in datos["filas"] if f["escenario"] == "salud_get"]
+    n500 = agg.estados.get(500, 0) + sum(1 for datos in (datos1, datos2) if datos is not None
+                                          for f in datos["filas"] if f["estado"] == 500)
+    # Conciliación: contra las peticiones que pasan por el limitador (relleno y
+    # legítimo); /salud está exenta (limitador.py:198) y no explica ninguna línea.
+    fase1 = None
+    if csv1.is_file():
+        i503, i0 = intervalos_de([f for f in datos1["filas"] if f["escenario"] == "legitimo"])
+        fase1 = (i503 + agg.int503, i0 + agg.int0)
+    fase2 = None
+    if f2 is not None and csv2 is not None and csv2.is_file():
+        fase2 = intervalos_de([f for f in datos2["filas"] if f["escenario"] == "legitimo"])
+    if f1_vm is None or t0 is None:
+        validez.append(fallo("sin FinishedAt o sin T0 de la fase 1: no se concilian las lineas OOM"))
+        conciliacion = {"falla": [], "sin_conclusion": [], "texto": "sin conciliar"}
+    else:
+        conciliacion = conciliacion_l6(lineas_oom, t_rp, f1_vm, i2, fin_f2, fase1, fase2, f1["n_parado"])
+    p(f"   conciliacion de las lineas OOM (informacion): {conciliacion['texto']}")
+    if oom:
+        p(f"   primera linea OOM: {oom[0][1][oom[0][1].index('EVENTO'):]}")
+    if otras:
+        p(f"   otras lineas del limitador (informacion): {dict(otras.most_common(5))}")
+    maxmemory = MAXMEMORY_HUMO_B if humo else MAXMEMORY_REAL_B
+    claves = agg.n422_antes_oom
+    p(f"   relleno: {agg.n} peticiones, estados {dict(sorted(agg.estados.items()))}; claves (422 antes de la "
+      f"primera linea OOM) {claves}" + (f"; bytes por clave {maxmemory / claves:.1f} (maxmemory {maxmemory})"
+                                       if claves else "")
+      + ("" if t_oom is None or inicio is None else f"; primera linea OOM a los {t_oom - inicio:.1f} s del inicio"))
+    if cpu_maximas:
+        p(f"   CPU de k6 sumada por instante (J1): maxima {max(cpu_maximas):.0f} % (umbral {UMBRAL_CPU_K6:.0f} %)")
+    if t0 is None or inicio is None:
+        validez.append(fallo("la fase 1 no trae T0: no hay reloj de la BASE ni del relleno"))
+        ev = {"resultado": "SIN CONCLUSION", "validez": validez, "falla": [], "oraculo": [],
+              "muertes": vig["muertes"],
+              "salud_l6": texto_salud_l6(salud, None if i2 is None or f1_vm is None else i2 - f1_vm),
+              "h5": ("SIN CONCLUSION", "sin T0 de la fase 1"), "info": []}
+    else:
+        ev = evaluar_l6({"inicio_relleno": inicio, "t0": t0, "t_rp": t_rp, "i2": i2, "fin_vigilancia": fin_ultimo,
+                         "lineas_oom": lineas_oom, "conciliacion": conciliacion, "legitimo": leg1 + leg2,
+                         "salud": salud, "hueco_s": None if i2 is None or f1_vm is None else i2 - f1_vm,
+                         "n500": n500, "relleno": {"n422": agg.n422_antes_oom, "n": agg.n_antes_oom},
+                         "plan_b": None, "validez": validez, "muertes": vig["muertes"]})
+    for linea in ev["info"]:
+        p("   " + linea)
+    if humo:
+        paradas += informar_humo_l6(ej, f1, f2, agg, datos1, leg1 + leg2, oom, m1, m2, resumen1, cpu_maximas,
+                                    conciliacion)
+        if paradas:
+            p("HUMO: no es evidencia")
+            raise Parada("humo de L6: " + "; ".join(paradas))
+    return {"modo": "l6", "repeticion": rep, "humo": humo, "ev": ev, "conciliacion": conciliacion["texto"],
+            "muertes": vig["muertes"], "reinicios": vig["reinicios"]}
+
+
+def informar_humo_l6(ej, f1, f2, agg, datos1, legitimo, oom, m1, m2, resumen1, cpu_maximas, conciliacion):
+    """Lo que imprime el humo (§5.2), con su criterio escrito antes de verlo.
+    Devuelve los motivos de PARADA (la lista vacía si no hay ninguno)."""
+    paradas = []
+    k1, t_rp = f1["k6"], f1["t_rp"]
+    f1_vm = k1["fin_vm"]
+    p("=== humo de L6 (informacion; no es evidencia)")
+    # La ACL de la pila (scripts/generar_secretos.py:59-62) solo deja ping, multi,
+    # exec, incr, expire, ttl y client|setinfo al usuario aplicacion y desactiva
+    # default: INFO no está permitido y los secretos no se leen. Se dice, no se
+    # sustituye por otra cifra.
+    p("   MEMORIA_INICIAL del Redis de la pila: no medible (la ACL de la pila no permite INFO al usuario "
+      "aplicacion y default esta desactivado; ver la sonda A)")
+    if t_rp is None:
+        paradas.append(f"el humo no lleno Redis con maxmemory {MAXMEMORY_HUMO} en {RELLENO_HUMO_S} s (sin "
+                       "RELLENO_PARADO)")
+        return paradas
+    csv1 = f1["salida"] / "k6.csv"
+    h_csv = (k1["codigo"] == 108 and f1["n_parado"] >= 1 and csv1.is_file() and datos1["ilegibles"] == 0
+             and agg.max_fin_ms is not None and agg.max_fin_ms / 1000 >= t_rp - 1 and resumen1.is_file())
+    p(f"   H-CSV: {'cierta' if h_csv else 'FALSA'} (codigo {k1['codigo']}, RELLENO_PARADO {f1['n_parado']}, k6.csv "
+      f"{csv1.is_file()} con {datos1['ilegibles']} filas ilegibles, fin maximo del relleno "
+      f"{None if agg.max_fin_ms is None else agg.max_fin_ms / 1000 - t_rp} s respecto a T_RP, resumen.json "
+      f"{resumen1.is_file()})")
+    if not h_csv:
+        paradas.append("H-CSV falsa: plan B (§3.5) y sonda B'")
+    if agg.max_fin_ms is not None and f1_vm is not None:
+        motivo, info = regla_cota_humo(t_rp, agg.max_fin_ms / 1000, f1_vm)
+        p("   " + info)
+        if motivo:
+            paradas.append(motivo)
+    cortados = collections.Counter(agg.cortados0)
+    for x in legitimo:
+        if x["estado"] == 0 and f1_vm is not None and t_rp - TOLERANCIA_OOM_S <= x["fin"] <= f1_vm:
+            cortados[x["error_code"]] += 1
+    p(f"   estados 0 cortados por el aborto (fin en [T_RP - 2, F1]), por error_code: {dict(cortados)}")
+    lat_legitimo = max((x["dur"] for x in legitimo if x["estado"] == 503), default=None)
+    p(f"   latencia maxima de los 503: relleno {ms(agg.latencia_503_ms)} ms, legitimo {ms(lat_legitimo)} ms")
+    o1 = sum(n for codigo, n in cortados.items() if codigo not in E0_OOM)
+    p("   " + hipotesis_hgs(o1, agg.o2))
+    if agg.n:
+        extrapolado = csv1.stat().st_size / agg.n * PETICIONES_RELLENO_EXTRAPOLAR
+        p(f"   CSV de la fase 1 extrapolado a {PETICIONES_RELLENO_EXTRAPOLAR} peticiones: {extrapolado / 1e9:.2f} GB "
+          "(sobrestima: incluye las filas del vigia)")
+        if extrapolado > TOPE_CSV_HUMO_B:
+            paradas.append(f"CSV extrapolado {extrapolado / 1e9:.2f} GB > 3 GB: plan B")
+    if k1["desfase"] is None:
+        paradas.append(f"sin desfase host-VM valido en la fase 1 ({k1['motivo_desfase']}): no se extrapola la "
+                       "memoria de k6")
+    elif m1 is None or m2 is None:
+        paradas.append("no hay las dos muestras de memoria de k6 (inicio del relleno + 30 s y antes de T_RP - 2 s)")
+    else:
+        maxima = max((b for _, _, _, b in muestras_k6(f1["salida"] / "stats.txt", k1["desfase"]) if b is not None),
+                     default=m2[1])
+        n1, n2 = agg.n_hasta[0], agg.n_hasta[1]
+        extrapolada, motivo = extrapolar_memoria_k6(m1[1], n1, m2[1], n2, maxima)
+        p(f"   memoria de k6: M1 {m1[1] / 1048576:.0f} MiB con N1 {n1}, M2 {m2[1] / 1048576:.0f} MiB con N2 {n2}; "
+          + ("sin extrapolar" if extrapolada is None else f"extrapolada {extrapolada / 1073741824:.2f} GiB"))
+        if motivo:
+            paradas.append(motivo)
+        elif extrapolada > TOPE_MEMORIA_K6_HUMO_B:
+            paradas.append(f"memoria de k6 extrapolada {extrapolada / 1073741824:.2f} GiB > 3 GiB: plan B")
+    if resumen1.is_file():
+        try:
+            resumen = json.loads(resumen1.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            resumen = None
+        accion, valido, texto = comparar_trend_fin(maximo_trend(resumen, "fin_relleno_ms"), agg.max_fin_ms)
+        p(f"   D-8: {texto}")
+        if accion == "PARADA":
+            paradas.append(texto)
+    p(f"   linea OOM literal: {oom[0][1][oom[0][1].index('EVENTO'):] if oom else 'ninguna'}; RELLENO_PARADO "
+      f"{f1['n_parado']} (la primera en {t_rp:.3f}, la ultima {f1['marcas'][-1] - t_rp:.3f} s despues)")
+    p(f"   Retry-After de los 503 del legitimo: "
+      f"{dict(collections.Counter(x['ra'] for x in legitimo if x['estado'] == 503))}; IP_MUESTRA "
+      f"{len(PATRON_IP_MUESTRA.findall(k1['registro']))}; CPU de k6 sumada maxima "
+      f"{max(cpu_maximas) if cpu_maximas else 'sin medir'}")
+    if f2 is None:
+        paradas.append("la fase 2 del humo no se lanzo")
+    else:
+        mant = f1["mantenimiento"]
+        destroy = [e["t"] for e in ej.eventos.copia() if e["id"] == k1["k6_id"] and e["accion"] == "destroy"]
+        dies = [e for e in ej.eventos.copia() if e["id"] == k1["k6_id"] and e["accion"] == "die"]
+        otro = any(otro_murio([d], "", d["t"] - 1, d["t"] + 1, ej.mantenimientos) for d in dies)
+        p(f"   fase 2 del humo: arranco con --ip {IP_TRAEFIK}; mantenimiento del aborto con hasta "
+          f"{mant['hasta']} (destroy {destroy[:1]}, finito {math.isfinite(mant['hasta'])}); otro_murio para el die "
+          f"del k6 de la fase 1: {otro}; {f2['texto_codigo']}; hueco entre F1 e I2 "
+          f"{None if f1_vm is None or f2['k6']['inicio_vm'] is None else round(f2['k6']['inicio_vm'] - f1_vm, 1)} s")
+        if not f2["codigo_ok"]:
+            paradas.append("la fase 2 del humo sale con " + f2["texto_codigo"])
+    p(f"   conciliacion completa (informacion): {conciliacion['texto']}")
+    return paradas
+
+
+def emitir_l6(r, globales, humo):
+    """Publica L6 (§3.8): la línea l6 con el sufijo de las repeticiones, la
+    línea salud_l6 y h5 (información). Nunca hay OK global con una sola
+    repetición (J1): se marca NO OK aunque l6 sea PASA. En el humo, todo es
+    información y termina con "HUMO: no es evidencia"."""
+    ev = r["ev"]
+    v, motivos = veredicto_l6(ev, globales)
+    p("   salud_l6 (informacion, no cambia l6): " + ev["salud_l6"])
+    p(f"   h5 (informacion): {ev['h5'][0]}: {ev['h5'][1]}")
+    if humo:
+        p("   humo (informacion): " + linea_l6(v, motivos))
+        p("HUMO: no es evidencia")
+        estado["sin_conclusion"] = True
+        return v, motivos
+    texto = linea_l6(v, motivos)
+    if v == NO_SE_LLENO:
+        p(texto)
+    else:
+        emitir(v, texto)
+    # J1 exige 3 repeticiones: L6 no da OK global aunque pase (D-L6-2).
+    p("NO OK GLOBAL: l6 se mide con 1 de 3 repeticiones; J1 exige 3")
+    estado["sin_conclusion"] = True
+    return v, motivos
 
 
 def literales_siembra():
@@ -5498,24 +6998,37 @@ def guardar_resultados(salida, hechas):
     (salida / "resultados.json").write_text(json.dumps(hechas, indent=1, default=str), encoding="utf-8", newline="\n")
 
 
-def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones):
-    """--l2, --pico, --l3 o --l3b: comprobaciones, controles en sándwich, las
-    repeticiones, el escáner anti-fuga, el veredicto agregado y su emisión."""
-    if t != T_CONGELADA:
-        raise Parada(f"--t {t} no es la t congelada ({T_CONGELADA}): las tasas ya no serian las de la segunda congelacion")
-    tasas = tasas_de(t)
-    n_ataque = n_ips_ataque(tasas["login_pico"])
-    comprobar_cifras_congeladas(tasas, n_ataque, ips_necesarias(TASA_VICTIMA, 570, LIMITE_DENUNCIA, VENTANA_DENUNCIA_S),
-                                ips_necesarias(TASA_VICTIMA, 570, LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S))
-    plan = plan_ips(modo, repeticiones, n_ataque) if modo in ("l3", "l3b") else {}
-    p(f"=== {modo}: tasas {tasas}; tiempo estimado (peor caso) {estimar_repeticion_s(modo) / 60:.1f} min la repeticion 1 y "
-      f"{estimar_repeticion_s(modo, 2) / 60:.1f} min las siguientes, {estimar_total_s(modo, repeticiones) / 3600:.1f} h en total")
+def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones, humo=False):
+    """--l2, --pico, --l3, --l3b, --l5, --l6 o --l7: comprobaciones, controles en
+    sándwich, las repeticiones, el escáner anti-fuga, el veredicto agregado y su
+    emisión. L5 y L6 no usan t (no derivan ninguna tasa de ella)."""
+    if modo in ("l5", "l6"):
+        tasas, n_ataque = None, None
+    else:
+        if t != T_CONGELADA:
+            raise Parada(f"--t {t} no es la t congelada ({T_CONGELADA}): las tasas ya no serian las de la segunda "
+                         "congelacion")
+        tasas = tasas_de(t)
+        n_ataque = n_ips_ataque(tasas["login_pico"])
+        comprobar_cifras_congeladas(tasas, n_ataque,
+                                    ips_necesarias(TASA_VICTIMA, 570, LIMITE_DENUNCIA, VENTANA_DENUNCIA_S),
+                                    ips_necesarias(TASA_VICTIMA, 570, LIMITE_SEGUIMIENTO, VENTANA_SEGUIMIENTO_S))
+        if modo == "l7" and tasas["inundacion"] != TASA_SALUD_CONGELADA:
+            raise Parada(f"la tasa de la inundacion de /salud ({tasas['inundacion']}) no es la congelada "
+                         f"({TASA_SALUD_CONGELADA})")
+    if modo == "l6" and repeticiones != 1:
+        raise Parada("L6 se mide con una sola repeticion (D-L6-2): --repeticiones 1")
+    plan = plan_ips(modo, repeticiones, n_ataque) if modo in MODOS_PRODUCCION else {}
+    if modo != "l5":
+        p(f"=== {modo}: tasas {tasas}; tiempo estimado (peor caso) {estimar_repeticion_s(modo) / 60:.1f} min la "
+          f"repeticion 1 y {estimar_repeticion_s(modo, 2) / 60:.1f} min las siguientes, "
+          f"{estimar_total_s(modo, repeticiones) / 3600:.1f} h en total")
     if modo in ("l2", "pico"):
         comprobar_literales_argon2()
-    if modo in ("l3", "l3b"):
+    if modo in MODOS_PRODUCCION:
         comprobar_origen_produccion()
     ej = Ejecucion(t, datos, salida, cpus_canario, cpus_k6, None,
-                   LINEA_LIMITES_PRODUCCION if modo in ("l3", "l3b") else LINEA_LIMITES)
+                   LINEA_LIMITES_PRODUCCION if modo in MODOS_PRODUCCION else LINEA_LIMITES)
     ej.modo, ej.tasas, ej.plan_ips = modo, tasas, plan
     ej.literales = literales_siembra()
     ej.contrasena, ej.texto_humo = ej.literales["contrasena"], ej.literales["texto_humo"]
@@ -5537,7 +7050,12 @@ def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones):
                 ej.eventos = EventosDocker(hora_motor_ahora(), salida / "docker_events.err")
                 pila.callback(ej.eventos.parar)
                 for rep in range(1, repeticiones + 1):
-                    hechas.append(ejecutar_repeticion_fases(ej, modo, rep, repeticiones))
+                    if modo == "l5":
+                        hechas.append(ejecutar_repeticion_l5(ej, rep))
+                    elif modo == "l6":
+                        hechas.append(ejecutar_repeticion_l6(ej, rep, humo))
+                    else:
+                        hechas.append(ejecutar_repeticion_fases(ej, modo, rep, repeticiones))
                 # H1: el control final del detector, las lineas ilegibles o la muerte del
                 # stream de eventos son fallos de validez de todas las partes.
                 if not ejecutar_control(ej, "final"):
@@ -5563,12 +7081,17 @@ def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones):
             if v_fuga != "PASA":
                 globales.append(fallo("anti-fuga: " + t_fuga))
         ej.escaneado = True
+        if modo == "l6":
+            emitir_l6(hechas[0], globales, humo)
+            return
         controles = {}
         finales = agregar_fases(modo, hechas, repeticiones, globales, controles)
         for nombre, (veredicto, motivos) in finales.items():
             texto = f"{nombre}: {veredicto}" + (f" ({'; '.join(motivos)})" if motivos else "")
             if nombre == "l3b-b":
                 texto = linea_l3b_b(veredicto, motivos, controles.get(nombre)) or texto
+            if nombre == "l5" and veredicto == "PASA":
+                texto += f" ({TEXTO_COSTE_L5})"
             emitir(veredicto, texto)
     finally:
         # Lo medido hasta ahora queda escrito y escaneado tambien con PARADA o Ctrl+C (J7).
@@ -5595,16 +7118,28 @@ def main():
     modo.add_argument("--pico", action="store_true", help="L4: pico de 10 veces durante 30 s y recuperacion")
     modo.add_argument("--l3", action="store_true", help="200 IPs con los limites de produccion")
     modo.add_argument("--l3b", action="store_true", help="el coste del ataque de L2 con los limites de produccion")
-    analizador.add_argument("--t", type=float, help="t en segundos de la primera congelacion (obligatorio salvo con "
-                                                    "--hash; con --l2, --pico, --l3 y --l3b debe ser 0.0196)")
-    analizador.add_argument("--repeticiones", type=int, default=REPETICIONES_POR_DEFECTO,
-                            help="repeticiones independientes (3 por defecto)")
+    modo.add_argument("--l5", action="store_true", help="IP compartida: 11 denuncias desde una IP (produccion)")
+    modo.add_argument("--l6", action="store_true", help="agotar el limitador llenando Redis (produccion, 1 repeticion)")
+    modo.add_argument("--l7", action="store_true", help="inundacion de GET /salud con las victimas de L2 (produccion)")
+    analizador.add_argument("--t", type=float, help="t en segundos de la primera congelacion (obligatorio con --l1, "
+                                                    "--l2, --pico, --l3, --l3b y --l7; salvo en --l1 debe ser 0.0196)")
+    analizador.add_argument("--repeticiones", type=int, default=None,
+                            help="repeticiones independientes (3 por defecto; 1 en --l6)")
+    analizador.add_argument("--humo", action="store_true",
+                            help="solo con --l6: la sonda B (Redis pequeno, relleno de 600 s y fase 2 de 30 s)")
     analizador.add_argument("--conservar", action="store_true",
                             help="no borra la pila ni los temporales (solo para desarrollar)")
     argumentos = analizador.parse_args()
-    con_t = argumentos.l1 or argumentos.l2 or argumentos.pico or argumentos.l3 or argumentos.l3b
+    con_t = argumentos.l1 or argumentos.l2 or argumentos.pico or argumentos.l3 or argumentos.l3b or argumentos.l7
     modo_nuevo = "l2" if argumentos.l2 else "pico" if argumentos.pico else "l3" if argumentos.l3 else \
-        "l3b" if argumentos.l3b else None
+        "l3b" if argumentos.l3b else "l5" if argumentos.l5 else "l6" if argumentos.l6 else \
+        "l7" if argumentos.l7 else None
+    if argumentos.repeticiones is None:
+        # L6 se mide una vez (D-L6-2); el resto, con las 3 de A1.
+        argumentos.repeticiones = 1 if argumentos.l6 else REPETICIONES_POR_DEFECTO
+    if argumentos.humo and not argumentos.l6:
+        p("PARADA: --humo solo vale con --l6")
+        terminar_con_parada()
     if con_t and argumentos.t is None:
         # Sin t congelada, las tasas no serían las de la hipótesis publicada
         # antes de medir (sección 3, primera y segunda congelación).
@@ -5639,22 +7174,27 @@ def main():
     temporal = pathlib.Path(tempfile.mkdtemp(prefix="canario_estres_"))
     datos = pathlib.Path(tempfile.mkdtemp(prefix="canario_estres_datos_"))
     salida = pathlib.Path(tempfile.mkdtemp(prefix="canario_estres_salida_"))
-    # L3 y L3b: limites de produccion (sin CANARIO_LIMITES) y Caddy con
-    # Caddyfile.produccion; el resto, limites de estres y Caddyfile local.
-    produccion = modo_nuevo in ("l3", "l3b")
+    # L3, L3b, L5, L6 y L7: limites de produccion (sin CANARIO_LIMITES) y Caddy
+    # con Caddyfile.produccion; el resto, limites de estres y Caddyfile local.
+    produccion = modo_nuevo in MODOS_PRODUCCION
     for fichero in preparar_overrides(temporal, canario, None if produccion else LIMITES_ESTRES,
                                       caddy_produccion=produccion):
         BASE.extend(["-f", str(fichero)])
 
     parada = None
     try:
-        if con_t:
+        # El override de logging de PostgreSQL va en toda pila de medida (L5 y L6
+        # incluidas, aunque no usen t): preparar_repeticion lo comprueba.
+        if con_t or modo_nuevo in ("l5", "l6"):
             preparar_override_postgres(temporal)
+        if argumentos.humo:
+            preparar_override_redis(temporal)
         if argumentos.hash:
             arrancar(("api",), canario)
             medir_hash(salida)
         elif modo_nuevo is not None:
-            ejecutar_modo(modo_nuevo, argumentos.t, datos, salida, canario, k6, argumentos.repeticiones)
+            ejecutar_modo(modo_nuevo, argumentos.t, datos, salida, canario, k6, argumentos.repeticiones,
+                          humo=argumentos.humo)
         else:
             ejecutar_l1(argumentos.t, datos, salida, canario, k6, argumentos.repeticiones)
     except Parada as e:
