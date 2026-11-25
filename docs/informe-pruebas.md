@@ -419,3 +419,47 @@ Selenium sigue siendo la referencia histórica y el estándar W3C (WebDriver). A
 - Los dos commits de congelación con su push, y el tag de Git de la versión entregada.
 
 No se publican trazas de Playwright, HAR ni scripts con producción como destino por defecto.
+
+## 7. Resultados (del 23 al 25/11/2026)
+
+Esta sección se añade después de medir. No toca nada de lo anterior: los criterios siguen siendo los congelados, con sus erratas. Las pruebas de estrés usan `--t 0.0196` y la segunda congelación (`d1432c1`). Cada cifra está contada en la salida guardada de su ejecución, salvo el máximo deslizante de L3 (ver abajo). Commits medidos: L1 × 3 en `0a04158`, L3b en `c7791e6`, y L4 y los funcionales finales en `5e23535` (la consola de estos dos no imprime el commit; es el `HEAD` en el que se lanzaron, con el árbol limpio). L2 y L3, del 24/11, no dejaron el commit en lo que se guardó: la consola de L2 no lo imprime y la de L3 no se conservó.
+
+**Referencias de E15 al threat model.** E15 cita `docs/threat-model.md` §8 por líneas que se han movido al crecer el documento: "l.693" es hoy la entrada "El límite es por cliente, no global" (l.705), y "l.760-764" es hoy "Agotar los hilos de la API con logins" (l.773-782). El texto de E15 no se toca.
+
+### Funcionales
+
+Ejecución limpia final del 25/11, sobre el commit `5e23535`: `RESULTADO GLOBAL: OK`. Chromium pasa 3 de 3 (F1, F2 y F3), Firefox 3 de 3 y WebKit 2 de 2 (F2 y F3; F1 se deselecciona por diseño, sin `skip`). Pasan también el control de que ningún secreto de la ejecución aparece en los informes publicables y el de que el repositorio no ha cambiado.
+
+### Estrés
+
+| Prueba | Resultado | Lo que dice |
+|---|---|---|
+| L1 × 3 (23/11, `0a04158`) | OK | Codos estables en las 3 repeticiones: `login_email` en 0,75 × 2/t (76,53/s), `login_empresa` en 1,0 × 2/t y seguimiento en 400/s. Denuncia solo tiene codo (200/s) en la repetición 2. H1, REFUTADA en las 3: el codo cae en 0,75 × 2/t, fuera de 1,0 o 1,25 (E2); `hashes_saturados` en el codo: 1, 0 y 0, así que en la repetición 1 la refutación se apoya solo en dónde cae el codo. H2 de seguimiento, REFUTADA en las 3 (primera señal `limitador_no_disponible`). H2 de denuncia, REFUTADA en la repetición 2 y NO EVALUABLE en la 1 y la 3. La puerta de memoria R1, en PASA (peor caso de 140 693 504 B frente a 167 772 160 B) |
+| L1 × 1 (24/11, diagnóstica) | OK | Solo para H7 y con la imagen de PostgreSQL 18.7: no sustituye a la L1 × 3. `recrear_api`, de 7,8 a 8,1 s |
+| H7 | SIN CONCLUSION | Ver abajo |
+| L2 | FALLA (NO OK) | B1 FALLA en las tres víctimas. Cifras y mecanismo en threat-model §8 |
+| L3 | SIN CONCLUSION en las 3 repeticiones | Ver abajo |
+| L3b-a | PASA en las 3 | El ataque repartido no recibe ningún 429 |
+| L3b-b | FALLA en las 3 (NO OK) | La salida la da como esperada por el diseño (E15): la misma amenaza que L2, con los límites de producción |
+| L4 (25/11, `5e23535`) | OK | F3 PASA en las 3 repeticiones. Recuperación en 4, 5 y 5 s (mediana 5, frente a menos de 60): H6 se cumple. Sin muertes ni reinicios, con el humo previo y el posterior correctos en las 3 |
+
+**H7, SIN CONCLUSION por el paso 3 del criterio (escrito el 23/11, antes de medir).** El paso 1 no decide: los campos de validez están a 0, `arranques_redis_vistos` es 1 y no hay nada dentro de la ventana de arranque. El paso 2 tampoco: `limitador_permiso` es 0 y no hay ninguna línea `murio redis`. En el paso 3 solo cuenta un escalón, seguimiento e6, con N = 7, por debajo de los 20 que pide la muestra mínima. El criterio para en ese paso.
+
+**L3, SIN CONCLUSION en las 3 repeticiones (C1).** 0 FALLA, 0 muertes y 0 reinicios. De 1000 pares IP-ventana, 1, 1 y 2 pares solo pasan de 60 si se cuentan las peticiones ambiguas. El máximo de aceptadas por IP en un tramo deslizante de 60 s (información, no oráculo) no está en la salida guardada, porque la consola de L3 no se conservó. Se recalculó el 25/11, sin volver a medir, a partir de los `k6.csv` conservados, con un script aparte que reproduce `maximo_deslizante` de `tests/estres/lanzar.py` sin importarlo: 61, 62 y 61 por repetición, frente a los 120 que se esperan como mucho. Recalcularlo no reinterpreta C1. Tratar las ambiguas de otra forma solo se puede hacer después de la entrega, con revisión y antes de volver a medir, nunca a la vista de este resultado.
+
+**L3b.** Además de lo que recoge el threat model (§8):
+- En la repetición 1, las víctimas tuvieron 41 descartes con el aviso `Insufficient VUs` cada una (0 en las repeticiones 2 y 3), que salen en los motivos de la mediana.
+- El ataque de la repetición 1 tuvo 481 errores con estado 0 (plazo de 15 s agotado, `error_code` 1050) y 4 líneas `EVENTO` sin su 503 (H14, información).
+- La limpieza y el `git status` dan PASA.
+
+**L4 del 24/11, inválida.** El "FALLA" lo produjeron dos fallos del lanzador, no Canario:
+- el humo no traía el nombre de cada check en el CSV;
+- un contenedor de la imagen de la API, con un id que no era el de la API real, se contó como una muerte de Canario: era el servidor de la sonda de descartes, que hereda de la imagen las etiquetas de compose.
+
+Sin la muerte, esa ejecución habría dado `SIN CONCLUSION`. La corrección (commit `5e23535`, con el visto bueno de dos revisores en cada vuelta y 350 pruebas del lanzador en verde) añade el check al CSV, clasifica la sonda como clase propia y guarda los eventos de Docker de cada repetición. Antes de repetir se comprobó que `docker events` da el nombre del contenedor sin barra inicial, que es el literal del que depende el control C5.
+
+**L4 del 25/11, válida.** Además del veredicto, se comprobó en la salida cada condición de validez del arreglo: la cabecera del CSV lleva la columna del check; hay 8 checks con nombre en cada repetición (4 del humo previo y 4 del posterior) y 0 filas ilegibles; "control C5: PASA" en la repetición 1, con la sonda clasificada como sonda; el humo previo termina unos 9,9 s antes de la carga; el control de la BASE se cumple en el 100 % de sus ventanas; y no muere ningún servicio de Canario durante la prueba (los 4 cierres de las repeticiones 2 y 3 son los contenedores de la repetición anterior, con otros ids y antes del primer arranque). Cifras de la repetición 1: p95 de la BASE de 28 ms en denuncia, 10 ms en seguimiento, 7 ms en `GET /web/seguimiento` y 29 ms en login; durante el PICO, de unos 3,8 s (4,4 s en login), con entre un 1,9 y un 2,6 % de 503 y descartes que solo se informan (E14); en la RECUPERACIÓN, de 30, 11, 9 y 30 ms.
+
+### Severidad del hallazgo
+
+El hallazgo de L2 y L3b, "Agotar los hilos de la API con logins", queda en `docs/threat-model.md` §8 con severidad OWASP **ALTA**, en estado ABIERTO, como manda la sección 3. Se aplica E13: no hay información de negocio, así que se usa el impacto técnico. Los factores y la revisión están en esa entrada.
