@@ -5471,7 +5471,15 @@ def cliente_control(ej, nombre, ip, peticiones):
     contenedor = f"{PREFIJO_EFIMEROS}cliente_{nombre}"
     plazo = len(peticiones) * PLAZO_PETICION_CONTROL_S + MARGEN_CLIENTE_S
     try:
+        # La imagen de la API lleva las etiquetas de compose (project y
+        # service=api) y el contenedor las hereda: sin anularlas, `docker
+        # compose logs api` (Registro) recogía la salida del cliente, con los
+        # cuerpos de los 201 y sus códigos de seguimiento, en log_api.txt (el
+        # anti-fuga de L5 lo detectó el 25/11/2026). Vacías, compose ya no lo
+        # trata como un servicio de la pila; la clase la sigue dando
+        # canario.estres (clase_contenedor).
         r = ejecutar(["docker", "run", "--rm", "--name", contenedor, "--label", "canario.estres=control",
+                      "--label", "com.docker.compose.project=", "--label", "com.docker.compose.service=",
                       "--network", RED_EDGE, "--ip", ip, "--read-only", "--cap-drop", "ALL", "--security-opt",
                       "no-new-privileges", "--pids-limit", "64", "--memory", "64m", "--user", USUARIO_API,
                       "--cpuset-cpus", ej.cpus_k6, "--mount", f"type=bind,src={ej.datos},dst=/datos,readonly",

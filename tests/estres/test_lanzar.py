@@ -2864,6 +2864,14 @@ class ControlesConMocks(unittest.TestCase):
                     L.cliente_control(ej, "x", "10.88.1.2", [L.peticion_control("POST", "/salud", "h")])
             # PY-5: 1 peticion x 15 s + 60 s de margen, y el contenedor se borra a la fuerza.
             self.assertEqual(llamadas[0][1], 75)
+            # Anti-fuga de L5 (25/11/2026): el cliente anula las etiquetas de
+            # compose heredadas de la imagen, para que `compose logs api` no
+            # recoja su salida (cuerpos con códigos de seguimiento).
+            orden = llamadas[0][0]
+            etiquetas = [orden[i + 1] for i, x in enumerate(orden) if x == "--label"]
+            self.assertIn("com.docker.compose.project=", etiquetas)
+            self.assertIn("com.docker.compose.service=", etiquetas)
+            self.assertIn("canario.estres=control", etiquetas)
             self.assertEqual(llamadas[1][0][:3], ["docker", "rm", "-f"])
             # Control positivo: con respuesta, devuelve los resultados.
             salida = '[{"estado": 405, "cuerpo": "", "inicio": 1.0, "fin": 2.0}]'
