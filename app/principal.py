@@ -112,6 +112,7 @@ async def ciclo_de_vida(app):
     registro.info("ORIGEN PERSONAL: %s", origen_personal)
     pool = bd.crear_pool()
     limitador_api = None
+    tarea_resumen = None
     try:
         try:
             pool.open(wait=True, timeout=ESPERA_CONEXION_SEGUNDOS)
@@ -131,13 +132,34 @@ async def ciclo_de_vida(app):
         if fallos:
             raise verificacion_arranque.ArranqueBloqueado("limitador")
         registro.info("LIMITADOR VERIFICADO")
+        # Mamparo global del login (app/personal.py, "Mamparo global del
+        # login"): el semáforo y el limitador se crean aquí, dentro del bucle
+        # de eventos, y deben tener el mismo ancho que el ejecutor de Argon2.
+        # Uno distinto es un error de despliegue o de código: la API no
+        # arranca, en vez de encolar en el ejecutor o tirar capacidad.
+        semaforo_hash, limitador_hash = personal.crear_mamparo()
+        if fallo := personal.comprobar_mamparo(semaforo_hash, limitador_hash):
+            registro.error("ARRANQUE BLOQUEADO: mamparo_hashes: %s", fallo)
+            raise verificacion_arranque.ArranqueBloqueado("mamparo_hashes")
+        # El resumen de las saturaciones y su tarea periódica, que se guarda
+        # aquí para pararla al salir (el bucle solo guarda una referencia
+        # débil a sus tareas).
+        resumen_saturacion = personal.ResumenSaturacion()
+        tarea_resumen = resumen_saturacion.lanzar_tarea()
         app.state.pool = pool
         app.state.claves = claves_servidor
         app.state.limitador = limitador_api
         app.state.origen_web = origen_web
         app.state.origen_personal = origen_personal
+        app.state.semaforo_hash = semaforo_hash
+        app.state.limitador_hash = limitador_hash
+        app.state.resumen_saturacion = resumen_saturacion
         yield
     finally:
+        # Antes de cerrar el limitador y el pool: para la tarea y vacía la
+        # ventana abierta (parcial=1), para no perder el último resumen.
+        if tarea_resumen is not None:
+            await resumen_saturacion.parar_tarea(tarea_resumen)
         if limitador_api is not None:
             await limitador_api.cerrar()
         pool.close()

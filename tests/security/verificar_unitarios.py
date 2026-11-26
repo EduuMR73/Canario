@@ -76,6 +76,7 @@ PRUEBAS_POR_FICHERO = {
     "test_limitador": 36,
     "test_login": 8,
     "test_login_externo": 27,
+    "test_mamparo": 15,
     "test_personal": 8,
     "test_proveedores_externos": 18,
     "test_rutas_externo": 20,
@@ -89,7 +90,7 @@ PRUEBAS_POR_FICHERO = {
 # pruebas que llegan a un hash lo crean con personal.iniciar_ejecutor_hashes
 # y lo instalan con mock.patch.object sobre personal._ejecutor (test_login y
 # test_login_externo.LoQueRevocaLosVinculos.test_cambio_de_contrasena).
-TOTAL_PRUEBAS = 391
+TOTAL_PRUEBAS = 406
 SALIDA_SIN_PRUEBAS = 5  # unittest de Python 3.12: "NO TESTS RAN"
 
 B = chr(92)  # barra invertida, para escribir el texto exacto del fuente sin escapes

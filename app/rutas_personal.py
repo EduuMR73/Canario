@@ -107,6 +107,14 @@ Las rutas son síncronas (def): FastAPI las ejecuta en su pool de hilos, y
 tanto la base de datos como Argon2 son síncronos. La dependencia _sesion es
 asíncrona porque el limitador lo es; la autenticación, que es síncrona, la
 envía al pool de hilos.
+
+Salvo las tres que calculan un hash de contraseña (iniciar_sesion, activar y
+cambiar_contrasena), que son async def y pasan por el mamparo global del
+login (app/personal.py, en_mamparo): esperan su turno sin ocupar un hilo del
+pool, y su trabajo síncrono corre en un hilo del limitador propio del
+mamparo. Un 503 por falta de turno sale antes de llamar a app/personal.py:
+sin reserva, sin contar el intento y con la misma respuesta byte a byte
+exista o no la empresa o el email.
 """
 import logging
 import uuid
@@ -486,9 +494,11 @@ def _uuid(texto):
 # ---------------------------------------------------------------------------
 
 @router.post("/activacion")
-def activar(datos: Activacion, peticion: Request):
+async def activar(datos: Activacion, peticion: Request):
     estado = peticion.app.state
-    pendiente = personal.activar(estado.pool, estado.claves, datos.token, datos.contrasena)
+    # Calcula un Argon2: por el mamparo (ver la cabecera).
+    pendiente = await personal.en_mamparo(estado, personal.activar, estado.pool, estado.claves, datos.token,
+                                          datos.contrasena)
     return JSONResponse(content={"secreto_totp": pendiente.secreto_totp, "uri_totp": pendiente.uri_totp})
 
 
@@ -537,7 +547,7 @@ def respuesta_con_tokens(peticion, acceso, codigo=200):
 
 
 @router.post("/sesiones", status_code=201)
-def iniciar_sesion(datos: Login, peticion: Request):
+async def iniciar_sesion(datos: Login, peticion: Request):
     estado = peticion.app.state
     dispositivo = datos.token_dispositivo
     if peticion.state.navegador:
@@ -546,8 +556,10 @@ def iniciar_sesion(datos: Login, peticion: Request):
         if dispositivo is not None:
             return _error(422)
         dispositivo = peticion.state.cookies.get(COOKIE_DISPOSITIVO) or None
-    acceso = personal.iniciar_sesion(estado.pool, estado.claves, datos.empresa, datos.email, datos.contrasena,
-                                     datos.codigo_totp, dispositivo)
+    # Por el mamparo (ver la cabecera): un 503 por falta de turno sale aquí,
+    # antes de resolver la empresa y de reservar el intento.
+    acceso = await personal.en_mamparo(estado, personal.iniciar_sesion, estado.pool, estado.claves, datos.empresa,
+                                       datos.email, datos.contrasena, datos.codigo_totp, dispositivo)
     return respuesta_con_tokens(peticion, acceso, 201)
 
 
@@ -606,10 +618,13 @@ def yo(peticion: Request, sesion: SesionPersonal):
 
 
 @router.post("/contrasena")
-def cambiar_contrasena(datos: CambioContrasena, peticion: Request, sesion: SesionPersonal):
+async def cambiar_contrasena(datos: CambioContrasena, peticion: Request, sesion: SesionPersonal):
     estado = peticion.app.state
-    return respuesta_con_tokens(peticion, personal.cambiar_contrasena(
-        estado.pool, estado.claves, sesion, datos.contrasena_actual, datos.contrasena_nueva, datos.codigo_totp))
+    # Dos Argon2 (verificar la actual y crear la nueva) con un solo turno del
+    # mamparo: dentro van uno detrás de otro (ver la cabecera).
+    acceso = await personal.en_mamparo(estado, personal.cambiar_contrasena, estado.pool, estado.claves, sesion,
+                                       datos.contrasena_actual, datos.contrasena_nueva, datos.codigo_totp)
+    return respuesta_con_tokens(peticion, acceso)
 
 
 @router.get("/usuarios")

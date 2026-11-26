@@ -120,8 +120,10 @@ class ComprobarFactores(unittest.TestCase):
                     self.assertRaises(personal.Saturado):
                 factores(reservada, envuelta)
             self.assertEqual(argon2.call_count, 0)
+            # El semáforo interno: con el mamparo no debería saturarse, así
+            # que es un error y sale en cada caso (app/personal.py).
             self.assertEqual(registro.output, [
-                "WARNING:canario.personal:EVENTO hashes_saturados: no hay hueco para calcular un hash de contrasena"])
+                "ERROR:canario.personal:EVENTO hashes_saturados_interno etapa=interna"])
         finally:
             for _ in range(ocupados):
                 personal._semaforo.release()

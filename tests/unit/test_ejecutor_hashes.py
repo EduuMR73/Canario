@@ -33,7 +33,8 @@ from fastapi import FastAPI
 from app import bd, personal, rutas_personal, verificacion_arranque
 
 NOMBRES_ARGON2 = frozenset({"argon2_0", "argon2_1"})
-EVENTO_SATURADOS = "WARNING:canario.personal:EVENTO hashes_saturados: no hay hueco para calcular un hash de contrasena"
+# El del semáforo interno (con el mamparo del login, un error en cada caso).
+EVENTO_SATURADOS = "ERROR:canario.personal:EVENTO hashes_saturados_interno etapa=interna"
 EVENTO_SIN_CREAR = "ERROR:canario.personal:EVENTO ejecutor_no_disponible: motivo=sin_crear"
 EVENTO_CERRADO = "ERROR:canario.personal:EVENTO ejecutor_no_disponible: motivo=cerrado"
 CUERPO_503 = '{"detalle": "servicio ocupado; inténtelo de nuevo en unos segundos"}'.encode()

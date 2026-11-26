@@ -86,6 +86,12 @@ memoria: cada hilo de AnyIO que calculaba un hash dejaba sus 19 MiB en su
 arena de glibc (banco D1, ver "Argon2 en un ejecutor propio"). Argon2 se
 calcula fuera de toda transacción, para no retener conexiones del pool.
 
+Mamparo global del login (ver "Mamparo global del login"): las tres rutas
+que calculan un hash (login, activación y cambio de contraseña) esperan su
+turno en el bucle de eventos, sin ocupar un hilo de AnyIO, y solo las
+admitidas toman un hilo, de un limitador propio de HASHES_SIMULTANEOS. Sin
+turno en ESPERA_HASH segundos, 503 antes de tocar la base de datos.
+
 Login con un proveedor externo (docs/threat-model.md, 6.19): sustituye a la
 contraseña, nunca al TOTP, y solo desde un dispositivo de confianza vigente
 de la cuenta vinculada. El intento se reserva por ese dispositivo y por la
@@ -116,8 +122,10 @@ códigos ni tokens. Cada login fallido deja EVENTO login_fallido (OWASP ASVS
 5.0.0, 16.3.1), con la misma llamada en todos los caminos de fallo; los
 correctos quedan en la auditoría (ACCION_ACCESO).
 """
+import asyncio
 import datetime
 import logging
+import math
 import secrets
 import threading
 import time
@@ -127,6 +135,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+import anyio
+import anyio.to_thread
 import psycopg
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError
@@ -166,6 +176,10 @@ NOMBRES_HILOS_HASH = frozenset({"argon2_0", "argon2_1"})
 # Plazo de la barrera con la que el arranque obliga a crear los 2 hilos. Si
 # vence, el ejecutor tiene menos hilos de los esperados y la API no arranca.
 ESPERA_ARRANQUE_HILOS = 5.0
+# Resumen de las saturaciones del mamparo (ResumenSaturacion): ventanas de 60
+# segundos alineadas a UTC y una tarea que vacía las cerradas cada 5 segundos.
+VENTANA_RESUMEN = 60
+PERIODO_RESUMEN = 5
 
 # Bloqueo progresivo (ver la cabecera).
 FALLOS_ANTES_DE_ESPERAR = 5
@@ -574,6 +588,7 @@ class EjecutorNoArrancado(Exception):
     arrancar: la API no arranca (app/principal.py, ArranqueBloqueado)."""
 
 
+
 class HashAnidado(Exception):
     """Un hash pedido desde un hilo del propio ejecutor. Nunca ocurre en el
     código actual; si ocurriera, el hilo esperaría a un trabajo encolado
@@ -822,9 +837,16 @@ def _rechazar_llamada_anidada():
 
 
 def _tomar_hueco_hash():
-    """Va antes del try de quien lo llama: sin hueco no hay nada que liberar."""
+    """Va antes del try de quien lo llama: sin hueco no hay nada que liberar.
+
+    Con el mamparo (ver "Mamparo global del login") nunca hay más de
+    HASHES_SIMULTANEOS peticiones aquí dentro, y cada una toma como mucho un
+    hueco a la vez, así que este semáforo no debería saturarse. Si se satura,
+    algo se salta el mamparo (o lo dejó atrás, por ejemplo una cancelación
+    nativa de asyncio): por eso es un error y sale en cada caso, sin
+    resumen."""
     if not _semaforo.acquire(timeout=ESPERA_HASH):
-        registro.warning("EVENTO hashes_saturados: no hay hueco para calcular un hash de contrasena")
+        registro.error("EVENTO hashes_saturados_interno etapa=interna")
         raise Saturado
 
 
@@ -861,6 +883,169 @@ def _verificar_hash(hash_guardado, contrasena):
 def _crear_hash(contrasena):
     """Corre en el ejecutor."""
     return _hasher.hash(contrasena)
+
+
+# ---------------------------------------------------------------------------
+# Mamparo global del login
+# ---------------------------------------------------------------------------
+# Por qué (L2 y L3b, 24 y 25/11; D2, 26/11): las rutas del login eran def y
+# retenían un hilo de AnyIO (40 en total, compartidos con las víctimas del
+# denunciante) durante todo el recorrido, también mientras esperaban el
+# semáforo de Argon2. D2 los encontró prestados los 40 en 170 de 170
+# muestras, con una espera de 10 s y, de mediana, el 97,5 % de los hilos no
+# libres en el semáforo o en Argon2. Con el mamparo, la espera del turno es
+# una corrutina en el bucle de eventos, y solo las HASHES_SIMULTANEOS
+# admitidas toman un hilo, de su propio CapacityLimiter: el resto del
+# proceso conserva sus 40.
+#
+# Es un tope de concurrencia sobre un recurso de CPU global (los 2 hilos de
+# Argon2), no un límite de peticiones: no decide quién entra según quién es,
+# sino cuánto Argon2 corre a la vez. Coste declarado (docs/threat-model.md,
+# 8): con la cola FIFO, en una inundación entra aproximadamente c/λ de los
+# logins, también los del personal legítimo de cualquier empresa.
+#
+# Invariantes:
+# * El plazo (ESPERA_HASH) cubre SOLO la espera del turno. Un login admitido
+#   termina aunque su hash tarde más: un 503 a mitad dejaría el trabajo
+#   hecho (el intento ya reservado) sin respuesta.
+# * El 503 de la admisión sale antes de llamar a nada de este módulo: sin
+#   reserva, el intento no cuenta, y la respuesta es la misma byte a byte
+#   exista o no la empresa o el email.
+# * abandon_on_cancel=False: si se cancela la petición con su función ya en
+#   el hilo, el turno y la ficha del limitador se devuelven al acabar el
+#   hilo, no antes; si no, entraría otra con el hash anterior aún en marcha.
+#   Declarado: esto solo vale para las cancelaciones de AnyIO; una
+#   cancelación nativa de asyncio (task.cancel()) no respeta el escudo de
+#   AnyIO y suelta el turno antes (comprobado con anyio 4.15.1). Si eso
+#   pasa, el semáforo interno de threading lo frena y lo delata con EVENTO
+#   hashes_saturados_interno.
+# * El ejecutor y el semáforo de threading se quedan: son los que acotan la
+#   memoria y lo que llama a Argon2 sin pasar por una ruta.
+
+def crear_mamparo():
+    """(semáforo, limitador) del mamparo, con HASHES_SIMULTANEOS cada uno.
+    Lo llama el arranque de la API (app/principal.py) dentro del bucle de
+    eventos. max_value convierte una liberación de más en un ValueError
+    visible en vez de un hueco extra silencioso."""
+    return (anyio.Semaphore(HASHES_SIMULTANEOS, max_value=HASHES_SIMULTANEOS),
+            anyio.CapacityLimiter(HASHES_SIMULTANEOS))
+
+
+def comprobar_mamparo(semaforo, limitador):
+    """None si el semáforo, el limitador y el ejecutor de Argon2 instalado
+    tienen HASHES_SIMULTANEOS; si no, el detalle (sin datos de nadie). Lo
+    llama el arranque con los recién creados, y si hay detalle la API no
+    arranca (app/principal.py, ArranqueBloqueado("mamparo_hashes")): un
+    mamparo más ancho que el ejecutor encolaría en el ejecutor (y saturaría
+    el semáforo interno); uno más estrecho tiraría capacidad.
+
+    Devuelve el detalle en vez de lanzar para que en app/principal.py todo lo
+    del mamparo sean sentencias con sus nombres: la comprobación por ast de
+    la campaña, antes de P6, quita esas sentencias y exige el resto idéntico
+    al de 5bd462a."""
+    ejecutor = _ejecutor
+    hilos = None if ejecutor is None else ejecutor._max_workers
+    if (semaforo.value, semaforo.max_value, limitador.total_tokens, hilos) == (HASHES_SIMULTANEOS,) * 4:
+        return None
+    return (f"semaforo={semaforo.value}/{semaforo.max_value} limitador={limitador.total_tokens} "
+            f"ejecutor={hilos}; se esperaba {HASHES_SIMULTANEOS} en los tres")
+
+
+async def en_mamparo(estado, funcion, *argumentos):
+    """Ejecuta funcion(*argumentos) en un hilo del limitador del mamparo,
+    después de obtener turno en su semáforo. estado es app.state, con
+    semaforo_hash, limitador_hash y resumen_saturacion. Saturado si no hay
+    turno en ESPERA_HASH segundos.
+
+    El except va pegado al with: así solo captura el TimeoutError del plazo
+    de la espera. Un TimeoutError que saliera de la función (por ejemplo, de
+    la base de datos) no se convierte en un 503 de saturación; sigue su
+    camino hasta ErroresInternos (500)."""
+    try:
+        with anyio.fail_after(ESPERA_HASH):
+            await estado.semaforo_hash.acquire()
+    except TimeoutError:
+        estado.resumen_saturacion.anotar()
+        raise Saturado from None
+    try:
+        return await anyio.to_thread.run_sync(funcion, *argumentos, limiter=estado.limitador_hash,
+                                              abandon_on_cancel=False)
+    finally:
+        estado.semaforo_hash.release()
+
+
+class ResumenSaturacion:
+    """Cuenta las saturaciones de la admisión por ventanas de VENTANA_RESUMEN
+    segundos alineadas a UTC (floor(reloj() / 60)).
+
+    Por qué: una línea por 503 dejaría inundar el log a quien inunda el
+    login, y una sola por ventana sin contar no permitiría conciliar los 503
+    con lo que ve el cliente. La primera saturación de cada ventana escribe
+    EVENTO hashes_saturados etapa=admision al momento; las demás solo suman,
+    y al cerrarse la ventana sale una línea con cuántas fueron y sus límites
+    en epoch. Ninguna lleva empresa, email ni IP: la admisión no sabe de
+    quién es la petición.
+
+    Declarado: un salto del reloj de pared puede mover una saturación de
+    ventana. Un OOM, un SIGKILL o una segunda señal (force_exit de uvicorn)
+    pierden el resumen de la ventana abierta. Un solo proceso (Dockerfile).
+
+    El reloj es inyectable para las pruebas. threading.Lock y no un cerrojo
+    de asyncio: anotar y vaciar no esperan nada dentro, y así siguen siendo
+    correctos si alguna vez se llaman desde un hilo."""
+
+    def __init__(self, reloj=time.time):
+        self.reloj = reloj
+        self._cerrojo = threading.Lock()
+        self._ventanas = {}
+
+    def anotar(self):
+        ventana = math.floor(self.reloj() / VENTANA_RESUMEN)
+        with self._cerrojo:
+            veces = self._ventanas.get(ventana, 0) + 1
+            self._ventanas[ventana] = veces
+        if veces == 1:
+            registro.warning("EVENTO hashes_saturados etapa=admision")
+
+    def vaciar(self, ahora=None, forzar=False):
+        """Una línea por cada ventana cerrada en ahora con alguna saturación.
+        Con forzar, también la abierta, con parcial=1: es lo que hace la
+        parada de la API para no perder la última ventana."""
+        actual = math.floor((self.reloj() if ahora is None else ahora) / VENTANA_RESUMEN)
+        with self._cerrojo:
+            listas = sorted((ventana, veces) for ventana, veces in self._ventanas.items()
+                            if forzar or ventana < actual)
+            for ventana, _ in listas:
+                del self._ventanas[ventana]
+        for ventana, veces in listas:
+            inicio = ventana * VENTANA_RESUMEN
+            registro.warning("EVENTO hashes_saturados_resumen etapa=admision n=%d inicio=%d fin=%d%s", veces, inicio,
+                             inicio + VENTANA_RESUMEN, " parcial=1" if ventana >= actual else "")
+
+    async def vaciar_cada(self, periodo=PERIODO_RESUMEN):
+        """La tarea periódica. Un fallo al vaciar no la mata: deja un evento
+        con la clase del error (nunca su mensaje) y sigue, porque sin ella
+        ninguna ventana volvería a resumirse. CancelledError no se captura:
+        es como la para el arranque."""
+        while True:
+            await asyncio.sleep(periodo)
+            try:
+                self.vaciar(self.reloj())
+            except Exception as error:  # noqa: BLE001 - se registra y la tarea sigue
+                registro.error("EVENTO resumen_saturacion_caido: %s", type(error).__name__)
+
+    def lanzar_tarea(self, periodo=PERIODO_RESUMEN):
+        """Crea la tarea periódica. Quien la llama guarda la referencia: el
+        bucle de eventos solo guarda una débil."""
+        return asyncio.create_task(self.vaciar_cada(periodo))
+
+    async def parar_tarea(self, tarea):
+        """La cancela, espera a que acabe sin recoger su CancelledError
+        (asyncio.wait no la relanza, pero sí una cancelación de quien llama)
+        y vacía también la ventana abierta."""
+        tarea.cancel()
+        await asyncio.wait({tarea})
+        self.vaciar(forzar=True)
 
 
 # ---------------------------------------------------------------------------

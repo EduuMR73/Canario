@@ -150,6 +150,11 @@ def aplicacion():
     # El sitio del denunciante: /yo compone con él el enlace del canal
     # (app/rutas_personal.py). La API real lo fija al arrancar.
     app.state.origen_web = OTRO_PUERTO
+    # El mamparo del login (app/personal.py, en_mamparo), como lo crea el
+    # arranque: el login pasa por él. Creado fuera del bucle, AnyIO da sus
+    # adaptadores, que sirven en el asyncio.run de cada petición.
+    app.state.semaforo_hash, app.state.limitador_hash = personal.crear_mamparo()
+    app.state.resumen_saturacion = personal.ResumenSaturacion()
     return app
 
 

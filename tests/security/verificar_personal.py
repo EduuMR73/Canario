@@ -109,6 +109,10 @@ y 6.9). Qué prueba:
   empresa cambia a mitad, SIN
   CONCLUSION. Con esas filas, la auditoría desde lo más reciente pagina sin
   huecos y coincide fila a fila con la de desde el principio.
+* Mamparo global del login (n): con los 2 turnos ocupados por logins que
+  esperan un bloqueo de fila, un login sin turno da 503 con Retry-After sin
+  contar el intento (control: un 401 sí lo cuenta), y el 503 es el mismo
+  byte a byte con la empresa y el email existentes o no.
 * Regla acceso del limitador con los límites de producción, y 503 sin Redis
   sin contar ningún intento. Regla cuenta (segunda capa, por identidad): la
   misma cuenta desde dos IPs agota su límite, otra cuenta desde la misma IP
@@ -349,6 +353,10 @@ import base64, concurrent.futures, http.client, json, socket, ssl, sys, time
 def una(pt):
     conexion = None
     try:
+        # Dentro de un grupo, "retraso" fija el orden de llegada (n: las que
+        # esperan turno en el mamparo del login llegan después).
+        if pt.get("retraso"):
+            time.sleep(pt["retraso"])
         if pt.get("tls"):
             contexto = ssl.create_default_context()
             contexto.check_hostname = False
@@ -3073,6 +3081,94 @@ def seccion_l():
              res.get("resolver") == [MODO_SOLO_LECTURA], control, f"{res.get('resolver')}")
 
 
+def seccion_n():
+    """Mamparo global del login (app/personal.py, en_mamparo). Los 2 turnos
+    se ocupan con logins de una cuenta cuya fila retiene otra sesión: su
+    reserva espera el lock_timeout de 2 s (app/bd.py) con el turno tomado, y
+    dan el 503 de SATURACION. El orden de llegada lo fija el retraso del
+    cliente HTTP, porque la cola del turno es FIFO:
+    * a los 0 s, los ocupantes 1 y 2 toman los 2 turnos y los retienen pre +
+      2 s (pre: lo que tardan desde el turno hasta esperar el lock), así que
+      su 503 llega entre 2,0 y 2,5 s;
+    * a los 0,5 s, los ocupantes 3 y 4 esperan turno; su plazo vence a los
+      2,5 s y los turnos se sueltan a los 2 s + pre, así que los toman si pre
+      es menor que 0,5 s, y los retienen otros pre + 2 s (su 503 llega entre
+      3,4 y 4,6 s desde que envían);
+    * a los 1,0 s, los 4 de prueba esperan turno detrás de los ocupantes 3 y
+      4 y agotan sus 2 s sin turno (503 entre 2,0 y 2,5 s).
+    Por qué los 4 ocupantes no llegan a la vez: los 2 que esperaran desde los
+    0 s no heredarían los turnos de los 2 primeros, porque su plazo vence a
+    los 2 s, antes de que se suelten a los 2 s + pre, y los turnos pasarían a
+    los de prueba (que llegarían a personal y darían 401). Ninguno de
+    prueba usa la fila retenida, así que su 503 solo puede ser el de la
+    admisión."""
+    p("=== n) mamparo global del login: 503 sin contar el intento y uniforme")
+    victima, retenida = CUENTAS["victima"], CUENTAS["instructor"]
+    poner_sin_confianza(victima, 0)
+    antes = contadores(victima)[0]
+    marcas_antes = sum("EVENTO hashes_saturados etapa=admision" in l for l in lineas_log("api"))
+    ocupan = [login(retenida, contrasena="ocupa-turno-" + secrets.token_hex(4), dispositivo=None)] * 4
+    # Empresa y email existentes o no, todos sin dispositivo y con la
+    # contraseña mal: si alguno llegara a personal, contaría o daría 401.
+    inexistente = "0123456789abcdef0123456789abcdef"
+    otro_email = "nadie-mamparo@alfa.test"
+    pruebas = {"empresa y email existentes": login(victima, contrasena="mamparo-equivocada", dispositivo=None),
+               "empresa inexistente": login(victima, contrasena="mamparo-equivocada", dispositivo=None,
+                                            empresa=inexistente),
+               "email inexistente": login(victima, contrasena="mamparo-equivocada", dispositivo=None,
+                                          email=otro_email),
+               "empresa y email inexistentes": login(victima, contrasena="mamparo-equivocada", dispositivo=None,
+                                                     empresa=inexistente, email=otro_email)}
+    # Retrasos (ver el docstring): 0,5 s entre los ocupantes 1-2 y 3-4 es el
+    # margen para pre; con 0,3 s fallaba en cuanto pre llegaba a 0,35 s
+    # (ensayado con el en_mamparo real). El 1,0 s de las pruebas las pone
+    # detrás de los ocupantes 3 y 4 en la cola.
+    grupo = [*ocupan[:2], *({**peticion, "retraso": 0.5} for peticion in ocupan[2:]),
+             *({**peticion, "retraso": 1.0} for peticion in pruebas.values())]
+    respuestas, visto = mientras_se_bloquea(
+        f"select 1 from canal.usuario_personal where id = '{retenida.usuario_id}' for update;",
+        lambda: http([{"grupo": grupo}]), segundos=15)
+    respuestas = respuestas or [{}] * len(grupo)
+    de_ocupan, de_pruebas = respuestas[:4], dict(zip(pruebas, respuestas[4:]))
+    tras_503 = contadores(victima)[0]
+    # Diagnóstico: estado, Retry-After y tiempo de cada una. No cambia ningún
+    # oráculo.
+    for nombre, r in [*(("ocupa turno", r) for r in de_ocupan), *de_pruebas.items()]:
+        p(f"   {nombre}: {r.get('estado')} retry-after={(r.get('cabeceras') or {}).get('retry-after')!r} "
+          f"ms={round(r.get('ms') or 0)}" + (f" error={r['error']}" if "error" in r else ""))
+    marcas = sum("EVENTO hashes_saturados etapa=admision" in l for l in lineas_log("api")) - marcas_antes
+    p(f"   lineas nuevas EVENTO hashes_saturados etapa=admision: {marcas}")
+    # Control: con la fila retenida, los que ocupan los turnos dan el 503 de
+    # SATURACION (la cola existió), y un 401 sin dispositivo sí cuenta. Los
+    # tiempos demuestran el orden: los ocupantes 1 y 2 sueltan el turno tras
+    # su lock_timeout, y los 3 y 4 lo heredan (si no lo heredaran, darían el
+    # 503 de la admisión a los 2 s, y los de prueba entrarían).
+    ms_ocupan = [r.get("ms") or 0 for r in de_ocupan]
+    control_cola = (visto and all(r.get("estado") == 503 and r.get("cuerpo") == CUERPO_503_OCUPADO for r in de_ocupan)
+                    and all(2000 <= ms <= 2500 for ms in ms_ocupan[:2])
+                    and all(3400 <= ms <= 4600 for ms in ms_ocupan[2:]))
+    pasa(control_cola, "n) control: con la fila retenida mas que lock_timeout, los 4 logins que ocupan los turnos "
+                       "dan 503, los 2 primeros en [2000, 2500] ms y los 2 siguientes en [3400, 4600] ms "
+                       f"({[round(ms) for ms in ms_ocupan]})")
+    control_401 = es_401(una(login(victima, contrasena="mamparo-equivocada", dispositivo=None)))
+    tras_401 = contadores(victima)[0]
+    control_cuenta = control_401 and tras_401 == tras_503 + 1
+    pasa(control_cuenta, f"n) control: un 401 sin dispositivo cuenta el intento (+1: {tras_503} -> {tras_401})")
+    sin_fecha = [(r.get("estado"), r.get("cuerpo"), {k: v for k, v in (r.get("cabeceras") or {}).items()
+                                                      if k != "date"})
+                 for r in de_pruebas.values()]
+    # El 503 llega tras los 2 s de espera del turno, no antes ni después de la
+    # holgura de 0,5 s.
+    ms_pruebas = [r.get("ms") or 0 for r in de_pruebas.values()]
+    negativo("n) sin turno en 2 s, el login da 503 con Retry-After 5 en [2000, 2500] ms y no cuenta el intento (+0)",
+             all(e == 503 and c == CUERPO_503_OCUPADO and h.get("retry-after") == REINTENTAR_TRAS
+                 for e, c, h in sin_fecha) and tras_503 == antes and all(2000 <= ms <= 2500 for ms in ms_pruebas),
+             control_cola and control_cuenta, f"intentos {antes} -> {tras_503}, ms {[round(ms) for ms in ms_pruebas]}")
+    negativo("n) el 503 sin turno es igual byte a byte con la empresa y el email existentes o no",
+             all(x == sin_fecha[0] for x in sin_fecha) and sin_fecha[0][0] == 503, control_cola,
+             f"{[(n, x[0]) for n, x in zip(pruebas, sin_fecha)]}")
+
+
 def seccion_h():
     p("=== h) regla acceso del limitador (limites de produccion)")
     # Antes de recrear la API: después su log anterior ya no existe.
@@ -3330,7 +3426,7 @@ def main():
     try:
         for seccion in (seccion_a, seccion_b, seccion_c, seccion_d, seccion_e, seccion_f, seccion_g, seccion_j,
                         seccion_k, seccion_k_no_veraz, seccion_k_redaccion, seccion_k_auditor, seccion_k_lecturas,
-                        seccion_m, seccion_l, seccion_i,
+                        seccion_m, seccion_l, seccion_n, seccion_i,
                         seccion_h):
             seccion()
     except Parada as e:
