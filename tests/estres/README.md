@@ -290,3 +290,15 @@ python tests\estres\diagnosticar_memoria.py --regresion
 ```
 
 Deja en %TEMP% `verificacion_diag_memoria_regresion.txt` (sin pisar la salida de D1) y la carpeta `canario_diag_salida_*` con el JSON crudo y `resultados.json`. Hasta que L1 cumpla su predicción, un `PASA` se resume como "mitigación de la causa 1 demostrada en el banco, pendiente de L1", nunca como "arreglado".
+
+# Diagnóstico D2 (`--d2`): dónde espera el login
+
+Una repetición de L2 (la misma pila, `LIMITES_ESTRES` y la INUNDACIÓN de `fases.js`) en la que el proceso de la API es `tests/estres/diag_hilos.py`. Lo monta de solo lectura en `/diag/diag_hilos.py` un override del compose temporal (entrypoint `python`, command `-I -B -u /diag/diag_hilos.py`), que el lanzador compara antes de arrancar con lo que resuelve compose; nada cambia en la imagen ni en `compose.produccion.yaml`. El programa sirve `app.principal:aplicacion` con la Config de `docker-compose.yml` y el `Dockerfile`, corre los 9 controles positivos antes de abrir el socket y escribe una muestra JSON (prefijo `DIAG2 `) cada 0,5 s en el log de la API. En lugar del veredicto de L2, el lanzador aplica la tabla de decisión de D2 (`diag_hilos.evaluar_d2`) y termina con `D2: <decisión> (fila N de la tabla)`: SIN CONCLUSION, PARADA, PARADA (M1), A2 o A2 con nota. La tabla, los controles, la ventana y las desviaciones están en [docs/informe-pruebas.md](../../docs/informe-pruebas.md) (sección 3, "D2").
+
+```powershell
+docker compose -p canario down
+python tests\estres\lanzar.py --d2 --t 0.0196
+python -m unittest tests.estres.test_lanzar tests.estres.test_diag_hilos
+```
+
+Solo admite una repetición. Deja en %TEMP% lo mismo que L2 (`verificacion_estres.txt` y `canario_estres_salida_*`): las muestras quedan en `rep1/log_api.txt`.

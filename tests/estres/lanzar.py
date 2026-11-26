@@ -8,6 +8,12 @@ local parada:
     python tests\\estres\\lanzar.py --l2|--pico|--l3|--l3b|--l7 --t 0.0196 [--repeticiones N] [--conservar]
     python tests\\estres\\lanzar.py --l5 [--repeticiones N] [--conservar]
     python tests\\estres\\lanzar.py --l6 [--humo] [--conservar]
+    python tests\\estres\\lanzar.py --d2 --t 0.0196 [--conservar]
+
+--d2 (diagnostico D2, "donde espera el login") levanta la pila y la carga de
+una repeticion de L2 con tests/estres/diag_hilos.py como proceso de la API
+(solo en un override del compose temporal) y emite el veredicto de la tabla
+de decision de D2 en lugar del de L2.
 
 --l5 (IP compartida), --l6 (agotar el limitador; --humo es la sonda B del
 plan v3.2) y --l7 (inundacion de /salud) usan los limites de produccion y el
@@ -7006,10 +7012,210 @@ def guardar_resultados(salida, hechas):
     (salida / "resultados.json").write_text(json.dumps(hechas, indent=1, default=str), encoding="utf-8", newline="\n")
 
 
-def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones, humo=False):
+# ---------------------------------------------------------------------------
+# --d2: dónde espera el login (plan del bloque 1, v4, §2, A0)
+# ---------------------------------------------------------------------------
+# La pila y la carga son las de L2 (una repetición, la INUNDACIÓN de fases.js
+# con LIMITES_ESTRES); lo único distinto es el proceso de la API, que pasa a
+# ser tests/estres/diag_hilos.py. La evaluación (tabla de decisión) es la
+# función pura diag_hilos.evaluar_d2; aquí solo se reúnen sus entradas.
+DIAG_HILOS = DIR_ESTRES / "diag_hilos.py"
+DIAG_HILOS_DENTRO = "/diag/diag_hilos.py"
+# Solo en el compose temporal: el entrypoint de la imagen pasa a ser python y
+# la command, el programa montado de solo lectura. -I: sin el directorio del
+# script en sys.path ni variables PYTHON* (el programa añade /srv a mano, como
+# diag_memoria_contenedor.py); -B: sin .pyc, que la imagen ya evita con
+# PYTHONDONTWRITEBYTECODE pero -I lo ignora; -u: cada muestra sale en el momento.
+ENTRYPOINT_D2 = ["python"]
+COMMAND_D2 = ["-I", "-B", "-u", DIAG_HILOS_DENTRO]
+CLAVES_OVERRIDE_D2 = ("entrypoint", "command", "volumes")
+
+
+def motivo_modo_d2(modo, repeticiones):
+    """None si --d2 puede seguir; si no, el motivo de la PARADA. D2 es una
+    INUNDACIÓN de L2, una sola vez (plan v4, §2, A0)."""
+    if modo != "l2":
+        return f"--d2 solo mide la carga de L2 (modo {modo})"
+    if repeticiones != 1:
+        return f"--d2 se mide con una sola repeticion (--repeticiones {repeticiones})"
+    return None
+
+
+def yaml_override_d2(fuente):
+    """Override de compose de D2 para la API: entrypoint, command y el
+    programa montado de solo lectura (sintaxis larga, el equivalente de
+    --mount). Cada valor como cadena JSON, que también es YAML, con $
+    duplicado para que compose no lo interpole."""
+    def cadena(valor):
+        return json.dumps(str(valor).replace("$", "$$"))
+    lineas = ["services:", "  api:",
+              "    entrypoint: [" + ", ".join(cadena(a) for a in ENTRYPOINT_D2) + "]",
+              "    command: [" + ", ".join(cadena(a) for a in COMMAND_D2) + "]",
+              "    volumes:",
+              "      - type: bind",
+              f"        source: {cadena(fuente)}",
+              f"        target: {cadena(DIAG_HILOS_DENTRO)}",
+              "        read_only: true"]
+    return "\n".join(lineas) + "\n"
+
+
+def diferencias_override_d2(antes, despues, fuente):
+    """Lo que cambia en el servicio api resuelto por compose, además de lo que
+    D2 debe cambiar. Vacía si el override solo pone el entrypoint y la
+    command de D2 y añade el montaje de solo lectura del programa."""
+    dif = [f"{clave} cambia" for clave in sorted(set(antes) | set(despues))
+           if clave not in CLAVES_OVERRIDE_D2 and antes.get(clave) != despues.get(clave)]
+    if despues.get("entrypoint") != ENTRYPOINT_D2:
+        dif.append(f"entrypoint {despues.get('entrypoint')!r}, se esperaba {ENTRYPOINT_D2!r}")
+    if despues.get("command") != COMMAND_D2:
+        dif.append(f"command {despues.get('command')!r}, se esperaba {COMMAND_D2!r}")
+    previos = antes.get("volumes") or []
+    actuales = despues.get("volumes") or []
+    if any(v not in actuales for v in previos):
+        dif.append("se pierde un volumen del servicio")
+    nuevos = [v for v in actuales if v not in previos]
+    nuevo = nuevos[0] if len(nuevos) == 1 and isinstance(nuevos[0], dict) else {}
+    montaje_ok = (nuevo.get("type") == "bind" and nuevo.get("target") == DIAG_HILOS_DENTRO
+                  and nuevo.get("read_only") is True and isinstance(nuevo.get("source"), str)
+                  and pathlib.Path(nuevo["source"]) == pathlib.Path(fuente))
+    if not montaje_ok:
+        dif.append(f"el montaje del programa no es el esperado (bind de solo lectura en {DIAG_HILOS_DENTRO}): "
+                   f"{nuevos!r}")
+    return dif
+
+
+def servicio_resuelto(servicio):
+    """El servicio entero tal como lo resuelve docker compose con los ficheros de BASE."""
+    r = dc("config", "--format", "json", timeout=120)
+    try:
+        resuelto = json.loads(r.out)["services"][servicio]
+    except (ValueError, KeyError, TypeError):
+        raise Parada(f"docker compose config --format json no da el servicio {servicio} (codigo {r.rc}): "
+                     f"{r.err.strip()[-300:]!r}") from None
+    if not isinstance(resuelto, dict):
+        raise Parada(f"el servicio {servicio} resuelto no es un objeto: {resuelto!r}")
+    return resuelto
+
+
+def preparar_override_d2(temporal):
+    """Como preparar_override_redis: escribe el override en el directorio
+    temporal y, antes de arrancar, compara el servicio api resuelto antes y
+    después. Si cambia algo más que el entrypoint, la command y el montaje del
+    programa, PARADA. Nada cambia en la imagen, en docker-compose.yml ni en
+    compose.produccion.yaml."""
+    if not DIAG_HILOS.is_file():
+        raise Parada(f"no existe {DIAG_HILOS}")
+    antes = servicio_resuelto("api")
+    fichero = temporal / "d2_api.yml"
+    fichero.write_text(yaml_override_d2(DIAG_HILOS), encoding="utf-8", newline="\n")
+    BASE.extend(["-f", str(fichero)])
+    dif = diferencias_override_d2(antes, servicio_resuelto("api"), DIAG_HILOS)
+    if dif:
+        raise Parada(f"el override de D2 cambia mas de lo previsto en la API: {dif}")
+    p(f"   API con python {' '.join(COMMAND_D2)} (solo en el override de D2; la imagen no cambia)")
+
+
+def registros_d2(lineas):
+    """(registros, ilegibles) de las líneas DIAG2 de leer_log(log_api.txt).
+    El resto del log (la API, uvicorn) se ignora."""
+    import diag_hilos
+    registros, ilegibles = [], 0
+    for _, mensaje in lineas:
+        if not mensaje.startswith(diag_hilos.PREFIJO_LINEA):
+            continue
+        try:
+            registro = json.loads(mensaje[len(diag_hilos.PREFIJO_LINEA):])
+        except ValueError:
+            ilegibles += 1
+            continue
+        if isinstance(registro, dict):
+            registros.append(registro)
+        else:
+            ilegibles += 1
+    return registros, ilegibles
+
+
+def inicios_k6_d2(filas):
+    """Inicios de las peticiones de k6 que entran en el limitador por defecto:
+    todas menos la sonda POST /salud (405 sin hilos, fases.js:228), que el
+    middleware del diagnóstico tampoco cuenta."""
+    return sorted(f["inicio"] for f in filas if f["nombre"] != "sonda_salud")
+
+
+def reunir_d2(salida_rep, salida_k6, hecha, globales):
+    """Las entradas de diag_hilos.evaluar_d2 a partir de lo que dejó la
+    repetición de L2 (k6_salida.txt, k6.csv y log_api.txt) y su análisis.
+    Devuelve el resultado de la evaluación con "reproduccion" y "lineas"."""
+    import diag_hilos
+    try:
+        registro_k6 = (salida_k6 / "k6_salida.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        registro_k6 = ""
+    t0 = leer_t0(registro_k6)
+    carga = fase_por_nombre(fases_de("l2"), "carga")
+    ventana = None if t0 is None else diag_hilos.ventana_valida(t0 + carga["desde_s"], t0 + carga["hasta_s"])
+    csv_k6 = salida_k6 / "k6.csv"
+    filas = [f for f in leer_csv_fases(csv_k6)["filas"] if not f["nombre"].startswith("humo")] \
+        if csv_k6.is_file() else []
+    registros, ilegibles = registros_d2(leer_log(salida_rep / "log_api.txt"))
+    parte = hecha["partes"]["l2"]
+    victimas = parte["detalle"].get("victimas", {})
+    reproduccion = {"p95_ms": {r: victimas.get(r, {}).get("carga", {}).get("p95_ms") for r in SLO_VICTIMAS_MS},
+                    "slo_ms": dict(SLO_VICTIMAS_MS), "n429": sum(1 for f in filas if f["estado"] == 429)}
+    # La validez de la carga de L2 (k6, vigilancia, BASE, anti-fuga, muertes) es
+    # un control más de D2: si L2 no es válida, D2 no concluye.
+    veredicto_l2, motivos_l2 = veredicto_con_validez(parte["resultado"], hecha["comun"] + parte["validez"] + globales,
+                                                     parte["control_ataque"], hecha["muertes"])
+    fallos_carga = (motivos_l2 or [veredicto_l2]) if veredicto_l2 == "SIN CONCLUSION" or hecha["muertes"] else []
+    resultado = diag_hilos.evaluar_d2(registros, ventana, inicios_k6_d2(filas), reproduccion, fallos_carga, ilegibles)
+    resultado["reproduccion"] = reproduccion
+    resultado["lineas"] = len(registros)
+    resultado["ilegibles"] = ilegibles
+    return resultado
+
+
+def emitir_d2(ej, hecha, globales):
+    """Imprime el veredicto de D2 (SIN CONCLUSION, PARADA, PARADA (M1), A2 o
+    A2 con nota), su fila de la tabla, las cifras y el control de
+    reproducción. SIN CONCLUSION deja el RESULTADO GLOBAL en NO OK; el resto
+    es un diagnóstico válido y no lo cambia."""
+    import diag_hilos
+    rep = hecha["repeticion"]
+    r = reunir_d2(ej.salida / f"rep{rep}", ej.salida / f"rep{rep}" / f"l2_rep{rep}", hecha, globales)
+    cifras = r["cifras"]
+    p("=== D2: donde espera el login (tabla de decision del plan v4; docs/informe-pruebas.md, seccion 3)")
+    p(f"   lineas DIAG2: {r['lineas']} ({r['ilegibles']} ilegibles); controles: {cifras.get('controles')}")
+    if "ventana" in cifras:
+        desde, hasta = cifras["ventana"]
+        p(f"   ventana valida: {datetime.datetime.fromtimestamp(desde, datetime.UTC):%H:%M:%S} a "
+          f"{datetime.datetime.fromtimestamp(hasta, datetime.UTC):%H:%M:%S} UTC; muestras "
+          f"{cifras['muestras_validas']} de {cifras['muestras_esperadas']} esperadas")
+    caddy = cifras.get("cliente_caddy")
+    p("   control de reproduccion: p95 de las victimas en la INUNDACION "
+      + ", ".join(f"{v} {ms(r['reproduccion']['p95_ms'][v])} ms (SLO {s} ms)" for v, s in SLO_VICTIMAS_MS.items())
+      + f"; 429: {r['reproduccion']['n429']}; booleano de proxy: "
+      + ("sin dato" if caddy is None else str(caddy != 0)))
+    p("   cifras: " + ", ".join(f"{k}={v}" for k, v in cifras.items() if k not in ("controles", "ventana")))
+    for motivo in r["motivos"]:
+        p(f"   fila {r['fila']}: {motivo}")
+    texto = f"D2: {r['decision']} (fila {r['fila']} de la tabla)"
+    if r["decision"] == diag_hilos.SIN_CONCLUSION:
+        sinc(texto)
+    else:
+        p(texto)
+    return r
+
+
+def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones, humo=False, d2=False):
     """--l2, --pico, --l3, --l3b, --l5, --l6 o --l7: comprobaciones, controles en
     sándwich, las repeticiones, el escáner anti-fuga, el veredicto agregado y su
-    emisión. L5 y L6 no usan t (no derivan ninguna tasa de ella)."""
+    emisión. L5 y L6 no usan t (no derivan ninguna tasa de ella). d2: la
+    repetición única de L2 con el proceso de diagnóstico de D2 en la API; en
+    lugar del veredicto de L2 se emite el de D2."""
+    if d2:
+        motivo = motivo_modo_d2(modo, repeticiones)
+        if motivo is not None:
+            raise Parada(motivo)
     if modo in ("l5", "l6"):
         tasas, n_ataque = None, None
     else:
@@ -7092,6 +7298,9 @@ def ejecutar_modo(modo, t, datos, salida, cpus_canario, cpus_k6, repeticiones, h
         if modo == "l6":
             emitir_l6(hechas[0], globales, humo)
             return
+        if d2:
+            emitir_d2(ej, hechas[0], globales)
+            return
         controles = {}
         finales = agregar_fases(modo, hechas, repeticiones, globales, controles)
         for nombre, (veredicto, motivos) in finales.items():
@@ -7129,22 +7338,30 @@ def main():
     modo.add_argument("--l5", action="store_true", help="IP compartida: 11 denuncias desde una IP (produccion)")
     modo.add_argument("--l6", action="store_true", help="agotar el limitador llenando Redis (produccion, 1 repeticion)")
     modo.add_argument("--l7", action="store_true", help="inundacion de GET /salud con las victimas de L2 (produccion)")
+    modo.add_argument("--d2", action="store_true",
+                      help="D2: donde espera el login (una repeticion de L2 con diag_hilos.py como proceso de la API)")
     analizador.add_argument("--t", type=float, help="t en segundos de la primera congelacion (obligatorio con --l1, "
-                                                    "--l2, --pico, --l3, --l3b y --l7; salvo en --l1 debe ser 0.0196)")
+                                                    "--l2, --pico, --l3, --l3b, --l7 y --d2; salvo en --l1 debe ser "
+                                                    "0.0196)")
     analizador.add_argument("--repeticiones", type=int, default=None,
-                            help="repeticiones independientes (3 por defecto; 1 en --l6)")
+                            help="repeticiones independientes (3 por defecto; 1 en --l6 y --d2)")
     analizador.add_argument("--humo", action="store_true",
                             help="solo con --l6: la sonda B (Redis pequeno, relleno de 600 s y fase 2 de 30 s)")
     analizador.add_argument("--conservar", action="store_true",
                             help="no borra la pila ni los temporales (solo para desarrollar)")
     argumentos = analizador.parse_args()
-    con_t = argumentos.l1 or argumentos.l2 or argumentos.pico or argumentos.l3 or argumentos.l3b or argumentos.l7
-    modo_nuevo = "l2" if argumentos.l2 else "pico" if argumentos.pico else "l3" if argumentos.l3 else \
+    con_t = (argumentos.l1 or argumentos.l2 or argumentos.pico or argumentos.l3 or argumentos.l3b or argumentos.l7
+             or argumentos.d2)
+    # D2 mide la carga de L2: su modo es "l2" y lo distingue el indicador d2.
+    modo_nuevo = "l2" if argumentos.l2 or argumentos.d2 else "pico" if argumentos.pico else "l3" if argumentos.l3 else \
         "l3b" if argumentos.l3b else "l5" if argumentos.l5 else "l6" if argumentos.l6 else \
         "l7" if argumentos.l7 else None
     if argumentos.repeticiones is None:
-        # L6 se mide una vez (D-L6-2); el resto, con las 3 de A1.
-        argumentos.repeticiones = 1 if argumentos.l6 else REPETICIONES_POR_DEFECTO
+        # L6 y D2 se miden una vez (D-L6-2; plan v4, A0); el resto, con las 3 de A1.
+        argumentos.repeticiones = 1 if argumentos.l6 or argumentos.d2 else REPETICIONES_POR_DEFECTO
+    if argumentos.d2 and argumentos.repeticiones != 1:
+        p(f"PARADA: {motivo_modo_d2('l2', argumentos.repeticiones)}")
+        terminar_con_parada()
     if argumentos.humo and not argumentos.l6:
         p("PARADA: --humo solo vale con --l6")
         terminar_con_parada()
@@ -7197,12 +7414,14 @@ def main():
             preparar_override_postgres(temporal)
         if argumentos.humo:
             preparar_override_redis(temporal)
+        if argumentos.d2:
+            preparar_override_d2(temporal)
         if argumentos.hash:
             arrancar(("api",), canario)
             medir_hash(salida)
         elif modo_nuevo is not None:
             ejecutar_modo(modo_nuevo, argumentos.t, datos, salida, canario, k6, argumentos.repeticiones,
-                          humo=argumentos.humo)
+                          humo=argumentos.humo, d2=argumentos.d2)
         else:
             ejecutar_l1(argumentos.t, datos, salida, canario, k6, argumentos.repeticiones)
     except Parada as e:

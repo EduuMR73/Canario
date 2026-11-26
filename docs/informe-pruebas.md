@@ -436,6 +436,67 @@ Es la "tercera congelación" que cita `tests/estres/README.md` (l.192). El plan 
 
 **E20. Commit medido de L5 y L6 (25/11/2026, después de la primera L5 y antes de las siguientes medidas).** La primera L5 × 3 sobre `dc7a4c1` dio el oráculo en `PASA` en las tres repeticiones, pero `SIN CONCLUSION` de validez: el anti-fuga encontró códigos de seguimiento en `rep*/log_api.txt`. Eran la salida del cliente de control, no del log de la API: el contenedor del cliente usa la imagen de la API, hereda sus etiquetas de compose (`com.docker.compose.project` y `service=api`) y `docker compose logs api` recogía su salida. El arreglo (`481397c`) anula esas dos etiquetas en `cliente_control`; se comprobó en Docker con su control positivo (sin anularlas, el filtro del proyecto encuentra el contenedor; anuladas, no). Solo cambia el instrumento: ningún oráculo, umbral ni literal de esta congelación. Por eso L5 y L6 se miden sobre `481397c` y no sobre `d7f3d79`. Esa primera ejecución se conserva como evidencia y no se publica: contiene códigos de denuncias sintéticas de una pila ya destruida.
 
+### D2: dónde espera el login (predicciones escritas antes de medir, 26/11/2026)
+
+Diagnóstico previo al bloque 1 (plan v4, §2, A0, fuera del repositorio). Pregunta en qué cola espera el login cuando la inundación de L2 deja a las víctimas fuera del SLO (§7: B1 FALLA en las tres). Mide el código de `app/` de `677104a` sin cambiarlo. Este apartado, `tests/estres/diag_hilos.py` y el modo `--d2` de `tests/estres/lanzar.py` van en su propio commit, con push antes de ejecutar D2. Nada de lo congelado antes cambia. Si D2 da PARADA, no hay bloque 1.
+
+**Carga (literal).** Una repetición de L2 con `python tests\estres\lanzar.py --d2 --t 0.0196`: la misma pila de estrés (proyecto `canario_estres`, `LIMITES_ESTRES`, cpuset de 2 CPU, override de PostgreSQL), las mismas empresas y la misma `fases.js` con la INUNDACIÓN de 120 s del login a 153,06/s. Sale de un solo origen y sin `X-Forwarded-For`, así que no hay requisito de IP. Se conservan la vigilancia, el anti-fuga, la limpieza con `down -v` y la comparación de `git status`.
+
+**Proceso de la API.** Solo en un override del compose temporal (`d2_api.yml`), el servicio `api` arranca con el entrypoint `python` y la command `-I -B -u /diag/diag_hilos.py`. El programa está montado de solo lectura. Antes de arrancar, el lanzador compara el servicio resuelto por compose con y sin el override: si cambia algo más que el entrypoint, la command y ese montaje, PARADA. La imagen, `docker-compose.yml` y `compose.produccion.yaml` no cambian. El programa hace `asyncio.run(principal())`: envuelve `anyio.to_thread.run_sync`, crea `uvicorn.Config` con `host="10.88.0.4"`, `port=8000`, `proxy_headers=True`, `forwarded_allow_ips="10.88.0.2"`, `access_log=False` y `server_header=False` (la command de `docker-compose.yml:285-290` más el ENTRYPOINT de `Dockerfile:64`), escribe esa configuración efectiva, importa `app.principal:aplicacion`, crea la tarea de muestreo (con su referencia guardada) y hace `await uvicorn.Server(config).serve()`.
+
+**Muestras.** Una cada 0,5 s, con la hora real, como línea JSON con el prefijo `DIAG2 ` en la salida de la API. Cada una lleva:
+- el limitador por defecto de AnyIO (prestados, fichas y en espera), leído dentro del bucle;
+- `pool.get_stats()` del pool de la API (`app.state.pool`): `requests_waiting`, `requests_queued` y `requests_wait_ms`;
+- el retraso del bucle;
+- la CPU del proceso, del hilo principal, de los hilos `argon2_*` y de los de AnyIO (`Thread.native_id` y `/proc/self/task/<tid>/stat`);
+- λ, todo lo que entra en el limitador por defecto, contado al envolver `anyio.to_thread.run_sync` cuando `limiter` es None (Starlette 1.7.0 lo busca como atributo en cada llamada, `starlette/concurrency.py:34`);
+- un middleware ASGI puro (no `BaseHTTPMiddleware`), dentro de `ProxyHeadersMiddleware`, que cuenta las peticiones salvo `POST /salud` y las que llegan con el cliente igual al literal `10.88.0.2` (el booleano "el cliente visto es la IP de Caddy");
+- la clase de cada hilo de AnyIO, solo por `co_name` y `co_filename` de su pila, de dentro afuera, sin los hilos `argon2_*` ni los trabajadores del pool. Gana la primera marca: semáforo (`_tomar_hueco_hash`), Argon2 (`_verificar_en_ejecutor` o `_crear_hash_en_ejecutor`), pool (`_getconn_unchecked` de `psycopg_pool/pool.py`, la cola; `check_connection`, `app/bd.py:147`, ejecuta SQL y sale como BD activa), BD activa (`psycopg/`), libre (`queue.get` llamado desde `WorkerThread.run` de AnyIO) u otra.
+
+**Ventana válida y agregación.** De la INUNDACIÓN + 30 s al fin de la INUNDACIÓN − 5 s (85 s, 170 muestras esperadas), con el t0 de k6. Las fracciones por clase se calculan sobre los hilos de AnyIO NO libres de cada muestra, y después se toma la mediana. Little: W_AnyIO = mediana de los que esperan en el limitador / λ, con λ = Δλ / Δt en la ventana.
+
+**Controles positivos,** en el mismo proceso, dentro del lifespan y antes de abrir el socket (`up --wait` no ve la API sana hasta que terminan). Ninguno deja fichas, huecos ni conexiones para la carga. Cada uno escribe su resultado; si alguno no da PASA, la decisión es SIN CONCLUSION.
+1. `limitador_41`: 41 llamadas en `to_thread` dan 40 prestados y 1 en espera; el envoltorio de λ cuenta 41 y al final no queda ninguna ficha prestada.
+2. `pool_5_mas_1`: 5 conexiones retenidas + 1 petición dan `requests_waiting = 1` y un hilo clasificado como pool.
+3. `pg_sleep_bd_activa`: un `select pg_sleep(1)` en curso se clasifica como BD activa. Los controles 2 y 3 usan un pool aparte, creado con la misma `bd.crear_pool()` y cerrado al acabar: el pool de la API no se toca.
+4. `ejecutor_lento_argon2`: con un ejecutor falso lento (1,0 s, no calcula nada) en lugar de `personal._ejecutor`, la función real `_verificar_en_ejecutor` se clasifica como Argon2. El ejecutor real vuelve a su sitio y `_semaforo` queda con sus 2 huecos.
+5. `semaforo`: con los 2 huecos de `_semaforo` tomados por el control, un hilo en `_tomar_hueco_hash` se clasifica como semáforo.
+6. `retraso_bucle`: un `time.sleep(0.5)` en el bucle da un retraso de 0,5 s o más.
+7. `cpu_hilo`: un hilo en bucle activo durante 2 s da 0,9 CPU o más, y uno dormido, 0,05 o menos.
+8. `centinela`: la contraseña centinela del control 4 no aparece en la muestra que se escribiría en ese instante. Control: volcando las locales de ese hilo, sí aparece.
+9. `booleano_proxy`: la misma petición (cliente `10.88.0.2` con `X-Forwarded-For`) da False con `ProxyHeadersMiddleware` y la configuración efectiva, y True sin el middleware (`proxy_headers=False`) y con `forwarded_allow_ips` sin Caddy (`10.88.0.3`). Se compara con el literal `10.88.0.2`, no con un valor leído de la configuración.
+
+**Reproducción** (si no se cumple, SIN CONCLUSION): el p95 de la INUNDACIÓN de las tres víctimas por encima de su SLO (1000, 500 y 300 ms; un p95 sin respuestas cuenta como infinito, como en L2), 0 × 429 en toda la ejecución y el booleano de proxy en False en todas las muestras.
+
+**Tabla de decisión de D2** (literal del plan v4). Precedencia por orden: gana la primera fila que se cumple.
+
+| # | Condición | Decisión |
+|---|---|---|
+| 1 | Falla un control o > 10 % de muestras perdidas | SIN CONCLUSION |
+| 2 | H-bucle: p95 del retraso ≥ 1 s | PARADA |
+| 3 | H-CPU/GIL: (mediana de la CPU del proceso ≥ 1,8) o (hilo principal ≥ 0,9) | PARADA (M1) |
+| 4 | H-hilos: (40 prestados en ≥ 95 %) y (W_AnyIO ≥ 5 s) y (mediana de `requests_waiting` ≤ 1) y (fracción semáforo + Argon2 ≥ 0,5) | A2 |
+| 5 | H-bd: (mediana de `requests_waiting` ≥ 3) y (Δwait/Δqueued ≥ 1000 ms o "no aplica") y (fracción pool ≥ 0,5) | A2 con nota |
+| 6 | Cualquier otra | PARADA |
+
+**Qué cuenta como fallo de control en la fila 1,** además de los 9 controles: la configuración efectiva distinta de los literales (`forwarded_allow_ips == "10.88.0.2"` y el resto de la Config), más de una línea de configuración (el proceso arrancó más de una vez), líneas `DIAG2` ilegibles o muestras con error, λ, el middleware y k6 fuera de ±1 % en la ventana, una muestra de la ventana sin estadísticas del pool, la reproducción y la validez de la propia carga de L2 (k6, vigilancia, BASE, anti-fuga y muertes).
+
+**Precisiones de la implementación** (no estaban escritas en el plan; se fijan aquí, antes de medir):
+- La condición del hilo principal (fila 3) se evalúa sobre su mediana, como la del proceso.
+- p95 por rango más cercano, el mismo método que `percentil` de `lanzar.py`.
+- Muestras perdidas = 170 − las muestras de la ventana; SIN CONCLUSION si pasan de 17.
+- ±1 %: cada par (λ y k6, middleware y k6, λ y middleware) con el segundo como referencia. k6 cuenta las peticiones cuyo inicio cae entre la primera y la última muestra de la ventana, sin la sonda `POST /salud`. El healthcheck de la API (`GET /salud` cada 10 s) entra en λ y en el middleware y no en k6: unas 9 peticiones en la ventana, frente a unas 14 000 (153,06/s de login más 3 × 5/s de víctimas).
+- Una muestra cuyos hilos de AnyIO están todos libres no entra en la mediana de las fracciones. Si no queda ninguna, la fracción no se cumple.
+- Δwait/Δqueued se calcula entre la primera y la última muestra de la ventana. Es "no aplica" si no se encoló ninguna petición en ella. Un contador que psycopg_pool 3.3.3 todavía no ha incrementado no aparece en `get_stats()` y cuenta como 0.
+- La salida termina con `D2: <decisión> (fila N de la tabla)`. SIN CONCLUSION deja `RESULTADO GLOBAL: NO OK`; PARADA, PARADA (M1), A2 y A2 con nota son un diagnóstico válido y no lo cambian.
+
+**Desviaciones declaradas.**
+- **ENTRYPOINT.** El proceso de la API no es el de la imagen: es `python -I -B -u /diag/diag_hilos.py`, que sirve la misma aplicación con la misma Config. Respecto al `python -u` del plan, `-I` saca del `sys.path` el directorio del script y las variables `PYTHON*` (el programa añade `/srv` a mano, como `diag_memoria_contenedor.py`), y `-B` sustituye a `PYTHONDONTWRITEBYTECODE`, que `-I` ignora. Además, el lifespan de la API va envuelto para correr los controles, y la aplicación va envuelta por el middleware de cuentas.
+- **Muestras escritas en el momento.** Nada se escribe después de `serve()`: uvicorn instala sus gestores de señal y vuelve a lanzar la señal al salir (`server.py:88-90` y `:332-349`).
+- **force_exit, OOM y SIGKILL.** Una segunda señal (`force_exit`), un OOM o un SIGKILL cortan la salida donde esté. Lo ya escrito queda; lo que falte de la ventana cuenta como muestras perdidas, y un reinicio deja dos líneas de configuración (SIN CONCLUSION).
+- **El instrumento cuesta algo.** El muestreo corre en el bucle de eventos (recorre las pilas y lee unos 45 ficheros de `/proc` cada 0,5 s) y entra en lo que mide. Los controles abren y cierran un pool aparte, que deja en el log sus líneas de `psycopg_pool` antes de la carga.
+- **λ cuenta llamadas, no peticiones.** La igualdad "1 petición = 1 `run_sync`" vale en L2 (0 × 429, sin rutas `async def` ni con sesión en la carga). Si no se cumple, la comprobación cruzada da SIN CONCLUSION.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |

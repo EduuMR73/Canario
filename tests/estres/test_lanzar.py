@@ -5709,5 +5709,121 @@ class EscenariosYArranqueDeL6(unittest.TestCase):
         self.assertEqual((c["falla"], len(c["sin_conclusion"])), ([], 1))
 
 
+class D2(unittest.TestCase):
+    """--d2 (plan del bloque 1, v4, §2, A0): solo lo puro del lanzador. La
+    tabla de decisión se prueba en test_diag_hilos.py."""
+
+    FUENTE = pathlib.Path("C:/repo con espacios/tests/estres/diag_hilos.py")
+    API = {"image": "canario_estres-api", "command": ["--host", "10.88.0.4", "--proxy-headers",
+                                                      "--forwarded-allow-ips", "10.88.0.2"],
+           "read_only": True, "cap_drop": ["ALL"], "pids_limit": 64, "mem_limit": "268435456"}
+
+    def con_override(self, **cambios):
+        despues = {**self.API, "entrypoint": ["python"], "command": ["-I", "-B", "-u", "/diag/diag_hilos.py"],
+                   "volumes": [{"type": "bind", "source": str(self.FUENTE), "target": "/diag/diag_hilos.py",
+                                "read_only": True, "bind": {"create_host_path": True}}]}
+        despues.update(cambios)
+        return despues
+
+    def test_motivo_modo(self):
+        self.assertIsNone(L.motivo_modo_d2("l2", 1))
+        self.assertIn("una sola repeticion", L.motivo_modo_d2("l2", 3))
+        self.assertIn("solo mide la carga de L2", L.motivo_modo_d2("l3", 1))
+
+    def test_ejecutar_modo_d2_con_tres_repeticiones_es_parada_antes_de_docker(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(L, "p", lambda *a: None), \
+                mock.patch.object(L, "ejecutar", side_effect=AssertionError("no debe tocar Docker")):
+            with self.assertRaises(L.Parada):
+                L.ejecutar_modo("l2", 0.0196, pathlib.Path(d), pathlib.Path(d), [0], [1], 3, d2=True)
+
+    def test_main_d2_con_repeticiones_2_es_parada(self):
+        lineas = []
+
+        class Fin(Exception):
+            pass
+
+        def fin():
+            raise Fin()
+        with mock.patch.object(sys, "argv", ["lanzar.py", "--d2", "--t", "0.0196", "--repeticiones", "2"]), \
+                mock.patch.object(L, "p", lineas.append), mock.patch.object(L, "terminar_con_parada", fin):
+            with self.assertRaises(Fin):
+                L.main()
+        self.assertIn("PARADA: --d2 se mide con una sola repeticion (--repeticiones 2)", lineas)
+
+    def test_yaml_del_override(self):
+        texto = L.yaml_override_d2(pathlib.Path("C:/a $b/diag_hilos.py"))
+        self.assertEqual(texto.splitlines()[:4], ["services:", "  api:", '    entrypoint: ["python"]',
+                                                  '    command: ["-I", "-B", "-u", "/diag/diag_hilos.py"]'])
+        self.assertIn('        target: "/diag/diag_hilos.py"\n', texto)
+        self.assertIn("        read_only: true\n", texto)
+        self.assertIn("$$b", texto)  # compose no interpola el $ de la ruta
+        self.assertNotIn("compose.produccion", texto)
+
+    def test_diferencias_override_control_positivo(self):
+        self.assertEqual(L.diferencias_override_d2(self.API, self.con_override(), self.FUENTE), [])
+
+    def test_diferencias_override_detecta_lo_que_no_toca(self):
+        for cambios, texto in (({"pids_limit": 128}, "pids_limit cambia"),
+                               ({"read_only": False}, "read_only cambia"),
+                               ({"entrypoint": ["uvicorn"]}, "entrypoint"),
+                               ({"command": ["-u", "/diag/diag_hilos.py"]}, "command"),
+                               ({"volumes": []}, "montaje"),
+                               ({"volumes": [{"type": "bind", "source": str(self.FUENTE),
+                                              "target": "/diag/diag_hilos.py", "read_only": False}]}, "montaje"),
+                               ({"volumes": [{"type": "bind", "source": "C:/otro/diag_hilos.py",
+                                              "target": "/diag/diag_hilos.py", "read_only": True}]}, "montaje")):
+            with self.subTest(cambios=cambios):
+                dif = L.diferencias_override_d2(self.API, self.con_override(**cambios), self.FUENTE)
+                self.assertTrue(any(texto in d for d in dif), dif)
+
+    def test_preparar_override_compara_con_lo_que_resuelve_compose(self):
+        def config(*servicios):
+            respuestas = iter(L.R(0, json.dumps({"services": {"api": s}}), "") for s in servicios)
+            return lambda *a, **k: next(respuestas)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(L, "BASE", list(L.BASE)), \
+                mock.patch.object(L, "p", lambda *a: None), mock.patch.object(L, "DIAG_HILOS", self.FUENTE), \
+                mock.patch.object(pathlib.Path, "is_file", lambda self: True):
+            with mock.patch.object(L, "dc", config(self.API, self.con_override())):
+                L.preparar_override_d2(pathlib.Path(d))
+            self.assertEqual(L.BASE[-2:], ["-f", str(pathlib.Path(d) / "d2_api.yml")])
+            with mock.patch.object(L, "dc", config(self.API, self.con_override(mem_limit="1g"))):
+                with self.assertRaises(L.Parada):
+                    L.preparar_override_d2(pathlib.Path(d))
+
+    def test_registros_d2(self):
+        lineas = [(1.0, "INFO canario.arranque: LIMITES (configurados): ..."),
+                  (2.0, 'DIAG2 {"tipo":"configuracion","port":8000}'),
+                  (3.0, 'DIAG2 {"tipo":"muestra"'),
+                  (4.0, "DIAG2 [1, 2]"),
+                  (5.0, 'DIAG2 {"tipo":"control","nombre":"semaforo","resultado":"PASA"}')]
+        registros, ilegibles = L.registros_d2(lineas)
+        self.assertEqual([r["tipo"] for r in registros], ["configuracion", "control"])
+        self.assertEqual(ilegibles, 2)
+
+    def test_inicios_k6_sin_la_sonda(self):
+        filas = [{"nombre": "login_email", "inicio": 3.0}, {"nombre": "sonda_salud", "inicio": 1.0},
+                 {"nombre": "denuncia", "inicio": 2.0}]
+        self.assertEqual(L.inicios_k6_d2(filas), [2.0, 3.0])
+
+    def test_reunir_d2_sin_salida_de_k6_no_concluye(self):
+        # Sin T0 ni CSV no hay ventana: SIN CONCLUSION, nunca una decisión.
+        hecha = {"repeticion": 1, "comun": [], "muertes": [],
+                 "partes": {"l2": {"resultado": "FALLA", "validez": [], "control_ataque": True,
+                                   "detalle": {"victimas": {}}}}}
+        with tempfile.TemporaryDirectory() as d:
+            r = L.reunir_d2(pathlib.Path(d), pathlib.Path(d) / "l2_rep1", hecha, [])
+        self.assertEqual((r["decision"], r["fila"]), ("SIN CONCLUSION", 1))
+        self.assertIn("sin ventana valida (falta el t0 de k6)", r["motivos"])
+
+    def test_reunir_d2_lleva_la_validez_de_l2(self):
+        hecha = {"repeticion": 1, "comun": [L.fallo("k6 no dejo el CSV")], "muertes": [],
+                 "partes": {"l2": {"resultado": "FALLA", "validez": [], "control_ataque": True,
+                                   "detalle": {"victimas": {}}}}}
+        with tempfile.TemporaryDirectory() as d:
+            r = L.reunir_d2(pathlib.Path(d), pathlib.Path(d) / "l2_rep1", hecha, [L.fallo("anti-fuga: hallazgo")])
+        self.assertIn("carga: k6 no dejo el CSV", r["motivos"])
+        self.assertIn("carga: anti-fuga: hallazgo", r["motivos"])
+
+
 if __name__ == "__main__":
     unittest.main()
