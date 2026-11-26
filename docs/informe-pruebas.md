@@ -470,7 +470,7 @@ Selenium sigue siendo la referencia histórica y el estándar W3C (WebDriver). A
 
 No se publican trazas de Playwright, HAR ni scripts con producción como destino por defecto.
 
-## 7. Resultados (del 23 al 25/11/2026)
+## 7. Resultados (del 23 al 26/11/2026)
 
 Esta sección se añade después de medir. No toca nada de lo anterior: los criterios siguen siendo los congelados, con sus erratas. Las pruebas de estrés usan `--t 0.0196` y la segunda congelación (`d1432c1`). Cada cifra está contada en la salida guardada de su ejecución, salvo el máximo deslizante de L3 (ver abajo). Commits medidos: L1 × 3 en `0a04158`, L3b en `c7791e6`, y L4 y los funcionales finales en `5e23535` (la consola de estos dos no imprime el commit; es el `HEAD` en el que se lanzaron, con el árbol limpio). L2 y L3, del 24/11, no dejaron el commit en lo que se guardó: la consola de L2 no lo imprime y la de L3 no se conservó.
 
@@ -492,6 +492,9 @@ Ejecución limpia final del 25/11, sobre el commit `5e23535`: `RESULTADO GLOBAL:
 | L3b-a | PASA en las 3 | El ataque repartido no recibe ningún 429 |
 | L3b-b | FALLA en las 3 (NO OK) | La salida la da como esperada por el diseño (E15): la misma amenaza que L2, con los límites de producción |
 | L4 (25/11, `5e23535`) | OK | F3 PASA en las 3 repeticiones. Recuperación en 4, 5 y 5 s (mediana 5, frente a menos de 60): H6 se cumple. Sin muertes ni reinicios, con el humo previo y el posterior correctos en las 3 |
+| L5 × 3 (25/11, `481397c`) | OK | PASA en las 3 repeticiones: las 10 primeras denuncias dan 201 y la 11.ª, 429 con `Retry-After` de 3599, 3537 y 3478 s. Es el coste asumido de `docs/threat-model.md` §8. Sin muertes ni reinicios. La 12.ª denuncia, desde otra IP, da 201 (información, en la consola). La primera ejecución, sobre `dc7a4c1`, no se publica (E20) |
+| L6 × 1 (26/11, `4ec7d90`, el código de `481397c`) | PASA, NO OK GLOBAL por J1 | Ver abajo |
+| L7 | No medida | Fuera de esta entrega (tercera congelación): su franja ya pasó |
 
 **H7, SIN CONCLUSION por el paso 3 del criterio (escrito el 23/11, antes de medir).** El paso 1 no decide: los campos de validez están a 0, `arranques_redis_vistos` es 1 y no hay nada dentro de la ventana de arranque. El paso 2 tampoco: `limitador_permiso` es 0 y no hay ninguna línea `murio redis`. En el paso 3 solo cuenta un escalón, seguimiento e6, con N = 7, por debajo de los 20 que pide la muestra mínima. El criterio para en ese paso.
 
@@ -509,6 +512,29 @@ Ejecución limpia final del 25/11, sobre el commit `5e23535`: `RESULTADO GLOBAL:
 Sin la muerte, esa ejecución habría dado `SIN CONCLUSION`. La corrección (commit `5e23535`, con el visto bueno de dos revisores en cada vuelta y 350 pruebas del lanzador en verde) añade el check al CSV, clasifica la sonda como clase propia y guarda los eventos de Docker de cada repetición. Antes de repetir se comprobó que `docker events` da el nombre del contenedor sin barra inicial, que es el literal del que depende el control C5.
 
 **L4 del 25/11, válida.** Además del veredicto, se comprobó en la salida cada condición de validez del arreglo: la cabecera del CSV lleva la columna del check; hay 8 checks con nombre en cada repetición (4 del humo previo y 4 del posterior) y 0 filas ilegibles; "control C5: PASA" en la repetición 1, con la sonda clasificada como sonda; el humo previo termina unos 9,9 s antes de la carga; el control de la BASE se cumple en el 100 % de sus ventanas; y no muere ningún servicio de Canario durante la prueba (los 4 cierres de las repeticiones 2 y 3 son los contenedores de la repetición anterior, con otros ids y antes del primer arranque). Cifras de la repetición 1: p95 de la BASE de 28 ms en denuncia, 10 ms en seguimiento, 7 ms en `GET /web/seguimiento` y 29 ms en login; durante el PICO, de unos 3,8 s (4,4 s en login), con entre un 1,9 y un 2,6 % de 503 y descartes que solo se informan (E14); en la RECUPERACIÓN, de 30, 11, 9 y 30 ms.
+
+**L6, PASA en 1 de 3 repeticiones.** La salida da `NO OK GLOBAL`, como estaba congelado: J1 exige 3 repeticiones para la evidencia completa. Pasan todos los controles: los del arranque, los dos controles positivos de memoria (inicial y final), los tres de configuración, el anti-fuga y la limpieza. Además, no muere ni se reinicia ningún servicio. La CPU máxima de k6 es del 70 % (umbral del 320 %). El relleno hizo 531 732 peticiones (529 330 × 422 y 2402 × 503) y llenó los 64 MiB de Redis con 529 330 claves, unos 126,8 B por clave. La primera línea OOM, `EVENTO limitador_no_disponible: OutOfMemoryError causa=otra espera=<0.25`, aparece a los 3528,6 s del inicio, y el relleno se para por `RELLENO_PARADO` (F1 − T_RP = 0,758 s). La conciliación da 2440 líneas OOM: C1, 2108, todas con su 503; C2, 303, con 1 sin pareja (solo se publica); C3, 303; C4a, C4b y C4c, 0; C5, 29, todas con su 503. Ninguna línea queda sin pareja en C1 ni en C5. El tráfico legítimo recibe 503 con `Retry-After: 5`: 8 en la fase 1 (con 1795 × 404) y 29 en la fase 2 (con 343 × 404). Con Redis lleno, el limitador cierra en vez de dejar pasar sin contar, y el cliente recibe un 503 con reintento, nunca un 500. `salud_l6` (información): `/salud` da 200 en las 4348 sondas, con un hueco de 3,2 s entre fases. H5 (información, no cambia `l6`): `SIN CONCLUSION`, porque la fase 2 empezó a los 3548,6 s, después del plazo de 3478 s, y la vigilancia llegó tarde. El llenado sí ocurrió antes de los 3600 s. Salida: `canario_estres_salida_qy9dpqs_`.
+
+### Producción
+
+Producción en `e2bd349` con PostgreSQL 18.7, desplegada el 25/11/2026 a las 18:49 UTC. Cada prueba guarda el commit desde el que se lanzó (`head` de `resumen.json`): `e2bd349` de P0 a P5 y `4ec7d90` en P6, con el `git status` vacío. Ninguna prueba crea datos ni busca el punto de rotura.
+
+| Prueba (25/11, UTC) | Resultado | Lo que dice |
+|---|---|---|
+| P0 (19:03) | OK | Las dos redes salen por IP públicas distintas, `/salud` da 200 literal y el desfase con el `Date` de Caddy está en [-0,222; -0,042] s al empezar y en [-0,178; -0,001] s al terminar. Traefik v3.6.25 sin `rateLimit` ni `forwardedHeaders`, `canario.yml` igual al del repositorio y el panel 8080 sin publicar (revisión del autor) |
+| P4 (19:10) | PASA | La línea `LIMITES` del arranque es igual al literal |
+| P3 (19:12) | PASA | 413 literal de Caddy, sin `Via`, en 0,045 s |
+| P1 (19:13) | PASA | El limitador separa por la IP real: en la ventana en la que A recibe 429, B recibe 5 × 404 |
+| P1b (19:14) | PASA | Control: 60 × 404 y 10 × 429 sin `X-Forwarded-For`. De la 61.ª a la 70.ª, con `X-Forwarded-For` distintos, todas 429: A no puede inventarse IP |
+| P2 (19:18) | PASA | 10 × 422 y la 11.ª, 429 con `Retry-After` de 2475 s |
+| Q-12 (19:31) | PASA | Ningún evento `limitador_no_disponible` durante P3, P1, P1b y P2 |
+| P5 (19:32) | PASA | Línea base desde B: 300 respuestas, 0 errores, p50 de 428,0 ms, p95 de 634,4 ms y máximo de 961,7 ms. Son las cifras congeladas en `5bd462a` |
+| P6 (22:03) | SIN CONCLUSION (NO OK) | Ver abajo |
+| Q-12 de P6 (22:20) | PASA | Ningún evento `limitador_no_disponible` durante P6 |
+
+**P6, SIN CONCLUSION.** Lo que funcionó: B, 60 respuestas de 60 (58 × 404 y 2 ambiguas, también 404) con p50 de 401 ms frente al umbral congelado de 856 ms; las 5 vecinas, 1295 sondas, todas 200; sin descartes y con el control de retraso correcto. A lanzó 1785 peticiones: 1665 × 429 y 120 × 404, y la guarda D10 omitió 45 llegadas. Lo que decide el veredicto: 2 de las aceptadas (404) de A son ambiguas, porque su intervalo cruza una frontera de minuto, y 1 par de ventanas solo pasa de 60 si se cuentan. La regla congelada dice `SIN CONCLUSION`, y así se publica. El máximo deslizante de A, 115, es información (la guarda evita a propósito el caso de 120 de l.100). No se repite P6 sin una regla nueva: la causa de las ambiguas está sin verificar (la hipótesis es que D10 usa el desfase inicial y el rango se ensanchó durante la prueba), y su arreglo, con pruebas y una congelación nueva, va después de la entrega, igual que el criterio de las ambiguas de L3, con el que está relacionado.
+
+**Lo que no se publica.** La sal y el fichero de las vecinas, y las salidas privadas del modo manual (P4, Q-12 y la relectura), se quedan fuera del repositorio; quien evalúe puede pedírselos al autor para recalcular el HMAC.
 
 ### Severidad del hallazgo
 
