@@ -525,6 +525,18 @@ También se vieron, en el plan del bloque 1 y sin publicar, las duraciones de la
 
 Resultado predicho: las dos, en ambas ambiguas. Confianza baja. Motivo: el rango de A1 se ensanchó por los dos extremos entre la medida inicial y la final, y el despachador pudo lanzar las peticiones más tarde de lo planeado; no hay motivo para descartar ninguna de las dos causas.
 
+**Resultado (27/11/2026, después del push de las predicciones en `38359a1`).** `python tests\produccion\b1_causa_p6.py "$env:TEMP\canario_produccion_salida_20261125T220309Z_p6"` da `B1 HECHO`.
+- Identidad: `head` 4ec7d90aae26 y `sha256_lanzar` igual al de `4ec7d90`.
+- A1 inicial [-0,351892; -0,211145] s, final [-0,381521; -0,197360] s; la envolvente es la de `combinar_a1`.
+- Reconstrucción: 1785 filas de A; hueco `inicio_local - real` con máximo 0,127792 ms, mediana 0,062943 ms y 0 filas con hueco negativo.
+
+| Ambigua (línea del CSV) | Inicio local (s) | Duración | (a) Deriva | Lado | (b) Despachador | Resultado |
+|---|---|---|---|---|---|---|
+| 1317 | 1795644540,362688 | 277,917 ms | sí | inicio (d_min final -0,381521 < inicial -0,351892) | no (la guarda pasa en `planeada` y en `real`) | solo (a) |
+| 1925 | 1795644600,362565 | 139,033 ms | sí | inicio | no | solo (a) |
+
+**Frente a la predicción.** La (a) se acertó y la (b) no: la causa es solo la deriva del desfase durante P6, no el retraso del despachador. Las dos peticiones empezaron unos 0,36 s después de una frontera de minuto local. Con el A1 inicial, su inicio en hora del servidor caía 10,8 y 10,7 ms dentro de la ventana nueva, y la guarda las dejó pasar. Durante P6, `d_min` bajó 29,6 ms, y con la envolvente el inicio podía caer 18,8 y 19,0 ms antes de la frontera. La guarda de `4ec7d90` no deja margen frente a la deriva de A1 entre la medida inicial y la final. B1(i) lo cubre: ensancha la guarda `ANCHURA_A1_MAX_S` (1,5 s) por cada lado y la evalúa en el trabajador, en el instante del inicio.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |
