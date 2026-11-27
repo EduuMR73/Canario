@@ -27,11 +27,14 @@ Solo biblioteca estándar. Las funciones puras están separadas de la E/S y
 las prueba tests/produccion/test_lanzar.py, sin red ni Docker.
 """
 import argparse
+import ast
 import base64
+import collections
 import csv
 import datetime
 import email.utils
 import hashlib
+import heapq
 import hmac
 import http.client
 import ipaddress
@@ -201,7 +204,7 @@ PATRON_CODIGO = re.compile(rb"(?i:[A-Z2-7]{4}(?:-[A-Z2-7]{4}){7})|[A-Z2-7]{32}")
 # literales en las unitarias (plan §1).
 # ===========================================================================
 def ventana_de_peticion(inicio_s, fin_s, ventana_s):
-    """Copia de tests/estres/lanzar.py:3413-3420. (índice de ventana por la
+    """Copia de tests/estres/lanzar.py:3506-3513. (índice de ventana por la
     hora de INICIO, ambigua). Una petición es ambigua si el intervalo
     [inicio, fin] cruza una frontera de ventana: no se sabe en qué contador
     cayó."""
@@ -210,17 +213,19 @@ def ventana_de_peticion(inicio_s, fin_s, ventana_s):
 
 
 def contar_por_ip_ventana(filas, ventana_s, aceptado):
-    """Copia de tests/estres/lanzar.py:3423-3455. Recuento por (IP, ventana).
+    """Copia de tests/estres/lanzar.py:3516-3554. Recuento por (IP, ventana).
     filas: dicts con ip, inicio, fin (segundos desde 1970) y estado. Solo
     cuenta el estado ACEPTADO; los 503 van aparte y todo lo demás en "otros".
     Cada par lleva sus peticiones ordenadas por inicio, para el control
-    positivo, y las ambiguas que cruzan su frontera inicial."""
+    positivo, y las ambiguas que cruzan su frontera inicial. "hasta_ambiguas"
+    (B1(ii)): la ventana de fin de cada aceptada ambigua que empieza en el
+    par, para asignacion_factible."""
     pares = {}
 
     def par(clave):
         return pares.setdefault(clave, {"aceptadas": 0, "aceptadas_ambiguas": 0, "aceptadas_ambiguas_inicio": 0,
                                         "n429": 0, "n503": 0, "otros": 0, "ambiguas": 0, "ambiguas_inicio": 0,
-                                        "peticiones": []})
+                                        "peticiones": [], "hasta_ambiguas": []})
 
     for f in filas:
         ventana, ambigua = ventana_de_peticion(f["inicio"], f["fin"], ventana_s)
@@ -232,6 +237,7 @@ def contar_por_ip_ventana(filas, ventana_s, aceptado):
             siguiente["ambiguas_inicio"] += 1
             if f["estado"] == aceptado:
                 siguiente["aceptadas_ambiguas_inicio"] += 1
+                p_["hasta_ambiguas"].append(math.floor(f["fin"] / ventana_s))
         if f["estado"] == aceptado:
             p_["aceptadas_ambiguas" if ambigua else "aceptadas"] += 1
         elif f["estado"] == 429:
@@ -246,22 +252,69 @@ def contar_por_ip_ventana(filas, ventana_s, aceptado):
 
 
 def retry_after_valido(valor, ventana_s):
-    """Copia de tests/estres/lanzar.py:3458-3462. Retry-After de un 429: un
+    """Copia de tests/estres/lanzar.py:3557-3561. Retry-After de un 429: un
     entero entre 1 y la ventana. El -1 que se anota cuando falta no vale."""
     return (isinstance(valor, (int, float)) and not isinstance(valor, bool) and float(valor).is_integer()
             and 1 <= valor <= ventana_s)
 
 
+def asignacion_factible(no_ambiguas, ambiguas, limite):
+    """Copia de tests/estres/lanzar.py:3570-3611. B1(ii): None si las aceptadas
+    ambiguas ([(a, b)]) se pueden repartir entre los contadores de a a b sin
+    que ninguno pase de `limite` junto con las no ambiguas ({ventana: n}); si
+    no, la ventana del primer conflicto. EDF con montón."""
+    ventanas = set(no_ambiguas) | {a for a, _ in ambiguas}
+    if not ventanas:
+        return None
+    por_nacer = sorted(ambiguas)
+    monton, i, w = [], 0, min(ventanas)
+    while True:
+        while i < len(por_nacer) and por_nacer[i][0] <= w:
+            heapq.heappush(monton, por_nacer[i][1])
+            i += 1
+        # Capacidad negativa: las no ambiguas ya pasan del límite (conflicto).
+        capacidad = limite - no_ambiguas.get(w, 0)
+        if capacidad < 0:
+            return w
+        while monton and capacidad > 0:
+            heapq.heappop(monton)
+            capacidad -= 1
+        if monton and monton[0] <= w:
+            return w
+        if monton:
+            w += 1
+            continue
+        siguientes = [x for x in no_ambiguas if x > w]
+        if i < len(por_nacer):
+            siguientes.append(por_nacer[i][0])
+        if not siguientes:
+            return None
+        w = min(siguientes)
+
+
 def veredicto_l3(pares, limite, retry_invalidos=0):
-    """Copia de tests/estres/lanzar.py:3472-3490. Oráculo por IP y ventana.
-    FALLA: algún par con más de `limite` aceptadas NO ambiguas, o algún 429
-    sin Retry-After válido. SIN CONCLUSION: solo se pasa de `limite` contando
-    las ambiguas. PASA en otro caso."""
+    """Copia de tests/estres/lanzar.py:3614-3650. Oráculo por IP y ventana, C1
+    en tres niveles (B1(ii)). FALLA: algún par con más de `limite` aceptadas
+    NO ambiguas, ninguna asignación factible de las ambiguas de una IP, o
+    algún 429 sin Retry-After válido. SIN CONCLUSION: una aceptada ambigua
+    cruza dos fronteras, o solo se pasa de `limite` contando las ambiguas.
+    PASA en otro caso."""
     pasan = sorted(((c, p_["aceptadas"]) for c, p_ in pares.items() if p_["aceptadas"] > limite))
     if pasan:
         return "FALLA", f"{len(pasan)} pares IP-ventana con mas de {limite} aceptadas no ambiguas (ejemplo {pasan[0]})"
+    por_ip = {}
+    for (ip, w), p_ in pares.items():
+        no_ambiguas, ambiguas = por_ip.setdefault(ip, ({}, []))
+        no_ambiguas[w] = p_["aceptadas"]
+        ambiguas.extend((w, b) for b in p_["hasta_ambiguas"])
+    for ip in sorted(por_ip, key=str):
+        conflicto = asignacion_factible(*por_ip[ip], limite)
+        if conflicto is not None:
+            return "FALLA", f"ninguna asignacion factible de las ambiguas (IP {ip}, ventana {conflicto})"
     if retry_invalidos:
         return "FALLA", f"{retry_invalidos} respuestas 429 sin Retry-After valido"
+    if any(b >= w + 2 for (_, w), p_ in pares.items() for b in p_["hasta_ambiguas"]):
+        return "SIN CONCLUSION", "una aceptada cruza dos fronteras: la regla de PASA no la cubre"
     # Cuentan tambien las aceptadas ambiguas de la ventana anterior, que pudieron
     # caer en esta (H11), igual que control_l3 con ambiguas_inicio.
     dudosos = [c for c, p_ in pares.items()
@@ -272,7 +325,7 @@ def veredicto_l3(pares, limite, retry_invalidos=0):
 
 
 def control_l3(pares, limite):
-    """Copia de tests/estres/lanzar.py:3493-3510. Control positivo: en cada par
+    """Copia de tests/estres/lanzar.py:3653-3670. Control positivo: en cada par
     no son 429 las primeras (limite - ambiguas al inicio del par - peticiones
     previas del par con estado 0 o 503) peticiones NO ambiguas. Devuelve
     (ok, motivos)."""
@@ -293,7 +346,7 @@ def control_l3(pares, limite):
 
 
 def maximo_deslizante(inicios_por_ip, tramo_s=60):
-    """Copia de tests/estres/lanzar.py:3513-3525. Máximo de peticiones
+    """Copia de tests/estres/lanzar.py:3673-3686. Máximo de peticiones
     aceptadas por una IP en cualquier tramo de tramo_s segundos (el defecto de
     la ventana fija). Devuelve (máximo, ip)."""
     mejor = (0, None)
@@ -309,7 +362,7 @@ def maximo_deslizante(inicios_por_ip, tramo_s=60):
 
 
 def percentil(ordenados, q):
-    """Copia de tests/estres/lanzar.py:599-604. Percentil por rango más
+    """Copia de tests/estres/lanzar.py:612-617. Percentil por rango más
     cercano sobre una lista ya ordenada."""
     if not ordenados:
         return None
@@ -318,7 +371,7 @@ def percentil(ordenados, q):
 
 
 def formas_codificadas(valor):
-    """Copia de tests/estres/lanzar.py:4069-4075. Un literal tal cual y en sus
+    """Copia de tests/estres/lanzar.py:4250-4256. Un literal tal cual y en sus
     formas codificadas: URL y JSON escapado. Sin duplicados."""
     import urllib.parse
     formas = {valor, urllib.parse.quote(valor, safe=""), urllib.parse.quote_plus(valor),
@@ -327,7 +380,7 @@ def formas_codificadas(valor):
 
 
 def buscar_en_bytes(contenido, literales, patrones=()):
-    """Copia de tests/estres/lanzar.py:4078-4090. Literales (con sus formas
+    """Copia de tests/estres/lanzar.py:4259-4270. Literales (con sus formas
     codificadas) y patrones (regex de bytes) que aparecen en contenido.
     Devuelve los nombres encontrados, sin repetir."""
     encontrados = []
@@ -341,7 +394,7 @@ def buscar_en_bytes(contenido, literales, patrones=()):
 
 
 def escanear_fichero(ruta, literales, patrones=(), trozo=8 * 1024 * 1024, solape=512):
-    """Copia de tests/estres/lanzar.py:4093-4107: buscar_en_bytes por trozos
+    """Copia de tests/estres/lanzar.py:4273-4286: buscar_en_bytes por trozos
     con solape."""
     encontrados = set()
     cola = b""
@@ -357,7 +410,7 @@ def escanear_fichero(ruta, literales, patrones=(), trozo=8 * 1024 * 1024, solape
 
 
 def veredicto_fuga(hallazgos, centinela_visto):
-    """Copia de tests/estres/lanzar.py:4133-4141. Si el escáner no encuentra
+    """Copia de tests/estres/lanzar.py:4313-4320. Si el escáner no encuentra
     su centinela, no es de fiar (SIN CONCLUSION); si encuentra algo, SIN
     CONCLUSION; si no, PASA."""
     if not centinela_visto:
@@ -568,14 +621,33 @@ def construir_plan_a(tasa=TOPE_TASA_A, duracion=TOPE_DURACION_S, tope_peticiones
 
 
 def permite_guarda(t, d_min, d_max, ventana=VENTANA_SEGUIMIENTO_S):
-    """D10 (Q-1, N3, QA6). Se lanza en el instante local t solo si
-    t + d_min >= F_anterior y t + d_max + 1,0 s + 0,001 s <= F_siguiente, con
-    F las fronteras de minuto del servidor. F_anterior es la frontera de la
-    ventana en la que cae t + d_min."""
-    temprano = round(t + d_min, 6)
-    f_anterior = math.floor(temprano / ventana) * ventana
-    f_siguiente = f_anterior + ventana
-    return temprano >= f_anterior and round(t + d_max + GUARDA_DURACION_S + GUARDA_MARGEN_S, 6) <= f_siguiente
+    """D10 con la guarda de B1(i) (plan bloque 1, §3). Se lanza en el instante
+    local t, con [d_min, d_max] el A1 INICIAL, solo si el intervalo
+    [t + d_min - 1,5 ; t + d_max + 1,5 + 1,0 + 0,001] cae entero en una
+    ventana del servidor.
+
+    Por qué el 1,5 a cada lado: el veredicto clasifica con la envolvente del
+    A1 inicial y el final (combinar_a1). Cada A1 mide como mucho
+    ANCHURA_A1_MAX_S = 1,5 s (evaluar_a1) y el final tiene que solapar con el
+    inicial (si no, combinar_a1 da None y P6 queda SIN CONCLUSION). Así que la
+    envolvente cae dentro de [d_min_ini - 1,5 ; d_max_ini + 1,5], y una
+    petición de 1,0 s o menos lanzada con esta guarda no puede salir ambigua
+    con ella. La guarda vieja (t + d_max + 1,001 <= F_siguiente, con una
+    condición t + d_min >= F_anterior que era una tautología) usaba el A1
+    inicial sin margen: si el desfase derivaba, la envolvente fabricaba
+    ambiguas (las 2 de P6 del 25/11; B1 las atribuye a la deriva por el lado
+    del inicio).
+
+    Zona ciega: con d = [0; 0,3] se pierden 4,301 s por minuto, y con
+    d = [0; 1,5], 5,501 s (antes, unos 1,3 s). A sigue dando mucho más de 60
+    por ventana.
+
+    Con b exactamente en la frontera, la guarda rechaza: floor(b / ventana) ya
+    es la ventana siguiente, igual que en ventana_de_peticion. Los extremos se
+    redondean al microsegundo, como en intervalo_servidor."""
+    a = round(t + d_min - ANCHURA_A1_MAX_S, 6)
+    b = round(t + d_max + ANCHURA_A1_MAX_S + GUARDA_DURACION_S + GUARDA_MARGEN_S, 6)
+    return math.floor(a / ventana) == math.floor(b / ventana)
 
 
 def planificar_guarda(tiempos, t0, d_min, d_max, guarda=True):
@@ -1086,9 +1158,22 @@ def veredicto_p6(filas_a, filas_b, d_min, d_max, parada, descartes, retraso_ok, 
         ventana, ambigua = ventana_de_peticion(inicio, fin, VENTANA_SEGUIMIENTO_S)
         filas_srv.append({"ip": "A", "inicio": inicio, "fin": fin, "estado": f["estado"], "ventana": ventana,
                           "ambigua": ambigua, "es_429": f.get("es_429", False), "retry_after": f.get("retry_after", -1)})
-    aceptadas_ambiguas = sum(1 for f in filas_srv if f["ambigua"] and f["estado"] == 404)
-    if aceptadas_ambiguas:
-        dudas.append(f"A: {aceptadas_ambiguas} aceptadas (404) ambiguas: veredicto_l3 las sumaria a dos ventanas")
+    # B1(i): con la guarda nueva, una aceptada de 1,0 s o menos no puede salir
+    # ambigua; si sale, falla el instrumento (la guarda o el A1). Una de más
+    # de 1,0 s sí puede, y es lo que D10 ya espera. Las dos son SIN
+    # CONCLUSION, pero con su causa. La duración es la LOCAL (fin - inicio de
+    # filas_a), sin el desfase.
+    largas = cortas = 0
+    for f, f_srv in zip(filas_a, filas_srv):
+        if f_srv["ambigua"] and f_srv["estado"] == 404:
+            if f["fin"] - f["inicio"] > GUARDA_DURACION_S:
+                largas += 1
+            else:
+                cortas += 1
+    if largas:
+        dudas.append(f"A: {largas} aceptadas (404) ambiguas de mas de 1,0 s: esperadas por D10")
+    if cortas:
+        dudas.append(f"A: {cortas} aceptadas (404) ambiguas de 1,0 s o menos: fallo del instrumento")
     ventanas = sorted({f["ventana"] for f in filas_srv})
     if parada is not None:
         limite = round(parada["instante"] + d_min, 6)
@@ -1156,6 +1241,202 @@ def veredicto_p6(filas_a, filas_b, d_min, d_max, parada, descartes, retraso_ok, 
     if dudas:
         return SIN_CONCLUSION, dudas, info
     return PASA, ["A como mucho 60 aceptadas por ventana, con 429; B sin errores y p50 dentro del umbral"], info
+
+
+# --- P3: comprobación previa de P6 (plan bloque 1, §5, punto 2) -----------------
+# No es la prueba P3 del 413. Antes de P6 se comprueba que, desde 5bd462a (el
+# código con el que se midió lo anterior), el diff no toca nada que cambie lo
+# que P6 mide salvo el mamparo de A2, y que app/principal.py solo añade esas
+# sentencias. Mecanismo: lista permitida LITERAL. Si alguien retoca una de
+# estas 9 sentencias, P3 da PARADA hasta que se actualice la lista: es
+# justo lo que se quiere vigilar.
+BASE_P3 = "5bd462a"
+# Las 9 sentencias que A2 (42cbd20) añadió a ciclo_de_vida, como fuente. Se
+# parsean dentro de un async def auxiliar (la 9 lleva await) y se comparan
+# por ast.dump, sin posiciones. Su sitio también es literal (SITIO_MAMPARO).
+MAMPARO_A2 = (
+    "tarea_resumen = None",
+    "semaforo_hash, limitador_hash = personal.crear_mamparo()",
+    ("if fallo := personal.comprobar_mamparo(semaforo_hash, limitador_hash):\n"
+     "    registro.error(\"ARRANQUE BLOQUEADO: mamparo_hashes: %s\", fallo)\n"
+     "    raise verificacion_arranque.ArranqueBloqueado(\"mamparo_hashes\")"),
+    "resumen_saturacion = personal.ResumenSaturacion()",
+    "tarea_resumen = resumen_saturacion.lanzar_tarea()",
+    "app.state.semaforo_hash = semaforo_hash",
+    "app.state.limitador_hash = limitador_hash",
+    "app.state.resumen_saturacion = resumen_saturacion",
+    ("if tarea_resumen is not None:\n"
+     "    await resumen_saturacion.parar_tarea(tarea_resumen)"),
+)
+# Sitio de cada huella: "cuerpo" (cuerpo de ciclo_de_vida, justo antes del
+# Try contenedor), "body" o "finalbody" de ese Try (app/principal.py:116).
+SITIO_MAMPARO = ("cuerpo", "body", "body", "body", "body", "body", "body", "body", "finalbody")
+# Lo que P6 no puede ver cambiado (plan §5, punto 2). Además, cualquier A
+# bajo app/ es PARADA: así se mecaniza "un módulo nuevo de log" (Q5).
+FICHEROS_PROHIBIDOS_P3 = ("app/rutas_denuncias.py", "app/denuncias.py", "app/bd.py", "app/frontera_http.py",
+                          "app/limitador.py", "app/validacion.py", "app/cripto.py", "Dockerfile",
+                          "requirements.txt", "docker-compose.yml", "compose.produccion.yaml")
+# Control positivo del comparador, en ejecución: un lifespan mínimo con las 9
+# en su sitio (tiene que dar igual) y el mismo con un else colado en la
+# sentencia 3 (el mutante de python-async, que tiene que dar distinto).
+CONTROL_P3_VIEJO = """
+async def ciclo_de_vida(app):
+    pool = bd.crear_pool()
+    limitador_api = None
+    try:
+        app.state.pool = pool
+        yield
+    finally:
+        pool.close()
+"""
+CONTROL_P3_NUEVO = """
+async def ciclo_de_vida(app):
+    pool = bd.crear_pool()
+    limitador_api = None
+    tarea_resumen = None
+    try:
+        semaforo_hash, limitador_hash = personal.crear_mamparo()
+        if fallo := personal.comprobar_mamparo(semaforo_hash, limitador_hash):
+            registro.error("ARRANQUE BLOQUEADO: mamparo_hashes: %s", fallo)
+            raise verificacion_arranque.ArranqueBloqueado("mamparo_hashes")
+        resumen_saturacion = personal.ResumenSaturacion()
+        tarea_resumen = resumen_saturacion.lanzar_tarea()
+        app.state.pool = pool
+        app.state.semaforo_hash = semaforo_hash
+        app.state.limitador_hash = limitador_hash
+        app.state.resumen_saturacion = resumen_saturacion
+        yield
+    finally:
+        if tarea_resumen is not None:
+            await resumen_saturacion.parar_tarea(tarea_resumen)
+        pool.close()
+"""
+CONTROL_P3_ELSE = """
+async def ciclo_de_vida(app):
+    pool = bd.crear_pool()
+    limitador_api = None
+    tarea_resumen = None
+    try:
+        semaforo_hash, limitador_hash = personal.crear_mamparo()
+        if fallo := personal.comprobar_mamparo(semaforo_hash, limitador_hash):
+            registro.error("ARRANQUE BLOQUEADO: mamparo_hashes: %s", fallo)
+            raise verificacion_arranque.ArranqueBloqueado("mamparo_hashes")
+        else:
+            pool.max_size = 1
+        resumen_saturacion = personal.ResumenSaturacion()
+        tarea_resumen = resumen_saturacion.lanzar_tarea()
+        app.state.pool = pool
+        app.state.semaforo_hash = semaforo_hash
+        app.state.limitador_hash = limitador_hash
+        app.state.resumen_saturacion = resumen_saturacion
+        yield
+    finally:
+        if tarea_resumen is not None:
+            await resumen_saturacion.parar_tarea(tarea_resumen)
+        pool.close()
+"""
+
+
+def huellas_mamparo(sentencias=MAMPARO_A2):
+    """ast.dump (sin posiciones) de cada sentencia de la lista, parseada
+    dentro de un async def auxiliar para que el await de la 9 sea válido."""
+    huellas = []
+    for texto in sentencias:
+        envoltorio = "async def _p3():\n" + "\n".join("    " + linea for linea in texto.split("\n")) + "\n"
+        huellas.append(ast.dump(ast.parse(envoltorio).body[0].body[0]))
+    return huellas
+
+
+def _ciclo_de_vida(modulo):
+    """La definición de ciclo_de_vida del nivel superior del módulo, o None si
+    no hay exactamente una."""
+    defs = [n for n in modulo.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "ciclo_de_vida"]
+    return defs[0] if len(defs) == 1 else None
+
+
+def quitar_mamparo(funcion, huellas):
+    """Quita de la función (se modifica) las 9 huellas, exigiendo cada una
+    exactamente una vez en toda la función y en su sitio (SITIO_MAMPARO):
+    la 1 en el cuerpo, seguida del Try contenedor; de la 2 a la 8 en el body
+    de ese Try, en orden; la 9 en su finalbody. Solo se quita una sentencia
+    si su ast.dump está en la lista. Sin el sitio, mover una huella a otro
+    bloque pasaba (python-async lo comprobó). Devuelve None si todo cuadra, o
+    el motivo."""
+    vistas = collections.Counter(ast.dump(n) for n in ast.walk(funcion) if isinstance(n, ast.stmt))
+    for i, h in enumerate(huellas, 1):
+        if vistas.get(h, 0) != 1:
+            return f"la sentencia {i} del mamparo aparece {vistas.get(h, 0)} veces (se espera 1)"
+    cuerpo = [ast.dump(n) for n in funcion.body]
+    if huellas[0] not in cuerpo:
+        return "la sentencia 1 del mamparo no esta en el cuerpo de ciclo_de_vida"
+    i1 = cuerpo.index(huellas[0])
+    if i1 + 1 >= len(funcion.body) or not isinstance(funcion.body[i1 + 1], ast.Try):
+        return "la sentencia 1 del mamparo no va justo antes del try contenedor"
+    contenedor = funcion.body[i1 + 1]
+    en_body = [ast.dump(n) for n in contenedor.body]
+    posiciones = []
+    for i, (h, sitio) in enumerate(zip(huellas, SITIO_MAMPARO), 1):
+        if sitio == "body":
+            if h not in en_body:
+                return f"la sentencia {i} del mamparo no esta en el body del try contenedor"
+            posiciones.append(en_body.index(h))
+        elif sitio == "finalbody" and h not in [ast.dump(n) for n in contenedor.finalbody]:
+            return f"la sentencia {i} del mamparo no esta en el finally del try contenedor"
+    if posiciones != sorted(posiciones):
+        return "las sentencias 2 a 8 del mamparo no van en orden"
+    conjunto = set(huellas)
+    contenedor.body = [n for n in contenedor.body if ast.dump(n) not in conjunto]
+    contenedor.finalbody = [n for n in contenedor.finalbody if ast.dump(n) not in conjunto]
+    funcion.body = [n for n in funcion.body if ast.dump(n) not in conjunto]
+    return None
+
+
+def comparar_principal(viejo, nuevo, sentencias=MAMPARO_A2):
+    """P3 sobre dos fuentes de app/principal.py. Devuelve (dentro, fuera,
+    motivo): dentro es True si ciclo_de_vida del nuevo, sin las 9 sentencias
+    del mamparo (en su sitio y una sola vez), es igual a la del viejo; fuera,
+    si el módulo sin ciclo_de_vida es igual. Todo por ast.dump, sin
+    posiciones (los comentarios no cuentan)."""
+    try:
+        m_viejo, m_nuevo = ast.parse(viejo), ast.parse(nuevo)
+    except SyntaxError as error:
+        return False, False, f"no se puede parsear: {type(error).__name__}"
+    f_viejo, f_nuevo = _ciclo_de_vida(m_viejo), _ciclo_de_vida(m_nuevo)
+    if f_viejo is None or f_nuevo is None:
+        return False, False, "no hay exactamente una ciclo_de_vida en cada fuente"
+    motivo = quitar_mamparo(f_nuevo, huellas_mamparo(sentencias))
+    dentro = motivo is None and ast.dump(f_nuevo) == ast.dump(f_viejo)
+    if motivo is None and not dentro:
+        motivo = "ciclo_de_vida cambia ademas de las 9 sentencias del mamparo"
+    m_viejo.body = [n for n in m_viejo.body if n is not f_viejo]
+    m_nuevo.body = [n for n in m_nuevo.body if n is not f_nuevo]
+    fuera = ast.dump(m_nuevo) == ast.dump(m_viejo)
+    if not fuera:
+        motivo = (motivo + "; " if motivo else "") + "el modulo cambia fuera de ciclo_de_vida"
+    return dentro, fuera, motivo or "solo cambian las 9 sentencias del mamparo, en su sitio"
+
+
+def ficheros_prohibidos(lineas):
+    """Motivos de PARADA en la salida de git diff --name-status --no-renames
+    (con --no-renames un renombrado sale como D + A, no hay R ni C). Lista
+    vacía si no hay ninguno. Cualquier estado (A, M, D o T) sobre un fichero
+    prohibido o bajo proxy/, cualquier A bajo app/ y cualquier línea con un
+    estado desconocido."""
+    motivos = []
+    for linea in lineas:
+        if not linea.strip():
+            continue
+        partes = linea.split("\t")
+        if len(partes) != 2 or partes[0] not in ("A", "M", "D", "T"):
+            motivos.append(f"linea de git diff con un estado desconocido: {linea!r}")
+            continue
+        estado, ruta = partes
+        if ruta in FICHEROS_PROHIBIDOS_P3 or ruta.startswith("proxy/"):
+            motivos.append(f"{estado} {ruta}: fichero que P6 no puede ver cambiado")
+        elif estado == "A" and ruta.startswith("app/"):
+            motivos.append(f"A {ruta}: modulo nuevo en app/")
+    return motivos
 
 
 # --- IP pública (S5), ssh -G (N6) y anti-fuga (§5.4) -----------------------------------
@@ -1336,6 +1617,43 @@ def comprobar_push():
     return head
 
 
+def comprobar_diff_p6(git_=None):
+    """P3 previa de P6 (plan bloque 1, §5, punto 2). Parada si el diff desde
+    BASE_P3 toca lo prohibido o si app/principal.py cambia algo más que las
+    9 sentencias del mamparo. Compara las versiones de HEAD (git show), no el
+    árbol de trabajo: lo que se mide es lo commiteado. git() no lanza:
+    devuelve (rc, out, err), así que cada rc se mira aquí. git_ solo existe
+    para las unitarias. Devuelve el texto para la salida."""
+    git_ = git_ or git
+    # Control positivo en ejecución, antes de los reales: si el comparador no
+    # distingue el par literal, no es de fiar.
+    igual = comparar_principal(CONTROL_P3_VIEJO, CONTROL_P3_NUEVO)[:2]
+    distinto = comparar_principal(CONTROL_P3_VIEJO, CONTROL_P3_ELSE)[:2]
+    if igual != (True, True) or distinto == (True, True):
+        raise Parada("SIN CONCLUSION del control de P3")
+
+    def llamar(*args, vacio_es_fallo):
+        rc, out, err = git_(*args)
+        if rc != 0:
+            raise Parada(f"P3: git {args[0]} devolvio {rc}: {err[-300:]}")
+        # Una salida vacía solo es fallo en git show (el fichero tiene que
+        # existir); en git diff significa que no hay cambios (C2).
+        if vacio_es_fallo and not out.strip():
+            raise Parada(f"P3: git {args[0]} sin salida")
+        return out
+
+    diff = llamar("diff", "--name-status", "--no-renames", BASE_P3, "HEAD", vacio_es_fallo=False)
+    motivos = ficheros_prohibidos(diff.splitlines())
+    if motivos:
+        raise Parada(f"P3: el diff desde {BASE_P3} toca lo prohibido: {motivos[:5]}")
+    viejo = llamar("show", f"{BASE_P3}:app/principal.py", vacio_es_fallo=True)
+    nuevo = llamar("show", "HEAD:app/principal.py", vacio_es_fallo=True)
+    dentro, fuera, motivo = comparar_principal(viejo, nuevo)
+    if not (dentro and fuera):
+        raise Parada(f"P3: app/principal.py: {motivo}")
+    return f"P3 previa: diff desde {BASE_P3} sin ficheros prohibidos; app/principal.py: {motivo}"
+
+
 class ConexionFijada(http.client.HTTPSConnection):
     """HTTPS/1.1 keep-alive contra una IP fijada (resuelta una vez con AF_INET)
     y desde un origen local fijo (source_address): así A y B salen cada una
@@ -1351,11 +1669,15 @@ class ConexionFijada(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
-def peticion(conexion, reloj, metodo, ruta, cuerpo=None, cabeceras=(), leer_max=1_048_576):
+def peticion(conexion, reloj, metodo, ruta, cuerpo=None, cabeceras=(), leer_max=1_048_576, inicio=None):
     """Una petición por la conexión. Sin User-Agent ni cookies, y sin el
     Accept-Encoding que añade http.client. Devuelve estado (0 si no hubo
-    respuesta), cuerpo, cabeceras en minúsculas e instantes inicio y fin."""
-    r = {"estado": 0, "cuerpo": b"", "cabeceras": {}, "inicio": reloj.ahora(), "fin": None, "error": ""}
+    respuesta), cuerpo, cabeceras en minúsculas e instantes inicio y fin.
+    inicio (B1(i)): el instante en el que el trabajador de P6 comprobó la
+    guarda. Si se pasa, es el inicio de la petición: así la guarda y el
+    veredicto miran el MISMO instante y no dos lecturas del reloj."""
+    r = {"estado": 0, "cuerpo": b"", "cabeceras": {}, "inicio": reloj.ahora() if inicio is None else inicio,
+         "fin": None, "error": ""}
     try:
         conexion.putrequest(metodo, ruta, skip_accept_encoding=True)
         for nombre, valor in cabeceras:
@@ -1666,6 +1988,16 @@ def esperar_frontera(ctx, a1, mas_s=2.0, frontera_utc=None):
 
 def cuerpo_seguimiento():
     return json.dumps({"codigo": codigo_inexistente()}).encode("utf-8")
+
+
+def enviar_seguimiento(con, reloj, inicio):
+    """El envío de A en P6 (antes enviar_a, anidada en prueba_p6), a nivel de
+    módulo para poder probarlo (B1(i)). inicio es el instante en el que el
+    trabajador comprobó la guarda, y pasa a ser el inicio de la petición.
+    Añade es_429 y retry_after, que piden veredicto_p6 y control_l3."""
+    r = peticion(con, reloj, "POST", RUTA_SEGUIMIENTO, cuerpo_seguimiento(), [TIPO_JSON], inicio=inicio)
+    r["es_429"], r["retry_after"] = es_429(r, VENTANA_SEGUIMIENTO_S), retry_after_entero(r)
+    return r
 
 
 def filas_para_combinar(filas, d):
@@ -2040,10 +2372,27 @@ def ejecutar_a(llegadas, t0, reloj, fabrica, enviar, parada, duracion, en_vuelo,
     antes de cada envío. Una llegada sin conexión libre es un descarte; una
     que la guarda no deja lanzar se omite y no se reenvía. Devuelve
     (omitidas, descartes). conexiones recibe cada conexión creada; al salir
-    se cierran todas aquí, haya terminado su hilo o no."""
+    se cierran todas aquí, haya terminado su hilo o no.
+
+    La guarda (B1(i)) tiene la última palabra en el TRABAJADOR: toma
+    real = reloj.ahora(), comprueba permite(real) y, si pasa, envía con
+    enviar(con, reloj, real), de modo que ese mismo instante es el inicio de
+    la petición. Así una llegada que el despachador vio permitida pero que el
+    trabajador recoge tarde, ya dentro de la zona ciega, se omite en vez de
+    lanzarse.
+
+    La guarda del despachador se queda como prefiltro conservador, con la
+    misma permite: sin ella, una llegada de la zona ciega que coincide con los
+    `en_vuelo` trabajadores ocupados acabaría en descartes en vez de en
+    omitidas, y veredicto_p6 convierte cualquier descarte en SIN CONCLUSION.
+    El prefiltro solo puede omitir de más, nunca lanzar algo que el
+    trabajador rechace. La lista omitidas mezcla las de los dos sitios."""
     fin_mono = time.monotonic() + duracion
     permite = permite or (lambda t: True)
     libres, trabajadores, omitidas, descartes, propias = queue.Queue(), [], [], [], []
+    # Escriben en omitidas el despachador y varios trabajadores: candado
+    # explícito, sin fiarse de que list.append sea atómico en CPython.
+    candado_omitidas = threading.Lock()
     terminar = threading.Event()
 
     def trabajar(cola):
@@ -2063,7 +2412,12 @@ def ejecutar_a(llegadas, t0, reloj, fabrica, enviar, parada, duracion, en_vuelo,
                     libres.put(cola)
                     continue
                 real = reloj.ahora()
-                r = enviar(con, reloj)
+                if not permite(real):
+                    with candado_omitidas:
+                        omitidas.append((k, plan))
+                    libres.put(cola)
+                    continue
+                r = enviar(con, reloj, real)
                 r.update(k=k, planeada=plan, real=real)
                 registro.append(r)
                 if racha is not None and racha.anotar(es_error(r["estado"])):
@@ -2089,8 +2443,10 @@ def ejecutar_a(llegadas, t0, reloj, fabrica, enviar, parada, duracion, en_vuelo,
                 time.sleep(min(resto, 0.05))
             if time.monotonic() >= fin_mono or parada.evento.is_set() or enviadas >= tope:
                 break
+            # Prefiltro del despachador (ver la docstring); el trabajador decide.
             if not (permite(plan) and permite(reloj.ahora())):
-                omitidas.append((k, plan))
+                with candado_omitidas:
+                    omitidas.append((k, plan))
                 continue
             try:
                 cola = libres.get_nowait()
@@ -2206,6 +2562,7 @@ def prueba_p6(ctx):
     if not ctx.produccion:
         raise Parada("P6 solo contra produccion (no tiene ensayo local con un solo origen)")
     comprobar_congelacion()
+    ctx.salida.p(f"   {comprobar_diff_p6()}")
     llegadas = construir_plan_a()
     validar_topes(TOPE_TASA_A, TOPE_DURACION_S, TOPE_PETICIONES_A, TOPE_EN_VUELO, 1 / PERIODO_B_S, PERIODO_SONDA_S)
     rol = ctx.args.rol
@@ -2251,13 +2608,9 @@ def prueba_p6(ctx):
         if rol in (None, "a"):
             racha_a = Racha(ERRORES_SEGUIDOS_A)
 
-            def enviar_a(con, reloj):
-                r = peticion(con, reloj, "POST", RUTA_SEGUIMIENTO, cuerpo_seguimiento(), [TIPO_JSON])
-                r["es_429"], r["retry_after"] = es_429(r, VENTANA_SEGUIMIENTO_S), retry_after_entero(r)
-                return r
-
+            # La guarda sigue con el A1 INICIAL: el final aún no existe.
             def correr_a():
-                o, d_ = ejecutar_a(llegadas, t0, ctx.reloj, lambda: ctx.conexion("A"), enviar_a, parada,
+                o, d_ = ejecutar_a(llegadas, t0, ctx.reloj, lambda: ctx.conexion("A"), enviar_seguimiento, parada,
                                    TOPE_DURACION_S, TOPE_EN_VUELO, TOPE_PETICIONES_A, filas_a, conexiones,
                                    lambda t: permite_guarda(t, a1[0], a1[1]), racha_a)
                 omitidas.extend(o)

@@ -9,10 +9,13 @@ tests/security/verificar_denuncia.py:386-387, los cuerpos de las baterías),
 no derivado de las constantes del lanzador. Cada comprobación negativa lleva
 su control positivo en la misma prueba.
 """
+import ast
+import copy
 import datetime
 import json
 import math
 import pathlib
+import random
 import sys
 import tempfile
 import threading
@@ -159,11 +162,55 @@ class GuardaD10(unittest.TestCase):
                 fronteras = {math.floor((p + 0.6) / 60) for p in ambiguas}
                 self.assertEqual(len(fronteras), 3, "sin la guarda hay ambiguas en cada frontera")
 
-    def test_borde_qa6(self):
-        self.assertTrue(L.permite_guarda(118.699, 0.0, 0.3))
-        self.assertFalse(L.permite_guarda(118.700, 0.0, 0.3))
-        self.assertEqual(L.clasificar(118.699, 118.699 + 1.000, 0.0, 0.3, 60), (1, False))
-        self.assertEqual(L.clasificar(118.699, 118.699 + 1.001, 0.0, 0.3, 60), (1, True))
+    def test_bordes_de_la_guarda_b1(self):
+        # B1(i): [t + d_min - 1,5 ; t + d_max + 1,5 + 1,0 + 0,001] entero en una ventana.
+        # d = [0,0; 0,3]: a = t - 1,5 y b = t + 2,801.
+        self.assertTrue(L.permite_guarda(61.5, 0.0, 0.3))          # a = 60,000000: ya en la ventana 1
+        self.assertFalse(L.permite_guarda(61.499999, 0.0, 0.3))    # a = 59,999999: ventana 0
+        self.assertTrue(L.permite_guarda(117.198, 0.0, 0.3))       # b = 119,999
+        self.assertFalse(L.permite_guarda(117.199, 0.0, 0.3))      # b = 120,000: la frontera rechaza
+        # Pausa por minuto: de 117,199 a 121,5 (sin incluir), 4,301 s.
+        # d = [0,0; 1,5]: b = t + 4,001.
+        self.assertTrue(L.permite_guarda(115.998, 0.0, 1.5))       # b = 119,999
+        self.assertFalse(L.permite_guarda(115.999, 0.0, 1.5))      # b = 120,000
+        # Pausa por minuto: de 115,999 a 121,5, 5,501 s.
+
+    def test_derivacion_de_la_guarda_con_deriva_del_a1(self):
+        # A1 inicial [0; w], w en [0; 1,5]; final de anchura <= 1,5 que solapa con el
+        # inicial; envolvente con combinar_a1. Para todo t que la guarda nueva deja
+        # lanzar con el A1 inicial y dur en {0,0; 0,5; 1,0}, la petición no es ambigua
+        # con la envolvente. 200 casos, 60 s con paso de 0,01 s, semilla literal.
+        def guarda_vieja(t, d_min, d_max, ventana=60):
+            # Mutante: la fórmula de antes de B1(i), copiada aquí (4ec7d90).
+            temprano = round(t + d_min, 6)
+            f_anterior = math.floor(temprano / ventana) * ventana
+            return temprano >= f_anterior and round(t + d_max + 1.0 + 0.001, 6) <= f_anterior + ventana
+
+        rnd = random.Random(20261126)
+        base = 1_000_020.0      # 1000020 / 60 = 16667: frontera exacta
+        ambiguas_nueva, ambiguas_vieja = [], 0
+        for _ in range(200):
+            w = rnd.uniform(0.0, 1.5)
+            ancho = rnd.uniform(0.0, 1.5)
+            desde = rnd.uniform(-ancho, w)          # [desde, desde + ancho] solapa con [0, w]
+            env = L.combinar_a1((0.0, w), (desde, desde + ancho))
+            self.assertIsNotNone(env)
+            for k in range(6000):
+                t = base + k / 100
+                nueva, vieja = L.permite_guarda(t, 0.0, w), guarda_vieja(t, 0.0, w)
+                if not (nueva or vieja):
+                    continue
+                for dur in (0.0, 0.5, 1.0):
+                    ambigua = L.clasificar(t, t + dur, env[0], env[1], 60)[1]
+                    if nueva and ambigua:
+                        ambiguas_nueva.append((w, desde, ancho, t, dur))
+                    if vieja and ambigua:
+                        ambiguas_vieja += 1
+        # Control: la guarda vieja con la misma deriva fabrica ambiguas. Si no, el
+        # escenario no prueba nada.
+        if not ambiguas_vieja:
+            self.fail("SIN CONCLUSION: la deriva sintetica no fabrica ambiguas con la guarda vieja")
+        self.assertEqual(ambiguas_nueva[:3], [])
 
     def test_omitidas_no_se_reenvian(self):
         tiempos = L.tiempos_rampa()
@@ -180,8 +227,8 @@ class GuardaD10(unittest.TestCase):
         t0 = reloj.ahora() + 0.05
         llegadas = [i * 0.01 for i in range(20)]
 
-        def enviar(con, reloj_):
-            return {"estado": 404, "inicio": reloj_.ahora(), "fin": reloj_.ahora(), "ms": 1.0}
+        def enviar(con, reloj_, inicio):
+            return {"estado": 404, "inicio": inicio, "fin": reloj_.ahora(), "ms": 1.0}
 
         omitidas, descartes = L.ejecutar_a(llegadas, t0, reloj, Falsa, enviar, parada, 2.0, 10, 2400, registro,
                                            conexiones, permite=lambda t: not (t0 + 0.05 <= t < t0 + 0.10))
@@ -193,6 +240,50 @@ class GuardaD10(unittest.TestCase):
         # El control de retraso solo ve las lanzadas.
         retrasos = [f["real"] - f["planeada"] for f in registro]
         self.assertEqual(len(retrasos), len(k_lanzadas))
+
+    def test_la_guarda_decide_en_el_trabajador(self):
+        # B1(i). El reloj falso adelanta 0,06 s en los hilos trabajadores y no en el del
+        # despachador, que es el hilo que llama a ejecutar_a (el de esta prueba): así un
+        # trabajador "recoge tarde" la llegada. Se guarda get_ident() al crearlo, justo
+        # antes de llamar a ejecutar_a, sin suponer que la prueba corre en el hilo principal.
+        class RelojFalso(L.Reloj):
+            def __init__(self):
+                super().__init__()
+                self.despachador = threading.get_ident()
+
+            def ahora(self):
+                return super().ahora() + (0.0 if threading.get_ident() == self.despachador else 0.06)
+
+        parada, registro, conexiones = L.EstadoParada(), [], []
+        reloj = RelojFalso()
+        t0 = reloj.ahora() + 0.05
+        llegadas = [i * 0.01 for i in range(20)]
+
+        def permite(t):
+            return not (t0 + 0.05 <= t < t0 + 0.10)
+
+        def enviar(con, reloj_, inicio):
+            return {"estado": 404, "inicio": inicio, "fin": inicio, "ms": 1.0}
+
+        omitidas, descartes = L.ejecutar_a(llegadas, t0, reloj, Falsa, enviar, parada, 2.0, 10, 2400, registro,
+                                           conexiones, permite=permite)
+        k_lanzadas = [f["k"] for f in registro]
+        k_omitidas = [k for k, _ in omitidas]
+        k_descartes = [k for k, _ in descartes]
+        # La lista omitidas mezcla las del despachador (prefiltro) y las del
+        # trabajador. Por eso el control exige k = 0, que el despachador nunca omite
+        # (la ve en t0, permitido), y no "alguna omitida": el trabajador la ve en
+        # t0 + 0,06 o más tarde, dentro de [t0 + 0,05; t0 + 0,10), y la omite. Con la
+        # guarda solo en el despachador se habría lanzado dentro de la franja.
+        if 0 not in k_omitidas:
+            self.fail("SIN CONCLUSION: el escenario no separa despachador y trabajador")
+        # Negativa: toda petición lanzada empieza en el instante en el que el trabajador
+        # comprobó la guarda, y ese instante está permitido.
+        for f in registro:
+            self.assertEqual(f["inicio"], f["real"])
+            self.assertTrue(permite(f["real"]), f)
+        # Lanzadas, omitidas y descartes reparten las 20 llegadas sin solaparse.
+        self.assertEqual(sorted(k_lanzadas + k_omitidas + k_descartes), list(range(20)))
 
 
 class Falsa:
@@ -432,6 +523,20 @@ class P6(unittest.TestCase):
         self.assertEqual(self.v(filas_p6_a(extra=[cruza_404]), filas_b()), "SIN CONCLUSION")
         self.assertEqual(self.v(filas_p6_a(extra=[cruza_429]), filas_b()), "PASA")
 
+    def test_ambiguas_aceptadas_separadas_por_duracion_b1(self):
+        # B1(i): duración LOCAL de más de 1,0 s (119,0 a 120,2: 1,2 s) es la esperada por D10.
+        larga = {"inicio": 119.0, "fin": 120.2, "estado": 404, "es_429": False, "retry_after": -1}
+        v, motivos, _ = L.veredicto_p6(filas_p6_a(extra=[larga]), filas_b(), 0.0, 0.3, None, 0, True, 100.0)
+        self.assertEqual(v, "SIN CONCLUSION")
+        self.assertTrue(any("ambiguas de mas de 1,0 s: esperadas por D10" in m for m in motivos), motivos)
+        # De 1,0 s o menos (119,9 a 119,95: 0,05 s, ambigua por el desfase): fallo del instrumento.
+        corta = {"inicio": 119.9, "fin": 119.95, "estado": 404, "es_429": False, "retry_after": -1}
+        v, motivos, _ = L.veredicto_p6(filas_p6_a(extra=[corta]), filas_b(), 0.0, 0.3, None, 0, True, 100.0)
+        self.assertEqual(v, "SIN CONCLUSION")
+        self.assertTrue(any("ambiguas de 1,0 s o menos: fallo del instrumento" in m for m in motivos), motivos)
+        # Control: sin ambiguas, PASA.
+        self.assertEqual(self.v(filas_p6_a(), filas_b()), "PASA")
+
     def test_parada_por_sondas(self):
         self.assertIsNotNone(L.evaluar_sondas([(200, 5.01), (200, 5.01)], 2.0))
         self.assertIsNone(L.evaluar_sondas([(200, 5.00), (200, 5.00)], 2.0))
@@ -568,11 +673,11 @@ class P5(unittest.TestCase):
         envios, conexiones, registro = [], [], []
         candado = threading.Lock()
 
-        def enviar(con, reloj):
+        def enviar(con, reloj, inicio):
             with candado:
                 envios.append(time.monotonic())
             time.sleep(0.01)
-            return {"estado": 404, "inicio": reloj.ahora(), "fin": reloj.ahora(), "ms": 10.0}
+            return {"estado": 404, "inicio": inicio, "fin": reloj.ahora(), "ms": 10.0}
 
         colgado = threading.Event()
         hilo_parada = threading.Thread(target=colgado.wait, daemon=True)   # nunca avisa
@@ -917,6 +1022,276 @@ class PeticionP3(unittest.TestCase):
         res = L.peticion_p3(con, L.Reloj(), b"x" * 10)
         self.assertEqual((res["estado"], res["segundos"]), (0, None))
         self.assertTrue(con.cerrada)
+
+
+# ---------------------------------------------------------------------------
+# Tanda 2 del bloque 1: B1(i) (inicio de la petición), B1(ii) (copias) y P3
+# ---------------------------------------------------------------------------
+class ConexionSinRed(Falsa):
+    """putrequest lanza OSError, que peticion captura: no hay respuesta."""
+
+    def putrequest(self, *a, **k):
+        raise OSError("sin red")
+
+
+class RespuestaFija:
+    def __init__(self, estado, cabeceras, cuerpo):
+        self.status, self._cabeceras, self._cuerpo = estado, cabeceras, cuerpo
+
+    def getheaders(self):
+        return list(self._cabeceras)
+
+    def read(self, n):
+        return self._cuerpo
+
+    def isclosed(self):
+        return True
+
+
+class ConexionConRespuesta(Falsa):
+    def __init__(self, respuesta):
+        super().__init__()
+        self.respuesta = respuesta
+
+    def putrequest(self, *a, **k):
+        pass
+
+    def putheader(self, *a):
+        pass
+
+    def endheaders(self, cuerpo=None):
+        pass
+
+    def getresponse(self):
+        return self.respuesta
+
+
+class InicioDeLaPeticion(unittest.TestCase):
+    RELOJ = SimpleNamespace(ahora=lambda: 500.0)
+
+    def test_peticion_con_inicio(self):
+        r_ = L.peticion(ConexionSinRed(), self.RELOJ, "POST", "/x", inicio=123.0)
+        self.assertEqual(r_["inicio"], 123.0)
+        self.assertEqual(r_["error"], "OSError")
+        # Control: sin inicio, el del reloj.
+        self.assertEqual(L.peticion(ConexionSinRed(), self.RELOJ, "POST", "/x")["inicio"], 500.0)
+
+    def test_enviar_seguimiento(self):
+        cab = [(k, v) for k, v in SEGURIDAD.items()] + [("Retry-After", "30")]
+        r_ = L.enviar_seguimiento(ConexionConRespuesta(RespuestaFija(429, cab, C429)), self.RELOJ, 123.0)
+        self.assertEqual(r_["inicio"], 123.0)
+        self.assertIs(r_["es_429"], True)
+        self.assertEqual(r_["retry_after"], 30)
+        # Control: con un 404, ni es_429 ni Retry-After.
+        r_ = L.enviar_seguimiento(ConexionConRespuesta(RespuestaFija(404, [], C404)), self.RELOJ, 123.0)
+        self.assertIs(r_["es_429"], False)
+        self.assertEqual(r_["retry_after"], -1)
+
+
+ESTRES_LANZAR = pathlib.Path(__file__).resolve().parent.parent / "estres" / "lanzar.py"
+COPIADAS = ("ventana_de_peticion", "contar_por_ip_ventana", "retry_after_valido", "veredicto_l3", "control_l3",
+            "asignacion_factible", "maximo_deslizante", "percentil")
+
+
+def funciones_de(ruta):
+    arbol = ast.parse(pathlib.Path(ruta).read_text(encoding="utf-8"))
+    return arbol, {n.name: n for n in arbol.body if isinstance(n, ast.FunctionDef)}
+
+
+def huella_funcion(nodo):
+    """Argumentos y cuerpo sin la docstring, por ast.dump (sin posiciones)."""
+    cuerpo = nodo.body
+    if cuerpo and isinstance(cuerpo[0], ast.Expr) and isinstance(cuerpo[0].value, ast.Constant) \
+            and isinstance(cuerpo[0].value.value, str):
+        cuerpo = cuerpo[1:]
+    return ast.dump(nodo.args) + "|" + "|".join(ast.dump(n) for n in cuerpo)
+
+
+def constantes_de(arbol):
+    return {t.id: ast.dump(n.value) for n in arbol.body if isinstance(n, ast.Assign)
+            for t in n.targets if isinstance(t, ast.Name)}
+
+
+class CopiasIgualesQueEstres(unittest.TestCase):
+    """B1(ii): las funciones copiadas de tests/estres/lanzar.py son iguales (por
+    ast, sin importar el otro lanzador): un cambio en una sola copia se ve aquí."""
+
+    def test_cuerpos_y_constantes_iguales(self):
+        arbol_p, propias = funciones_de(L.__file__)
+        arbol_e, de_estres = funciones_de(ESTRES_LANZAR)
+        mayusculas = set()
+        for nombre in COPIADAS:
+            self.assertIn(nombre, propias)
+            self.assertIn(nombre, de_estres)
+            self.assertEqual(huella_funcion(propias[nombre]), huella_funcion(de_estres[nombre]), nombre)
+            mayusculas |= {n.id for n in ast.walk(propias[nombre]) if isinstance(n, ast.Name) and n.id.isupper()}
+        # Si las copias usan alguna constante, vale lo mismo en los dos ficheros.
+        c_p, c_e = constantes_de(arbol_p), constantes_de(arbol_e)
+        for nombre in sorted(mayusculas):
+            self.assertEqual(c_p.get(nombre), c_e.get(nombre), nombre)
+        # Control: un mutante en memoria (el primer > cambiado por >=) da distinto.
+        mutante = copy.deepcopy(propias["veredicto_l3"])
+        compara = next((n for n in ast.walk(mutante) if isinstance(n, ast.Compare) and isinstance(n.ops[0], ast.Gt)),
+                       None)
+        if compara is None:
+            self.fail("SIN CONCLUSION: el mutante no encuentra ningun >")
+        compara.ops[0] = ast.GtE()
+        self.assertNotEqual(huella_funcion(mutante), huella_funcion(de_estres["veredicto_l3"]))
+
+    def test_la_copia_de_c1_da_lo_mismo(self):
+        # Mismos casos literales que tests/estres/test_lanzar.py (C1EnTresNiveles).
+        def filas(inicios):
+            return [{"ip": "a", "inicio": t, "fin": t + 0.05, "estado": 404} for t in inicios]
+        ambiguas = [{"ip": "a", "inicio": 119.99, "fin": 120.05, "estado": 404}] * 3
+        v1, v2 = filas([60 + i * 0.5 for i in range(59)]), filas([121 + i * 0.5 for i in range(59)])
+        self.assertEqual(L.veredicto_l3(L.contar_por_ip_ventana(v1 + v2 + ambiguas, 60, 404), 60)[0], "FALLA")
+        self.assertEqual(L.veredicto_l3(L.contar_por_ip_ventana(v1 + v2 + ambiguas[:2], 60, 404), 60)[0],
+                         "SIN CONCLUSION")
+        self.assertEqual(L.asignacion_factible({1: 61}, [], 60), 1)
+        self.assertIsNone(L.asignacion_factible({}, [(1, 2), (2, 3), (1, 2)], 1))
+
+
+# Fuentes mínimas literales de app/principal.py para P3 (no se leen del repo).
+PRINCIPAL_VIEJO = '''import contextlib
+
+from app import bd
+
+
+@contextlib.asynccontextmanager
+async def ciclo_de_vida(app):
+    pool = bd.crear_pool()
+    limitador_api = None
+    try:
+        app.state.pool = pool
+        yield
+    finally:
+        pool.close()
+
+
+def otra():
+    return 1
+'''
+PRINCIPAL_NUEVO = '''import contextlib
+
+from app import bd
+
+
+@contextlib.asynccontextmanager
+async def ciclo_de_vida(app):
+    pool = bd.crear_pool()
+    limitador_api = None
+    tarea_resumen = None
+    try:
+        # Un comentario no cuenta.
+        semaforo_hash, limitador_hash = personal.crear_mamparo()
+        if fallo := personal.comprobar_mamparo(semaforo_hash, limitador_hash):
+            registro.error("ARRANQUE BLOQUEADO: mamparo_hashes: %s", fallo)
+            raise verificacion_arranque.ArranqueBloqueado("mamparo_hashes")
+        resumen_saturacion = personal.ResumenSaturacion()
+        tarea_resumen = resumen_saturacion.lanzar_tarea()
+        app.state.pool = pool
+        app.state.semaforo_hash = semaforo_hash
+        app.state.limitador_hash = limitador_hash
+        app.state.resumen_saturacion = resumen_saturacion
+        yield
+    finally:
+        if tarea_resumen is not None:
+            await resumen_saturacion.parar_tarea(tarea_resumen)
+        pool.close()
+
+
+def otra():
+    return 1
+'''
+H6 = "        app.state.semaforo_hash = semaforo_hash\n"
+H9 = "        if tarea_resumen is not None:\n            await resumen_saturacion.parar_tarea(tarea_resumen)\n"
+
+
+class ComprobacionPreviaP3(unittest.TestCase):
+    def comparar(self, nuevo):
+        # Control "igual": el par literal con las 9 en su sitio da (True, True). Si no,
+        # el comparador no es de fiar y el resultado sería SIN CONCLUSION.
+        if L.comparar_principal(PRINCIPAL_VIEJO, PRINCIPAL_NUEVO)[:2] != (True, True):
+            self.fail("SIN CONCLUSION: el par de control no da igual")
+        return L.comparar_principal(PRINCIPAL_VIEJO, nuevo)
+
+    def test_viejo_frente_a_nuevo_con_las_nueve(self):
+        self.assertEqual(self.comparar(PRINCIPAL_NUEVO)[:2], (True, True))
+
+    def test_import_dentro_del_try(self):
+        nuevo = PRINCIPAL_NUEVO.replace("        app.state.pool = pool\n",
+                                        "        import asyncio\n        app.state.pool = pool\n")
+        self.assertEqual(self.comparar(nuevo)[:2], (False, True))
+
+    def test_import_arriba(self):
+        nuevo = PRINCIPAL_NUEVO.replace("import contextlib\n", "import anyio\nimport contextlib\n")
+        self.assertEqual(self.comparar(nuevo)[:2], (True, False))
+
+    def test_else_en_la_sentencia_3(self):
+        nuevo = PRINCIPAL_NUEVO.replace(
+            '            raise verificacion_arranque.ArranqueBloqueado("mamparo_hashes")\n',
+            '            raise verificacion_arranque.ArranqueBloqueado("mamparo_hashes")\n'
+            '        else:\n            pool.max_size = 1\n')
+        self.assertFalse(self.comparar(nuevo)[0])
+
+    def test_sentencia_6_cambiada(self):
+        nuevo = PRINCIPAL_NUEVO.replace(H6, "        app.state.semaforo_hash = None\n")
+        dentro, _, motivo = self.comparar(nuevo)
+        self.assertFalse(dentro)
+        self.assertIn("sentencia 6", motivo)
+
+    def test_sentencia_duplicada(self):
+        nuevo = PRINCIPAL_NUEVO.replace(H6, H6 + H6)
+        self.assertFalse(self.comparar(nuevo)[0])
+
+    def test_huella_fuera_de_su_sitio(self):
+        # La 6 fuera del try (entre la 1 y el try): la 1 ya no va justo antes del try.
+        fuera = PRINCIPAL_NUEVO.replace(H6, "").replace("    tarea_resumen = None\n    try:\n",
+                                                         "    tarea_resumen = None\n    app.state.semaforo_hash = "
+                                                         "semaforo_hash\n    try:\n")
+        self.assertFalse(self.comparar(fuera)[0])
+        # La 9 en el body del try (antes del yield) en vez de en el finally.
+        al_body = PRINCIPAL_NUEVO.replace(H9, "").replace("        yield\n", H9 + "        yield\n")
+        self.assertFalse(self.comparar(al_body)[0])
+
+    def git_falso(self, diff=(0, "", ""), viejo=None, nuevo=None):
+        llamadas = []
+
+        def git(*args):
+            llamadas.append(args)
+            if args[0] == "diff":
+                return diff
+            if args[1].startswith("HEAD:"):
+                return nuevo if nuevo is not None else (0, PRINCIPAL_NUEVO, "")
+            return viejo if viejo is not None else (0, PRINCIPAL_VIEJO, "")
+        return git, llamadas
+
+    def test_diff_vacio_no_es_parada_y_show_vacio_si(self):
+        git, llamadas = self.git_falso()
+        self.assertIn("P3 previa", L.comprobar_diff_p6(git))
+        self.assertEqual(llamadas[0], ("diff", "--name-status", "--no-renames", "5bd462a", "HEAD"))
+        self.assertIn(("show", "5bd462a:app/principal.py"), llamadas)
+        self.assertIn(("show", "HEAD:app/principal.py"), llamadas)
+        git, _ = self.git_falso(nuevo=(0, "", ""))
+        with self.assertRaises(L.Parada):
+            L.comprobar_diff_p6(git)
+
+    def test_rc_distinto_de_cero_es_parada(self):
+        git, _ = self.git_falso(diff=(128, "", "fatal: bad revision"))
+        with self.assertRaises(L.Parada):
+            L.comprobar_diff_p6(git)
+        git, _ = self.git_falso(viejo=(128, "", "fatal: path"))
+        with self.assertRaises(L.Parada):
+            L.comprobar_diff_p6(git)
+        # Control: con rc 0 y el diff de los tres ficheros permitidos, no hay Parada.
+        git, _ = self.git_falso(diff=(0, "M\tapp/personal.py\nM\tapp/principal.py\nM\tapp/rutas_personal.py\n", ""))
+        L.comprobar_diff_p6(git)
+
+    def test_ficheros_prohibidos(self):
+        for linea in ("M\tapp/bd.py", "D\tapp/cripto.py", "A\tapp/registro_nuevo.py", "M\tproxy/x.caddy", "X\tfoo"):
+            self.assertTrue(L.ficheros_prohibidos([linea]), linea)
+        # Control: lo permitido no da motivos.
+        self.assertEqual(L.ficheros_prohibidos(["M\tapp/personal.py", "M\tdocs/x.md", ""]), [])
 
 
 if __name__ == "__main__":

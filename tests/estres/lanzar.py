@@ -1810,6 +1810,17 @@ def guardar_eventos(destino, eventos):
 
 ENDURECIDO = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--network", "none",
               "--pids-limit", "64", "--user", USUARIO_API]
+# B3 (plan bloque 1, §4). La imagen de la API lleva las etiquetas de compose
+# (project y service=api) y todo contenedor que sale de ella las hereda. Sin
+# anularlas, `docker compose logs api` (Registro) recoge la salida del
+# contenedor en log_api.txt (con el cliente de control, cuerpos con códigos de
+# seguimiento: el anti-fuga de L5 lo detectó el 25/11/2026, E20 y 481397c en
+# docs/informe-pruebas.md:437), y `compose ps -q api` y bajar_pila lo
+# confunden con la API. Vacías, compose ya no lo trata como un servicio de la
+# pila; la clase la sigue dando canario.estres (clase_contenedor). Va en TODO
+# docker run o create con la imagen de la API, y lo vigila una guarda ast de
+# test_lanzar.py.
+SIN_ETIQUETAS_COMPOSE = ("--label", "com.docker.compose.project=", "--label", "com.docker.compose.service=")
 numeracion_lectores = itertools.count(1)
 
 
@@ -1830,8 +1841,8 @@ class Lector:
         self.err = open(destino_err, "wb")  # noqa: SIM115 - se cierra en parar()
         pares = [f"{n}={i}" for n, i in objetivos.items()]
         self.proceso = subprocess.Popen(
-            ["docker", "run", "--name", self.nombre, "--label", "canario.estres=lector", "--cgroupns", "host",
-             *ENDURECIDO, "--memory", "64m", "--cpuset-cpus", cpus, "--entrypoint", "python", imagen,
+            ["docker", "run", "--name", self.nombre, "--label", "canario.estres=lector", *SIN_ETIQUETAS_COMPOSE,
+             "--cgroupns", "host", *ENDURECIDO, "--memory", "64m", "--cpuset-cpus", cpus, "--entrypoint", "python", imagen,
              "-I", "-u", "-c", CODIGO_LECTOR, str(espera), *pares],
             stdout=subprocess.PIPE, stderr=self.err, creationflags=CREACION)
         self.hilo = threading.Thread(target=self._leer, daemon=True)
@@ -2865,8 +2876,8 @@ def ejecutar_control(ej, etapa):
     p(f"=== control positivo {etapa}")
     nombre = f"{PREFIJO_EFIMEROS}control"
     ejecutar(["docker", "rm", "-f", nombre])
-    r = ejecutar(["docker", "create", "--name", nombre, "--label", "canario.estres=control", "--restart",
-                  "on-failure:1", "--memory", "64m", "--memory-swap", "128m", *ENDURECIDO, "--cpuset-cpus",
+    r = ejecutar(["docker", "create", "--name", nombre, "--label", "canario.estres=control", *SIN_ETIQUETAS_COMPOSE,
+                  "--restart", "on-failure:1", "--memory", "64m", "--memory-swap", "128m", *ENDURECIDO, "--cpuset-cpus",
                   ej.cpus_k6, "--entrypoint", "python", ej.imagen, "-I", "-u", "-c", CODIGO_CONTROL])
     if r.rc != 0:
         raise Parada(f"no se crea el contenedor de control: {r.err.strip()[-300:]!r}")
@@ -3507,13 +3518,17 @@ def contar_por_ip_ventana(filas, ventana_s, aceptado):
     desde 1970) y estado. Solo cuenta el estado ACEPTADO (J3: 404 en L3, 401 en
     L3b); los 503 van aparte y todo lo demás en "otros". Cada par lleva sus
     peticiones ordenadas por inicio, para el control positivo (J2), y las
-    ambiguas que cruzan su frontera inicial ("ambiguas_inicio")."""
+    ambiguas que cruzan su frontera inicial ("ambiguas_inicio").
+    "hasta_ambiguas" (B1(ii)) guarda, por cada aceptada ambigua que EMPIEZA en
+    la ventana del par, la ventana en la que termina: es el plazo b del
+    intervalo [a, b] de contadores en los que pudo caer, y lo usa
+    asignacion_factible. "peticiones" no cambia de forma (la usa control_l3)."""
     pares = {}
 
     def par(clave):
         return pares.setdefault(clave, {"aceptadas": 0, "aceptadas_ambiguas": 0, "aceptadas_ambiguas_inicio": 0,
                                         "n429": 0, "n503": 0, "otros": 0, "ambiguas": 0, "ambiguas_inicio": 0,
-                                        "peticiones": []})
+                                        "peticiones": [], "hasta_ambiguas": []})
 
     for f in filas:
         ventana, ambigua = ventana_de_peticion(f["inicio"], f["fin"], ventana_s)
@@ -3525,6 +3540,7 @@ def contar_por_ip_ventana(filas, ventana_s, aceptado):
             siguiente["ambiguas_inicio"] += 1
             if f["estado"] == aceptado:
                 siguiente["aceptadas_ambiguas_inicio"] += 1
+                p_["hasta_ambiguas"].append(math.floor(f["fin"] / ventana_s))
         if f["estado"] == aceptado:
             p_["aceptadas_ambiguas" if ambigua else "aceptadas"] += 1
         elif f["estado"] == 429:
@@ -3551,16 +3567,80 @@ def retry_after_invalidos(valores, n429, ventana_s):
     return sum(1 for v in valores if not retry_after_valido(v, ventana_s)) + max(0, n429 - len(valores))
 
 
+def asignacion_factible(no_ambiguas, ambiguas, limite):
+    """B1(ii), C1 en tres niveles. ¿Existe un reparto de las aceptadas
+    ambiguas entre los contadores en los que pudieron caer sin que ninguno
+    pase de `limite`? no_ambiguas: {ventana: aceptadas no ambiguas};
+    ambiguas: [(a, b)], la ventana de inicio y la de fin de cada aceptada
+    ambigua (pudo caer en cualquier contador de a a b). Devuelve None si hay
+    reparto, o la ventana del primer conflicto.
+
+    Es EDF (plazo más temprano primero) con un montón: en cada ventana, la
+    capacidad libre se da a las ambiguas ya nacidas de plazo más cercano. Es
+    óptimo para este problema de intervalos con capacidad (un voraz por orden
+    de lista no lo es; lo demuestra el contraejemplo de las pruebas). El
+    recorrido incluye las ventanas que solo tienen no ambiguas: sin eso,
+    ({1: 61}, [], 60) no daría conflicto. Los huecos sin nada pendiente se
+    saltan."""
+    ventanas = set(no_ambiguas) | {a for a, _ in ambiguas}
+    if not ventanas:
+        return None
+    por_nacer = sorted(ambiguas)
+    monton, i, w = [], 0, min(ventanas)
+    while True:
+        while i < len(por_nacer) and por_nacer[i][0] <= w:
+            heapq.heappush(monton, por_nacer[i][1])
+            i += 1
+        # Capacidad negativa: las no ambiguas ya pasan del límite (conflicto).
+        capacidad = limite - no_ambiguas.get(w, 0)
+        if capacidad < 0:
+            return w
+        while monton and capacidad > 0:
+            heapq.heappop(monton)
+            capacidad -= 1
+        if monton and monton[0] <= w:
+            return w
+        if monton:
+            w += 1
+            continue
+        siguientes = [x for x in no_ambiguas if x > w]
+        if i < len(por_nacer):
+            siguientes.append(por_nacer[i][0])
+        if not siguientes:
+            return None
+        w = min(siguientes)
+
+
 def veredicto_l3(pares, limite, retry_invalidos=0):
-    """Oráculo por IP y ventana (C1, E7). Devuelve (veredicto, texto).
-    FALLA: algún par con más de `limite` aceptadas NO ambiguas, o algún 429
-    sin Retry-After válido. SIN CONCLUSION: solo se pasa de `limite` contando
-    las ambiguas. PASA en otro caso."""
+    """Oráculo por IP y ventana (C1 en tres niveles, B1(ii), y E7). Devuelve
+    (veredicto, texto). En orden:
+    1. FALLA: algún par con más de `limite` aceptadas NO ambiguas.
+    2. FALLA: alguna IP sin asignación factible de sus aceptadas ambiguas
+       (asignacion_factible): pase lo que pase con ellas, algún contador
+       admitió más de `limite`.
+    3. FALLA: algún 429 sin Retry-After válido.
+    4. SIN CONCLUSION: alguna aceptada ambigua cruza dos fronteras (b >= a + 2).
+       La regla de PASA solo acredita la ambigua a la ventana a + 1
+       (aceptadas_ambiguas_inicio) y no la cubre; es conservador.
+    5. SIN CONCLUSION: solo se pasa de `limite` contando las ambiguas (la regla
+       de PASA de siempre, H11).
+    6. PASA en otro caso."""
     pasan = sorted(((c, p_["aceptadas"]) for c, p_ in pares.items() if p_["aceptadas"] > limite))
     if pasan:
         return "FALLA", f"{len(pasan)} pares IP-ventana con mas de {limite} aceptadas no ambiguas (ejemplo {pasan[0]})"
+    por_ip = {}
+    for (ip, w), p_ in pares.items():
+        no_ambiguas, ambiguas = por_ip.setdefault(ip, ({}, []))
+        no_ambiguas[w] = p_["aceptadas"]
+        ambiguas.extend((w, b) for b in p_["hasta_ambiguas"])
+    for ip in sorted(por_ip, key=str):
+        conflicto = asignacion_factible(*por_ip[ip], limite)
+        if conflicto is not None:
+            return "FALLA", f"ninguna asignacion factible de las ambiguas (IP {ip}, ventana {conflicto})"
     if retry_invalidos:
         return "FALLA", f"{retry_invalidos} respuestas 429 sin Retry-After valido"
+    if any(b >= w + 2 for (_, w), p_ in pares.items() for b in p_["hasta_ambiguas"]):
+        return "SIN CONCLUSION", "una aceptada cruza dos fronteras: la regla de PASA no la cubre"
     # Cuentan tambien las aceptadas ambiguas de la ventana anterior, que pudieron
     # caer en esta (H11), igual que control_l3 con ambiguas_inicio.
     dudosos = [c for c, p_ in pares.items()
@@ -4490,19 +4570,27 @@ TASA_LEGITIMO = 0.5
 VUS_LEGITIMO = 15
 ESCENARIO_RELLENO = "denuncia_relleno"
 # Fase 2 (§3.2, V31-9): fin en inicio_relleno + 4290 s o más, con 300 s como
-# mínimo; en el humo dura unos 30 s (QA-SB). Tiene que empezar antes de
-# inicio_relleno + 3598 - 120 = 3478 s para vigilar 120 s antes del primer
-# instante en que H5 admite la recuperación (N3).
+# mínimo; en el humo dura unos 30 s (QA-SB). B2 (plan bloque 1, §3) quitó el
+# plazo de arranque de la fase 2 (3478 s): las fases se unen por tiempo y R
+# solo vale anclada a un 503 inmediatamente anterior (ANCLA_R_S), así que una
+# fase 2 que empieza tarde ya no puede fabricar una R falsa; si no hay ancla,
+# H5 da SIN CONCLUSION.
 FIN_FASE2_S = 4290
 FASE2_MINIMA_S = 300
 FASE2_HUMO_S = 30
-PLAZO_ARRANQUE_FASE2_S = 3478
 # H5 (§3.8): llenado antes de 3600 s y R entre 3598 y 4200 s, relativos al
-# inicio del relleno; R es el inicio de 30 respuestas seguidas sin 503.
+# inicio del relleno; R es el inicio de 30 respuestas 404 seguidas tras el
+# primer 503, anclada (calcular_r).
 H5_LLENADO_S = 3600
 H5_R_MINIMO_S = 3598
 H5_R_MAXIMO_S = 4200
 RACHA_R = 30
+# B2: la respuesta inmediatamente anterior al primer 404 de la racha tiene
+# que ser un 503 enviado 4,0 s o menos antes. El legítimo va a 0,5/s (una
+# llegada cada 2 s): 4 s admiten como mucho una llegada perdida entre el 503
+# y el 404, y sin el ancla la racha podría empezar tras un hueco sin datos
+# (por ejemplo, entre fases) y R no marcaría la recuperación.
+ANCLA_R_S = 4.0
 # Controles positivos (§3.6): al menos 25 respuestas del legítimo en la BASE,
 # todas 404, y al menos el 99 % de 422 en el relleno hasta la primera OOM.
 RESPUESTAS_BASE_L6 = 25
@@ -4774,25 +4862,35 @@ def conciliacion_l6(lineas, t_rp, f1, i2, fin_f2, fase1, fase2, n_parado=0, tole
 
 
 def calcular_r(respuestas):
-    """R (§3.3 f): inicio de la primera racha de 30 respuestas seguidas del
-    legítimo que no son 503, después de su primer 503, con las dos fases unidas
-    en orden de tiempo (la racha se cuenta en respuestas, no en segundos).
-    respuestas: [(t, estado)]. None si no hay 503 o no hay racha."""
+    """R (§3.3 f, con B2 del plan bloque 1): las respuestas del legítimo de las
+    dos fases unidas y ordenadas por la hora de ENVÍO (t es el inicio de la
+    petición); después del primer 503, la primera racha de 30 respuestas 404
+    consecutivas (un 0 o cualquier otro estado la reinicia; la racha se
+    cuenta en respuestas, no en segundos). R vale solo si la respuesta
+    inmediatamente anterior al primer 404 de la racha es un 503 enviado
+    ANCLA_R_S o menos antes. Un 503 sin conciliar cuenta igual.
+    respuestas: [(t, estado)]. Devuelve (r, motivo): (t_404, None) si hay R
+    anclada; (None, "sin_503"), (None, "sin_racha") o (None, "sin_ancla")."""
     ordenadas = sorted(respuestas)
     primero = next((i for i, (_, e) in enumerate(ordenadas) if e == 503), None)
     if primero is None:
-        return None
+        return None, "sin_503"
     inicio_racha, seguidas = None, 0
-    for t, e in ordenadas[primero + 1:]:
-        if e == 503:
+    for i in range(primero + 1, len(ordenadas)):
+        if ordenadas[i][1] != 404:
             inicio_racha, seguidas = None, 0
             continue
         if inicio_racha is None:
-            inicio_racha = t
+            inicio_racha = i
         seguidas += 1
         if seguidas == RACHA_R:
-            return inicio_racha
-    return None
+            # inicio_racha > primero: siempre hay una respuesta anterior.
+            t_404 = ordenadas[inicio_racha][0]
+            t_anterior, e_anterior = ordenadas[inicio_racha - 1]
+            if e_anterior == 503 and t_404 - t_anterior <= ANCLA_R_S:
+                return t_404, None
+            return None, "sin_ancla"
+    return None, "sin_racha"
 
 
 def parsear_legitimo(linea):
@@ -4951,8 +5049,6 @@ def evaluar_h5(d, primera_oom, l503, salud_malas):
         return "REFUTADA", f"se lleno a los {primera_oom - inicio:.0f} s (3600 s o mas)"
     if any(x["fase"] == 1 for x in salud_malas):
         return "REFUTADA", "/salud fallo en la fase 1"
-    if d.get("i2") is not None and d["i2"] - inicio >= PLAZO_ARRANQUE_FASE2_S:
-        return "SIN CONCLUSION", f"la fase 2 empezo a los {d['i2'] - inicio:.1f} s (3478 s o mas): vigilancia tarde"
     plan_b = d.get("plan_b")
     if plan_b and not plan_b["legitimo_completo"] and l503 and l503[0]["fase"] == 1:
         return "SIN CONCLUSION", "plan B: las lineas LEGITIMO no estan completas y el primer 503 esta en la fase 1"
@@ -4960,7 +5056,13 @@ def evaluar_h5(d, primera_oom, l503, salud_malas):
         return "REFUTADA", "/salud fallo en la fase 2"
     if not l503:
         return "SIN CONCLUSION", "el legitimo no recibio ningun 503: R no existe"
-    r = calcular_r([(x["t"], x["estado"]) for x in d["legitimo"]])
+    # El legítimo entra completo, conciliado o no: un 503 sin conciliar
+    # cuenta para R (B2).
+    r, motivo = calcular_r([(x["t"], x["estado"]) for x in d["legitimo"]])
+    if motivo == "sin_503":
+        return "SIN CONCLUSION", "el legitimo no recibio ningun 503: R no existe"
+    if motivo == "sin_ancla":
+        return "SIN CONCLUSION", "R sin anclar: la respuesta anterior a la racha no es un 503 enviado 4 s o menos antes"
     if r is None:
         fin = d.get("fin_vigilancia")
         if fin is not None and fin - inicio >= H5_R_MAXIMO_S + 2 * RACHA_R:
@@ -5116,16 +5218,43 @@ def control_inundacion(respuestas_200):
     return respuestas_200 >= UMBRAL_INUNDACION_L7
 
 
-def evaluar_h4(degradacion, cpu_api_media):
-    """H4 (información, §4): NO EVALUADA sin degradación y por debajo del 90 %;
-    REFUTA con degradación por debajo o sin degradación por encima; CONFIRMA
-    con degradación por encima. Sin CPU medida, SIN CONCLUSION."""
-    if cpu_api_media is None:
+def evaluar_h4(resultado_l7, cpu_api_media, por_muerte=False):
+    """H4 (información, §4, con B4 del plan bloque 1). resultado_l7 es el
+    veredicto COMPLETO de L7 (con su validez y las muertes); declarado:
+    degradación = FALLA de B1. Tabla: CONFIRMA con FALLA y CPU >= 90 %;
+    REFUTA con FALLA y CPU < 90 %, o con PASA y CPU >= 90 %; NO EVALUADA con
+    PASA y CPU < 90 %. SIN CONCLUSION si L7 no es PASA ni FALLA o falta la CPU.
+
+    por_muerte (P1, dictamen de QA y python-async): la FALLA viene de
+    MOTIVO_MUERTE y no de B1. Da SIN CONCLUSION con cualquier CPU, y se mira
+    ANTES de la tabla: una muerte (OOM o kill) no es degradación de B1 y además
+    contamina la CPU media, así que CONFIRMA o REFUTA atribuirían mal la
+    caída. No esconde nada: la FALLA sigue en el veredicto de L7."""
+    if por_muerte:
+        return "SIN CONCLUSION"
+    if cpu_api_media is None or resultado_l7 not in ("PASA", "FALLA"):
         return "SIN CONCLUSION"
     llega = cpu_api_media >= UMBRAL_H4_CPU
     if llega:
-        return "CONFIRMA" if degradacion else "REFUTA"
-    return "REFUTA" if degradacion else "NO EVALUADA"
+        return "CONFIRMA" if resultado_l7 == "FALLA" else "REFUTA"
+    return "REFUTA" if resultado_l7 == "FALLA" else "NO EVALUADA"
+
+
+# Lo que se añade a la línea de H4 cuando la FALLA de L7 es una muerte (P1).
+TEXTO_H4_MUERTE = "SIN CONCLUSION: murio un servicio de Canario; H4 no evalua muertes"
+
+
+def linea_h4_repeticion(rep, veredicto_l7, detalle):
+    """La línea de H4 de una repetición (PY-4). veredicto_l7 es (veredicto,
+    motivos) de L7 en esa repetición, ya con comun (generador, vigilancia,
+    cruce de las 00:00), la validez de la parte y las muertes; detalle, el de
+    la parte l7 (lleva cpu_api). Pura, para probarla sin Docker."""
+    cpu = detalle.get("cpu_api")
+    por_muerte = MOTIVO_MUERTE in veredicto_l7[1]
+    h4 = evaluar_h4(veredicto_l7[0], cpu, por_muerte)
+    return (f"   repeticion {rep}, h4 (informacion): {h4} (CPU media de la API en la INUNDACION "
+            f"{'sin medir' if cpu is None else f'{cpu:.0f} %'}; l7 {veredicto_l7[0]})"
+            + (f"; {TEXTO_H4_MUERTE}" if por_muerte else ""))
 
 
 def escenarios_l7(tasas, ips):
@@ -5477,17 +5606,13 @@ def cliente_control(ej, nombre, ip, peticiones):
     contenedor = f"{PREFIJO_EFIMEROS}cliente_{nombre}"
     plazo = len(peticiones) * PLAZO_PETICION_CONTROL_S + MARGEN_CLIENTE_S
     try:
-        # La imagen de la API lleva las etiquetas de compose (project y
-        # service=api) y el contenedor las hereda: sin anularlas, `docker
-        # compose logs api` (Registro) recogía la salida del cliente, con los
-        # cuerpos de los 201 y sus códigos de seguimiento, en log_api.txt (el
-        # anti-fuga de L5 lo detectó el 25/11/2026). Vacías, compose ya no lo
-        # trata como un servicio de la pila; la clase la sigue dando
-        # canario.estres (clase_contenedor).
+        # Etiquetas de compose vacías (SIN_ETIQUETAS_COMPOSE, B3): sin
+        # anularlas, `docker compose logs api` recogía la salida del cliente,
+        # con los cuerpos de los 201 y sus códigos de seguimiento, en
+        # log_api.txt (el anti-fuga de L5 lo detectó el 25/11/2026).
         r = ejecutar(["docker", "run", "--rm", "--name", contenedor, "--label", "canario.estres=control",
-                      "--label", "com.docker.compose.project=", "--label", "com.docker.compose.service=",
-                      "--network", RED_EDGE, "--ip", ip, "--read-only", "--cap-drop", "ALL", "--security-opt",
-                      "no-new-privileges", "--pids-limit", "64", "--memory", "64m", "--user", USUARIO_API,
+                      *SIN_ETIQUETAS_COMPOSE, "--network", RED_EDGE, "--ip", ip, "--read-only", "--cap-drop", "ALL",
+                      "--security-opt", "no-new-privileges", "--pids-limit", "64", "--memory", "64m", "--user", USUARIO_API,
                       "--cpuset-cpus", ej.cpus_k6, "--mount", f"type=bind,src={ej.datos},dst=/datos,readonly",
                       "--entrypoint", "python", ej.imagen, "-I", "-c", CODIGO_CLIENTE, f"/datos/{nombre}.json"],
                      timeout=plazo)
@@ -5996,6 +6121,10 @@ def analizar_repeticion_fases(ej, modo, rep, salida_rep, salida_k6, k6, fases, f
                                               vig["muertes"])
         motivos = veredictos[n][1]
         p(f"   repeticion {rep}, {n}: {veredictos[n][0]}" + (f" ({'; '.join(motivos)})" if motivos else ""))
+    # H4 por repetición (B4, PY-4): con el veredicto COMPLETO de L7 de esta
+    # repetición, que ya incluye comun, la validez de la parte y las muertes.
+    if modo == "l7" and "l7" in veredictos:
+        p(linea_h4_repeticion(rep, veredictos["l7"], partes["l7"]["detalle"]))
     return {"modo": modo, "repeticion": rep, "muertes": vig["muertes"], "reinicios": vig["reinicios"], "comun": comun,
             "partes": partes, "veredictos": veredictos}
 
@@ -6270,10 +6399,9 @@ def analizar_l7(filas, datos, t0, fases, insuficientes, salida_rep, k6, stats_ru
     if k6["desfase"] is not None:
         cpu = cpu_en_ventana([stats_ruta], k6["desfase"], t0 + carga["desde_s"], t0 + carga["hasta_s"])
         cpu_api = cpu.get("api", {}).get("media")
-    h4 = evaluar_h4(resultado == "FALLA", cpu_api)
-    p(f"   h4 de esta repeticion (informacion): {h4} (CPU media de la API en la INUNDACION "
-      f"{'sin medir' if cpu_api is None else f'{cpu_api:.0f} %'}; umbral {UMBRAL_H4_CPU:.0f} %; "
-      f"victimas {resultado})")
+    # H4 de la repetición ya no se imprime aquí (B4, PY-4): aquí no se ven
+    # comun ni las muertes. La imprime analizar_repeticion_fases con el
+    # veredicto completo; esta función solo guarda cpu_api en el detalle.
     sonda = {f["nombre"]: resumen_filas([x for x in filas if x["nombre"] == "sonda_salud" and x["fase"] == f["nombre"]], 405)
              for f in fases}
     p("   sonda_salud p95 por fase: " + ", ".join(f"{n} {ms(s['p95_ms'])} ms" for n, s in sonda.items()))
@@ -6327,10 +6455,15 @@ def agregar_fases(modo, repeticiones, tamano_pedido, fallos_globales=(), control
             cpus = [r["partes"]["l7"]["detalle"].get("cpu_api") if "l7" in r["partes"] else None
                     for r in repeticiones]
             cpu = statistics.median(cpus) if cpus and None not in cpus else None
-            h4 = evaluar_h4(resultados_oraculo.get("l7") == "FALLA", cpu)
+            # B4: con el veredicto FINAL de L7 (validez y muertes incluidas),
+            # no con el resultado del oráculo solo. PARTES["l7"] = ("l7", "h4"):
+            # finales["l7"] ya está calculado.
+            final_l7 = finales.get("l7", ("SIN CONCLUSION", []))
+            por_muerte = MOTIVO_MUERTE in final_l7[1]
+            h4 = evaluar_h4(final_l7[0], cpu, por_muerte)
             p(f"   h4 (informacion): {h4} (mediana de la CPU media de la API en la INUNDACION "
-              f"{'sin medir en alguna repeticion' if cpu is None else f'{cpu:.0f} %'}; victimas "
-              f"{resultados_oraculo.get('l7')})")
+              f"{'sin medir en alguna repeticion' if cpu is None else f'{cpu:.0f} %'}; l7 {final_l7[0]}"
+              + (f"; {TEXTO_H4_MUERTE})" if por_muerte else ")"))
             continue
         if nombre in ("l2", "l3b-b", "l7"):
             if detalles and all("victimas" in d for d in detalles):

@@ -52,6 +52,15 @@ PATRON_T0 = re.compile(r"T0_MS=(\d+)")
 # (un falso "limpio"): lo cubre la prueba P1 de test_lanzar.py.
 ETIQUETA_SONDA = "canario.estres=sonda"
 
+# B3 (plan bloque 1, §4): el servidor lento sale de la imagen de la API y
+# hereda sus etiquetas de compose (project y service=api); sin anularlas,
+# `docker compose logs api` recogería su salida en log_api.txt y `compose ps
+# -q api` lo confundiría con la API (E20 y 481397c, docs/informe-pruebas.md:437).
+# Es el mismo literal que SIN_ETIQUETAS_COMPOSE de lanzar.py, copiado y no
+# importado porque este módulo no importa lanzar.py (lanzar lo carga de forma
+# perezosa); test_lanzar.py comprueba que los dos valen lo mismo.
+SIN_ETIQUETAS_COMPOSE = ("--label", "com.docker.compose.project=", "--label", "com.docker.compose.service=")
+
 # Servidor lento: responde a todo con 200 vacio tras 2 s. Sin comillas dobles ni
 # barras invertidas: va por lista de argumentos con python -c. ThreadingHTTPServer
 # para que el cierre de una conexion no bloquee a la siguiente.
@@ -336,7 +345,8 @@ def _medir_sonda(ejecutar, imagen_api, imagen_k6, cpus_k6, dir_estres, constante
         r = ejecutar(["docker", "network", "create", "--internal", "--label", ETIQUETA_SONDA, red], timeout=120)
         if r.rc != 0:
             return [], 0, None, f"no se crea la red de la sonda: {r.err.strip()[-200:]!r}"
-        r = ejecutar(["docker", "run", "-d", "--name", servidor, "--label", ETIQUETA_SONDA, "--network", red,
+        r = ejecutar(["docker", "run", "-d", "--name", servidor, "--label", ETIQUETA_SONDA, *SIN_ETIQUETAS_COMPOSE,
+                      "--network", red,
                       "--network-alias", "lento", "--read-only", "--cap-drop", "ALL", "--security-opt",
                       "no-new-privileges", "--pids-limit", "64", "--memory", "64m", "--cpuset-cpus", cpus_k6,
                       "--user", constantes["usuario_api"], "--entrypoint", "python", imagen_api, "-I", "-c",

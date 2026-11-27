@@ -3397,10 +3397,15 @@ class LimpiezaDeLaSonda(unittest.TestCase):
         self.assertEqual(creaciones[0][:3], ["docker", "network", "create"])
         self.assertEqual(creaciones[1][:3], ["docker", "run", "-d"])
         self.assertEqual(creaciones[2][:3], ["docker", "run", "--rm"])
-        for argumentos in creaciones:
+        # B3: el servidor lento (run -d, imagen de la API) lleva además las etiquetas de
+        # compose vacías; la de la sonda sigue siendo la primera y única con canario.estres.
+        esperadas = (["canario.estres=sonda"],
+                     ["canario.estres=sonda", "com.docker.compose.project=", "com.docker.compose.service="],
+                     ["canario.estres=sonda"])
+        for argumentos, etiquetas in zip(creaciones, esperadas):
             with self.subTest(creacion=argumentos[:3]):
-                self.assertEqual(argumentos.count("--label"), 1)
-                self.assertEqual(argumentos[argumentos.index("--label") + 1], "canario.estres=sonda")
+                vistas = [argumentos[i + 1] for i, x in enumerate(argumentos) if x == "--label"]
+                self.assertEqual(vistas, etiquetas)
         # Control: el filtro de los dos listados lleva la misma etiqueta, escrita a mano.
         filtros = [a[a.index("--filter") + 1] for a, _ in r.llamadas if "--filter" in a]
         self.assertEqual(filtros, ["label=canario.estres=sonda", "label=canario.estres=sonda"])
@@ -5155,11 +5160,13 @@ class HumoDeL6(unittest.TestCase):
 def datos_l6(**cambios):
     """Una L6 que PASA con H5 CONFIRMADA: inicio del relleno en 0 (T0 en -60),
     primera OOM a 2700, 503 del legítimo a 2750 (fase 1) y 3600 (fase 2), y 30
-    respuestas 404 desde 3610 (R = 3610)."""
+    respuestas 404 desde 3602 (R = 3602). B2: la racha empieza 2 s después
+    del 503 de 3600 (2 <= 4,0, anclada); con el 3610 de antes, 10 s de hueco,
+    R quedaba sin anclar."""
     legitimo = [{"t": -60.0 + 2 * i, "estado": 404, "ra": None, "fase": 1} for i in range(30)]
     legitimo.append({"t": 2750.0, "estado": 503, "ra": "5", "fase": 1})
     legitimo.append({"t": 3600.0, "estado": 503, "ra": "5", "fase": 2})
-    legitimo += [{"t": 3610.0 + 2 * i, "estado": 404, "ra": None, "fase": 2} for i in range(30)]
+    legitimo += [{"t": 3602.0 + 2 * i, "estado": 404, "ra": None, "fase": 2} for i in range(30)]
     salud = [{"t": -60.0 + i, "estado": 200, "fase": 1} for i in range(60)] + [{"t": 3100.0, "estado": 200, "fase": 2}]
     d = {"inicio_relleno": 0.0, "t0": -60.0, "t_rp": 2800.0, "i2": 3000.0, "fin_vigilancia": 4290.0,
          "lineas_oom": [2700.0], "conciliacion": {"falla": [], "sin_conclusion": []}, "legitimo": legitimo,
@@ -5253,21 +5260,38 @@ class EvaluarL6(unittest.TestCase):
         self.assertEqual(veredicto(datos_l6(legitimo=justa))[0][0], "PASA")
 
     def test_u_l6_19_h5_por_r_y_por_el_llenado(self):
-        self.assertEqual(veredicto(datos_l6(legitimo=legitimo_con((2750.0, 503, "5", 1), desde=3597.0)))[1]["h5"][0],
-                         "SIN CONCLUSION")
+        # R = 3597 < 3598, anclada al 503 de 3595 (2 s antes, B2): SIN CONCLUSION por "R < 3598".
+        menor = legitimo_con((2750.0, 503, "5", 1), (3595.0, 503, "5", 2), desde=3597.0)
+        h5 = veredicto(datos_l6(legitimo=menor))[1]["h5"]
+        self.assertEqual(h5[0], "SIN CONCLUSION")
+        self.assertIn("menos de 3598 s", h5[1])
+        # Sin el 503 de 3595, el anterior a la racha es el de 2750: sin ancla, no "R < 3598".
+        sin_ancla = veredicto(datos_l6(legitimo=legitimo_con((2750.0, 503, "5", 1), desde=3597.0)))[1]["h5"]
+        self.assertEqual(sin_ancla[0], "SIN CONCLUSION")
+        self.assertIn("R sin anclar", sin_ancla[1])
+        # 503 en 4199 y racha en 4201: anclada (2 s), R = 4201 > 4200.
         tarde = legitimo_con((2750.0, 503, "5", 1), (4199.0, 503, "5", 2), desde=4201.0)
         self.assertEqual(veredicto(datos_l6(legitimo=tarde))[1]["h5"][0], "REFUTADA")
         lleno_tarde = datos_l6(lineas_oom=[3700.0], legitimo=legitimo_con((3750.0, 503, "5", 1), desde=3800.0))
         self.assertEqual(veredicto(lleno_tarde)[1]["h5"][0], "REFUTADA")
-        # Control: R = 3598 y R = 4200 son los bordes admitidos.
+        # Control: R = 3598 y R = 4200 son los bordes admitidos, cada una anclada a un 503 en r - 2.
         for r in (3598.0, 4200.0):
-            d = datos_l6(legitimo=legitimo_con((2750.0, 503, "5", 1), desde=r))
+            d = datos_l6(legitimo=legitimo_con((2750.0, 503, "5", 1), (r - 2.0, 503, "5", 2), desde=r))
             self.assertEqual(veredicto(d)[1]["h5"][0], "CONFIRMADA", r)
 
     def test_u_l6_20_fase_2_tarde(self):
+        # B2 quitó el plazo de arranque de la fase 2 (3478 s): una fase 2 tardía
+        # ya no da SIN CONCLUSION por sí sola; lo que decide es el ancla de R.
         self.assertEqual(veredicto(datos_l6(i2=3477.9))[1]["h5"][0], "CONFIRMADA")
         (v, _), ev = veredicto(datos_l6(i2=3478.0))
-        self.assertEqual((v, ev["h5"][0]), ("PASA", "SIN CONCLUSION"))
+        self.assertEqual((v, ev["h5"][0]), ("PASA", "CONFIRMADA"))
+        # Control: la misma fase 2 tardía con la racha sin anclar (503 en 3600 y
+        # racha desde 3610: 10 s > 4,0) da SIN CONCLUSION "R sin anclar".
+        sin_ancla = datos_l6(i2=3478.0, legitimo=legitimo_con((2750.0, 503, "5", 1), (3600.0, 503, "5", 2),
+                                                             desde=3610.0))
+        h5 = veredicto(sin_ancla)[1]["h5"]
+        self.assertEqual(h5[0], "SIN CONCLUSION")
+        self.assertIn("R sin anclar", h5[1])
         tarde_y_lleno = datos_l6(i2=3478.0, lineas_oom=[3700.0],
                                  legitimo=legitimo_con((3750.0, 503, "5", 1), desde=3800.0))
         self.assertEqual(veredicto(tarde_y_lleno)[1]["h5"][0], "REFUTADA")
@@ -5422,17 +5446,30 @@ class PlanB(unittest.TestCase):
         self.assertEqual(L.parsear_legitimo('msg="LEGITIMO t=1795546367000 estado=404 ra=" x'),
                          (1795546367.0, 404, None))
         self.assertIsNone(L.parsear_legitimo("otra cosa"))
-        respuestas = [(100.0, 503)] + [(101.0 + i, 404) for i in range(29)] + [(150.0, 503)]
-        respuestas += [(200.0 + i, 404) for i in range(30)]
-        self.assertEqual(L.calcular_r(respuestas), 200.0)
-        # Control: sin el segundo 503, la primera racha ya tiene 30 y R = 101.
-        self.assertEqual(L.calcular_r(respuestas[:30] + [(140.0, 404)]), 101.0)
+        # B2: racha de 30 x 404 tras el primer 503, anclada a un 503 de 4,0 s o menos antes.
+        # 503 en 100 y 404 en 102, 104, ..., 160: el anterior al primer 404 es el 503, 2 s antes.
+        anclada = [(100.0, 503)] + [(102.0 + 2 * i, 404) for i in range(30)]
+        self.assertEqual(L.calcular_r(anclada), (102.0, None))
+        # Borde del ancla: primer 404 en 104,0 (4,0 s, vale) y en 104,5 (4,5 s, no vale).
+        self.assertEqual(L.calcular_r([(100.0, 503)] + [(104.0 + 2 * i, 404) for i in range(30)]), (104.0, None))
+        self.assertEqual(L.calcular_r([(100.0, 503)] + [(104.5 + 2 * i, 404) for i in range(30)]), (None, "sin_ancla"))
+        # Un 0 rompe la racha: 15 x 404 (102 a 130), un 0 en 132 y 30 x 404 desde 134. La racha
+        # completa empieza en 134 y su anterior es el 0: sin ancla.
+        quince = [(100.0, 503)] + [(102.0 + 2 * i, 404) for i in range(15)]
+        treinta = [(134.0 + 2 * i, 404) for i in range(30)]
+        self.assertEqual(L.calcular_r(quince + [(132.0, 0)] + treinta), (None, "sin_ancla"))
+        # Control: con un 503 en lugar del 0, la misma racha queda anclada (134 - 132 = 2 s).
+        self.assertEqual(L.calcular_r(quince + [(132.0, 503)] + treinta), (134.0, None))
+        # Sin ningún 503 no hay R; con una racha de 29, tampoco.
+        self.assertEqual(L.calcular_r([(102.0 + 2 * i, 404) for i in range(30)]), (None, "sin_503"))
+        self.assertEqual(L.calcular_r(anclada[:30]), (None, "sin_racha"))
 
     def test_u_pb_5_completitud_de_las_lineas_legitimo(self):
         incompleto = {"falla_recuento": None, "legitimo_completo": L.legitimo_completo(2249, 2250)}
         (v, _), ev = veredicto(datos_l6(plan_b=incompleto))
         self.assertEqual((v, ev["h5"][0]), ("PASA", "SIN CONCLUSION"))
-        en_f2 = legitimo_con((3600.0, 503, "5", 2), desde=3610.0)
+        # B2: la racha empieza en 3602, 2 s después del 503 de 3600 (anclada).
+        en_f2 = legitimo_con((3600.0, 503, "5", 2), desde=3602.0)
         self.assertEqual(veredicto(datos_l6(plan_b=incompleto, legitimo=en_f2))[1]["h5"][0], "CONFIRMADA")
         completo = {"falla_recuento": None, "legitimo_completo": L.legitimo_completo(2250, 2250)}
         self.assertEqual(veredicto(datos_l6(plan_b=completo))[1]["h5"][0], "CONFIRMADA")
@@ -5582,11 +5619,44 @@ class L7InundacionDeSalud(unittest.TestCase):
         self.assertEqual(L.tasas_de(0.0196)["inundacion"], 153.06)
 
     def test_h4(self):
-        self.assertEqual(L.evaluar_h4(False, 89.9), "NO EVALUADA")
-        self.assertEqual(L.evaluar_h4(True, 89.9), "REFUTA")
-        self.assertEqual(L.evaluar_h4(False, 90.0), "REFUTA")
-        self.assertEqual(L.evaluar_h4(True, 90.0), "CONFIRMA")
-        self.assertEqual(L.evaluar_h4(True, None), "SIN CONCLUSION")
+        # B4: H4 recibe el veredicto completo de L7 (degradación = FALLA de B1). Umbral 90 % literal.
+        self.assertEqual(L.evaluar_h4("FALLA", 90.0), "CONFIRMA")
+        self.assertEqual(L.evaluar_h4("FALLA", 89.9), "REFUTA")
+        self.assertEqual(L.evaluar_h4("PASA", 90.0), "REFUTA")
+        self.assertEqual(L.evaluar_h4("PASA", 89.9), "NO EVALUADA")
+        # L7 en SIN CONCLUSION: H4 no concluye. Control: la misma CPU con FALLA, CONFIRMA.
+        self.assertEqual(L.evaluar_h4("SIN CONCLUSION", 95.0), "SIN CONCLUSION")
+        self.assertEqual(L.evaluar_h4("FALLA", 95.0), "CONFIRMA")
+        # Sin la CPU medida, SIN CONCLUSION con cualquier resultado.
+        self.assertEqual(L.evaluar_h4("FALLA", None), "SIN CONCLUSION")
+        self.assertEqual(L.evaluar_h4("PASA", None), "SIN CONCLUSION")
+
+    def test_h4_con_falla_por_muerte(self):
+        # P1 (QA y python-async): una FALLA por muerte da SIN CONCLUSION con CUALQUIER CPU.
+        self.assertEqual(L.evaluar_h4("FALLA", 95.0, por_muerte=True), "SIN CONCLUSION")
+        self.assertEqual(L.evaluar_h4("FALLA", 50.0, por_muerte=True), "SIN CONCLUSION")
+        # Control: sin por_muerte, las mismas dan CONFIRMA y REFUTA. Si no, la prueba no discrimina.
+        self.assertEqual(L.evaluar_h4("FALLA", 95.0), "CONFIRMA")
+        self.assertEqual(L.evaluar_h4("FALLA", 50.0), "REFUTA")
+
+    def test_linea_h4_de_la_repeticion_con_la_validez_completa(self):
+        # PY-4: la línea por repetición usa el veredicto de L7 con comun. Un fallo de
+        # validez en comun y el oráculo FALLA con CPU 95: L7 da SIN CONCLUSION y H4 también.
+        con_fallo = L.veredicto_con_validez("FALLA", [L.fallo("cruza las 00:00")], True, [])
+        self.assertEqual(con_fallo[0], "SIN CONCLUSION")
+        linea = L.linea_h4_repeticion(2, con_fallo, {"cpu_api": 95.0})
+        self.assertIn("repeticion 2, h4 (informacion): SIN CONCLUSION", linea)
+        # Control: sin el fallo, FALLA y CPU 95 dan CONFIRMA.
+        sano = L.veredicto_con_validez("FALLA", [], True, [])
+        self.assertIn("repeticion 2, h4 (informacion): CONFIRMA", L.linea_h4_repeticion(2, sano, {"cpu_api": 95.0}))
+        # Con una muerte: SIN CONCLUSION y el texto de P1.
+        muerte = L.veredicto_con_validez("PASA", [], True, ["FALLA"])
+        linea = L.linea_h4_repeticion(2, muerte, {"cpu_api": 95.0})
+        self.assertIn("h4 (informacion): SIN CONCLUSION", linea)
+        self.assertIn("H4 no evalua muertes", linea)
+        # analizar_repeticion_fases imprime esta línea y analizar_l7 ya no calcula H4.
+        self.assertIn("linea_h4_repeticion(", inspect.getsource(L.analizar_repeticion_fases))
+        self.assertNotIn("evaluar_h4(", inspect.getsource(L.analizar_l7))
 
     def test_l7_va_por_las_fases_y_su_estimacion(self):
         self.assertIn('"l7": fases_de("l7")', inspect.getsource(L.ejecutar_repeticion_fases))
@@ -5604,22 +5674,49 @@ class L7InundacionDeSalud(unittest.TestCase):
                          ["contexto", "nombre", "script", "args_red", "duracion_s", "salida"])
 
     def test_agregado_de_l7_con_el_control_de_la_inundacion(self):
-        def repeticion(n, ok):
+        def repeticion(n, ok, muertes=()):
             detalle = {"victimas": {r: {"base": {"p95_ms": 50}, "carga": {"peticiones": 600, "p95_ms": 60,
                                                                           "tasa_errores": 0.0},
                                         "descartes_aviso": 0} for r in L.SLO_VICTIMAS_MS},
                        "inundacion_200": 18000 if ok else 100, "inundacion_ok": ok, "cpu_api": 95.0}
-            return {"modo": "l7", "repeticion": n, "muertes": [], "reinicios": 0, "comun": [],
+            return {"modo": "l7", "repeticion": n, "muertes": list(muertes), "reinicios": 0, "comun": [],
                     "partes": {"l7": {"resultado": "PASA", "validez": [], "control_ataque": ok, "detalle": detalle}},
                     "veredictos": {"l7": ("PASA", [])}}
         lineas = []
         with mock.patch.object(L, "p", lineas.append):
             finales = L.agregar_fases("l7", [repeticion(i, True) for i in (1, 2, 3)], 3)
-            self.assertEqual(finales, {"l7": ("PASA", [])})
-            self.assertTrue(any("h4 (informacion): REFUTA" in x for x in lineas))
-            # Una repeticion sin inundacion rebaja el PASA.
+        self.assertEqual(finales, {"l7": ("PASA", [])})
+        # Control: PASA con CPU 95 es REFUTA.
+        self.assertTrue(any("h4 (informacion): REFUTA" in x for x in lineas))
+        # Una repeticion sin inundacion rebaja el PASA; B4: H4 sigue al veredicto
+        # final de L7 (SIN CONCLUSION), no al oráculo solo (PASA).
+        lineas = []
+        with mock.patch.object(L, "p", lineas.append):
             rebajado = L.agregar_fases("l7", [repeticion(1, False), repeticion(2, True), repeticion(3, True)], 3)
         self.assertEqual(rebajado["l7"][0], "SIN CONCLUSION")
+        self.assertTrue(any("h4 (informacion): SIN CONCLUSION" in x for x in lineas))
+
+    def test_agregado_de_l7_con_una_muerte(self):
+        # P1: oráculo PASA, CPU 95 y una muerte FALLA: L7 FALLA por MOTIVO_MUERTE y H4 SIN CONCLUSION.
+        def repeticion(n, muertes):
+            detalle = {"victimas": {r: {"base": {"p95_ms": 50}, "carga": {"peticiones": 600, "p95_ms": 60,
+                                                                          "tasa_errores": 0.0},
+                                        "descartes_aviso": 0} for r in L.SLO_VICTIMAS_MS},
+                       "inundacion_200": 18000, "inundacion_ok": True, "cpu_api": 95.0}
+            return {"modo": "l7", "repeticion": n, "muertes": list(muertes), "reinicios": 0, "comun": [],
+                    "partes": {"l7": {"resultado": "PASA", "validez": [], "control_ataque": True, "detalle": detalle}},
+                    "veredictos": {"l7": ("PASA", [])}}
+        lineas = []
+        with mock.patch.object(L, "p", lineas.append):
+            finales = L.agregar_fases("l7", [repeticion(1, ["FALLA"]), repeticion(2, []), repeticion(3, [])], 3)
+        self.assertEqual(finales["l7"][0], "FALLA")
+        self.assertEqual(finales["l7"][1][0], L.MOTIVO_MUERTE)
+        self.assertTrue(any("h4 (informacion): SIN CONCLUSION" in x for x in lineas))
+        # Control: lo mismo sin muertes imprime REFUTA.
+        lineas = []
+        with mock.patch.object(L, "p", lineas.append):
+            L.agregar_fases("l7", [repeticion(i, []) for i in (1, 2, 3)], 3)
+        self.assertTrue(any("h4 (informacion): REFUTA" in x for x in lineas))
 
 
 class EscenariosYArranqueDeL6(unittest.TestCase):
@@ -5823,6 +5920,197 @@ class D2(unittest.TestCase):
             r = L.reunir_d2(pathlib.Path(d), pathlib.Path(d) / "l2_rep1", hecha, [L.fallo("anti-fuga: hallazgo")])
         self.assertIn("carga: k6 no dejo el CSV", r["motivos"])
         self.assertIn("carga: anti-fuga: hallazgo", r["motivos"])
+
+
+# ---------------------------------------------------------------------------
+# Tanda 2 del bloque 1: B1(ii) (C1 en tres niveles) y B3 (etiquetas de compose)
+# ---------------------------------------------------------------------------
+import ast  # noqa: E402
+import itertools  # noqa: E402
+import random  # noqa: E402
+
+
+def factible_por_fuerza_bruta(no_ambiguas, ambiguas, limite):
+    """Oráculo escrito aquí, sin mirar asignacion_factible: prueba todos los
+    repartos de cada ambigua (a, b) entre las ventanas a..b."""
+    for eleccion in itertools.product(*[range(a, b + 1) for a, b in ambiguas]):
+        cuenta = dict(no_ambiguas)
+        for w in eleccion:
+            cuenta[w] = cuenta.get(w, 0) + 1
+        if all(c <= limite for c in cuenta.values()):
+            return True
+    return False
+
+
+def factible_voraz_por_lista(no_ambiguas, ambiguas, limite):
+    """El voraz ingenuo (cada ambigua, en el orden de la lista, a la primera
+    ventana con hueco): NO es óptimo. Sirve de control de que las pruebas
+    distinguen EDF de un voraz."""
+    cuenta = dict(no_ambiguas)
+    if any(c > limite for c in cuenta.values()):
+        return False
+    for a, b in ambiguas:
+        hueco = next((w for w in range(a, b + 1) if cuenta.get(w, 0) < limite), None)
+        if hueco is None:
+            return False
+        cuenta[hueco] = cuenta.get(hueco, 0) + 1
+    return True
+
+
+class C1EnTresNiveles(unittest.TestCase):
+    """B1(ii), con una IP, ventana 60 y límite 60. V1 es [60, 120) y V2 [120, 180)."""
+
+    def filas(self, inicios, dur=0.05, estado=404):
+        return [{"ip": "a", "inicio": t, "fin": t + dur, "estado": estado} for t in inicios]
+
+    def ambiguas(self, n, inicio=119.99, fin=120.05):
+        # Empiezan en V1 y terminan en V2: a = 1, b = 2.
+        return [{"ip": "a", "inicio": inicio, "fin": fin, "estado": 404} for _ in range(n)]
+
+    def v(self, filas):
+        return L.veredicto_l3(L.contar_por_ip_ventana(filas, 60, 404), 60)
+
+    def test_61_no_ambiguas_en_v1_es_falla(self):
+        self.assertEqual(self.v(self.filas([60 + i * 0.4 for i in range(61)]))[0], "FALLA")
+        # Control: 60 PASA.
+        self.assertEqual(self.v(self.filas([60 + i * 0.4 for i in range(60)]))[0], "PASA")
+
+    def test_59_59_y_3_ambiguas_no_tienen_asignacion(self):
+        # 59 en V1 y 59 en V2 dejan 1 + 1 huecos para 3 ambiguas: ningún reparto cabe.
+        v1, v2 = self.filas([60 + i * 0.5 for i in range(59)]), self.filas([121 + i * 0.5 for i in range(59)])
+        veredicto, texto = self.v(v1 + v2 + self.ambiguas(3))
+        self.assertEqual(veredicto, "FALLA")
+        self.assertIn("ninguna asignacion factible", texto)
+        self.assertIn("ventana 2", texto)
+        # Control: con 2 ambiguas sí hay reparto (una a V1 y otra a V2), y la regla de
+        # siempre da SIN CONCLUSION (V1: 59 + 2 = 61 > 60).
+        veredicto, texto = self.v(v1 + v2 + self.ambiguas(2))
+        self.assertEqual(veredicto, "SIN CONCLUSION")
+        self.assertIn("solo pasan de 60", texto)
+
+    def test_50_50_y_2_ambiguas_pasa(self):
+        # V1: 50 + 2 = 52; V2: 50 + 2 de inicio = 52. Ninguna pasa de 60.
+        filas = self.filas([60 + i * 0.5 for i in range(50)]) + self.filas([121 + i * 0.5 for i in range(50)])
+        self.assertEqual(self.v(filas + self.ambiguas(2))[0], "PASA")
+
+    def test_hasta_ambiguas_guarda_la_ventana_de_fin(self):
+        cruza_429 = {"ip": "a", "inicio": 119.99, "fin": 120.05, "estado": 429}
+        pares = L.contar_por_ip_ventana(self.ambiguas(1) + [cruza_429], 60, 404)
+        self.assertEqual(pares[("a", 1)]["hasta_ambiguas"], [2])
+        # Control: la 429 ambigua no entra (solo las aceptadas).
+        pares = L.contar_por_ip_ventana([cruza_429], 60, 404)
+        self.assertEqual(pares[("a", 1)]["hasta_ambiguas"], [])
+
+    def test_asignacion_con_solo_no_ambiguas(self):
+        self.assertEqual(L.asignacion_factible({1: 61}, [], 60), 1)
+        # Control: 60 cabe.
+        self.assertIsNone(L.asignacion_factible({1: 60}, [], 60))
+
+    def test_una_aceptada_que_cruza_dos_fronteras(self):
+        diez = self.filas([60 + i for i in range(10)])
+        dos = [{"ip": "a", "inicio": 59.0, "fin": 121.0, "estado": 404}]   # a = 0, b = 2
+        veredicto, texto = self.v(diez + dos)
+        self.assertEqual(veredicto, "SIN CONCLUSION")
+        self.assertIn("cruza dos fronteras", texto)
+        # Control: la misma con fin en 61,0 (a = 0, b = 1) PASA.
+        una = [{"ip": "a", "inicio": 59.0, "fin": 61.0, "estado": 404}]
+        self.assertEqual(self.v(diez + una)[0], "PASA")
+
+    def test_contraejemplo_edf_frente_a_voraz(self):
+        ambiguas = [(1, 2), (2, 3), (1, 2)]
+        # EDF: (1,2) a 1, (1,2) a 2, (2,3) a 3. Existe reparto.
+        self.assertIsNone(L.asignacion_factible({}, ambiguas, 1))
+        self.assertTrue(factible_por_fuerza_bruta({}, ambiguas, 1))
+        # Control: el voraz por orden de lista pone (1,2) en 1 y (2,3) en 2, y la
+        # tercera ya no cabe. Si no fallara, el caso no distinguiría EDF de un voraz.
+        if factible_voraz_por_lista({}, ambiguas, 1):
+            self.fail("SIN CONCLUSION: el contraejemplo no distingue EDF de un voraz")
+
+    def test_fuerza_bruta_500_casos(self):
+        # Semilla literal; hasta 4 ventanas con no ambiguas (de 0 a limite + 1, así que
+        # también hay conflictos solo de no ambiguas), hasta 6 ambiguas con b = a + 1
+        # o a + 2, y límite de 1 a 3. El enumerador de arriba es el oráculo.
+        rnd = random.Random(20261126)
+        factibles = infactibles = discrepa_voraz = 0
+        for caso in range(500):
+            limite = rnd.randint(1, 3)
+            base = rnd.randint(0, 3)
+            ventanas = rnd.sample(range(base, base + 4), rnd.randint(0, 4))
+            no_ambiguas = {w: rnd.randint(0, limite + 1) for w in ventanas}
+            ambiguas = []
+            for _ in range(rnd.randint(0, 6)):
+                a = rnd.randint(base, base + 3)
+                ambiguas.append((a, a + rnd.choice((1, 2))))
+            esperado = factible_por_fuerza_bruta(no_ambiguas, ambiguas, limite)
+            obtenido = L.asignacion_factible(no_ambiguas, ambiguas, limite) is None
+            self.assertEqual(obtenido, esperado, (caso, no_ambiguas, ambiguas, limite))
+            factibles += esperado
+            infactibles += not esperado
+            discrepa_voraz += factible_voraz_por_lista(no_ambiguas, ambiguas, limite) != esperado
+        # Controles: el generador fabrica los dos tipos de caso y al menos uno en el
+        # que el voraz se equivoca. Si no, la prueba no discrimina.
+        if not (factibles and infactibles and discrepa_voraz):
+            self.fail(f"SIN CONCLUSION: el generador no discrimina (factibles {factibles}, infactibles "
+                      f"{infactibles}, el voraz discrepa en {discrepa_voraz})")
+
+
+ETIQUETAS_COMPOSE_VACIAS = ("--label", "com.docker.compose.project=", "--label", "com.docker.compose.service=")
+
+
+def es_imagen_api(nodo):
+    """La imagen de la API en una lista de argumentos: Name imagen o
+    imagen_api, o un atributo .imagen (ej.imagen)."""
+    return ((isinstance(nodo, ast.Name) and nodo.id in ("imagen", "imagen_api"))
+            or (isinstance(nodo, ast.Attribute) and nodo.attr == "imagen"))
+
+
+def sitios_docker_api(arbol):
+    """(sitios vistos, líneas de los que no llevan *SIN_ETIQUETAS_COMPOSE):
+    cada ast.List que empieza por "docker" y "run" o "create" y contiene la
+    imagen de la API."""
+    vistos, sin = 0, []
+    for nodo in ast.walk(arbol):
+        if not isinstance(nodo, ast.List) or len(nodo.elts) < 2:
+            continue
+        a, b = nodo.elts[:2]
+        if not (isinstance(a, ast.Constant) and a.value == "docker" and isinstance(b, ast.Constant)
+                and b.value in ("run", "create")):
+            continue
+        if not any(es_imagen_api(e) for e in nodo.elts):
+            continue
+        vistos += 1
+        if not any(isinstance(e, ast.Starred) and isinstance(e.value, ast.Name) and e.value.id == "SIN_ETIQUETAS_COMPOSE"
+                   for e in nodo.elts):
+            sin.append(nodo.lineno)
+    return vistos, sin
+
+
+class EtiquetasDeComposeVacias(unittest.TestCase):
+    """B3: todo docker run o create con la imagen de la API anula las etiquetas de compose."""
+
+    def test_las_dos_constantes_valen_el_literal(self):
+        self.assertEqual(L.SIN_ETIQUETAS_COMPOSE, ETIQUETAS_COMPOSE_VACIAS)
+        self.assertEqual(sonda_descartes.SIN_ETIQUETAS_COMPOSE, ETIQUETAS_COMPOSE_VACIAS)
+
+    def test_guarda_ast_de_los_sitios(self):
+        directorio = pathlib.Path(L.__file__).resolve().parent
+        resultados = {}
+        for nombre in ("lanzar.py", "sonda_descartes.py"):
+            arbol = ast.parse((directorio / nombre).read_text(encoding="utf-8"))
+            resultados[nombre] = sitios_docker_api(arbol)
+        # Control positivo: la guarda ve los sitios (Lector, control y cliente_control en
+        # lanzar.py; el servidor lento en sonda_descartes.py). Si no, no prueba nada.
+        if (resultados["lanzar.py"][0], resultados["sonda_descartes.py"][0]) != (3, 1):
+            self.fail(f"SIN CONCLUSION: la guarda no ve los sitios ({resultados})")
+        self.assertEqual(resultados["lanzar.py"][1], [])
+        self.assertEqual(resultados["sonda_descartes.py"][1], [])
+
+    def test_guarda_ast_rechaza_y_acepta(self):
+        # Control negativo: sin el starred se rechaza; con él, se acepta.
+        sin = ast.parse('ejecutar(["docker", "run", "--name", n, imagen])')
+        self.assertEqual(sitios_docker_api(sin), (1, [1]))
+        con = ast.parse('ejecutar(["docker", "run", *SIN_ETIQUETAS_COMPOSE, "--name", n, imagen])')
+        self.assertEqual(sitios_docker_api(con), (1, []))
 
 
 if __name__ == "__main__":
