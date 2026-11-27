@@ -497,6 +497,34 @@ Diagnóstico previo al bloque 1 (plan v4, §2, A0, fuera del repositorio). Pregu
 - **El instrumento cuesta algo.** El muestreo corre en el bucle de eventos (recorre las pilas y lee unos 45 ficheros de `/proc` cada 0,5 s) y entra en lo que mide. Los controles abren y cierran un pool aparte, que deja en el log sus líneas de `psycopg_pool` antes de la carga.
 - **λ cuenta llamadas, no peticiones.** La igualdad "1 petición = 1 `run_sync`" vale en L2 (0 × 429, sin rutas `async def` ni con sesión en la carga). Si no se cumple, la comprobación cruzada da SIN CONCLUSION.
 
+### B1: causa de las 2 aceptadas ambiguas de P6 (predicciones escritas antes de abrir los datos, 27/11/2026)
+
+Pregunta por qué P6 (25/11, 22:03) dio SIN CONCLUSION con 2 aceptadas (404) ambiguas en A. Se analizará la salida `canario_produccion_salida_20261125T220309Z_p6` con `tests/produccion/b1_causa_p6.py`, que entra en este mismo commit. Al escribir esto no se ha abierto esa salida ni se ha ejecutado el script sobre ella.
+
+Por cada ambigua:
+- **(a) Deriva:** ¿dejaría de ser ambigua con el A1 inicial en lugar de la envolvente? Si es así, la deriva es necesaria. Lado: inicio (`d_min_final < d_min_inicial`) o fin (`d_max_final > d_max_inicial`).
+- **(b) Despachador:** ¿la guarda de hoy (`permite_guarda` tal cual en `4ec7d90`), con el A1 inicial y evaluada en el inicio real de la petición, la habría rechazado? Si es así, el despachador es necesario.
+- **Resultado:** solo (a), solo (b), las dos o ninguna. "Ninguna" es PARADA de P6. Si faltan las salidas, o falla el control de identidad o el de reconstrucción del script, el resultado es SIN CONCLUSION, y B1(i) entra igual en la tanda 2.
+
+**Visto antes de predecir.** Copia literal de la consola de P6 (25/11, 22:03):
+
+```
+   A1: d en [-0.352; -0.211] s con 10 muestras (inicial)
+   A1: d en [-0.382; -0.197] s con 10 muestras (final)
+P6 SIN CONCLUSION: A: 2 aceptadas (404) ambiguas: veredicto_l3 las sumaria a dos ventanas; A: 1 pares solo pasan de 60 contando peticiones ambiguas
+```
+
+También se vieron, en el plan del bloque 1 y sin publicar, las duraciones de las dos ambiguas: 277,9 ms y 139,0 ms. Por eso la predicción (a) NO es ciega: se escribe después de ver el A1 inicial y el final, y puede estar condicionada por ellos. La predicción (b) sí es ciega.
+
+**Predicciones.**
+
+| Ambigua | (a) Deriva necesaria | Lado | (b) Despachador necesario |
+|---|---|---|---|
+| 277,9 ms | sí | no sé | sí |
+| 139,0 ms | sí | no sé | sí |
+
+Resultado predicho: las dos, en ambas ambiguas. Confianza baja. Motivo: el rango de A1 se ensanchó por los dos extremos entre la medida inicial y la final, y el despachador pudo lanzar las peticiones más tarde de lo planeado; no hay motivo para descartar ninguna de las dos causas.
+
 ## 4. Por qué Playwright y no Selenium
 
 | Criterio | Playwright | Selenium |
